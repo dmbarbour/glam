@@ -2200,10 +2200,16 @@ maps the short names used here to file names.
     `m.read(port, n)` pushes the next `n`, static arities that force
     nothing.
   - Wiring is directional, external and local: a machine wires its own
-    ports and its descendants', from a descendant's output or its own
-    input to a descendant's input or its own output. A machine wiring its
-    own input to its own output is a switchboard. Wiring is transactional
-    state.
+    ports and its direct children's, never deeper, by the Law of Demeter
+    (maintainer, the same day), so each machine states what it exposes and
+    probes are reflection's. A wire's end is the machine's own input, its
+    own output, or a child's port, which is the child's output as a source
+    and its input as a destination (`Endpoint::input`, `output`, `child`).
+    The machine's own ports serve in both roles (maintainer): its input to
+    its output is a switchboard, its output to a child's input feeds the
+    child, and a child's output to its input collects from the child. A
+    value reaching an output follows every wire from it, its parent's
+    outward and its own inward. Wiring is transactional state.
   - Buffers belong to receiving ports, unbounded by default. Several wires
     from one port duplicate, and several into one merge in commit order.
   - Too few to read, or a full buffer, is pushback: a divergence, the new
@@ -2211,16 +2217,24 @@ maps the short names used here to file names.
     again, while `Backtrack` stays for alternatives. Outside a cut, `read`
     and `write` block, and `try_read` and `try_write` return `Retry`. A
     write to an unconnected output is a plain error.
-  - Diagnostics wiring is default configuration, with an option for none:
-    each child's diagnostics output exported to its parent's, up to a
-    collecting machine at the root.
+  - Diagnostics wiring is default configuration, with an option for none
+    (`DiagnosticsWiring`): each child's diagnostics output to its parent's
+    diagnostics input, and each machine's diagnostics input, the root's
+    aside, through to its own output, so diagnostics gather at the root's
+    input. The default wires are rules rather than stored wires, since
+    children appear on first use; a machine intervenes by unwiring one it
+    owns, which suppresses it until it is wired again.
+  - `m.pending()` lists a machine's inputs holding values, a read of all
+    its buffers, so a cut waiting on it wakes when any input receives.
 - **Alternatives rejected:** communication by heap logs with readers'
   cursors (`api-heap-communication`), which leaves topology inside the
-  machines; unwired ports defaulting to their parent's; wires from a
-  child's output to its parent's input, which leave the local scope;
-  lists as port values, which would force their spines; `Backtrack` for
-  pushback, which would let an alternative operation treat an empty
-  buffer as a decision.
+  machines; unwired ports defaulting to their parent's; wiring to deep
+  descendants' ports, convenient for probes but against encapsulation; a
+  machine's own ports in one role each, first built the same day, which
+  could neither feed a child nor collect from one, and needed a collecting
+  machine for diagnostics; lists as port values, which would force their
+  spines; `Backtrack` for pushback, which would let an alternative
+  operation treat an empty buffer as a decision.
 - **Consequences:** this amends `runtime-api-turns-on-machines`'s
   rejection of point-to-point channels: buffers stay shared, transactional
   state, and the topology belongs to the wiring, which a parent may change.

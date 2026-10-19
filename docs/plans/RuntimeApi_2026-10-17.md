@@ -202,15 +202,17 @@ handle API goes.
      waiting belongs with `api-alternatives`.
    - A port name has two independent roles, input and output
      (maintainer). Wiring is directional and external:
-     `m.wire(source, destination)` and `m.unwire`, with endpoints a
-     relative path and a port, on the machine's own ports and its
-     descendants' (maintainer). A source is a descendant's output or the
-     machine's own input; a destination is a descendant's input or the
-     machine's own output. A machine that wires its own input to its own
-     output is a switchboard, which the runtime may collapse into direct
-     routes. Wiring is transactional state, so rewiring within a cut is
-     atomic. `m.input_connected(port)` and `m.output_connected(port)` tell
-     whether a role has a wire.
+     `m.wire(source, destination)` and `m.unwire`, on the machine's own
+     ports and its direct children's, by the Law of Demeter (maintainer).
+     An `Endpoint` is `input(port)`, `output(port)` or `child(child,
+     port)`, a child's port being its output as a source and its input as
+     a destination (maintainer). The machine's own ports serve in both
+     roles: its input to its output is a switchboard, its output to a
+     child's input feeds the child, and a child's output to its input
+     collects from the child (maintainer). Wiring is transactional state,
+     so rewiring within a cut is atomic. `m.input_connected(port)` and
+     `m.output_connected(port)` tell whether a role has a wire, and
+     `m.pending()` which inputs hold values (maintainer).
    - A write to an unconnected output is a plain error (maintainer): it
      is structure, not flow, and waiting would not help.
      `m.available(port)` counts what an input holds, transactionally
@@ -224,21 +226,20 @@ handle API goes.
      so they are serializable within cuts, and an empty read or a full
      buffer waits through the existing wakes. Their cost is measured before
      anything specializes them.
-   - Unwired ports do not default to their parent's (maintainer). Wires
-     stay local, so a child's output cannot feed its parent's input. The
-     diagnostics wiring is instead part of the runtime's default
-     configuration, with an option for none (maintainer): each child's
-     diagnostics output is exported to its parent's own diagnostics
-     output, and at the root to a collecting machine, at a reserved key,
-     where diagnostics accumulate. Any machine intervenes by rewiring
-     locally, such as routing a child's export through a filter. A turn
-     that ends in error might emit its error on its machine's diagnostics
-     output by default, so that an unobserved failure, such as a fork's
-     left to its turn's end, still reaches a person.
-   - The host reads the collecting machine in a turn, or wires its output
-     to a logger. Until reflection tasks are machines, the runtime feeds
-     their diagnostics (`.log`) and its own reports into the collecting
-     machine, a bridge that goes with the reflection API's alignment.
+   - Unwired ports do not default to their parent's (maintainer). The
+     diagnostics wiring is part of the runtime's default configuration,
+     with an option for none (maintainer): each child's diagnostics output
+     to its parent's diagnostics input, and each machine's diagnostics
+     input, the root's aside, through to its own output, so diagnostics
+     gather at the root's input. Any machine intervenes by unwiring a
+     default wire it owns, such as its pass-through, and reading its input.
+     A turn that ends in error might emit its error on its machine's
+     diagnostics output by default, so that an unobserved failure, such as
+     a fork's left to its turn's end, still reaches a person.
+   - The host reads the root's diagnostics input in a turn, or wires it to
+     a logger. Until reflection tasks are machines, the runtime feeds their
+     diagnostics (`.log`) and its own reports into the root's diagnostics
+     input, a bridge that goes with the reflection API's alignment.
    - Ports live beside the runtime's existing transactional event state,
      whose FIFO buffers, cursor validation and combined commit with the
      store they extend: buffers by receiving port, wiring by the machine
@@ -998,10 +999,8 @@ with the maintainer that day:
   refuses a branch, and the cut runs again, when the cut claimed from a
   buffer the branch read, or changed wiring the branch followed, after
   the fork; the store's and the ports' merges happen both or neither.
-- Local wiring has a consequence: a machine cannot feed its own child
-  through a port, since its own output routes outward only. A sibling
-  that the machine fills with `give` and runs, writing to its output, can
-  stand in for now.
+- First built with a machine's own ports in one role each, which could
+  not feed a child: revised the same day (below).
 - Tests: `tests/runtime_ports.rs` covers ordered delivery between wired
   siblings, an unconnected output, duplication and merging, a switchboard,
   the connection queries, a wiring loop, pushback from a short read, a
@@ -1009,9 +1008,33 @@ with the maintainer that day:
   abort hook), a failed cut sending nothing, reads seeing committed values
   only, rewiring undone with a cut, a fork whose routing its cut changed
   running again (forced through channels), and `retry`.
-- Not yet: bounded buffers, the default diagnostics wiring and its
-  collecting machine, the runtime feeding its diagnostics there, and the
-  CLI slices.
+- Not yet: bounded buffers, the runtime feeding its diagnostics to the
+  root, and the CLI slices.
+
+`api-ports`, second slice (2026-10-19), after the maintainer's review:
+- A wire's ends are `WireEnd::In`, `Out` or `Child`, publicly
+  `Endpoint::input`, `output` and `child`, an abstract type with three
+  constructors (maintainer). A machine wires only its own ports and its
+  direct children's. Routing from an output follows its parent's wires
+  outward and its own inward; an input passes through where the machine
+  wired it on, and otherwise buffers.
+- Default diagnostics wiring, `DiagnosticsWiring::ToRoot` unless the
+  runtime's configuration says `None`: rules rather than stored wires, a
+  child's diagnostics output to its parent's input and a non-root
+  machine's diagnostics input to its own output. `unwire` of a default
+  wire records a suppression in the owner's wiring, and `wire` lifts it.
+  `input_connected` counts the default collection for the diagnostics
+  input.
+- `m.pending()` returns a machine's inputs holding values, with counts, in
+  port order. It records a survey of the machine's buffers, which
+  validation compares whole, so a cut that found nothing and retries
+  wakes when any input receives, even one that never held a value.
+- Tests added to `tests/runtime_ports.rs`: a machine feeding a child
+  through its own output and collecting from one through its own input,
+  `pending` in port order, a cut woken through `pending` by a new port
+  (forced by an abort hook), and the default diagnostics wiring: gathered
+  at the root, a machine intervening by unwiring its pass-through, and a
+  runtime configured with none.
 
 ## Verification
 

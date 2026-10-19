@@ -5,7 +5,7 @@
 use std::cell::Cell;
 use std::sync::mpsc;
 
-use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig};
+use glam::{DiagnosticsWiring, Endpoint, Error, ErrorKind, Machine, Runtime, RuntimeConfig};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -37,7 +37,7 @@ fn receive(m: &mut Machine<'_, '_>, path: &str, port: &str, n: usize) -> Result<
 fn wired_siblings_send_values_in_order() {
     let mut rt = runtime();
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
         send(p, "a", "out", &[1, 2])?;
         send(p, "a", "out", &[3])?;
         assert_eq!(receive(p, "b", "in", 3)?, [1, 2, 3]);
@@ -65,9 +65,9 @@ fn a_write_to_an_unconnected_output_is_an_error_and_pops_nothing() {
 fn several_wires_from_an_output_duplicate_and_several_into_an_input_merge() {
     let mut rt = runtime();
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("b", "in"))?;
-        p.wire(("a", "out"), ("c", "in"))?;
-        p.wire(("d", "out"), ("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("c", "in"))?;
+        p.wire(Endpoint::child("d", "out"), Endpoint::child("b", "in"))?;
         send(p, "a", "out", &[1])?;
         send(p, "d", "out", &[2])?;
         send(p, "a", "out", &[3])?;
@@ -86,9 +86,11 @@ fn several_wires_from_an_output_duplicate_and_several_into_an_input_merge() {
 fn a_switchboard_passes_its_input_through_without_taking_turns() {
     let mut rt = runtime();
     rt.run("p", |p| {
-        p.run("s", |s| s.wire(((), "in"), ((), "out")))?;
-        p.wire(("a", "out"), ("s", "in"))?;
-        p.wire(("s", "out"), ("b", "in"))?;
+        p.run("s", |s| {
+            s.wire(Endpoint::input("in"), Endpoint::output("out"))
+        })?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("s", "in"))?;
+        p.wire(Endpoint::child("s", "out"), Endpoint::child("b", "in"))?;
         send(p, "a", "out", &[7, 8])?;
         let held = p.run("s", |s| Ok(s.available("in")))?;
         assert_eq!(held, 0, "the switchboard holds nothing");
@@ -102,13 +104,13 @@ fn a_switchboard_passes_its_input_through_without_taking_turns() {
 fn connections_are_read_from_the_wiring() {
     let mut rt = runtime();
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
         let (out, into) = p.run("a", |a| {
             Ok((a.output_connected("out"), a.input_connected("out")))
         })?;
         assert_eq!((out, into), (true, false), "a port name has two roles");
         assert!(p.run("b", |b| Ok(b.input_connected("in")))?);
-        p.unwire(("a", "out"), ("b", "in"))?;
+        p.unwire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
         assert!(!p.run("a", |a| Ok(a.output_connected("out")))?);
         Ok(())
     })
@@ -119,9 +121,11 @@ fn connections_are_read_from_the_wiring() {
 fn a_wiring_loop_is_an_error() {
     let mut rt = runtime();
     rt.run("p", |p| {
-        p.run("s", |s| s.wire(((), "in"), ((), "out")))?;
-        p.wire(("s", "out"), ("s", "in"))?;
-        p.wire(("a", "out"), ("s", "in"))?;
+        p.run("s", |s| {
+            s.wire(Endpoint::input("in"), Endpoint::output("out"))
+        })?;
+        p.wire(Endpoint::child("s", "out"), Endpoint::child("s", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("s", "in"))?;
         let error = send(p, "a", "out", &[1]).expect_err("the wiring loops");
         assert!(error.to_string().contains("loops"), "{error}");
         Ok(())
@@ -133,7 +137,7 @@ fn a_wiring_loop_is_an_error() {
 fn reading_too_few_is_pushback() {
     let mut rt = runtime();
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
         send(p, "a", "out", &[1])?;
         let error = p
             .run("b", |b| b.try_read("in", 2))
@@ -155,7 +159,7 @@ fn a_read_outside_a_cut_waits_for_its_values() {
     let mut rt = runtime();
     let (reading, ready) = mpsc::channel();
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
         let reader = p.fork("b", move |b| {
             assert_eq!(
                 b.try_read("in", 1).map_err(|error| error.kind()),
@@ -180,7 +184,7 @@ fn a_cut_waits_out_pushback_until_values_arrive() {
     let mut rt = runtime();
     let (waiting, blocked) = mpsc::channel::<()>();
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
         let reader = p.fork("b", move |b| {
             let attempts = Cell::new(0);
             b.cut(|b| {
@@ -209,7 +213,7 @@ fn a_cut_waits_out_pushback_until_values_arrive() {
 fn a_cut_sends_when_it_commits_and_a_failed_cut_sends_nothing() {
     let mut rt = runtime();
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
         p.run("a", |a| {
             let failed: Result<(), Error> = a.cut(|a| {
                 a.push_int(1);
@@ -233,7 +237,7 @@ fn a_cut_sends_when_it_commits_and_a_failed_cut_sends_nothing() {
 fn a_read_sees_committed_values_only() {
     let mut rt = runtime();
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("a", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("a", "in"))?;
         let attempted = p.run("a", |a| -> Result<(), Error> {
             a.cut(|a| {
                 a.push_int(4);
@@ -257,7 +261,7 @@ fn rewiring_within_a_failed_cut_is_undone() {
     let mut rt = runtime();
     rt.run("p", |p| {
         let failed: Result<(), Error> = p.cut(|p| {
-            p.wire(("a", "out"), ("b", "in"))?;
+            p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
             Err(Error::new("the cut errs"))
         });
         assert!(failed.is_err());
@@ -272,7 +276,7 @@ fn a_fork_routing_by_wiring_its_cut_changed_after_the_fork_runs_again() {
     let mut rt = runtime();
     let attempts = Cell::new(0);
     rt.run("p", |p| {
-        p.wire(("a", "out"), ("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
         p.cut(|p| {
             attempts.set(attempts.get() + 1);
             let (sent, written) = mpsc::channel();
@@ -285,7 +289,7 @@ fn a_fork_routing_by_wiring_its_cut_changed_after_the_fork_runs_again() {
             written.recv().expect("the fork routed its write");
             if attempts.get() == 1 {
                 // After the fork routed by it, the cut changes the wiring.
-                p.wire(("a", "out"), ("c", "in"))?;
+                p.wire(Endpoint::child("a", "out"), Endpoint::child("c", "in"))?;
             }
             p.join(writer)
         })?;
@@ -312,4 +316,117 @@ fn retry_is_pushback_that_a_cut_waits_out() {
         Ok(())
     })
     .expect("the turn should succeed");
+}
+
+#[test]
+fn a_machine_feeds_a_child_and_collects_from_one_through_its_own_ports() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire(Endpoint::output("events"), Endpoint::child("b", "in"))?;
+        p.wire(Endpoint::child("a", "out"), Endpoint::input("collected"))?;
+        p.push_int(1);
+        p.write("events", 1)?;
+        assert_eq!(
+            receive(p, "b", "in", 1)?,
+            [1],
+            "its own output fed the child"
+        );
+        send(p, "a", "out", &[2])?;
+        p.read("collected", 1)?;
+        assert_eq!(p.pop_int()?, 2, "its own input collected from the child");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn pending_lists_the_inputs_that_hold_values() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire(Endpoint::child("a", "out"), Endpoint::input("x"))?;
+        p.wire(Endpoint::child("b", "out"), Endpoint::input("y"))?;
+        assert!(p.pending().is_empty());
+        send(p, "b", "out", &[1, 2])?;
+        send(p, "a", "out", &[3])?;
+        let pending = p.pending();
+        assert_eq!(pending, [("x".into(), 1), ("y".into(), 2)], "in port order");
+        p.read("y", 2)?;
+        p.discard(2)?;
+        assert_eq!(p.pending(), [("x".into(), 1)]);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_cut_that_finds_nothing_pending_wakes_when_any_input_receives() {
+    let mut rt = runtime();
+    let (waiting, blocked) = mpsc::channel::<()>();
+    rt.run("p", |p| {
+        p.wire(
+            Endpoint::child("a", "out"),
+            Endpoint::child("server", "requests"),
+        )?;
+        let server = p.fork("server", move |s| {
+            let port = s.cut(|s| {
+                let Some((port, _)) = s.pending().into_iter().next() else {
+                    let waiting = waiting.clone();
+                    s.on_abort(0, move |_| waiting.send(()).expect("the client listens"))?;
+                    return Err(s.retry());
+                };
+                Ok(port)
+            })?;
+            s.read(port, 1)
+        })?;
+        blocked.recv().expect("the server found nothing first");
+        // A port that has never held a value.
+        send(p, "a", "out", &[6])?;
+        p.join(server)?;
+        p.take("server", 1)?;
+        assert_eq!(p.pop_int()?, 6);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn diagnostics_gather_at_the_root_by_default_and_a_machine_may_intervene() {
+    let mut rt = runtime();
+    rt.run("p", |p| send(p, "c", "diagnostics", &[1]))
+        .expect("the default wiring connects every diagnostics output");
+    let gathered = rt
+        .run((), |root| {
+            root.read("diagnostics", 1)?;
+            root.pop_int()
+        })
+        .expect("the root's input holds the diagnostics");
+    assert_eq!(gathered, 1);
+
+    rt.run("p", |p| {
+        // The machine keeps its children's diagnostics, to read itself.
+        p.unwire(
+            Endpoint::input("diagnostics"),
+            Endpoint::output("diagnostics"),
+        )?;
+        send(p, "c", "diagnostics", &[2])?;
+        p.read("diagnostics", 1)?;
+        assert_eq!(p.pop_int()?, 2);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+    let at_root = rt
+        .run((), |root| Ok(root.available("diagnostics")))
+        .expect("a turn");
+    assert_eq!(at_root, 0, "nothing passed through");
+
+    let mut quiet = Runtime::open(RuntimeConfig::new().diagnostics_wiring(DiagnosticsWiring::None))
+        .expect("a runtime should open");
+    quiet
+        .run("c", |c| {
+            c.push_int(3);
+            let error = c.write("diagnostics", 1).expect_err("nothing is wired");
+            assert!(error.to_string().contains("not connected"), "{error}");
+            Ok(())
+        })
+        .expect("the turn should succeed");
 }

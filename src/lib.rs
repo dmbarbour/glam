@@ -56,7 +56,9 @@ pub use api::{
     EvaluationReductionCounts, ExactRouteMutationProfileSnapshot, InteractionNetProfileSnapshot,
     NetDriverCounts, NetReductionCounts, PhaseTimes, RuntimeProfileSnapshot,
 };
-pub use api::{Endpoint, Fork, Machine, MachinePath, MachineStatus, Runtime, RuntimeConfig};
+pub use api::{
+    DiagnosticsWiring, Endpoint, Fork, Machine, MachinePath, MachineStatus, Runtime, RuntimeConfig,
+};
 pub use diagnostic::Severity;
 pub use g_source::{
     GDeclarationKind, GDeclarationSummary, GSourceDiagnostic, GSourceInspection, inspect_g_source,

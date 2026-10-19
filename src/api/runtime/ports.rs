@@ -7,15 +7,24 @@
 //! FIFO cursors, appends to them, and edits the wiring. It reads committed
 //! buffers only, never its own appends, as glam's log reads do, while its
 //! routing follows its own wiring edits.
+//!
+//! A machine wires its own ports and its direct children's. A value that
+//! reaches a machine's output follows every wire from it: those its parent
+//! owns, and those the machine owns, which lead inward. A value that reaches
+//! an input passes through where the machine wired the input on, and
+//! otherwise waits in the input's buffer.
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 
 use rpds::RedBlackTreeMapSync;
 
 use crate::api::Value;
 use crate::core::Key;
 use crate::runtime::RuntimeValueRoot;
+
+/// The diagnostics port, which the default configuration wires.
+pub(in crate::api) static DIAGNOSTICS: LazyLock<Key> = LazyLock::new(|| Key::from("diagnostics"));
 
 /// A machine's port in one role: the machine's path from the root, and the
 /// port's name.
@@ -25,17 +34,17 @@ pub(in crate::api) struct PortAddress {
     pub(in crate::api) port: Key,
 }
 
-/// One end of a wire, relative to the machine that owns the wire: a
-/// descendant's port when the path is not empty, and the owner's own port
-/// when it is.
+/// One end of a wire, as the machine that owns the wire names it: its own
+/// input or output, or a direct child's port, which is the child's output
+/// as a wire's source and its input as a wire's destination.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(in crate::api) struct WireEnd {
-    pub(in crate::api) path: Vec<Key>,
-    pub(in crate::api) port: Key,
+pub(in crate::api) enum WireEnd {
+    In(Key),
+    Out(Key),
+    Child(Key, Key),
 }
 
-/// A wire a machine owns: from a descendant's output, or the owner's own
-/// input, to a descendant's input, or the owner's own output.
+/// A wire a machine owns.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub(in crate::api) struct Wire {
     pub(in crate::api) source: WireEnd,
@@ -55,16 +64,25 @@ impl PortBuffer {
     }
 }
 
-type Wiring = RedBlackTreeMapSync<Vec<Key>, Arc<BTreeSet<Wire>>>;
+/// The wiring a machine owns: its wires, and the default wires it removed.
+#[derive(Clone, Default)]
+struct OwnedWiring {
+    wires: BTreeSet<Wire>,
+    suppressed: BTreeSet<Wire>,
+}
+
+/// Wiring by the path of the machine that owns it.
+type Wiring = RedBlackTreeMapSync<Vec<Key>, Arc<OwnedWiring>>;
 
 /// The committed buffers and wiring. Cloning it is a snapshot.
 #[derive(Clone)]
 pub(in crate::api) struct PortState {
     buffers: RedBlackTreeMapSync<PortAddress, Arc<PortBuffer>>,
-    /// Wires by the path of the machine that owns them.
     wiring: Wiring,
     /// Advanced by each commit that changes the wiring.
     wiring_revision: u64,
+    /// Whether the default configuration's diagnostics wiring applies.
+    diagnostics: bool,
 }
 
 impl PortState {
@@ -73,17 +91,25 @@ impl PortState {
             buffers: RedBlackTreeMapSync::new_sync(),
             wiring: RedBlackTreeMapSync::new_sync(),
             wiring_revision: 0,
+            diagnostics: true,
+        }
+    }
+
+    /// Sets whether the default diagnostics wiring applies: each child's
+    /// diagnostics output to its parent's diagnostics input, and each
+    /// machine's diagnostics input, the root's aside, to its own output.
+    pub(in crate::api) fn set_diagnostics_wiring(&mut self, enabled: bool) {
+        if self.diagnostics != enabled {
+            self.diagnostics = enabled;
+            self.wiring_revision += 1;
         }
     }
 
     /// Whether `journal`'s reads and routing still hold: no buffer it read
-    /// was consumed, nor one it found short added to, and the wiring it
-    /// followed is unchanged.
+    /// was consumed, nor one it found short added to, no machine's buffers
+    /// it surveyed changed, and the wiring it followed is unchanged.
     pub(in crate::api) fn validate(&self, journal: &PortJournal) -> bool {
-        let observations = journal
-            .observations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let observations = lock(&journal.observations);
         if observations.wiring && self.wiring_revision != journal.snapshot.wiring_revision {
             return false;
         }
@@ -92,6 +118,10 @@ impl PortState {
             .iter()
             .chain(&journal.cursors)
             .all(|(address, cursor)| self.holds(address, cursor))
+            && observations.surveys.iter().all(|machine| {
+                machine_buffers(&self.buffers, machine)
+                    == machine_buffers(&journal.snapshot.buffers, machine)
+            })
     }
 
     fn holds(&self, address: &PortAddress, cursor: &PortCursor) -> bool {
@@ -130,12 +160,41 @@ impl PortState {
         if !journal.edits.is_empty() {
             changed = true;
             for edit in &journal.edits {
-                apply_edit(&mut self.wiring, edit);
+                apply_edit(&mut self.wiring, self.diagnostics, edit);
             }
             self.wiring_revision += 1;
         }
         changed
     }
+}
+
+/// The ports of the machine at `machine` that hold buffers, with each
+/// buffer's head and next sequences, in port order.
+fn machine_buffers(
+    buffers: &RedBlackTreeMapSync<PortAddress, Arc<PortBuffer>>,
+    machine: &[Key],
+) -> Vec<(Key, u64, u64)> {
+    buffers
+        .iter()
+        .filter(|(address, _)| address.machine == machine)
+        .map(|(address, buffer)| (address.port.clone(), buffer.head, buffer.next()))
+        .collect()
+}
+
+/// Whether `wire`, owned by the machine at `owner`, is one of the default
+/// diagnostics wiring's.
+fn is_default(diagnostics: bool, owner: &[Key], wire: &Wire) -> bool {
+    let port = &*DIAGNOSTICS;
+    diagnostics
+        && match (&wire.source, &wire.destination) {
+            (WireEnd::Child(_, source), WireEnd::In(destination)) => {
+                source == port && destination == port
+            }
+            (WireEnd::In(source), WireEnd::Out(destination)) => {
+                !owner.is_empty() && source == port && destination == port
+            }
+            _ => false,
+        }
 }
 
 /// A transaction's position in one buffer: its first sequence when the
@@ -154,22 +213,34 @@ enum WiringEdit {
     Remove(Vec<Key>, Wire),
 }
 
-fn apply_edit(wiring: &mut Wiring, edit: &WiringEdit) {
+/// Applies a wiring edit. Removing a default wire suppresses it, and adding
+/// it back lifts the suppression.
+fn apply_edit(wiring: &mut Wiring, diagnostics: bool, edit: &WiringEdit) {
     let (owner, wire, add) = match edit {
         WiringEdit::Add(owner, wire) => (owner, wire, true),
         WiringEdit::Remove(owner, wire) => (owner, wire, false),
     };
-    let mut wires = wiring.get(owner).cloned().unwrap_or_default();
-    let set = Arc::make_mut(&mut wires);
-    if add {
-        set.insert(wire.clone());
-    } else {
-        set.remove(wire);
+    let mut owned = wiring.get(owner).cloned().unwrap_or_default();
+    let set = Arc::make_mut(&mut owned);
+    let default = is_default(diagnostics, owner, wire);
+    match (add, default) {
+        (true, true) => {
+            set.suppressed.remove(wire);
+        }
+        (true, false) => {
+            set.wires.insert(wire.clone());
+        }
+        (false, true) => {
+            set.suppressed.insert(wire.clone());
+        }
+        (false, false) => {
+            set.wires.remove(wire);
+        }
     }
-    if set.is_empty() {
+    if set.wires.is_empty() && set.suppressed.is_empty() {
         wiring.remove_mut(owner);
     } else {
-        wiring.insert_mut(owner.clone(), wires);
+        wiring.insert_mut(owner.clone(), owned);
     }
 }
 
@@ -179,6 +250,8 @@ fn apply_edit(wiring: &mut Wiring, edit: &WiringEdit) {
 #[derive(Default)]
 struct PortObservations {
     reads: BTreeMap<PortAddress, PortCursor>,
+    /// Machines whose buffers the transaction surveyed together.
+    surveys: BTreeSet<Vec<Key>>,
     wiring: bool,
 }
 
@@ -236,24 +309,15 @@ impl PortJournal {
     /// `None`, claiming nothing, when it holds fewer. Either way the read is
     /// observed: a short read waits for an item to arrive.
     pub(in crate::api) fn claim(&mut self, address: &PortAddress, n: usize) -> Option<Vec<Value>> {
-        let (head, items) = match self.snapshot.buffers.get(address) {
-            Some(buffer) => (buffer.head, Some(buffer.clone())),
-            None => (0, None),
-        };
-        let cursor = self
-            .cursors
-            .entry(address.clone())
-            .or_insert_with(|| PortCursor {
-                start: head,
-                next: head,
-                observed_tail: false,
-            });
-        let end = items.as_ref().map_or(0, |buffer| buffer.next());
+        let buffer = self.snapshot.buffers.get(address).cloned();
+        let head = buffer.as_ref().map_or(0, |buffer| buffer.head);
+        let end = buffer.as_ref().map_or(0, |buffer| buffer.next());
+        let cursor = self.cursor(address, head);
         let claimed = if end - cursor.next < n as u64 {
             cursor.observed_tail = true;
             None
         } else {
-            let buffer = items.expect("a buffer with items exists");
+            let buffer = buffer.expect("a buffer with items exists");
             let offset = (cursor.next - head) as usize;
             let values = buffer
                 .items
@@ -276,14 +340,7 @@ impl PortJournal {
             .buffers
             .get(address)
             .map_or((0, 0), |buffer| (buffer.head, buffer.next()));
-        let cursor = self
-            .cursors
-            .entry(address.clone())
-            .or_insert_with(|| PortCursor {
-                start: head,
-                next: head,
-                observed_tail: false,
-            });
+        let cursor = self.cursor(address, head);
         cursor.observed_tail = true;
         let count = (end - cursor.next) as usize;
         let observation = cursor.clone();
@@ -291,12 +348,40 @@ impl PortJournal {
         count
     }
 
+    /// The input ports of the machine at `machine` that hold items beyond
+    /// this journal's claims, with how many, in port order. It surveys all
+    /// of the machine's buffers, so an item arriving at any of them, even a
+    /// port that held none, invalidates it.
+    pub(in crate::api) fn pending(&mut self, machine: &[Key]) -> Vec<(Key, usize)> {
+        lock(&self.observations).surveys.insert(machine.to_vec());
+        machine_buffers(&self.snapshot.buffers, machine)
+            .into_iter()
+            .filter_map(|(port, head, end)| {
+                let address = PortAddress {
+                    machine: machine.to_vec(),
+                    port: port.clone(),
+                };
+                let claimed = self
+                    .cursors
+                    .get(&address)
+                    .map_or(head, |cursor| cursor.next);
+                (end > claimed).then(|| (port, (end - claimed) as usize))
+            })
+            .collect()
+    }
+
+    fn cursor(&mut self, address: &PortAddress, head: u64) -> &mut PortCursor {
+        self.cursors
+            .entry(address.clone())
+            .or_insert_with(|| PortCursor {
+                start: head,
+                next: head,
+                observed_tail: false,
+            })
+    }
+
     fn observe(&mut self, address: &PortAddress, cursor: PortCursor) {
-        let mut observations = self
-            .observations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        observations
+        lock(&self.observations)
             .reads
             .entry(address.clone())
             .and_modify(|prior| {
@@ -311,10 +396,7 @@ impl PortJournal {
     }
 
     fn observe_wiring(&mut self) {
-        self.observations
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .wiring = true;
+        lock(&self.observations).wiring = true;
         if let Some(branch) = &self.branch {
             lock(&branch.reads).wiring = true;
         }
@@ -327,15 +409,17 @@ impl PortJournal {
 
     /// Adds `wire`, owned by the machine at `owner`.
     pub(in crate::api) fn wire(&mut self, owner: Vec<Key>, wire: Wire) {
-        let edit = WiringEdit::Add(owner, wire);
-        apply_edit(&mut self.wiring, &edit);
-        self.edits.push(edit);
+        self.edit(WiringEdit::Add(owner, wire));
     }
 
-    /// Removes `wire`, owned by the machine at `owner`, if it is there.
+    /// Removes `wire`, owned by the machine at `owner`, if it is there; a
+    /// default wire is suppressed.
     pub(in crate::api) fn unwire(&mut self, owner: Vec<Key>, wire: Wire) {
-        let edit = WiringEdit::Remove(owner, wire);
-        apply_edit(&mut self.wiring, &edit);
+        self.edit(WiringEdit::Remove(owner, wire));
+    }
+
+    fn edit(&mut self, edit: WiringEdit) {
+        apply_edit(&mut self.wiring, self.snapshot.diagnostics, &edit);
         self.edits.push(edit);
     }
 
@@ -368,7 +452,7 @@ impl PortJournal {
         if route.contains(&end) {
             return Err(format!("the wiring loops through {end:?}"));
         }
-        let next: Vec<RouteEnd> = match &end {
+        let next = match &end {
             RouteEnd::Output(machine, port) => {
                 let next = self.leading_from_output(machine, port);
                 if next.is_empty() {
@@ -379,7 +463,7 @@ impl PortJournal {
                 next
             }
             RouteEnd::Input(machine, port) => {
-                let next = self.through_input(machine, port);
+                let next = self.destinations(machine, &WireEnd::In(port.clone()));
                 if next.is_empty() {
                     buffers.push(PortAddress {
                         machine: machine.clone(),
@@ -399,61 +483,92 @@ impl PortJournal {
     }
 
     /// Where the wires from the output `port` of the machine at `machine`
-    /// lead: the wires its ancestors own, nearest last.
+    /// lead: outward, by its parent's wires, then inward, by its own.
     fn leading_from_output(&self, machine: &[Key], port: &Key) -> Vec<RouteEnd> {
-        (0..machine.len())
-            .flat_map(|depth| {
-                let owner = &machine[..depth];
-                let source = WireEnd {
-                    path: machine[depth..].to_vec(),
-                    port: port.clone(),
-                };
-                self.destinations(owner, &source)
+        let mut next = match machine.split_last() {
+            Some((child, parent)) => {
+                self.destinations(parent, &WireEnd::Child(child.clone(), port.clone()))
+            }
+            None => Vec::new(),
+        };
+        next.extend(self.destinations(machine, &WireEnd::Out(port.clone())));
+        next
+    }
+
+    /// Where the wires that the machine at `owner` owns from `source` lead:
+    /// its own, and the default ones it has not suppressed.
+    fn destinations(&self, owner: &[Key], source: &WireEnd) -> Vec<RouteEnd> {
+        let owned = self.wiring.get(owner);
+        let mut destinations: Vec<&WireEnd> = owned
+            .iter()
+            .flat_map(|owned| owned.wires.iter())
+            .filter(|wire| wire.source == *source)
+            .map(|wire| &wire.destination)
+            .collect();
+        let defaults = self.default_destinations(owner, source);
+        let suppressed = |wire: &Wire| owned.is_some_and(|owned| owned.suppressed.contains(wire));
+        destinations.extend(defaults.iter().filter(|destination| {
+            !suppressed(&Wire {
+                source: source.clone(),
+                destination: (*destination).clone(),
+            })
+        }));
+        destinations
+            .into_iter()
+            .map(|destination| match destination {
+                WireEnd::Child(child, port) => {
+                    RouteEnd::Input(owner.iter().chain([child]).cloned().collect(), port.clone())
+                }
+                WireEnd::Out(port) => RouteEnd::Output(owner.to_vec(), port.clone()),
+                WireEnd::In(port) => RouteEnd::Input(owner.to_vec(), port.clone()),
             })
             .collect()
     }
 
-    /// Where the machine at `machine` passes its input `port` through to.
-    fn through_input(&self, machine: &[Key], port: &Key) -> Vec<RouteEnd> {
-        let source = WireEnd {
-            path: Vec::new(),
-            port: port.clone(),
+    /// The destinations of the default wires from `source` that the machine
+    /// at `owner` would own.
+    fn default_destinations(&self, owner: &[Key], source: &WireEnd) -> Vec<WireEnd> {
+        let port = &*DIAGNOSTICS;
+        let candidates = match source {
+            WireEnd::Child(_, source) if source == port => vec![WireEnd::In(port.clone())],
+            WireEnd::In(source) if source == port => vec![WireEnd::Out(port.clone())],
+            _ => Vec::new(),
         };
-        self.destinations(machine, &source)
-    }
-
-    fn destinations(&self, owner: &[Key], source: &WireEnd) -> Vec<RouteEnd> {
-        let Some(wires) = self.wiring.get(owner) else {
-            return Vec::new();
-        };
-        wires
-            .iter()
-            .filter(|wire| wire.source == *source)
-            .map(|wire| {
-                let destination = &wire.destination;
-                if destination.path.is_empty() {
-                    RouteEnd::Output(owner.to_vec(), destination.port.clone())
-                } else {
-                    let machine = owner.iter().chain(&destination.path).cloned().collect();
-                    RouteEnd::Input(machine, destination.port.clone())
-                }
+        candidates
+            .into_iter()
+            .filter(|destination| {
+                is_default(
+                    self.snapshot.diagnostics,
+                    owner,
+                    &Wire {
+                        source: source.clone(),
+                        destination: destination.clone(),
+                    },
+                )
             })
             .collect()
     }
 
     /// Whether a wire leads into the input `port` of the machine at
-    /// `machine`, observing the wiring.
+    /// `machine`, observing the wiring: one its parent owns from elsewhere,
+    /// one it owns itself, from a child or its own port, or, for the
+    /// diagnostics input, the default wiring that collects from every child.
     pub(in crate::api) fn input_connected(&mut self, machine: &[Key], port: &Key) -> bool {
         self.observe_wiring();
-        (0..machine.len()).any(|depth| {
-            let destination = WireEnd {
-                path: machine[depth..].to_vec(),
-                port: port.clone(),
-            };
-            self.wiring
-                .get(&machine[..depth])
-                .is_some_and(|wires| wires.iter().any(|wire| wire.destination == destination))
-        })
+        let leads_into = |owner: &[Key], destination: &WireEnd| {
+            self.wiring.get(owner).is_some_and(|owned| {
+                owned
+                    .wires
+                    .iter()
+                    .any(|wire| wire.destination == *destination)
+            })
+        };
+        let from_parent = machine.split_last().is_some_and(|(child, parent)| {
+            leads_into(parent, &WireEnd::Child(child.clone(), port.clone()))
+        });
+        let own = leads_into(machine, &WireEnd::In(port.clone()));
+        let by_default = self.snapshot.diagnostics && *port == *DIAGNOSTICS;
+        from_parent || own || by_default
     }
 
     /// Whether a wire leads from the output `port` of the machine at
@@ -514,8 +629,7 @@ impl PortJournal {
         self.appends
             .extend(branch.appends[base.appends..].iter().cloned());
         for edit in &branch.edits[base.edits..] {
-            apply_edit(&mut self.wiring, edit);
-            self.edits.push(edit.clone());
+            self.edit(edit.clone());
         }
         // What the branch read, this journal's own branch read too.
         if let Some(own) = &self.branch {

@@ -47,6 +47,20 @@ use crate::reflection::{ConflictAnalysisStrategy, StoreCommitResult, StoreJourna
 pub struct RuntimeConfig {
     worker_threads: usize,
     conflict_analysis: Option<Arc<dyn ConflictAnalysisStrategy>>,
+    diagnostics_wiring: DiagnosticsWiring,
+}
+
+/// How a runtime wires machines' `diagnostics` ports by default.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiagnosticsWiring {
+    /// Each child's diagnostics output to its parent's diagnostics input,
+    /// and each machine's diagnostics input, the root's aside, through to its
+    /// own output, so diagnostics gather at the root's input. A machine
+    /// intervenes by unwiring a default wire it owns.
+    #[default]
+    ToRoot,
+    /// None: the diagnostics ports are wired as any other.
+    None,
 }
 
 impl RuntimeConfig {
@@ -63,6 +77,12 @@ impl RuntimeConfig {
     /// How transactions summarize what they read.
     pub fn conflict_analysis(mut self, strategy: Arc<dyn ConflictAnalysisStrategy>) -> Self {
         self.conflict_analysis = Some(strategy);
+        self
+    }
+
+    /// How machines' diagnostics ports are wired by default.
+    pub fn diagnostics_wiring(mut self, wiring: DiagnosticsWiring) -> Self {
+        self.diagnostics_wiring = wiring;
         self
     }
 }
@@ -180,31 +200,28 @@ impl<K: Into<Key>> From<Vec<K>> for MachinePath {
     }
 }
 
-/// One end of a wire, as the wiring machine names it: a port of the machine
-/// at a relative path, which `()` makes the wiring machine itself. As a
-/// source, it is a descendant's output or the machine's own input; as a
-/// destination, a descendant's input or the machine's own output.
+/// One end of a wire, as the machine that owns the wire names it: its own
+/// input or output port, or a direct child's port. A child's port is the
+/// child's output as a wire's source, and its input as a wire's destination.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub struct Endpoint {
-    path: MachinePath,
-    port: Key,
-}
-
-impl<P: Into<MachinePath>, K: Into<Key>> From<(P, K)> for Endpoint {
-    fn from((path, port): (P, K)) -> Self {
-        Self {
-            path: path.into(),
-            port: port.into(),
-        }
-    }
-}
+pub struct Endpoint(WireEnd);
 
 impl Endpoint {
-    fn wire_end(self) -> WireEnd {
-        WireEnd {
-            path: self.path.0,
-            port: self.port,
-        }
+    /// The machine's own input `port`. As a source, what arrives there
+    /// passes through; as a destination, the wire delivers there.
+    pub fn input(port: impl Into<Key>) -> Self {
+        Self(WireEnd::In(port.into()))
+    }
+
+    /// The machine's own output `port`. As a source, what reaches it also
+    /// flows inward; as a destination, the wire's values leave by it.
+    pub fn output(port: impl Into<Key>) -> Self {
+        Self(WireEnd::Out(port.into()))
+    }
+
+    /// The `port` of the direct child at `child`.
+    pub fn child(child: impl Into<Key>, port: impl Into<Key>) -> Self {
+        Self(WireEnd::Child(child.into(), port.into()))
     }
 }
 
@@ -404,7 +421,14 @@ impl Runtime {
             None => EvaluationRuntime::new(config.worker_threads)?,
         };
         let assembler = Assembler::builder().evaluation_runtime(runtime).build()?;
-        Ok(Self::around(assembler))
+        let runtime = Self::around(assembler);
+        runtime
+            .shared
+            .assembler
+            .evaluation_runtime()
+            .shared_resources()
+            .set_diagnostics_wiring(config.diagnostics_wiring == DiagnosticsWiring::ToRoot);
+        Ok(runtime)
     }
 
     /// A runtime around an assembler its caller built, for the CLI's
@@ -1435,9 +1459,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Pops `n` values and writes them, in order, to this machine's output
-    /// `port`. Each value reaches every buffer its wires lead to, through
-    /// pass-throughs, and arrives when the write commits: at once outside a
-    /// cut, with the outermost cut within one. An output with no wire is an
+    /// `port`. Each value follows every wire from it, outward by its
+    /// parent's wiring and inward by its own, through pass-throughs, to every
+    /// buffer it reaches, and arrives when the write commits: at once
+    /// outside a cut, with the outermost cut within one. An output with no wire is an
     /// error, which pops nothing. Buffers have no bound yet, so a write
     /// never waits.
     pub fn write(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
@@ -1536,20 +1561,17 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         }
     }
 
-    /// Wires `source` to `destination`, both named from this machine: a
-    /// descendant's output, or this machine's own input, to a descendant's
-    /// input, or this machine's own output. A wire from this machine's own
-    /// input to its own output passes the input through. The wire is this
-    /// machine's, and takes effect as a write does: at once outside a cut,
-    /// with the outermost cut within one.
-    pub fn wire(
-        &mut self,
-        source: impl Into<Endpoint>,
-        destination: impl Into<Endpoint>,
-    ) -> Result<(), Error> {
+    /// Wires `source` to `destination`, both named from this machine: its
+    /// own ports and its direct children's, never deeper, so each machine
+    /// states what it exposes. A wire from its own input to its own output
+    /// passes the input through; from its own output to a child's input,
+    /// feeds the child; from a child's output to its own input, collects
+    /// from the child. The wire is this machine's, and takes effect as a
+    /// write does: at once outside a cut, with the outermost cut within one.
+    pub fn wire(&mut self, source: Endpoint, destination: Endpoint) -> Result<(), Error> {
         let wire = Wire {
-            source: source.into().wire_end(),
-            destination: destination.into().wire_end(),
+            source: source.0,
+            destination: destination.0,
         };
         let owner = self.path.clone();
         self.port_action(|ports| {
@@ -1559,21 +1581,28 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Removes the wire from `source` to `destination` that this machine
-    /// owns, if there is one, as [`Self::wire`] adds it.
-    pub fn unwire(
-        &mut self,
-        source: impl Into<Endpoint>,
-        destination: impl Into<Endpoint>,
-    ) -> Result<(), Error> {
+    /// owns, if there is one, as [`Self::wire`] adds it. Removing a wire of
+    /// the default diagnostics wiring, such as this machine's pass-through
+    /// of its diagnostics input, keeps it removed until it is wired again.
+    pub fn unwire(&mut self, source: Endpoint, destination: Endpoint) -> Result<(), Error> {
         let wire = Wire {
-            source: source.into().wire_end(),
-            destination: destination.into().wire_end(),
+            source: source.0,
+            destination: destination.0,
         };
         let owner = self.path.clone();
         self.port_action(|ports| {
             ports.unwire(owner.clone(), wire.clone());
             Ok(())
         })
+    }
+
+    /// This machine's input ports that hold values beyond what this
+    /// transaction took, with how many, in port order. Within a cut it reads
+    /// all of the machine's inputs at once, so a cut that finds nothing and
+    /// retries wakes when any input receives a value.
+    pub fn pending(&mut self) -> Vec<(Key, usize)> {
+        let machine = self.path.clone();
+        self.port_view(|ports| ports.pending(&machine))
     }
 
     /// Whether a wire leads into this machine's input `port`.

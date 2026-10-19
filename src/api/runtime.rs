@@ -317,6 +317,18 @@ impl RuntimeSharedResources {
         (generation, store)
     }
 
+    /// Sets whether the default diagnostics wiring applies to machines'
+    /// ports.
+    pub(in crate::api) fn set_diagnostics_wiring(&self, enabled: bool) {
+        self.transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .events
+            .ports
+            .set_diagnostics_wiring(enabled);
+    }
+
     pub(in crate::api) fn transaction_snapshot(
         &self,
     ) -> (u64, crate::reflection::StoreSnapshot, RuntimeEventSnapshot) {
