@@ -23,7 +23,7 @@
 
 use std::any::Any;
 use std::cell::Cell;
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -525,7 +525,8 @@ impl Runtime {
 
     /// The machines below the one at `path`, each with its path from the
     /// root and its status, depth first, in key order. Only machines that
-    /// hold something are present.
+    /// hold something are present: state, or values waiting in an input, or
+    /// wiring they own.
     pub fn machines(
         &self,
         path: impl Into<MachinePath>,
@@ -539,7 +540,14 @@ impl Runtime {
         {
             state.walk(&mut path.0.clone(), &mut found);
         }
-        found.into_iter()
+        let (_, _, events) = self
+            .shared
+            .assembler
+            .evaluation_runtime()
+            .shared_resources()
+            .transaction_snapshot();
+        let present = PortJournal::new(events.ports).present_below(path.keys());
+        with_port_presence(found, present, path.keys().len(), 0).into_iter()
     }
 
     /// Whether the machine at `path` is in error, which only
@@ -806,7 +814,15 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         if let Some(state) = self.state.find(path.keys())? {
             state.walk(&mut path.0.clone(), &mut found);
         }
-        Ok(found.into_iter())
+        let absolute: Vec<Key> = self.path.iter().chain(path.keys()).cloned().collect();
+        let present = match &self.cut {
+            Some(cut) => cut.events.ports.present_below(&absolute),
+            None => {
+                let (_, _, events) = self.resources().transaction_snapshot();
+                PortJournal::new(events.ports).present_below(&absolute)
+            }
+        };
+        Ok(with_port_presence(found, present, absolute.len(), self.path.len()).into_iter())
     }
 
     /// Whether the descendant at `path` is in error, which only
@@ -2001,14 +2017,23 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Returns the machine to its initial state: an empty stack, stash,
-    /// local state and children. It fails, changing nothing, while a
-    /// descendant is forked.
+    /// local state and children, and the initial ports of the machine and
+    /// its descendants: nothing waiting in their inputs, and the wiring they
+    /// own back to the defaults. What arrives at their inputs later stays,
+    /// and the wires its parent owns to and from it stay. The ports change
+    /// as a write does: at once outside a cut, with the outermost cut within
+    /// one. It fails, changing nothing, while a descendant is forked.
     pub fn clear(&mut self) -> Result<(), Error> {
         if self.state.has_fork() {
             return Err(Error::new(
                 "a machine clears once its forked descendants have joined",
             ));
         }
+        let path = self.path.clone();
+        self.port_action(|ports| {
+            ports.clear_below(&path);
+            Ok(())
+        })?;
         self.state = MachineState::default();
         Ok(())
     }
@@ -2039,6 +2064,43 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         }
         Ok(depth)
     }
+}
+
+/// Adds to a walk's machines those below its start, at depth `start` from
+/// the root, that hold only port state, as idle, with their paths from
+/// depth `base`, in path order, which is the walk's depth-first order.
+/// Nothing below a forked machine joins: it lies on the fork's thread.
+fn with_port_presence(
+    found: Vec<(MachinePath, MachineStatus)>,
+    present: BTreeSet<Vec<Key>>,
+    start: usize,
+    base: usize,
+) -> Vec<(MachinePath, MachineStatus)> {
+    let mut machines: BTreeMap<Vec<Key>, MachineStatus> = found
+        .into_iter()
+        .map(|(path, status)| (path.0, status))
+        .collect();
+    let forked: Vec<Vec<Key>> = machines
+        .iter()
+        .filter(|(_, status)| **status == MachineStatus::Forked)
+        .map(|(path, _)| path.clone())
+        .collect();
+    for path in present {
+        if path.len() <= start {
+            continue;
+        }
+        let path = path[base..].to_vec();
+        let below_fork = forked
+            .iter()
+            .any(|fork| path.len() > fork.len() && path.starts_with(fork));
+        if !below_fork {
+            machines.entry(path).or_insert(MachineStatus::Idle);
+        }
+    }
+    machines
+        .into_iter()
+        .map(|(path, status)| (MachinePath(path), status))
+        .collect()
 }
 
 /// Pushback from an input port that holds fewer than a read needs.

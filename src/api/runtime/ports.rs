@@ -211,6 +211,8 @@ struct PortCursor {
 enum WiringEdit {
     Add(Vec<Key>, Wire),
     Remove(Vec<Key>, Wire),
+    /// Returns the wiring a machine owns to the defaults.
+    Reset(Vec<Key>),
 }
 
 /// Applies a wiring edit. Removing a default wire suppresses it, and adding
@@ -219,6 +221,10 @@ fn apply_edit(wiring: &mut Wiring, diagnostics: bool, edit: &WiringEdit) {
     let (owner, wire, add) = match edit {
         WiringEdit::Add(owner, wire) => (owner, wire, true),
         WiringEdit::Remove(owner, wire) => (owner, wire, false),
+        WiringEdit::Reset(owner) => {
+            wiring.remove_mut(owner);
+            return;
+        }
     };
     let mut owned = wiring.get(owner).cloned().unwrap_or_default();
     let set = Arc::make_mut(&mut owned);
@@ -400,6 +406,68 @@ impl PortJournal {
         if let Some(branch) = &self.branch {
             lock(&branch.reads).wiring = true;
         }
+    }
+
+    /// Returns the machine at `machine` and its descendants to their initial
+    /// port state: claims everything their input buffers hold, so that what
+    /// arrives after this journal's snapshot stays, drops what this journal
+    /// was to append to them, and returns the wiring they own to the
+    /// defaults. It observes the wiring, which a concurrent change then
+    /// conflicts with.
+    pub(in crate::api) fn clear_below(&mut self, machine: &[Key]) {
+        self.observe_wiring();
+        let addresses: Vec<PortAddress> = self
+            .snapshot
+            .buffers
+            .keys()
+            .filter(|address| address.machine.starts_with(machine))
+            .cloned()
+            .collect();
+        for address in addresses {
+            // Counted without observing the end: later arrivals stay.
+            let (head, end) = self
+                .snapshot
+                .buffers
+                .get(&address)
+                .map_or((0, 0), |buffer| (buffer.head, buffer.next()));
+            let held = end - self.cursor(&address, head).next;
+            self.claim(&address, held as usize);
+        }
+        self.appends
+            .retain(|(address, _)| !address.machine.starts_with(machine));
+        let owners: Vec<Vec<Key>> = self
+            .wiring
+            .keys()
+            .filter(|owner| owner.starts_with(machine))
+            .cloned()
+            .collect();
+        for owner in owners {
+            self.edit(WiringEdit::Reset(owner));
+        }
+    }
+
+    /// The machines at or below `machine` that hold port state: values
+    /// waiting in an input beyond this journal's claims, or wiring they own.
+    /// It observes nothing: it is discovery, not a read a cut validates.
+    pub(in crate::api) fn present_below(&self, machine: &[Key]) -> BTreeSet<Vec<Key>> {
+        let waiting = self
+            .snapshot
+            .buffers
+            .iter()
+            .filter_map(|(address, buffer)| {
+                let claimed = self
+                    .cursors
+                    .get(address)
+                    .map_or(buffer.head, |cursor| cursor.next);
+                (address.machine.starts_with(machine) && buffer.next() > claimed)
+                    .then(|| address.machine.clone())
+            });
+        let wiring = self
+            .wiring
+            .keys()
+            .filter(|owner| owner.starts_with(machine))
+            .cloned();
+        waiting.chain(wiring).collect()
     }
 
     /// Appends `value` to the buffer at `address`, when this journal commits.

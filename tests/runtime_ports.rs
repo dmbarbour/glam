@@ -430,3 +430,87 @@ fn diagnostics_gather_at_the_root_by_default_and_a_machine_may_intervene() {
         })
         .expect("the turn should succeed");
 }
+
+#[test]
+fn clearing_a_machine_resets_its_ports_and_its_descendants() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+        p.run("b", |b| b.wire(Endpoint::input("x"), Endpoint::output("y")))?;
+        send(p, "a", "out", &[1])?;
+        p.run("b", |b| {
+            b.push_int(9);
+            b.clear()?;
+            assert_eq!(b.available("in"), 0, "its input is empty");
+            assert!(
+                !b.output_connected("y"),
+                "its wiring is back to the defaults"
+            );
+            Ok(())
+        })?;
+        send(p, "a", "out", &[2])?;
+        assert_eq!(
+            receive(p, "b", "in", 1)?,
+            [2],
+            "the parent's wire to it stays, and later arrivals stay"
+        );
+        send(p, "a", "out", &[3])?;
+        p.clear()?;
+        let error = send(p, "a", "out", &[4]).expect_err("the machine's own wires went");
+        assert!(error.to_string().contains("not connected"), "{error}");
+        assert_eq!(
+            p.run("b", |b| Ok(b.available("in")))?,
+            0,
+            "so did its children's inputs"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_failed_cut_restores_the_ports_it_cleared() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+        send(p, "a", "out", &[5])?;
+        let failed: Result<(), Error> = p.cut(|p| {
+            p.clear()?;
+            Err(Error::new("the cut errs"))
+        });
+        assert!(failed.is_err());
+        assert_eq!(
+            receive(p, "b", "in", 1)?,
+            [5],
+            "the input and the wire are back"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn the_walk_counts_port_state_as_presence() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+        send(p, "a", "out", &[1])?;
+        let below: Vec<_> = p.machines(())?.map(|(path, _)| path).collect();
+        assert_eq!(
+            below,
+            [glam::MachinePath::from(["b"])],
+            "b waits with input though it never took a turn; a holds nothing"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+    let walked: Vec<_> = rt.machines(()).map(|(path, _)| path).collect();
+    assert_eq!(
+        walked,
+        [
+            glam::MachinePath::from(["p"]),
+            glam::MachinePath::from(["p", "b"])
+        ],
+        "p owns wiring, though its state is empty"
+    );
+}

@@ -1037,6 +1037,21 @@ with the maintainer that day:
   at the root, a machine intervening by unwiring its pass-through, and a
   runtime configured with none.
 
+`api-ports`, `clear` and presence (2026-10-19, maintainer's agreement):
+- `clear` returns the machine's ports and its descendants' to their
+  initial state too: it claims what their inputs hold as of the
+  transaction's snapshot, so later arrivals stay, drops what the
+  transaction was to send them, and returns the wiring they own to the
+  defaults (`WiringEdit::Reset`). The parent's wires to and from the
+  machine stay. Within a cut it is journaled, so a failed cut restores it.
+- A machine that holds port state, values waiting in an input or wiring
+  it owns, is present: `machines` walks include it, as idle, though its
+  machine state is empty and pruned. Pruning leaves port state alone. The
+  walk's port part is discovery, which a cut does not validate.
+- Tests added to `tests/runtime_ports.rs`: `clear` resetting a machine's
+  ports and its descendants', a failed cut restoring what it cleared, and
+  the walk counting port state.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
