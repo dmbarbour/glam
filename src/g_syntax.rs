@@ -87,15 +87,18 @@ pub(crate) fn defined_or_root(values: &CoreValueFactory) -> RuntimeValueRoot {
     compiler_values::defined_or_root(values)
 }
 
-/// A machine's environment, composed from `shares`, the most specific first
-/// (`machines-inherit-an-environment`): an anonymous object extending each
-/// share as `object _ extends ...` would, so a share overrides those after
-/// it. Each share is wrapped in an anonymous object of its own, so
-/// named and anonymous shares mix in any order, and one that is `{}`, never
-/// bound, stands for an empty object. Nothing is evaluated.
+/// A machine's environment, composed from what its machines' shares store,
+/// the most specific first (`machines-inherit-an-environment`): an anonymous
+/// object extending each share as `object _ extends ...` would, so a share
+/// overrides those after it. Each share is wrapped in an anonymous object of
+/// its own, so named and anonymous shares mix in any order. A bound share is
+/// stored as a list of one, and one never bound reads `{}`, standing for an
+/// empty object: a list is never logically `{}`, so telling them apart
+/// forces nothing within the share, such as a promised value. Nothing is
+/// evaluated.
 pub(crate) fn composed_environment_root(
     values: &CoreValueFactory,
-    shares: Vec<RuntimeValueRoot>,
+    stored: Vec<RuntimeValueRoot>,
 ) -> RuntimeValueRoot {
     let empty_defs = compiler_values::empty_object_defs_root(values);
     values.with_boundary_access(|access| {
@@ -112,14 +115,18 @@ pub(crate) fn composed_environment_root(
         };
         let spec =
             |object: Value| Value::builtin_call_in(&access, Builtin::ObjectSpec, vec![object]);
-        let levels = shares
+        let levels = stored
             .iter()
-            .map(|share| {
-                let share = Value::builtin_call_in(
+            .map(|stored| {
+                let bound = Value::builtin_call_in(
                     &access,
                     Builtin::Default,
-                    vec![anonymous(Vec::new()), share.clone_core_with(&access)],
+                    vec![
+                        Value::List(crate::core::List::from_values(vec![anonymous(Vec::new())])),
+                        stored.clone_core_with(&access),
+                    ],
                 );
+                let share = Value::builtin_call_in(&access, Builtin::ListHead, vec![bound]);
                 spec(anonymous(vec![spec(share)]))
             })
             .collect();

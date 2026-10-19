@@ -147,6 +147,7 @@ pub struct Runtime {
 /// What a turn's machines share, on every thread of its forks.
 struct Shared {
     assembler: Assembler,
+    promises: promises::Promises,
 }
 
 /// A machine's place in the tree of machines: the keys from the root, which
@@ -476,7 +477,10 @@ impl Runtime {
         }
         Ok(Self {
             root: MachineState::default(),
-            shared: Shared { assembler },
+            shared: Shared {
+                assembler,
+                promises: promises::Promises::default(),
+            },
             _affine: PhantomData,
         })
     }
@@ -974,6 +978,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             },
             observed: false,
             conflicted: false,
+            awaits_evaluation: false,
             commit_hooks: Vec::new(),
             abort_hooks: Vec::new(),
         });
@@ -1140,6 +1145,9 @@ struct CutTransaction {
     /// Whether a fork's branch read what the cut wrote after the fork, so
     /// the outermost cut must run again.
     conflicted: bool,
+    /// Whether an evaluation waited on what is not known yet, such as an
+    /// unresolved promise, so any change may wake the cut.
+    awaits_evaluation: bool,
     commit_hooks: Vec<Hook>,
     abort_hooks: Vec<Hook>,
 }
@@ -1157,6 +1165,7 @@ impl CutTransaction {
         }
         self.observed |= branch.observed;
         self.conflicted |= branch.conflicted || !serial;
+        self.awaits_evaluation |= branch.awaits_evaluation;
         self.commit_hooks.extend(branch.commit_hooks);
         self.abort_hooks.extend(branch.abort_hooks);
         serial
@@ -1181,6 +1190,9 @@ enum CutRetry {
     /// Once something its journals observed has changed: it failed, or
     /// met pushback.
     AfterChange(Box<(StoreJournal, RuntimeEventJournal)>),
+    /// Once anything has changed since the observation epoch it began at:
+    /// an evaluation waited on what was not known yet.
+    AfterAnyChange(u64),
     /// Never: an error ended it.
     Never(Error),
 }
@@ -1269,8 +1281,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Evaluates the top value to an integer and pops it.
     pub fn pop_int(&mut self) -> Result<i64, Error> {
-        let value = self.pop()?;
-        let evaluated = self.runtime.assembler.evaluator().eval(&value)?;
+        let evaluated = self.evaluate_top(Ok)?;
         evaluated
             .as_i64()?
             .ok_or_else(|| Error::new("the top value is not an integer within 64 bits"))
@@ -1278,9 +1289,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Evaluates the top value to bytes and pops them.
     pub fn pop_bytes(&mut self) -> Result<Bytes, Error> {
-        let value = self.pop()?;
-        let binary = self.runtime.assembler.values().anno_binary(value)?;
-        let evaluated = self.runtime.assembler.evaluator().eval(&binary)?;
+        let values = self.runtime.assembler.values();
+        let evaluated = self.evaluate_top(|value| values.anno_binary(value))?;
         evaluated
             .as_bytes()?
             .ok_or_else(|| Error::new("the top value is not binary data"))
@@ -1295,10 +1305,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// Evaluates the top value to an atom named by text, such as `'name`,
     /// and pops its name.
     pub fn pop_atom_name(&mut self) -> Result<String, Error> {
-        let value = self.pop()?;
-        let assembler = &self.runtime.assembler;
-        let key = assembler.reflection().atom_key(&value)?;
-        let name = assembler.evaluator().eval(&key)?.as_bytes()?;
+        let reflection = self.runtime.assembler.reflection();
+        let name = self
+            .evaluate_top(|value| reflection.atom_key(&value))?
+            .as_bytes()?;
         name.and_then(|name| String::from_utf8(name.to_vec()).ok())
             .ok_or_else(|| Error::new("the atom is not named by text"))
     }
@@ -1306,12 +1316,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// Evaluates the top value to a list and replaces it with its items, the
     /// first deepest, returning how many there are.
     pub fn unpack_list(&mut self) -> Result<usize, Error> {
-        let value = self.pop()?;
-        let assembler = &self.runtime.assembler;
-        let array = assembler.values().anno_array(value)?;
-        let items = assembler
-            .evaluator()
-            .eval(&array)?
+        let values = self.runtime.assembler.values();
+        let items = self
+            .evaluate_top(|value| values.anno_array(value))?
             .array_items()?
             .ok_or_else(|| Error::new("the top value is not a list"))?;
         let count = items.len();
@@ -1325,12 +1332,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// This is reflection: glam offers no iteration of a dict's keys, and the
     /// entries come in the runtime's canonical order of keys.
     pub fn unpack_dict(&mut self) -> Result<usize, Error> {
-        let value = self.pop()?;
-        let entries = self
-            .runtime
-            .assembler
-            .reflection()
-            .dictionary_items(&value)?;
+        let value = self.peek()?.clone();
+        let entries = self.runtime.assembler.reflection().dictionary_items(&value);
+        let entries = self.note_evaluation(entries)?;
+        self.pop()?;
         let count = entries.len();
         for (key, value) in entries {
             self.push(key);
@@ -1450,10 +1455,37 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Evaluates the top value to weak-head normal form, in place.
     pub fn eval(&mut self) -> Result<(), Error> {
-        let value = self.pop()?;
-        let evaluated = self.runtime.assembler.evaluator().eval(&value)?;
+        let evaluated = self.evaluate_top(Ok)?;
         self.push(evaluated.into_value());
         Ok(())
+    }
+
+    /// Evaluates the top value, as `prepare` presents it, to weak-head
+    /// normal form, and pops it once it is evaluated: an evaluation that
+    /// fails pops nothing. One that waits on what is not known yet, such as
+    /// an unresolved promise, is pushback, [`ErrorKind::Retry`], which the
+    /// outermost cut waits out.
+    fn evaluate_top(
+        &mut self,
+        prepare: impl FnOnce(Value) -> Result<Value, Error>,
+    ) -> Result<crate::api::EvaluatedValue, Error> {
+        let value = prepare(self.peek()?.clone())?;
+        let evaluated = self.runtime.assembler.evaluator().eval(&value);
+        let evaluated = self.note_evaluation(evaluated)?;
+        self.pop()?;
+        Ok(evaluated)
+    }
+
+    /// Notes, within a cut, an evaluation that waited on what is not known
+    /// yet, so the outermost cut runs again after any change.
+    fn note_evaluation<T>(&mut self, result: Result<T, Error>) -> Result<T, Error> {
+        if let (Err(error), Some(cut)) = (&result, &mut self.cut)
+            && error.kind() == ErrorKind::Retry
+        {
+            cut.observed = true;
+            cut.awaits_evaluation = true;
+        }
+        result
     }
 
     /// Compiles a module at `module_path` from `inputs`, in order, and
@@ -1552,8 +1584,71 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// the outermost cut.
     pub fn bind_env(&mut self) -> Result<(), Error> {
         let share = self.pop_own()?;
+        // Stored as a list of one, which the composition tells from an
+        // unbound share without forcing what the share holds.
+        let share = self.runtime.assembler.values().list([share])?;
         let path = environment_share(&self.path);
         self.store_edit(|journal| journal.write_environment(path.clone(), share.clone()))
+    }
+
+    /// Pushes a promised value, which waits until it is resolved, then its
+    /// resolver: an opaque glam value that [`Self::fulfill`] or
+    /// [`Self::break_promise`] resolves, once.
+    pub fn promise(&mut self) {
+        let (promised, resolver) = self
+            .runtime
+            .promises
+            .allocate(&self.runtime.assembler.values());
+        self.push(promised);
+        self.push(resolver);
+    }
+
+    /// Pops a value, then a resolver, and fulfills the resolver's promise
+    /// with the value, waking what waits on it. It evaluates the resolver,
+    /// never the value. A promise resolves once, so resolving it again is an
+    /// error, which pops nothing; so is resolving within a cut, since a
+    /// resolution cannot be undone: a cut resolves in a commit hook
+    /// ([`Self::on_commit`]).
+    pub fn fulfill(&mut self) -> Result<(), Error> {
+        self.resolve_promise(2, |value| {
+            promises::Resolution::Fulfill(value.expect("fulfill pops a value"))
+        })
+    }
+
+    /// Pops a resolver and breaks its promise, so what reads the promised
+    /// value fails. As [`Self::fulfill`], it evaluates the resolver, resolves
+    /// once, and is an error within a cut.
+    pub fn break_promise(&mut self) -> Result<(), Error> {
+        self.resolve_promise(1, |_| promises::Resolution::Break)
+    }
+
+    /// Resolves the promise of the resolver `n` values down, the last of
+    /// them, popping them once it has.
+    fn resolve_promise(
+        &mut self,
+        n: usize,
+        resolution: impl FnOnce(Option<Value>) -> promises::Resolution,
+    ) -> Result<(), Error> {
+        if self.cut.is_some() {
+            return Err(Error::new(
+                "a promise resolves outside a cut, or in its commit hook",
+            ));
+        }
+        let depth = self.require(n)?;
+        let resolver = self.state.stack[depth - n].clone();
+        let value = (n == 2).then(|| self.state.stack[depth - 1].clone());
+        if let Some(value) = &value {
+            self.runtime.assembler.values().require(value)?;
+        }
+        let resolver = self.runtime.assembler.evaluator().eval(&resolver)?;
+        self.runtime.promises.resolve(
+            &self.runtime.assembler.values(),
+            &self.resources(),
+            &resolver.into_value(),
+            resolution(value),
+        )?;
+        self.state.stack.truncate(depth - n);
+        Ok(())
     }
 
     /// Pushes the value at `path` in the shared heap, without evaluating
@@ -1904,12 +1999,13 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let resources = self.resources();
         loop {
             let start = self.state.clone();
-            let (_, store, events) = resources.transaction_snapshot();
+            let (generation, store, events) = resources.transaction_snapshot();
             self.cut = Some(CutTransaction {
                 journal: StoreJournal::new(store),
                 events: RuntimeEventJournal::new(events),
                 observed: false,
                 conflicted: false,
+                awaits_evaluation: false,
                 commit_hooks: Vec::new(),
                 abort_hooks: Vec::new(),
             });
@@ -1939,6 +2035,12 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 // does: the cut waits for a change in what it observed.
                 Err(error)
                     if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
+                        && cut.awaits_evaluation =>
+                {
+                    CutRetry::AfterAnyChange(generation)
+                }
+                Err(error)
+                    if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
                         && cut.observed =>
                 {
                     CutRetry::AfterChange(Box::new((cut.journal.clone(), cut.events.clone())))
@@ -1958,6 +2060,13 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 CutRetry::AfterChange(journals) => {
                     let (journal, events) = &*journals;
                     self.await_change(&resources, journal, events)
+                }
+                CutRetry::AfterAnyChange(generation) => {
+                    self.runtime
+                        .assembler
+                        .evaluation_runtime()
+                        .pump_until_stable();
+                    resources.wait_for_change(generation);
                 }
                 CutRetry::Never(error) => return Err(error),
             }
@@ -2290,6 +2399,8 @@ fn underflow(what: &str, needed: usize, held: usize) -> Error {
 fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
     path.into_iter().map(Into::into).collect()
 }
+
+mod promises;
 
 #[cfg(test)]
 mod tests;

@@ -76,7 +76,9 @@ impl Error {
             diagnostics: Vec::new(),
             panic: None,
             backtrack: false,
-            retry: false,
+            // An evaluation that waits on what is not known yet, such as an
+            // unresolved promise, is pushback.
+            retry: error.permanent_failure().is_none(),
         }
     }
 

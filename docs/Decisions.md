@@ -2215,7 +2215,9 @@ maps the short names used here to file names.
     duplicate, and several into one merge in commit order.
   - Too few to read, or a full buffer, is pushback: a divergence, the new
     error kind `Retry`, which a cut recognizes by waiting and running
-    again, while `Backtrack` stays for alternatives. Outside a cut, `read`
+    again, while `Backtrack` stays for alternatives. An evaluation that
+    waits on what is not known yet, such as an unresolved promise, is
+    pushback too (the same day, at `api-machine-environment`). Outside a cut, `read`
     and `write` block, and `try_read` returns `Retry`. A
     write to an unconnected output is a plain error.
   - Diagnostics wiring is default configuration, with an option for none

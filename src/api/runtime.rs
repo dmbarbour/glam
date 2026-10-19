@@ -275,6 +275,12 @@ pub(in crate::api) fn publish_runtime_observation(
 }
 
 impl RuntimeSharedResources {
+    /// Advances the observation epoch, waking what waits for a change, for
+    /// a change outside the transactional state: a promise's resolution.
+    pub(in crate::api) fn publish_change(&self) {
+        self.publish_observation(self.mutation_admission.mutation_guard());
+    }
+
     fn id(&self) -> EvaluationRuntimeId {
         self.id
     }

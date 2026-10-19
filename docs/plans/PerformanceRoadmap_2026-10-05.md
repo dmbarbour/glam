@@ -305,7 +305,10 @@ Their sections hold their earlier evidence.
   validates its reads and sleeps again if they stand, so each commit costs
   a validation per waiter. A wake indexed by what each waiter observed
   keeps the contract. Measure once machines wait in numbers, from
-  `api-request-queues`.
+  `api-request-queues`. A cut whose evaluation waited on what was not known
+  yet, such as an unresolved promise, wakes on any change of the
+  observation epoch and evaluates again (`api-machine-environment`); a wake
+  on the evaluation's own dependency keeps that contract too.
 - **Port routing** (`perf-port-routing`), not measured, after the
   representations, as the runtime API plan goes ahead of performance
   (maintainer, 2026-10-19). As `api-ports` built them, each write walks

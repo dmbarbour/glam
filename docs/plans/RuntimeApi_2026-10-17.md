@@ -1277,6 +1277,36 @@ maintainer's agreement):
   `clear`; a cut waiting on its environment woken when an ancestor binds
   (forced through a channel).
 
+`api-machine-environment`, promises (2026-10-19):
+- `m.promise()` pushes a promised value and its resolver; `m.fulfill()`
+  pops a value and a resolver, and `m.break_promise()` a resolver. A
+  resolver is an opaque glam value, which may hold no managed root, so it
+  carries its promise's identity, and the runtime's turn-side state holds
+  each unresolved promise's root until it resolves. Resolution evaluates
+  the resolver, never the value; it happens once, a second failing; and it
+  is an error within a cut, which cannot undo it, so a cut resolves in a
+  commit hook. It advances the observation epoch, so a cut waiting on a
+  change wakes. Breaking a promise whose resolver is collected stays with
+  `api-request-queues`.
+- An evaluation that waits on what is not known yet, an unresolved promise
+  or other blocked work that a client demand abandons, is pushback: its
+  error is `Retry`, where it was a plain failure. A machine's evaluating
+  operations now pop nothing when evaluation fails, as `write` does, so a
+  value that waits stays. Within a cut, such an evaluation counts as an
+  observation, and the outermost cut runs again after any change of the
+  observation epoch (`perf-fine-grained-wakes` records the coarse wake).
+- A bound share is stored as a list of one: `default`, which tells an
+  unbound share, `{}`, from a bound one, decides whether a dict is
+  logically `{}` by evaluating its entries, and so forced a promised value
+  within the share. A list is never `{}`, so the rest of the environment
+  reads while a promised value in it waits alone.
+- Tests in `tests/runtime_promises.rs`: a fulfilled promise read; a cut
+  waiting until a promise is fulfilled, and a promised value within a share
+  waiting alone (each forced through a channel after the first attempt
+  waits); outside a cut, an unresolved promise as pushback that pops
+  nothing; single resolution, the refusal within a cut, a broken promise's
+  readers failing, and a value that is no resolver.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
