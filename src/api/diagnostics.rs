@@ -4,18 +4,14 @@ use std::path::Path;
 use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use super::runtime::{
-    PortAddress, RuntimeDiagnosticRouteMode, RuntimeInputReader, RuntimeInputSender,
-    RuntimeOutputWriter, RuntimePreparedInput, RuntimeSharedResources,
-    configure_runtime_diagnostic_fallback, prepare_runtime_observation,
-    register_runtime_diagnostic_route, route_runtime_diagnostic_guarded,
-    set_runtime_diagnostic_route, set_runtime_diagnostic_route_guarded,
+    PortAddress, RuntimeInputSender, RuntimePreparedInput, RuntimeSharedResources,
+    prepare_runtime_observation, register_runtime_diagnostic_route,
+    route_runtime_diagnostic_guarded,
 };
 use super::{Error, EvaluationRuntime, Value, Values};
 use crate::core::{CoreValueFactory, Dict, Key, Value as CoreValue};
 use crate::diagnostic::{CompilationTrace, Severity};
-use crate::evaluation::{TaskStatusPublisher, TaskStatusWake};
 use crate::number::Number;
-use crate::reflection::EffectLifecycleTerminal;
 use crate::runtime::EvaluationRuntimeId;
 use crate::source::SourceIdentity;
 
@@ -605,41 +601,25 @@ impl DiagnosticBus {
         }
     }
 
-    /// Installs the single ordered runtime ingress for this bus.
+    /// Installs the single ordered runtime ingress for this bus, which
+    /// routes every diagnostic it publishes, in sequence order, to the input
+    /// `port` of the machine at `machine`, as a transport value
+    /// ([`Diagnostic::from_transport_value`] reads it back).
     ///
     /// The ingress receives publications before ordinary subscribers, admits
-    /// only runtime-rooted values to its FIFO, and remains registered weakly so
-    /// neither the bus nor an escaping handle keeps the runtime alive.
-    pub fn diagnostic_ingress(
-        &self,
-        runtime: &EvaluationRuntime,
-    ) -> Result<(DiagnosticIngress, RuntimeInputReader), Error> {
-        self.install_ingress(runtime, None)
-    }
-
-    /// Routes every diagnostic this bus publishes, in sequence order, to the
-    /// input `port` of the machine at `machine`, as a transport value
-    /// ([`Diagnostic::from_transport_value`] reads it back): its single
-    /// runtime ingress, as [`Self::diagnostic_ingress`] installs one, whose
-    /// route never changes. The runtime keeps the route for its lifetime.
+    /// only runtime-rooted values, and remains registered weakly so neither
+    /// the bus nor an escaping handle keeps the runtime alive. The runtime
+    /// keeps the route for its lifetime.
     pub fn route_to_port(
         &self,
         runtime: &EvaluationRuntime,
         machine: impl Into<crate::api::MachinePath>,
         port: impl Into<Key>,
-    ) -> Result<(), Error> {
-        let address = PortAddress {
+    ) -> Result<DiagnosticIngress, Error> {
+        let port = PortAddress {
             machine: machine.into().keys().to_vec(),
             port: port.into(),
         };
-        self.install_ingress(runtime, Some(address)).map(|_| ())
-    }
-
-    fn install_ingress(
-        &self,
-        runtime: &EvaluationRuntime,
-        port: Option<PortAddress>,
-    ) -> Result<(DiagnosticIngress, RuntimeInputReader), Error> {
         self.bind_runtime(runtime)?;
         let mut state = self
             .inner
@@ -662,8 +642,9 @@ impl DiagnosticBus {
         // during setup waits without runtime admission, then observes the
         // installed ingress. The opposite lock order is therefore unreachable
         // during the one-time installation.
-        let endpoint = runtime.input_endpoint::<Value, _>(Ok)?;
-        let (sender, reader) = endpoint.into_parts();
+        // The input endpoint identifies the ingress's route; diagnostics
+        // reach the port, never the endpoint's own buffer.
+        let sender = runtime.input_endpoint::<Value, _>(Ok)?.sender();
         register_runtime_diagnostic_route(&runtime.state.shared_resources, sender.id(), port)?;
         let ingress = DiagnosticIngress {
             inner: Arc::new(DiagnosticIngressInner {
@@ -684,7 +665,7 @@ impl DiagnosticBus {
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .push(ingress.inner.clone());
-        Ok((ingress, reader))
+        Ok(ingress)
     }
 
     /// Publishes one event, updating authoritative counts before notifying the
@@ -993,85 +974,6 @@ impl DiagnosticIngress {
             .expect("diagnostic ingress mutex should not be poisoned")
             .failure
             .clone()
-    }
-
-    /// Selects the output endpoint used when no configured logger lifecycle
-    /// owns this ingress. The endpoint must belong to the same runtime.
-    pub fn set_fallback_output(&self, output: &RuntimeOutputWriter) -> Result<(), Error> {
-        configure_runtime_diagnostic_fallback(&self.inner.sender, output)
-    }
-
-    /// Rearms this ingress for a configured logger lifecycle. Already queued
-    /// fallback obligations retain their route; only later publications enter
-    /// the logger input FIFO.
-    pub fn activate(&self) -> Result<(), Error> {
-        set_runtime_diagnostic_route(&self.inner.sender, RuntimeDiagnosticRouteMode::Active)
-            .map(|_| ())
-    }
-
-    /// Atomically selects fallback and transfers every buffered logger input
-    /// to ordered output obligations. Later publications remain on fallback
-    /// until [`Self::activate`] is called.
-    pub fn fallback(&self) -> Result<usize, Error> {
-        set_runtime_diagnostic_route(&self.inner.sender, RuntimeDiagnosticRouteMode::Fallback)
-    }
-
-    /// Constructs the guarded terminal transition for one coordinator-owned
-    /// logger root. Route selection and buffered-input transfer happen inside
-    /// the root's existing runtime mutation publication; `after` runs only
-    /// after that guard and the logger demand-session lease have been
-    /// released.
-    #[doc(hidden)]
-    pub fn logger_terminal(
-        &self,
-        after: impl Fn() + Send + Sync + 'static,
-    ) -> EffectLifecycleTerminal {
-        let ingress = self.inner.clone();
-        let runtime = ingress.sender.runtime;
-        let after = Arc::new(after);
-        EffectLifecycleTerminal::new(
-            runtime,
-            TaskStatusPublisher::new(move |mutation, _status| {
-                let notification = match ingress.sender.owner.upgrade() {
-                    Some(resources) => match set_runtime_diagnostic_route_guarded(
-                        &resources,
-                        ingress.sender.endpoint,
-                        RuntimeDiagnosticRouteMode::Fallback,
-                        mutation,
-                    ) {
-                        Ok((_transferred, notification)) => notification,
-                        Err(error) => {
-                            ingress
-                                .state
-                                .lock()
-                                .expect("diagnostic ingress mutex should not be poisoned")
-                                .failure = Some(error);
-                            None
-                        }
-                    },
-                    None => {
-                        let failure = Error::new(format!(
-                            "evaluation runtime {} for input endpoint {} has been dropped",
-                            ingress.sender.runtime.get(),
-                            ingress.sender.endpoint.get()
-                        ));
-                        ingress
-                            .state
-                            .lock()
-                            .expect("diagnostic ingress mutex should not be poisoned")
-                            .failure = Some(failure);
-                        None
-                    }
-                };
-                let after = after.clone();
-                TaskStatusWake::new(move || {
-                    if let Some(notification) = notification {
-                        notification.notify();
-                    }
-                    after();
-                })
-            }),
-        )
     }
 }
 

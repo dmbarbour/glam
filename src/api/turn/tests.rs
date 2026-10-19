@@ -113,3 +113,86 @@ fn the_runtime_s_diagnostics_follow_the_root_s_wiring() {
         "it passes through the root to the sink"
     );
 }
+
+#[test]
+fn a_hand_over_cut_reruns_when_a_diagnostic_arrives_and_keeps_their_order() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let values = rt.assembler().values();
+    let bus = rt.assembler().diagnostic_bus();
+    let publish = |message: &str| {
+        bus.publish(Diagnostic::new(&values, Severity::Info, message))
+            .expect("the diagnostic should publish");
+    };
+    let diagnostics = || DIAGNOSTICS.clone();
+    let keep = |machine: &mut Machine<'_, '_>| {
+        machine.unwire(
+            Endpoint::input(diagnostics()),
+            Endpoint::output(diagnostics()),
+        )
+    };
+    // As the CLI wires its logger: the root's diagnostics to `logger`, which
+    // keeps them, and its `unread` output to its `fallback`, which keeps them.
+    rt.run(["logger", "fallback"], keep)
+        .expect("the fallback keeps");
+    rt.run("logger", |logger| {
+        keep(logger)?;
+        logger.wire(
+            Endpoint::output("unread"),
+            Endpoint::child("fallback", diagnostics()),
+        )
+    })
+    .expect("the logger keeps");
+    rt.run((), |root| {
+        root.wire(
+            Endpoint::input(diagnostics()),
+            Endpoint::child("logger", diagnostics()),
+        )
+    })
+    .expect("the root sends its diagnostics to the logger");
+    publish("held");
+
+    let attempts = std::cell::Cell::new(0);
+    rt.run("logger", |logger| {
+        logger.cut(|logger| {
+            logger.wire(
+                Endpoint::input(diagnostics()),
+                Endpoint::child("fallback", diagnostics()),
+            )?;
+            let held = logger.available(diagnostics());
+            logger.read(diagnostics(), held)?;
+            logger.write("unread", held)?;
+            attempts.set(attempts.get() + 1);
+            if attempts.get() == 1 {
+                // It reaches the logger's input, since the rewiring has not
+                // committed, after this attempt counted what the input held.
+                publish("during");
+            }
+            Ok(())
+        })
+    })
+    .expect("the logger hands over");
+    assert_eq!(attempts.get(), 2, "the arrival disturbed the first attempt");
+    publish("after");
+
+    let messages = rt
+        .run(["logger", "fallback"], |fallback| {
+            let count = fallback.available(diagnostics());
+            fallback.read(diagnostics(), count)?;
+            let mut messages = (0..count)
+                .map(|_| {
+                    let value = fallback.pop()?;
+                    Ok(Diagnostic::from_transport_value(&values, &value)?
+                        .message()
+                        .to_owned())
+                })
+                .collect::<Result<Vec<_>, Error>>()?;
+            messages.reverse();
+            Ok(messages)
+        })
+        .expect("the fallback holds them");
+    assert_eq!(messages, ["held", "during", "after"], "each once, in order");
+    let left = rt
+        .run("logger", |logger| Ok(logger.available(diagnostics())))
+        .expect("a turn");
+    assert_eq!(left, 0);
+}

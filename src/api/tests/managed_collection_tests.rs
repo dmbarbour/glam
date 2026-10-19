@@ -183,8 +183,8 @@ impl EvaluationTaskMachine for PausedManagedWorker {
 fn production_collection_preserves_each_serial_boundary() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let bus = DiagnosticBus::for_runtime(&runtime);
-    let (_ingress, diagnostic_reader) = bus
-        .diagnostic_ingress(&runtime)
+    let _ingress = bus
+        .route_to_port(&runtime, (), "diagnostics")
         .expect("diagnostic ingress should attach");
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())
@@ -333,8 +333,7 @@ fn production_collection_preserves_each_serial_boundary() {
     let (_, store, snapshot) = runtime.transaction_snapshot();
     let mut diagnostic_events = RuntimeEventJournal::new(snapshot);
     let transported = diagnostic_events
-        .read(&diagnostic_reader)
-        .expect("logger-facing ingress should remain readable")
+        .read_port((), "diagnostics")
         .expect("published diagnostic should remain queued");
     assert_eq!(
         runtime.try_commit_transaction(&StoreJournal::new(store), &diagnostic_events),
@@ -744,8 +743,8 @@ fn runtime_retirement_before_collection_leaves_public_value_inert() {
 fn passive_finalization_produces_no_runtime_work() {
     let runtime = EvaluationRuntime::new(1).expect("worker runtime should build");
     let bus = DiagnosticBus::for_runtime(&runtime);
-    let (_ingress, diagnostic_reader) = bus
-        .diagnostic_ingress(&runtime)
+    let _ingress = bus
+        .route_to_port(&runtime, (), "diagnostics")
         .expect("diagnostic ingress should attach");
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())
@@ -841,14 +840,10 @@ fn passive_finalization_produces_no_runtime_work() {
     let (_, store, events) = runtime.transaction_snapshot();
     let mut events = RuntimeEventJournal::new(events);
     let transported = events
-        .read(&diagnostic_reader)
-        .expect("logger-facing ingress should remain readable")
+        .read_port((), "diagnostics")
         .expect("the diagnostic should remain queued");
     assert!(
-        events
-            .read(&diagnostic_reader)
-            .expect("the diagnostic FIFO should remain readable")
-            .is_none(),
+        events.read_port((), "diagnostics").is_none(),
         "collection must not inject another logger event"
     );
     assert_eq!(

@@ -12,19 +12,18 @@ use crate::api::{
 };
 use crate::core::{EvaluationHalt, ManagedPromiseRoot};
 use crate::evaluation::{
-    EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskStatus,
-    ReflectionTaskLauncher, ReflectionTaskProfile, ReflectionTaskResultPolicy, TaskStatusPublisher,
-    TaskStatusWake,
+    EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, ReflectionTaskLauncher,
+    ReflectionTaskProfile, ReflectionTaskResultPolicy,
 };
 use crate::reflection::lifecycle::{run_composed_effect_task, task_launcher};
 use crate::reflection::{
     CoarseConflictAnalysis, ConflictAnalysisStrategy, EffectLifecycle, EffectLifecycleStatus,
-    EffectLifecycleTerminal, EffectRun, EvaluationQueryHandle, ExactConflictAnalysis,
-    FingerprintConflictAnalysis, IsolatedEffectSearch, IsolatedSearchPoll, ReasoningSessionId,
-    ReflectionEffects, ReflectionHost, ReflectionJournal, ReflectionQueryMutation,
-    ReflectionQueryWriter, ReflectionRequest, ReflectionRequestWork, ReflectionServices,
-    ReflectionStore, ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment,
-    TaskValidation, ValidationResult, reflection_request_specs,
+    EffectRun, EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis,
+    IsolatedEffectSearch, IsolatedSearchPoll, ReasoningSessionId, ReflectionEffects,
+    ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
+    ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionStore,
+    ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment, TaskValidation,
+    ValidationResult, reflection_request_specs,
 };
 use crate::test_support::ResultTestExt as _;
 
@@ -5416,187 +5415,11 @@ fn scheduled_effect_root_publishes_failure_and_cancellation() {
     ));
 }
 
-fn terminal_test_lifecycle(
-    runtime: &EvaluationRuntime,
-) -> (
-    EffectLifecycle,
-    Arc<Mutex<Vec<EvaluationTaskStatus>>>,
-    Arc<AtomicBool>,
-) {
-    let statuses = Arc::new(Mutex::new(Vec::new()));
-    let published = statuses.clone();
-    let notified = Arc::new(AtomicBool::new(false));
-    let notified_after_release = notified.clone();
-    let runtime_after_release = runtime.clone();
-    let serial_runtime = runtime.worker_threads() == 0;
-    let terminal = EffectLifecycleTerminal::new(
-        runtime.id(),
-        TaskStatusPublisher::new(move |_mutation, status| {
-            published.lock().unwrap().push(status);
-            let notified_after_release = notified_after_release.clone();
-            let runtime_after_release = runtime_after_release.clone();
-            TaskStatusWake::new(move || {
-                if serial_runtime {
-                    assert!(
-                        runtime_after_release.exclusive_admission_available(),
-                        "terminal wake must run after runtime mutation admission is released"
-                    );
-                }
-                notified_after_release.store(true, Ordering::Release);
-            })
-        }),
-    );
-    (
-        EffectLifecycle::new_with_terminal(runtime, terminal),
-        statuses,
-        notified,
-    )
-}
-
 #[test]
-fn coordinator_terminal_policy_observes_every_root_disposition() {
-    fn recorded_status(statuses: &Arc<Mutex<Vec<EvaluationTaskStatus>>>) -> EvaluationTaskStatus {
-        let statuses = statuses.lock().unwrap();
-        assert_eq!(statuses.len(), 1);
-        statuses[0].clone()
-    }
-
-    let (complete_assembler, complete_effect) = compile_effect(".r ()");
-    let complete_runtime = complete_assembler.evaluation_runtime();
-    let (complete_lifecycle, complete_statuses, complete_notified) =
-        terminal_test_lifecycle(&complete_runtime);
-    let complete = EffectRun::new(
-        &complete_runtime,
-        &complete_effect,
-        TestEffects,
-        Arc::new(TestHost::with_values(complete_assembler.core_values())),
-    )
-    .schedule(&complete_lifecycle)
-    .unwrap();
-    assert!(matches!(complete.run().unwrap(), TaskOutcome::Complete(_)));
-    assert!(matches!(
-        recorded_status(&complete_statuses),
-        EvaluationTaskStatus::Complete(_)
-    ));
-    assert!(complete_notified.load(Ordering::Acquire));
-
-    let (failed_assembler, failed_effect) = compile_effect(".fail");
-    let failed_runtime = failed_assembler.evaluation_runtime();
-    let (failed_lifecycle, failed_statuses, failed_notified) =
-        terminal_test_lifecycle(&failed_runtime);
-    let failed = EffectRun::new(
-        &failed_runtime,
-        &failed_effect,
-        TestEffects,
-        Arc::new(TestHost::with_values(failed_assembler.core_values())),
-    )
-    .schedule(&failed_lifecycle)
-    .unwrap();
-    assert!(failed.run().is_err());
-    assert!(matches!(
-        recorded_status(&failed_statuses),
-        EvaluationTaskStatus::Failed(_)
-    ));
-    assert!(failed_notified.load(Ordering::Acquire));
-
-    let (cancelled_assembler, cancelled_effect) = compile_effect(".read_log");
-    let cancelled_runtime = cancelled_assembler.evaluation_runtime();
-    let (cancelled_lifecycle, cancelled_statuses, cancelled_notified) =
-        terminal_test_lifecycle(&cancelled_runtime);
-    let cancelled = EffectRun::new(
-        &cancelled_runtime,
-        &cancelled_effect,
-        TestEffects,
-        Arc::new(TestHost::with_values(cancelled_assembler.core_values())),
-    )
-    .schedule(&cancelled_lifecycle)
-    .unwrap();
-    cancelled_runtime.pump_until_stable();
-    cancelled.cancel();
-    assert!(matches!(cancelled.run().unwrap(), TaskOutcome::Cancelled));
-    assert_eq!(
-        recorded_status(&cancelled_statuses),
-        EvaluationTaskStatus::Cancelled
-    );
-    assert!(cancelled_notified.load(Ordering::Acquire));
-
-    let (abandoned_assembler, abandoned_effect) = compile_effect(".read_log");
-    let abandoned_runtime = abandoned_assembler.evaluation_runtime();
-    let (abandoned_lifecycle, abandoned_statuses, abandoned_notified) =
-        terminal_test_lifecycle(&abandoned_runtime);
-    let abandoned = EffectRun::new(
-        &abandoned_runtime,
-        &abandoned_effect,
-        TestEffects,
-        Arc::new(TestHost::with_values(abandoned_assembler.core_values())),
-    )
-    .schedule(&abandoned_lifecycle)
-    .unwrap();
-    abandoned_runtime.pump_until_stable();
-    drop(abandoned);
-    assert_eq!(
-        recorded_status(&abandoned_statuses),
-        EvaluationTaskStatus::Abandoned
-    );
-    assert!(abandoned_notified.load(Ordering::Acquire));
-
-    let (exited_assembler, exited_effect) = compile_effect(".exit.success");
-    let exited_runtime = exited_assembler.evaluation_runtime();
-    let (exited_lifecycle, exited_statuses, exited_notified) =
-        terminal_test_lifecycle(&exited_runtime);
-    let exited = EffectRun::new(
-        &exited_runtime,
-        &exited_effect,
-        TestEffects,
-        Arc::new(TestHost::with_values(exited_assembler.core_values())),
-    )
-    .schedule(&exited_lifecycle)
-    .unwrap();
-    exited_runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Ready(snapshot) = exited_runtime.readiness() else {
-        panic!("exit-capable root should vote for a ready settlement")
-    };
-    snapshot.settle().expect("exit vote should settle");
-    assert!(exited.run().is_err());
-    assert_eq!(
-        recorded_status(&exited_statuses),
-        EvaluationTaskStatus::Exited
-    );
-    assert!(exited_notified.load(Ordering::Acquire));
-
-    let (killed_assembler, killed_effect) = compile_effect(".read_log");
-    let killed_runtime = killed_assembler.evaluation_runtime();
-    let (killed_lifecycle, killed_statuses, killed_notified) =
-        terminal_test_lifecycle(&killed_runtime);
-    let killed = EffectRun::new(
-        &killed_runtime,
-        &killed_effect,
-        TestEffects,
-        Arc::new(TestHost::with_values(killed_assembler.core_values())),
-    )
-    .schedule(&killed_lifecycle)
-    .unwrap();
-    killed_runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Deadlocked(snapshot) = killed_runtime.readiness() else {
-        panic!("blocked root should produce a deadlock snapshot")
-    };
-    snapshot
-        .kill(crate::api::RuntimeKillReason::Deadlock)
-        .settle()
-        .expect("forced deadlock settlement should succeed");
-    assert!(killed.run().is_err());
-    assert!(matches!(
-        recorded_status(&killed_statuses),
-        EvaluationTaskStatus::Killed(_)
-    ));
-    assert!(killed_notified.load(Ordering::Acquire));
-}
-
-#[test]
-fn coordinator_terminal_policy_closes_root_descendants_after_publication() {
+fn a_closing_lifecycle_abandons_root_descendants_when_its_root_returns() {
     let (assembler, effect) = compile_effect(".task.new (.read_log) >>= (\\_child -> .r ())");
     let runtime = assembler.evaluation_runtime();
-    let (lifecycle, statuses, notified) = terminal_test_lifecycle(&runtime);
+    let lifecycle = EffectLifecycle::new_closing_session(&runtime);
     let task = EffectRun::new(
         &runtime,
         &effect,
@@ -5608,26 +5431,25 @@ fn coordinator_terminal_policy_closes_root_descendants_after_publication() {
 
     assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
     assert!(matches!(
-        statuses.lock().unwrap().as_slice(),
-        [EvaluationTaskStatus::Complete(_)]
+        lifecycle.status(),
+        EffectLifecycleStatus::Complete(_)
     ));
-    assert!(notified.load(Ordering::Acquire));
     runtime.pump_until_stable();
     let crate::api::RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
-        panic!("closing the logger demand session should abandon its blocked child")
+        panic!("closing the root's demand session should abandon its blocked child")
     };
     assert!(snapshot.dispositions().is_empty());
 }
 
 #[test]
-fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return() {
+fn a_closing_lifecycle_preserves_a_descendant_failure_before_root_return() {
     for workers in [0, 4] {
         let runtime = EvaluationRuntime::new(workers).expect("test runtime should build");
         let (assembler, effect) = compile_effect_with_runtime(
             &runtime,
             ".task.new (.fail) >>= (\\_child -> .read_log >>= (\\_message -> .r ()))",
         );
-        let (lifecycle, statuses, notified) = terminal_test_lifecycle(&runtime);
+        let lifecycle = EffectLifecycle::new_closing_session(&runtime);
         let host = Arc::new(TestHost::with_values(assembler.core_values()));
         let task = EffectRun::new(&runtime, &effect, TestEffects, host.clone())
             .schedule(&lifecycle)
@@ -5655,8 +5477,8 @@ fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return
                 .contains("reflection task failed permanently")
         );
         assert!(matches!(
-            statuses.lock().unwrap().as_slice(),
-            [EvaluationTaskStatus::Complete(_)]
+            lifecycle.status(),
+            EffectLifecycleStatus::Complete(_)
         ));
         let snapshot = loop {
             runtime.pump_until_stable();
@@ -5674,10 +5496,6 @@ fn coordinator_terminal_policy_preserves_a_descendant_failure_before_root_return
                 ),
             }
         };
-        assert!(
-            notified.load(Ordering::Acquire),
-            "terminal notification must finish before the runtime becomes stable"
-        );
         assert!(snapshot.dispositions().is_empty());
         let report = snapshot
             .settle()

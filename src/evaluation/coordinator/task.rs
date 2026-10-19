@@ -305,6 +305,7 @@ impl TaskStatusPublisher {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn publish_guarded(
         &self,
         mutation: &dyn RuntimeMutationAuthority,
@@ -1119,15 +1120,7 @@ impl PreparedEvaluationTask {
         self.handle
     }
 
-    pub(crate) fn activate_guarded(&self, mutation: &dyn RuntimeMutationAuthority) -> bool {
-        self.coordinator
-            .activate_reflection_guarded(self.handle.work, mutation)
-    }
-
-    pub(crate) fn finish_guarded_activation(&self, activated: bool) {
-        self.coordinator.notify_reflection_activation(activated);
-    }
-
+    #[cfg(test)]
     pub(crate) fn into_handle(self) -> EvaluationTaskHandle {
         self.handle
     }

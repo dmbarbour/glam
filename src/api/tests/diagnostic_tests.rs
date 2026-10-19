@@ -4,9 +4,8 @@ use std::sync::{Arc, Mutex};
 
 use crate::core::{Builtin, Key, TestAccess as _, Value as CoreValue};
 use crate::diagnostic::Severity;
-use crate::evaluation::{EvalContext, EvaluationMachinePoll, EvaluationTaskMachine};
+use crate::evaluation::EvalContext;
 use crate::reflection::{StoreCommitResult, StoreJournal};
-use crate::test_support::ResultTestExt as _;
 
 use super::test_compilation_trace;
 use crate::api::diagnostics::DiagnosticCallback;
@@ -222,12 +221,12 @@ fn diagnostic_events_retain_emission_and_origin_roots_until_retirement() {
 }
 
 #[test]
-fn diagnostic_ingress_retains_roots_through_buffer_and_committed_read() {
+fn diagnostic_ingress_retains_roots_through_port_and_committed_read() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let domain = EffectTokenDomain::new(&runtime.values());
     let bus = DiagnosticBus::for_runtime(&runtime);
-    let (_ingress, reader) = bus
-        .diagnostic_ingress(&runtime)
+    let _ingress = bus
+        .route_to_port(&runtime, (), "diagnostics")
         .expect("diagnostic ingress should attach");
     let emission_payload = Arc::new(());
     let retained = Arc::downgrade(&emission_payload);
@@ -249,9 +248,8 @@ fn diagnostic_ingress_retains_roots_through_buffer_and_committed_read() {
     let (_, store, snapshot) = runtime.transaction_snapshot();
     let mut journal = RuntimeEventJournal::new(snapshot);
     let transported = journal
-        .read(&reader)
-        .expect("diagnostic ingress should be readable")
-        .expect("the ingress should retain its diagnostic value");
+        .read_port((), "diagnostics")
+        .expect("the port should retain its diagnostic value");
     assert_eq!(
         runtime.try_commit_transaction(&StoreJournal::new(store), &journal),
         StoreCommitResult::Committed
@@ -270,11 +268,11 @@ fn diagnostic_ingress_is_runtime_bound_and_installed_once() {
     let owner = EvaluationRuntime::new(0).expect("owner runtime should build");
     let foreign = EvaluationRuntime::new(0).expect("foreign runtime should build");
     let bus = DiagnosticBus::for_runtime(&owner);
-    let (_ingress, _reader) = bus
-        .diagnostic_ingress(&owner)
+    let _ingress = bus
+        .route_to_port(&owner, (), "diagnostics")
         .expect("first ingress should attach");
 
-    assert!(bus.diagnostic_ingress(&owner).is_err());
+    assert!(bus.route_to_port(&owner, (), "diagnostics").is_err());
     assert!(bus.bind_runtime(&foreign).is_err());
     assert!(
         bus.publish(Diagnostic::new(
@@ -299,8 +297,8 @@ fn diagnostic_ingress_preparation_failure_still_counts_the_bus_publication() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let values = runtime.values();
     let bus = DiagnosticBus::for_runtime(&runtime);
-    let (ingress, _reader) = bus
-        .diagnostic_ingress(&runtime)
+    let ingress = bus
+        .route_to_port(&runtime, (), "diagnostics")
         .expect("diagnostic ingress should attach");
     drop(runtime);
 
@@ -318,127 +316,6 @@ fn diagnostic_ingress_preparation_failure_still_counts_the_bus_publication() {
             .expect("transport failure should remain observable")
             .to_string()
             .contains("has been dropped")
-    );
-}
-
-#[test]
-fn diagnostic_consumer_activation_hides_route_root_intermediate_state() {
-    struct CompleteTask;
-
-    impl EvaluationTaskMachine for CompleteTask {
-        fn poll(
-            &mut self,
-            _context: &mut crate::evaluation::EvaluationPollContext,
-            _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-        ) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Complete(_context.root_unit())
-        }
-    }
-
-    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let _assembler = Assembler::builder()
-        .evaluation_runtime(runtime.clone())
-        .build()
-        .expect("runtime reflection profile should seal");
-    let bus = DiagnosticBus::for_runtime(&runtime);
-    let (ingress, reader) = bus
-        .diagnostic_ingress(&runtime)
-        .expect("diagnostic ingress should attach");
-    let fallback = runtime
-        .output_endpoint(Ok::<Value, Error>, |_value| Ok(()))
-        .expect("fallback endpoint should register");
-    ingress
-        .set_fallback_output(&fallback.writer())
-        .expect("fallback endpoint should belong to the ingress runtime");
-    ingress
-        .fallback()
-        .expect("diagnostic route should begin on fallback");
-
-    let session = runtime
-        .new_evaluation_session()
-        .expect("diagnostic consumer session should open");
-    let context = EvalContext::new(&session);
-    let prepared = context
-        .prepare_machine(None, |_| Ok(Box::new(CompleteTask)))
-        .expect_without_debug("diagnostic consumer should prepare");
-
-    let activation_runtime = runtime.clone();
-    let activation_ingress = ingress.clone();
-    let (inside, inside_wait) = std::sync::mpsc::channel();
-    let (release, release_wait) = std::sync::mpsc::channel();
-    let activation = std::thread::spawn(move || {
-        activation_runtime
-            .activate_diagnostic_consumer(&activation_ingress, |mutation| {
-                inside
-                    .send(())
-                    .expect("activation should expose its deterministic barrier");
-                release_wait
-                    .recv()
-                    .expect("activation barrier should be released");
-                prepared.activate_guarded(mutation)
-            })
-            .expect("diagnostic consumer activation should commit");
-        prepared.finish_guarded_activation(true);
-        prepared.into_handle()
-    });
-    inside_wait
-        .recv()
-        .expect("activation should reach the route/root barrier");
-
-    assert!(
-        matches!(runtime.readiness(), RuntimeReadiness::Busy),
-        "readiness must conservatively hide the active route before its root"
-    );
-    let publishing_bus = bus.clone();
-    let publishing_values = runtime.values();
-    let (publication_started, publication_start_wait) = std::sync::mpsc::channel();
-    let (publication_done, publication_wait) = std::sync::mpsc::channel();
-    let publisher = std::thread::spawn(move || {
-        publication_started
-            .send(())
-            .expect("publisher start should be received");
-        publication_done
-            .send(publishing_bus.publish_local(Diagnostic::new(
-                &publishing_values,
-                Severity::Info,
-                "after atomic activation",
-            )))
-            .expect("publication result should be received");
-    });
-    publication_start_wait
-        .recv()
-        .expect("publisher should reach the guarded publication");
-    assert!(
-        publication_wait
-            .recv_timeout(std::time::Duration::from_millis(50))
-            .is_err(),
-        "publishers must not route input through the intermediate state"
-    );
-
-    release
-        .send(())
-        .expect("activation barrier should be releasable");
-    let _task = activation.join().expect("activation should not panic");
-    publication_wait
-        .recv_timeout(std::time::Duration::from_secs(1))
-        .expect("publication should resume after activation");
-    publisher.join().expect("publisher should not panic");
-
-    let (_, store, events) = runtime.transaction_snapshot();
-    let mut journal = RuntimeEventJournal::new(events);
-    let admitted = journal
-        .read(&reader)
-        .expect("diagnostic input should be readable")
-        .expect("post-activation diagnostic should enter the input FIFO");
-    assert_eq!(
-        Diagnostic::from_transport_value(&runtime.values(), &admitted)
-            .expect("input should retain a diagnostic envelope")
-            .message(),
-        "after atomic activation"
-    );
-    assert_eq!(
-        runtime.try_commit_transaction(&StoreJournal::new(store), &journal),
-        StoreCommitResult::Committed
     );
 }
 
@@ -470,8 +347,8 @@ fn diagnostic_value_operations_reject_foreign_runtime_views() {
 fn diagnostic_ingress_admits_in_bus_sequence_order() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let bus = DiagnosticBus::for_runtime(&runtime);
-    let (_ingress, reader) = bus
-        .diagnostic_ingress(&runtime)
+    let _ingress = bus
+        .route_to_port(&runtime, (), "diagnostics")
         .expect("ingress should attach");
     let before = runtime.transaction_snapshot().0;
     let values = runtime.values();
@@ -493,7 +370,7 @@ fn diagnostic_ingress_admits_in_bus_sequence_order() {
     let (_, store, snapshot) = runtime.transaction_snapshot();
     let mut journal = RuntimeEventJournal::new(snapshot);
     let mut received = Vec::new();
-    while let Some(value) = journal.read(&reader).expect("ingress should be readable") {
+    while let Some(value) = journal.read_port((), "diagnostics") {
         received.push(
             Diagnostic::from_transport_value(&runtime.values(), &value)
                 .expect("ingress should retain diagnostic envelopes")
@@ -504,7 +381,7 @@ fn diagnostic_ingress_admits_in_bus_sequence_order() {
     assert_eq!(
         received,
         published.values().cloned().collect::<Vec<_>>(),
-        "runtime FIFO order must follow bus sequence, not callback arrival"
+        "the port's order must follow bus sequence, not callback arrival"
     );
     assert_eq!(
         runtime.try_commit_transaction(&crate::reflection::StoreJournal::new(store), &journal),
@@ -513,223 +390,11 @@ fn diagnostic_ingress_admits_in_bus_sequence_order() {
 }
 
 #[test]
-fn diagnostic_ingress_transfers_buffered_and_later_values_to_fallback() {
-    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let bus = DiagnosticBus::for_runtime(&runtime);
-    let (ingress, reader) = bus
-        .diagnostic_ingress(&runtime)
-        .expect("ingress should attach");
-    let received = Arc::new(Mutex::new(Vec::new()));
-    let callback_values = received.clone();
-    let callback_runtime = runtime.clone();
-    let decode_values = runtime.values();
-    let fallback = runtime
-        .output_endpoint(
-            move |value| Diagnostic::from_transport_value(&decode_values, &value),
-            move |diagnostic| {
-                assert!(
-                    callback_runtime.exclusive_admission_available(),
-                    "fallback rendering must run outside runtime admission"
-                );
-                callback_values
-                    .lock()
-                    .expect("fallback collection mutex should not be poisoned")
-                    .push(diagnostic.message().to_owned());
-                Ok(())
-            },
-        )
-        .expect("fallback output should register");
-    let (writer, delivery) = fallback.into_parts();
-    ingress
-        .set_fallback_output(&writer)
-        .expect("fallback should share the ingress runtime");
-
-    for message in ["buffered one", "buffered two"] {
-        bus.publish_local(Diagnostic::new(&runtime.values(), Severity::Info, message));
-    }
-    assert_eq!(ingress.fallback().expect("fallback should activate"), 2);
-    let (_, _, snapshot) = runtime.transaction_snapshot();
-    assert!(
-        RuntimeEventJournal::new(snapshot)
-            .read(&reader)
-            .expect("transferred input should remain readable as empty")
-            .is_none()
-    );
-    while delivery
-        .deliver_next()
-        .expect("fallback delivery should remain usable")
-        .is_some()
-    {}
-
-    bus.publish_local(Diagnostic::new(
-        &runtime.values(),
-        Severity::Warning,
-        "later fallback",
-    ));
-    let (_, _, snapshot) = runtime.transaction_snapshot();
-    assert!(
-        RuntimeEventJournal::new(snapshot)
-            .read(&reader)
-            .expect("fallback publication should not enter the logger FIFO")
-            .is_none()
-    );
-    assert!(
-        delivery
-            .deliver_next()
-            .expect("later fallback delivery should remain usable")
-            .is_some()
-    );
-    assert!(
-        delivery
-            .deliver_next()
-            .expect("fallback delivery should become empty")
-            .is_none()
-    );
-    assert_eq!(
-        ingress.fallback().expect("fallback should be idempotent"),
-        0
-    );
-    assert_eq!(
-        *received
-            .lock()
-            .expect("fallback collection mutex should not be poisoned"),
-        ["buffered one", "buffered two", "later fallback"]
-    );
-
-    ingress.activate().expect("ingress should rearm");
-    bus.publish_local(Diagnostic::new(
-        &runtime.values(),
-        Severity::Info,
-        "rearmed",
-    ));
-    let (_, _, snapshot) = runtime.transaction_snapshot();
-    let value = RuntimeEventJournal::new(snapshot)
-        .read(&reader)
-        .expect("rearmed input should be readable")
-        .expect("rearmed publication should enter the logger FIFO");
-    assert_eq!(
-        Diagnostic::from_transport_value(&runtime.values(), &value)
-            .expect("rearmed input should remain a diagnostic")
-            .message(),
-        "rearmed"
-    );
-}
-
-#[test]
-fn diagnostic_fallback_drain_invalidates_a_stale_fifo_claim() {
-    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let bus = DiagnosticBus::for_runtime(&runtime);
-    let (ingress, reader) = bus
-        .diagnostic_ingress(&runtime)
-        .expect("ingress should attach");
-    let decode_values = runtime.values();
-    let fallback = runtime
-        .output_endpoint(
-            move |value| Diagnostic::from_transport_value(&decode_values, &value),
-            |_: Diagnostic| Ok(()),
-        )
-        .expect("fallback output should register");
-    let (writer, delivery) = fallback.into_parts();
-    ingress
-        .set_fallback_output(&writer)
-        .expect("fallback should share the ingress runtime");
-    bus.publish_local(Diagnostic::new(
-        &runtime.values(),
-        Severity::Info,
-        "stale logger claim",
-    ));
-    let (_, store, snapshot) = runtime.transaction_snapshot();
-    let mut events = RuntimeEventJournal::new(snapshot);
-    assert!(events.read(&reader).unwrap().is_some());
-
-    assert_eq!(ingress.fallback().expect("fallback should activate"), 1);
-    assert_eq!(
-        runtime.try_commit_transaction(&StoreJournal::new(store), &events),
-        StoreCommitResult::Conflict
-    );
-    assert!(
-        delivery
-            .deliver_next()
-            .expect("fallback delivery should remain valid")
-            .is_some()
-    );
-}
-
-#[test]
-fn diagnostic_publication_racing_fallback_is_delivered_once_in_sequence_order() {
-    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let bus = DiagnosticBus::for_runtime(&runtime);
-    let (ingress, _reader) = bus
-        .diagnostic_ingress(&runtime)
-        .expect("ingress should attach");
-    let received = Arc::new(Mutex::new(Vec::new()));
-    let callback_values = received.clone();
-    let decode_values = runtime.values();
-    let fallback = runtime
-        .output_endpoint(
-            move |value| Diagnostic::from_transport_value(&decode_values, &value),
-            move |diagnostic| {
-                callback_values
-                    .lock()
-                    .expect("fallback collection mutex should not be poisoned")
-                    .push(diagnostic.message().to_owned());
-                Ok(())
-            },
-        )
-        .expect("fallback output should register");
-    let (writer, delivery) = fallback.into_parts();
-    ingress
-        .set_fallback_output(&writer)
-        .expect("fallback should share the ingress runtime");
-
-    let values = runtime.values();
-    let barrier = Arc::new(std::sync::Barrier::new(49));
-    let publishers = (0..48)
-        .map(|index| {
-            let bus = bus.clone();
-            let values = values.clone();
-            let barrier = barrier.clone();
-            std::thread::spawn(move || {
-                barrier.wait();
-                let message = format!("racing {index}");
-                let event =
-                    bus.publish_local(Diagnostic::new(&values, Severity::Info, message.clone()));
-                (event.sequence(), message)
-            })
-        })
-        .collect::<Vec<_>>();
-    barrier.wait();
-    ingress
-        .fallback()
-        .expect("the route switch may race publications");
-    let published = publishers
-        .into_iter()
-        .map(|publisher| publisher.join().expect("publisher should not panic"))
-        .collect::<BTreeMap<_, _>>();
-    ingress
-        .fallback()
-        .expect("a second pass should transfer any pre-switch admission");
-    while delivery
-        .deliver_next()
-        .expect("fallback delivery should remain usable")
-        .is_some()
-    {}
-
-    assert_eq!(
-        *received
-            .lock()
-            .expect("fallback collection mutex should not be poisoned"),
-        published.values().cloned().collect::<Vec<_>>(),
-        "every racing publication must select exactly one route and preserve bus order"
-    );
-}
-
-#[test]
 fn runtime_retains_the_installed_diagnostic_ingress() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let bus = DiagnosticBus::for_runtime(&runtime);
-    let (ingress, reader) = bus
-        .diagnostic_ingress(&runtime)
+    let ingress = bus
+        .route_to_port(&runtime, (), "diagnostics")
         .expect("ingress should attach");
     drop(ingress);
 
@@ -741,8 +406,7 @@ fn runtime_retains_the_installed_diagnostic_ingress() {
     let (_, _, snapshot) = runtime.transaction_snapshot();
     let mut journal = RuntimeEventJournal::new(snapshot);
     let value = journal
-        .read(&reader)
-        .expect("retained ingress should remain readable")
+        .read_port((), "diagnostics")
         .expect("publication should reach the stable ingress");
     assert_eq!(
         Diagnostic::from_transport_value(&runtime.values(), &value)
@@ -756,8 +420,8 @@ fn runtime_retains_the_installed_diagnostic_ingress() {
 fn diagnostic_subscribers_run_after_runtime_admission_is_released() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let bus = DiagnosticBus::for_runtime(&runtime);
-    let (_ingress, _reader) = bus
-        .diagnostic_ingress(&runtime)
+    let _ingress = bus
+        .route_to_port(&runtime, (), "diagnostics")
         .expect("ingress should attach");
     let callback_runtime = runtime.clone();
     let _subscription = bus.subscribe(DiagnosticCallback(move |_| {
@@ -784,8 +448,8 @@ fn diagnostic_bus_and_ingress_do_not_retain_the_runtime() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let retained = Arc::downgrade(&runtime.state);
     let bus = DiagnosticBus::for_runtime(&runtime);
-    let (ingress, _reader) = bus
-        .diagnostic_ingress(&runtime)
+    let ingress = bus
+        .route_to_port(&runtime, (), "diagnostics")
         .expect("ingress should attach");
 
     let diagnostic = Diagnostic::new(&runtime.values(), Severity::Info, "after runtime");

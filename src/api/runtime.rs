@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use super::diagnostics::DiagnosticIngressInner;
-use super::{DiagnosticIngress, Error, ReasoningFailure, Value, Values};
+use super::{Error, ReasoningFailure, Value, Values};
 use crate::core::CoreValueFactory;
 use crate::evaluation::{
     EvaluationExecutor, EvaluationSession, EvaluationWorkCoordinator, ReflectionTaskProfile,
@@ -36,9 +36,7 @@ use events::{
     RuntimeDeliveryState, RuntimeEventState, RuntimeInputBuffer, runtime_delivery_failure_snapshot,
 };
 pub(in crate::api) use events::{
-    RuntimeDiagnosticRouteMode, RuntimePreparedInput, configure_runtime_diagnostic_fallback,
-    register_runtime_diagnostic_route, route_runtime_diagnostic_guarded,
-    set_runtime_diagnostic_route, set_runtime_diagnostic_route_guarded,
+    RuntimePreparedInput, register_runtime_diagnostic_route, route_runtime_diagnostic_guarded,
 };
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire, WireEnd};
 pub use readiness::*;
@@ -729,52 +727,6 @@ impl EvaluationRuntime {
 
     pub fn id(&self) -> EvaluationRuntimeId {
         self.state.shared_resources.id()
-    }
-
-    /// Publishes activation of a diagnostic consumer and its already prepared
-    /// coordinator root as one settlement-excluded runtime transition.
-    pub(crate) fn activate_diagnostic_consumer(
-        &self,
-        ingress: &DiagnosticIngress,
-        activate: impl FnOnce(&dyn RuntimeMutationAuthority) -> bool,
-    ) -> Result<(), Error> {
-        let resources = &self.state.shared_resources;
-        if ingress.inner.sender.runtime != self.id() {
-            return Err(Error::new(format!(
-                "diagnostic ingress belongs to evaluation runtime {}, not {}",
-                ingress.inner.sender.runtime.get(),
-                self.id().get()
-            )));
-        }
-        let owner = ingress.inner.sender.owner.upgrade().ok_or_else(|| {
-            Error::new(format!(
-                "evaluation runtime {} for diagnostic ingress has been dropped",
-                self.id().get()
-            ))
-        })?;
-        if !Arc::ptr_eq(resources, &owner) {
-            return Err(Error::new(
-                "diagnostic ingress does not belong to this evaluation runtime",
-            ));
-        }
-
-        let settlement = resources.mutation_admission.settlement_guard();
-        let (_transferred, notification) = set_runtime_diagnostic_route_guarded(
-            resources,
-            ingress.inner.sender.endpoint,
-            RuntimeDiagnosticRouteMode::Active,
-            &settlement,
-        )?;
-        assert!(
-            activate(&settlement),
-            "fresh diagnostic consumer reservation must activate"
-        );
-        drop(settlement);
-        resources.mutation_admission.notify_settlement();
-        if let Some(notification) = notification {
-            notification.notify();
-        }
-        Ok(())
     }
 
     pub(crate) fn shared_resources(&self) -> Arc<RuntimeSharedResources> {

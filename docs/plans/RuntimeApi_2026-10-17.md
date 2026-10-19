@@ -1129,6 +1129,27 @@ second stage:
   `fallback`, `set_fallback_output`, `logger_terminal`, and the consumer
   activation) has no caller left in the CLI, and retires next.
 
+`api-ports`, the route switching retired (2026-10-19):
+- A diagnostic bus's single ingress now always routes to a machine's input
+  port: `DiagnosticBus::route_to_port` installs it and returns the ingress,
+  for its failure, in place of `diagnostic_ingress`, whose input FIFO and
+  fallback output retire with the route modes, `DiagnosticIngress`'s
+  `set_fallback_output`, `activate`, `fallback` and `logger_terminal`, the
+  settlement-atomic consumer activation and `schedule_diagnostic_consumer`.
+- `EffectLifecycleTerminal` and `EffectLifecycle::new_with_terminal` retire
+  with `logger_terminal`, their one producer; closing the root's session,
+  which a terminal had implied, is `new_closing_session`'s alone.
+- Tests: the ingress's own (roots retained through the port and a committed
+  read, bound to one runtime and installed once, a failed transport still
+  counted, sequence order, the runtime keeping the route, subscribers after
+  admission, no runtime retained) read the port; the session-closing tests
+  move to `new_closing_session`. Retired with their mechanisms: the consumer
+  activation's hidden intermediate state, the fallback's transfer, its
+  stale FIFO claim and its publication race, and the terminal's view of
+  each root disposition. In their place, a hand-over cut that a diagnostic
+  disturbs runs again and keeps their order (forced within the cut's first
+  attempt).
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency

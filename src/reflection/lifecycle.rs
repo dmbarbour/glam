@@ -4,7 +4,7 @@ use crate::counted_condvar::CountedCondvar;
 
 use super::machine::{ContextualValueEffectTask, EffectTask, UnitEffectTask, ValueEffectTask};
 use super::protocol::{StandardEffects, TaskHalt, TaskHost, TaskOutcome, TaskSpecialization};
-use crate::api::{DiagnosticIngress, EvaluationRuntime, Value as PublicValue};
+use crate::api::{EvaluationRuntime, Value as PublicValue};
 use crate::core::EvaluationFailure;
 use crate::evaluation::{
     EvalContext, EvaluationSession, EvaluationSessionRun, EvaluationTaskHandle,
@@ -23,7 +23,6 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 #[derive(Clone)]
 pub struct EffectLifecycle {
     inner: Arc<EffectLifecycleState>,
-    terminal: Option<EffectLifecycleTerminal>,
     /// Whether the root's end closes its demand session, abandoning the
     /// tasks it started and left unjoined.
     closes_session: bool,
@@ -51,35 +50,6 @@ pub enum EffectLifecycleStatus {
     Panicked(TaskHalt),
 }
 
-/// Opaque coordinator-terminal policy for one host-owned effect lifecycle.
-///
-/// Construction is supplied by runtime facilities such as a diagnostic
-/// ingress. The guarded transition remains internal; embedding clients can
-/// attach the resulting policy without gaining runtime mutation authority.
-#[doc(hidden)]
-#[derive(Clone)]
-pub struct EffectLifecycleTerminal {
-    runtime: crate::runtime::EvaluationRuntimeId,
-    publisher: TaskStatusPublisher,
-}
-
-impl EffectLifecycleTerminal {
-    pub(crate) fn new(
-        runtime: crate::runtime::EvaluationRuntimeId,
-        publisher: TaskStatusPublisher,
-    ) -> Self {
-        Self { runtime, publisher }
-    }
-
-    fn publish_guarded(
-        &self,
-        mutation: &dyn crate::runtime::RuntimeMutationAuthority,
-        status: EvaluationTaskStatus,
-    ) -> TaskStatusWake {
-        self.publisher.publish_guarded(mutation, status)
-    }
-}
-
 impl EffectLifecycleStatus {
     fn same_state(&self, other: &Self) -> bool {
         std::mem::discriminant(self) == std::mem::discriminant(other)
@@ -97,44 +67,18 @@ impl EffectLifecycle {
                 status: Mutex::new(EffectLifecycleStatus::Launched),
                 changed: CountedCondvar::new(),
             }),
-            terminal: None,
             closes_session: false,
         }
     }
 
     /// Constructs a lifecycle whose root's end closes its demand session,
-    /// abandoning the tasks the root started and left unjoined, as a
-    /// coordinator-owned root's end does: for a host's long-lived root, such
-    /// as the CLI's configured logger.
+    /// abandoning the tasks the root started and left unjoined: for a host's
+    /// long-lived root, such as the CLI's configured logger.
     #[doc(hidden)]
     pub fn new_closing_session(runtime: &EvaluationRuntime) -> Self {
         Self {
             closes_session: true,
             ..Self::new(runtime)
-        }
-    }
-
-    /// Constructs a lifecycle whose terminal publication also performs one
-    /// host-selected guarded transition. This is reserved for
-    /// coordinator-owned roots; direct synchronous effects have no such
-    /// terminal dispatch.
-    #[doc(hidden)]
-    pub fn new_with_terminal(
-        runtime: &EvaluationRuntime,
-        terminal: EffectLifecycleTerminal,
-    ) -> Self {
-        assert_eq!(
-            runtime.id(),
-            terminal.runtime,
-            "effect lifecycle terminal policy belongs to another evaluation runtime"
-        );
-        Self {
-            inner: Arc::new(EffectLifecycleState {
-                status: Mutex::new(EffectLifecycleStatus::Launched),
-                changed: CountedCondvar::new(),
-            }),
-            terminal: Some(terminal),
-            closes_session: true,
         }
     }
 
@@ -183,22 +127,13 @@ impl EffectLifecycle {
         session: Arc<Mutex<Option<Arc<EvaluationSession>>>>,
     ) -> TaskStatusPublisher {
         let lifecycle = Arc::downgrade(&self.inner);
-        let terminal = self.terminal.clone();
         let closes_session = self.closes_session;
-        TaskStatusPublisher::new(move |mutation, status| {
+        TaskStatusPublisher::new(move |_mutation, status| {
             let Some(lifecycle) = Weak::upgrade(&lifecycle) else {
                 return TaskStatusWake::new(|| {});
             };
-            let terminal_status = status.clone();
             let status = lifecycle.public_status(status);
             let is_terminal = status.is_terminal();
-            let terminal_wake = if is_terminal {
-                terminal
-                    .as_ref()
-                    .map(|terminal| terminal.publish_guarded(mutation, terminal_status))
-            } else {
-                None
-            };
             *lifecycle
                 .status
                 .lock()
@@ -212,9 +147,6 @@ impl EffectLifecycle {
                         .unwrap_or_else(PoisonError::into_inner)
                         .take();
                     drop(session);
-                }
-                if let Some(wake) = terminal_wake {
-                    wake.notify();
                 }
             })
         })
@@ -469,25 +401,6 @@ impl<S: TaskSpecialization> EffectRun<S> {
     /// profile.
     #[doc(hidden)]
     pub fn schedule(self, lifecycle: &EffectLifecycle) -> Result<ScheduledEffectRun, TaskHalt> {
-        self.schedule_with_capabilities(lifecycle, None)
-    }
-
-    /// Installs this effect as the consumer of a runtime diagnostic ingress.
-    /// Route activation and coordinator-root activation are settlement-atomic.
-    #[doc(hidden)]
-    pub fn schedule_diagnostic_consumer(
-        self,
-        lifecycle: &EffectLifecycle,
-        ingress: &DiagnosticIngress,
-    ) -> Result<ScheduledEffectRun, TaskHalt> {
-        self.schedule_with_capabilities(lifecycle, Some(ingress))
-    }
-
-    fn schedule_with_capabilities(
-        self,
-        lifecycle: &EffectLifecycle,
-        diagnostic_ingress: Option<&DiagnosticIngress>,
-    ) -> Result<ScheduledEffectRun, TaskHalt> {
         let Self {
             effect,
             specialization,
@@ -559,18 +472,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             .map_err(|failure| {
                 TaskHalt::rooted_failure(RuntimeFailureRoot::new(runtime.values().core(), failure))
             })?;
-        let task = match diagnostic_ingress {
-            Some(ingress) => {
-                runtime
-                    .activate_diagnostic_consumer(ingress, |mutation| {
-                        prepared.activate_guarded(mutation)
-                    })
-                    .map_err(|error| TaskHalt::new(error.to_string()))?;
-                prepared.finish_guarded_activation(true);
-                prepared.into_handle()
-            }
-            None => PreparedEvaluationTask::activate(prepared),
-        };
+        let task = PreparedEvaluationTask::activate(prepared);
         Ok(ScheduledEffectRun {
             context,
             session,
@@ -742,15 +644,12 @@ mod root_inventory_tests {
         lifecycle: &EffectLifecycle,
         state: &EffectLifecycleState,
         status: &EffectLifecycleStatus,
-        terminal: &EffectLifecycleTerminal,
     ) {
         let EffectLifecycle {
             inner,
-            terminal: lifecycle_terminal,
             closes_session,
         } = lifecycle;
         let _: &Arc<EffectLifecycleState> = inner;
-        let _: &Option<EffectLifecycleTerminal> = lifecycle_terminal;
         let _: &bool = closes_session;
 
         let EffectLifecycleState {
@@ -775,10 +674,6 @@ mod root_inventory_tests {
                 let _: &TaskHalt = failure;
             }
         }
-
-        let EffectLifecycleTerminal { runtime, publisher } = terminal;
-        let _: &crate::runtime::EvaluationRuntimeId = runtime;
-        let _: &TaskStatusPublisher = publisher;
     }
 
     fn assert_effect_run_root_inventory(
@@ -824,12 +719,8 @@ mod root_inventory_tests {
 
     #[test]
     fn lifecycle_root_inventory_is_complete() {
-        let _: fn(
-            &EffectLifecycle,
-            &EffectLifecycleState,
-            &EffectLifecycleStatus,
-            &EffectLifecycleTerminal,
-        ) = assert_lifecycle_root_inventory;
+        let _: fn(&EffectLifecycle, &EffectLifecycleState, &EffectLifecycleStatus) =
+            assert_lifecycle_root_inventory;
         let _: fn(
             &ScheduledEffectRun,
             &EffectRun<StandardEffects>,

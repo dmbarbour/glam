@@ -7,14 +7,11 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use super::ports::{PortAddress, PortJournal, PortState};
-use super::{
-    RuntimeObservationNotification, RuntimeSharedResources, prepare_runtime_observation,
-    publish_runtime_observation,
-};
+use super::{RuntimeSharedResources, publish_runtime_observation};
 use crate::api::{Error, Value};
 use crate::core::Key;
 use crate::reflection::{RuntimeInputEndpointId, RuntimeInputSequence};
-use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority, RuntimeValueRoot};
+use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
 /// Runtime-local identity of one buffered-output endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -98,20 +95,6 @@ pub(in crate::api) struct RuntimeOutputState {
         RedBlackTreeMapSync<RuntimeDeliveryId, Arc<RuntimeDeliveryFailure>>,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::api) enum RuntimeDiagnosticRouteMode {
-    Active,
-    Fallback,
-}
-
-struct RuntimeDiagnosticRoute {
-    fallback: Option<RuntimeOutputEndpointId>,
-    mode: RuntimeDiagnosticRouteMode,
-    /// A machine's input port that takes every diagnostic, whatever the
-    /// mode, in place of the input FIFO and fallback.
-    port: Option<PortAddress>,
-}
-
 /// Stage of external output delivery which failed after semantic commit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeDeliveryFailureKind {
@@ -190,7 +173,8 @@ pub enum RuntimeDeliveryOutcome {
 pub(in crate::api) struct RuntimeEventState {
     pub(in crate::api) inputs: RedBlackTreeMapSync<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
     pub(in crate::api) outputs: RuntimeOutputState,
-    diagnostic_routes: BTreeMap<RuntimeInputEndpointId, RuntimeDiagnosticRoute>,
+    /// The machine input to which each diagnostic ingress routes.
+    diagnostic_routes: BTreeMap<RuntimeInputEndpointId, PortAddress>,
     /// Machines' port buffers and wiring.
     pub(in crate::api) ports: PortState,
 }
@@ -319,41 +303,6 @@ impl RuntimeEventState {
             .push_back(RuntimeInputRecord { sequence, payload });
         input.next_sequence = next;
         Ok(sequence)
-    }
-
-    fn queue_output(
-        &mut self,
-        endpoint: RuntimeOutputEndpointId,
-        delivery: RuntimeDeliveryId,
-        payload: RuntimeValueRoot,
-    ) -> Result<(), Error> {
-        let ready = self
-            .outputs
-            .ready_by_endpoint
-            .get_mut(&endpoint)
-            .ok_or_else(|| {
-                Error::new(format!(
-                    "runtime output endpoint {} is not registered",
-                    endpoint.get()
-                ))
-            })?;
-        if !self.outputs.accepted.insert(delivery) {
-            return Err(Error::new(format!(
-                "runtime delivery {} was already accepted",
-                delivery.get()
-            )));
-        }
-        let replaced = self.outputs.records.insert(
-            delivery,
-            RuntimeDeliveryRecord {
-                endpoint,
-                payload,
-                state: RuntimeDeliveryState::Queued,
-            },
-        );
-        assert!(replaced.is_none(), "accepted delivery IDs remain unique");
-        ready.push_back(delivery);
-        Ok(())
     }
 }
 
@@ -802,7 +751,7 @@ impl<T> RuntimeDeliveryTicket<T> {
 pub(in crate::api) fn register_runtime_diagnostic_route(
     resources: &Arc<RuntimeSharedResources>,
     endpoint: RuntimeInputEndpointId,
-    port: Option<PortAddress>,
+    port: PortAddress,
 ) -> Result<(), Error> {
     let _mutation = resources.mutation_admission.mutation_guard();
     let mut state = resources
@@ -822,174 +771,8 @@ pub(in crate::api) fn register_runtime_diagnostic_route(
             endpoint.get()
         )));
     }
-    state.events.diagnostic_routes.insert(
-        endpoint,
-        RuntimeDiagnosticRoute {
-            fallback: None,
-            mode: RuntimeDiagnosticRouteMode::Active,
-            port,
-        },
-    );
+    state.events.diagnostic_routes.insert(endpoint, port);
     Ok(())
-}
-
-pub(in crate::api) fn configure_runtime_diagnostic_fallback(
-    input: &RuntimeInputSender<Value>,
-    output: &RuntimeOutputWriter,
-) -> Result<(), Error> {
-    let resources = input.owner.upgrade().ok_or_else(|| {
-        Error::new(format!(
-            "evaluation runtime {} for input endpoint {} has been dropped",
-            input.runtime.get(),
-            input.endpoint.get()
-        ))
-    })?;
-    let output_owner = output.validate_runtime(input.runtime)?;
-    if !Arc::ptr_eq(&resources, &output_owner) {
-        return Err(Error::new(
-            "diagnostic input and fallback output do not share one runtime",
-        ));
-    }
-    let settlement = resources.mutation_admission.settlement_guard();
-    {
-        let mut state = resources
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned");
-        if !state
-            .events
-            .outputs
-            .ready_by_endpoint
-            .contains_key(&output.endpoint)
-        {
-            return Err(Error::new(format!(
-                "runtime output endpoint {} is not registered",
-                output.endpoint.get()
-            )));
-        }
-        let route = state
-            .events
-            .diagnostic_routes
-            .get_mut(&input.endpoint)
-            .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
-        match route.fallback {
-            Some(existing) if existing != output.endpoint => {
-                return Err(Error::new(
-                    "diagnostic ingress already has a different fallback output",
-                ));
-            }
-            Some(_) => {}
-            None => route.fallback = Some(output.endpoint),
-        }
-    }
-    drop(settlement);
-    resources.mutation_admission.notify_settlement();
-    Ok(())
-}
-
-pub(in crate::api) fn set_runtime_diagnostic_route(
-    input: &RuntimeInputSender<Value>,
-    mode: RuntimeDiagnosticRouteMode,
-) -> Result<usize, Error> {
-    let resources = input.owner.upgrade().ok_or_else(|| {
-        Error::new(format!(
-            "evaluation runtime {} for input endpoint {} has been dropped",
-            input.runtime.get(),
-            input.endpoint.get()
-        ))
-    })?;
-    let settlement = resources.mutation_admission.settlement_guard();
-    let (transferred, notification) =
-        set_runtime_diagnostic_route_guarded(&resources, input.endpoint, mode, &settlement)?;
-    drop(settlement);
-    resources.mutation_admission.notify_settlement();
-    if let Some(notification) = notification {
-        notification.notify();
-    }
-    Ok(transferred)
-}
-
-pub(in crate::api) fn set_runtime_diagnostic_route_guarded(
-    resources: &Arc<RuntimeSharedResources>,
-    input: RuntimeInputEndpointId,
-    mode: RuntimeDiagnosticRouteMode,
-    mutation: &dyn RuntimeMutationAuthority,
-) -> Result<(usize, Option<RuntimeObservationNotification>), Error> {
-    let mut transferred = 0;
-    let mut changed = false;
-    {
-        let mut state = resources
-            .transactions
-            .state
-            .lock()
-            .expect("runtime transaction mutex should not be poisoned");
-        let fallback = {
-            let route = state
-                .events
-                .diagnostic_routes
-                .get(&input)
-                .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
-            route.fallback
-        };
-        if mode == RuntimeDiagnosticRouteMode::Fallback {
-            let fallback = fallback.ok_or_else(|| {
-                Error::new("diagnostic ingress has no configured fallback output")
-            })?;
-            if !state
-                .events
-                .outputs
-                .ready_by_endpoint
-                .contains_key(&fallback)
-            {
-                return Err(Error::new(format!(
-                    "runtime output endpoint {} is not registered",
-                    fallback.get()
-                )));
-            }
-            let count = state
-                .events
-                .inputs
-                .get(&input)
-                .ok_or_else(|| Error::new("diagnostic ingress input is not registered"))?
-                .admitted
-                .len();
-            let deliveries = (0..count)
-                .map(|_| {
-                    resources.ids.delivery().map_err(Error::new).map(|id| {
-                        RuntimeDeliveryId::from_u64(id.get())
-                            .expect("runtime delivery IDs start at one")
-                    })
-                })
-                .collect::<Result<Vec<_>, _>>()?;
-            let records = {
-                let buffered = state
-                    .events
-                    .inputs
-                    .get_mut(&input)
-                    .expect("validated diagnostic input remains registered");
-                let buffered = Arc::make_mut(buffered);
-                let records = buffered.admitted.drain(..).collect::<Vec<_>>();
-                buffered.head_sequence = buffered.next_sequence;
-                records
-            };
-            transferred = records.len();
-            for (record, delivery) in records.into_iter().zip(deliveries) {
-                state
-                    .events
-                    .queue_output(fallback, delivery, record.payload)?;
-            }
-            changed = transferred != 0;
-        }
-        state
-            .events
-            .diagnostic_routes
-            .get_mut(&input)
-            .expect("validated diagnostic route remains registered")
-            .mode = mode;
-    }
-    let notification = changed.then(|| prepare_runtime_observation(resources, mutation));
-    Ok((transferred, notification))
 }
 
 pub(in crate::api) fn route_runtime_diagnostic_guarded(
@@ -1003,33 +786,13 @@ pub(in crate::api) fn route_runtime_diagnostic_guarded(
         .state
         .lock()
         .expect("runtime transaction mutex should not be poisoned");
-    let route = state
+    let address = state
         .events
         .diagnostic_routes
         .get(&prepared.endpoint)
+        .cloned()
         .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
-    if let Some(address) = route.port.clone() {
-        state.events.ports.admit(address, prepared.payload);
-        return Ok(());
-    }
-    match route.mode {
-        RuntimeDiagnosticRouteMode::Active => {
-            state
-                .events
-                .admit_input(prepared.endpoint, prepared.payload)?;
-        }
-        RuntimeDiagnosticRouteMode::Fallback => {
-            let fallback = route.fallback.ok_or_else(|| {
-                Error::new("diagnostic ingress has no configured fallback output")
-            })?;
-            let id = resources.ids.delivery().map_err(Error::new)?;
-            let delivery =
-                RuntimeDeliveryId::from_u64(id.get()).expect("runtime delivery IDs start at one");
-            state
-                .events
-                .queue_output(fallback, delivery, prepared.payload)?;
-        }
-    }
+    state.events.ports.admit(address, prepared.payload);
     Ok(())
 }
 

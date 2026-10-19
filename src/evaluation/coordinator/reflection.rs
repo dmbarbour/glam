@@ -291,14 +291,6 @@ impl EvaluationWorkCoordinator {
         activated
     }
 
-    pub(in crate::evaluation) fn activate_reflection_guarded(
-        &self,
-        id: EvaluationWorkId,
-        mutation: &dyn RuntimeMutationAuthority,
-    ) -> bool {
-        self.activate_reflection_guarded_with_parent(id, None, mutation)
-    }
-
     fn activate_reflection_guarded_with_parent(
         &self,
         id: EvaluationWorkId,

@@ -2242,7 +2242,10 @@ maps the short names used here to file names.
 - **Consequences:** this amends `runtime-api-turns-on-machines`'s
   rejection of point-to-point channels: buffers stay shared, transactional
   state, and the topology belongs to the wiring, which a parent may change.
-  Ports extend the runtime's existing transactional event state.
+  Ports extend the runtime's existing transactional event state. The
+  diagnostic bus's switching between a logger's input FIFO and a fallback
+  output retires: the CLI's logger is a machine whose fallback is its child,
+  and the hand-over is its own rewiring (maintainer, the same day).
 - **Recorded in:** runtime API plan, `api-ports`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints

@@ -332,11 +332,13 @@ derived from module paths or final object `spec.name`.
 ## CLI Logger Session
 
 Configured `conf.log` is a reflection task with a broader specialization.
-Main-only requests read admitted diagnostics, buffer stderr or diagnostic
-output, and coordinate `.exit.success`/`.exit.error`. Children inherit those
-capabilities. The input stream has no close request and logger output uses a
-separate bus, so it cannot feed its own input.
+Main-only requests read the diagnostics waiting at the CLI's `logger`
+machine, buffer stderr or diagnostic output, and coordinate
+`.exit.success`/`.exit.error`. Children inherit those capabilities. The input
+stream has no close request and logger output uses a separate bus, so it
+cannot feed its own input. The root's end closes its demand session,
+abandoning the children it left unjoined.
 
-See [`diagnostics.md`](diagnostics.md) for route activation, transactional
-transport, fallback, and rendering, and [`assembly.md`](assembly.md) for
-settlement and process exit.
+See [`diagnostics.md`](diagnostics.md) for the logger's wiring, transactional
+transport, its hand-over to the fallback, and rendering, and
+[`assembly.md`](assembly.md) for settlement and process exit.
