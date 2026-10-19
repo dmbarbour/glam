@@ -317,7 +317,12 @@ handle API goes.
      2026-10-19). Proposed: a machine's outstanding obligations as explicit
      state, a set of keys in its local state beside its stack, a checklist;
      settlement reports the machines whose sets are not empty, or at least
-     their count.
+     their count. A key describes itself; projecting machine states for a
+     report comes later. Semantically the set is the machine's alone:
+     reflection may see or change it once reflection over the process
+     network is designed. Reflection's operations come when it is time,
+     such as `.todo.add`, `.todo.del` and `.todo.list` (maintainer, the same
+     day).
 9. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
    decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
    quiescent when every machine waits on input or a heap change, retrying
