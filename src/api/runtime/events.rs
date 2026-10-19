@@ -12,6 +12,7 @@ use super::{
     publish_runtime_observation,
 };
 use crate::api::{Error, Value};
+use crate::core::Key;
 use crate::reflection::{RuntimeInputEndpointId, RuntimeInputSequence};
 use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority, RuntimeValueRoot};
 
@@ -456,6 +457,26 @@ impl RuntimeEventJournal {
             })
             .or_insert(observation);
         Ok(result)
+    }
+
+    /// Reads and claims the next value of the input `port` of the machine at
+    /// `machine`, as a turn's read of one does, or observes it empty, so
+    /// that the transaction is disturbed when a value arrives. For the CLI's
+    /// configured logger, a reflection task that reads the logger machine's
+    /// diagnostics until loggers are turns.
+    #[doc(hidden)]
+    pub fn read_port(
+        &mut self,
+        machine: impl Into<crate::api::MachinePath>,
+        port: impl Into<Key>,
+    ) -> Option<Value> {
+        let address = PortAddress {
+            machine: machine.into().keys().to_vec(),
+            port: port.into(),
+        };
+        self.ports
+            .claim(&address, 1)
+            .map(|mut values| values.pop().expect("a claim of one holds one"))
     }
 
     /// Buffers an external output intent in this transaction. The delivery ID

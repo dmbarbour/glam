@@ -24,6 +24,11 @@ impl DefaultLogger {
         }
     }
 
+    /// The values of the runtime whose diagnostics it renders.
+    pub(super) fn values(&self) -> glam::Values {
+        self.evaluator.values()
+    }
+
     pub(super) fn emit(&self, diagnostic: &Diagnostic) {
         let mut stderr = io::stderr().lock();
         let _ = self.emit_to(diagnostic, &mut stderr);

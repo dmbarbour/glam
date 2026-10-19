@@ -91,9 +91,10 @@ original event or publish a second message.
 
 ## Runtime Diagnostic Ingress
 
-Before configuration compilation, the binary's batch/configuration layer binds
-the assembler bus to its runtime and installs one long-lived
-`DiagnosticIngress`. The ingress converts
+A runtime binds its assembler bus and installs one long-lived
+`DiagnosticIngress`, which routes every diagnostic into the root machine's
+`diagnostics` input (`machines-communicate-through-wired-ports`). The ingress
+converts
 each structured diagnostic to a runtime-rooted transport value before entering
 runtime mutation admission. Valid bus publication remains counted even if
 transport preparation fails; the ingress retains that terminal transport
@@ -102,17 +103,20 @@ Encoding and decoding both require the matching runtime's `Values` service;
 the transport envelope is projected only inside its bounded value-access
 region and cannot be decoded as a freestanding opaque `Value`.
 
-The active ingress route initially points to a generic runtime input endpoint.
-Its authoritative FIFO contains runtime roots, not a typed Rust diagnostic
-queue. `.read_log` observes and consumes this endpoint through the logger's
-ordinary `RuntimeEventJournal`, so a successful transaction commits its heap
-edits, input claim, and output intents atomically.
+Each transport value arrives at the root's input as a child's write would,
+following the root's wiring. Before configuration compilation, the binary
+wires that input on to its `logger` machine, a direct child of the root, whose
+input buffer holds runtime roots, not a typed Rust diagnostic queue. The
+logger, and its own child `fallback`, keep what reaches them in place of the
+default pass-through to their parents. `.read_log` claims from the logger's
+input through the logger task's ordinary `RuntimeEventJournal`, so a
+successful transaction commits its heap edits, input claim, and output intents
+atomically.
 
-Installing `conf.log` prepares its evaluation root first. The binary then switches
-the ingress route and activates that root under one exclusive settlement guard.
-No diagnostic can enter an intermediate state in which the logger route is
-visible without its consumer root. Notifications happen after the guard is
-released.
+Since diagnostics wait at the logger from the start, installing `conf.log`
+switches no route: its root is scheduled and reads what has gathered. Its
+lifecycle closes the root's demand session when the root ends, abandoning
+the tasks the root started and left unjoined.
 
 ## Transactional Logger Output
 
@@ -210,19 +214,22 @@ New committed input disturbs the vote and retries the read. Runtime readiness
 and settlement, not a bus-close bit, determine whether the logger and every
 other live machine agree that batch work may finish.
 
-After settlement, `DiagnosticIngress::fallback` atomically transfers buffered
-logger input to a configured fallback output and routes later publications
-there. The settled report contains one-shot reporting obligations; rendering
-does not maintain an ever-growing set of previously seen failure identities.
-Fallback output is delivered through the ordinary outbox protocol, and work it
-admits causes another runtime pump before final exit.
+When the configured logger ends, at settlement or before, the logger hands
+over in one cut: it wires its input on to `fallback` and sends what the input
+holds there, so the fallback receives every diagnostic in order and nothing
+arrives between. Without a configured logger, the logger hands over at once.
+The CLI renders what waits at the fallback with its default renderer: between
+settlement pumps while no configured logger's fork holds the logger, and at the
+end. Settled reports render directly. They are one-shot reporting obligations;
+rendering does not maintain an ever-growing set of previously seen failure
+identities, and work it admits causes another runtime pump before final exit.
 
 Delivery and rendering run only on client threads, never on an evaluation
 worker. The logger task only journals and commits its outputs, wherever it
 runs; the CLI's logger thread delivers them between pumps
-(`ScheduledEffectRun::run_with`), and its subscribers render there. When the
-logger ends, its unread input moves to the fallback output on whichever
-thread settles it, and a client thread delivers that output.
+(`ScheduledEffectRun::run_with`), and its subscribers render there. The
+hand-over runs on that thread too, as the configured logger ends, and the
+fallback renders on the thread of the turn that reads it.
 
 A stable deadlock may be explicitly killed and settled. Task failures, output
 delivery failures, exit errors, killed work, and collector maintenance

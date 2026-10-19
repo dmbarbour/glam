@@ -11,13 +11,14 @@ use crate::command_line::{
 use bytes::Bytes;
 use glam::{
     Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, Machine, ModuleInput,
-    QuiescenceReport, RuntimeDispositionKind, RuntimeKillReason, RuntimeReadiness, Severity,
-    Values,
+    QuiescenceReport, Runtime, RuntimeDispositionKind, RuntimeKillReason, RuntimeReadiness,
+    Severity, Values,
 };
 
 use crate::DiagnosticBusLocal;
 use crate::configuration::logger::{
-    LoggerRun, LoggerSupervisor, SettledReportSelection, settled_report_diagnostics, start_logger,
+    LOGGER, SettledReportSelection, drain_fallback, render_settled_report, render_unread,
+    settled_report_diagnostics, start_logger,
 };
 use crate::configuration::{CLI, InitialCliEnvironment, PreparationFailure, PreparedAssembly};
 use crate::rendering::DefaultLogger;
@@ -61,8 +62,7 @@ pub(super) fn prepare_assembly(
     crate::configuration::prepare(cli_arguments, initial_environment).map_err(|failure| {
         let PreparationFailure {
             local_files,
-            log_host,
-            runtime,
+            mut runtime,
             error,
         } = *failure;
         let assembler = glam::transition::assembler(&runtime);
@@ -74,7 +74,7 @@ pub(super) fn prepare_assembly(
             &diagnostics,
             &assembler.values(),
         );
-        log_host.drain_default(&DefaultLogger::new(assembler.clone()));
+        render_unread_diagnostics(&mut runtime);
         ExitCode::from(1)
     })
 }
@@ -144,17 +144,17 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     let PreparedAssembly {
         local_files,
         mut runtime,
-        log_host,
         ..
     } = prepared;
     let assembler = glam::transition::assembler(&runtime).clone();
     let assembler_diagnostics = assembler.diagnostic_bus();
-    // The batch is one turn on the `cli` machine, which forks the logger and
-    // joins it before the turn ends.
+    let values = assembler.values();
+    // The batch is one turn on the root, which starts the logger, assembles
+    // on the `cli` machine, and joins the logger before the turn ends.
     let (operation_failed, logger_diagnostics) = runtime
-        .run(CLI, |m| {
-            let logger = start_logger(m, &assembler, log_host.clone());
-            let result = assemble(m, inputs, &assembly_args);
+        .run((), |root| {
+            let mut logger = start_logger(root, &assembler)?;
+            let result = root.run(CLI, |m| assemble(m, inputs, &assembly_args));
             let mut operation_failed = false;
             match result {
                 Ok(bytes) => {
@@ -179,21 +179,35 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
                 &assembler_diagnostics,
                 &assembler.values(),
             );
-            let LoggerRun {
-                thread: logger_thread,
-                diagnostics: logger_diagnostics,
-                supervisor: logger_supervisor,
-            } = logger;
+            let renderer = logger.renderer.clone();
+            let forked = logger.thread.is_some();
             operation_failed |= super::profile::time("settle", || {
-                settle_batch_runtime(&assembler.evaluation_runtime(), &logger_supervisor)
+                settle_batch_runtime(
+                    &assembler.evaluation_runtime(),
+                    &values,
+                    |diagnostic| renderer.emit(&diagnostic),
+                    || {
+                        // A configured logger's fork holds the fallback, which
+                        // receives nothing until the configured logger ends.
+                        if forked {
+                            return Ok(());
+                        }
+                        root.run(LOGGER, |logger| drain_fallback(logger, &renderer))
+                    },
+                )
             });
 
-            m.join(logger_thread)?;
-            if let Err(error) = logger_supervisor.deliver_fallback() {
+            if let Some(thread) = logger.thread.take()
+                && let Err(error) = root.join(thread)
+            {
                 operation_failed = true;
-                eprintln!("error: could not drain fallback diagnostics: {error}");
+                eprintln!("error: the logger ended in error: {error}");
             }
-            Ok((operation_failed, logger_diagnostics))
+            if let Err(error) = root.recover(LOGGER, |logger| render_unread(logger, &renderer)) {
+                operation_failed = true;
+                eprintln!("error: could not render fallback diagnostics: {error}");
+            }
+            Ok((operation_failed, logger.diagnostics.clone()))
         })
         .expect("the batch's turn returns its failures as diagnostics");
     super::profile::report(&runtime);
@@ -217,13 +231,15 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
 /// complete pump/settlement cycle.
 pub(super) fn settle_batch_runtime(
     runtime: &EvaluationRuntime,
-    supervisor: &LoggerSupervisor,
+    values: &Values,
+    mut render: impl FnMut(Diagnostic),
+    mut drain_fallback: impl FnMut() -> Result<(), Error>,
 ) -> bool {
     let mut failed = false;
 
     loop {
         runtime.pump_until_stable();
-        if let Err(error) = supervisor.deliver_fallback() {
+        if let Err(error) = drain_fallback() {
             failed = true;
             eprintln!("error: could not drain fallback diagnostics: {error}");
         }
@@ -264,12 +280,12 @@ pub(super) fn settle_batch_runtime(
         };
 
         failed |= settled_report_is_fatal(&report);
-        match supervisor.render_settled_report(&mut report) {
+        match render_settled_report(&mut report, values, &mut render) {
             Ok(0) => return failed,
             Ok(_) => {}
             Err(error) => {
-                failed = true;
                 eprintln!("error: could not render runtime settlement: {error}");
+                return true;
             }
         }
     }
@@ -330,17 +346,7 @@ fn settle_batch_runtime_default(
             Err(_) => continue,
         };
         failed |= settled_report_is_fatal(&report);
-        let selection = SettledReportSelection {
-            task_failures: report.pending_task_failure_reports().to_vec(),
-            delivery_failures: report
-                .pending_delivery_failure_reports()
-                .failures()
-                .into_iter()
-                .collect(),
-            exit_errors: report.pending_exit_error_reports().to_vec(),
-            killed_work: report.pending_killed_work_reports().to_vec(),
-            maintenance_failures: report.pending_maintenance_failure_reports().to_vec(),
-        };
+        let selection = SettledReportSelection::pending(&report);
         let rendered = match settled_report_diagnostics(values, selection) {
             Ok(rendered) => rendered,
             Err(error) => {
@@ -360,7 +366,7 @@ fn settle_batch_runtime_default(
 }
 
 pub(super) fn finish_without_logger(
-    prepared: PreparedAssembly,
+    mut prepared: PreparedAssembly,
     manifest: Option<&Path>,
     operation_failed: bool,
 ) -> ExitCode {
@@ -376,13 +382,29 @@ pub(super) fn finish_without_logger(
         &diagnostics,
         &prepared.assembler().values(),
     );
-    prepared
-        .log_host
-        .drain_default(&DefaultLogger::new(prepared.assembler().clone()));
-    if operation_failed || runtime_failed || file_failure || diagnostics.counts().errors() != 0 {
+    let render_failure = render_unread_diagnostics(&mut prepared.runtime);
+    if operation_failed
+        || runtime_failed
+        || file_failure
+        || render_failure
+        || diagnostics.counts().errors() != 0
+    {
         ExitCode::from(1)
     } else {
         ExitCode::SUCCESS
+    }
+}
+
+/// Renders every diagnostic waiting at the logger, where the CLI ends
+/// without a turn that started one, and returns whether that failed.
+fn render_unread_diagnostics(runtime: &mut Runtime) -> bool {
+    let renderer = DefaultLogger::new(glam::transition::assembler(runtime).clone());
+    match runtime.recover(LOGGER, |logger| render_unread(logger, &renderer)) {
+        Ok(()) => false,
+        Err(error) => {
+            eprintln!("error: could not render diagnostics: {error}");
+            true
+        }
     }
 }
 

@@ -422,34 +422,33 @@ impl Runtime {
             None => EvaluationRuntime::new(config.worker_threads)?,
         };
         let assembler = Assembler::builder().evaluation_runtime(runtime).build()?;
-        let runtime = Self::around(assembler);
-        runtime
-            .shared
-            .assembler
-            .evaluation_runtime()
+        Self::around(assembler, config.diagnostics_wiring)
+    }
+
+    /// A runtime around an assembler, which `open` builds and the CLI's
+    /// transition (`crate::transition`) brings.
+    pub(crate) fn around(
+        assembler: Assembler,
+        diagnostics_wiring: DiagnosticsWiring,
+    ) -> Result<Self, Error> {
+        let evaluation_runtime = assembler.evaluation_runtime();
+        evaluation_runtime
             .shared_resources()
-            .set_diagnostics_wiring(config.diagnostics_wiring == DiagnosticsWiring::ToRoot);
+            .set_diagnostics_wiring(diagnostics_wiring == DiagnosticsWiring::ToRoot);
         // Until reflection tasks are machines, the runtime's own diagnostics
         // join the root's diagnostics input as if a child had sent them.
-        if config.diagnostics_wiring == DiagnosticsWiring::ToRoot {
-            let assembler = &runtime.shared.assembler;
+        if diagnostics_wiring == DiagnosticsWiring::ToRoot {
             assembler.diagnostic_bus().route_to_port(
-                &assembler.evaluation_runtime(),
+                &evaluation_runtime,
                 (),
                 DIAGNOSTICS.clone(),
             )?;
         }
-        Ok(runtime)
-    }
-
-    /// A runtime around an assembler its caller built, for the CLI's
-    /// transition (`crate::transition`).
-    pub(crate) fn around(assembler: Assembler) -> Self {
-        Self {
+        Ok(Self {
             root: MachineState::default(),
             shared: Shared { assembler },
             _affine: PhantomData,
-        }
+        })
     }
 
     /// The assembler the runtime holds, for the CLI's transition

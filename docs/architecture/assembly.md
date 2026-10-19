@@ -150,7 +150,8 @@ construct an assembler or load configuration.
 ## Batch Lifecycle
 
 ```text
-construct one dormant assembler and compile configuration
+construct one dormant assembler, wire diagnostics to the logger machine,
+  and compile configuration
   -> for bare input, search all isolated conf.cli alternatives
   -> select one semantic command and resolve canonical environment promises
   -> activate the selected worker count exactly once
@@ -160,17 +161,19 @@ construct one dormant assembler and compile configuration
   -> pump all runtime work to a stable readiness or deadlock
   -> service any MaintenanceRequired collection, then pump again
   -> settle exit votes, or explicitly kill and settle a stable deadlock
-  -> render retained task, delivery, exit, and killed-work reports via fallback
-  -> repump if rendering admitted work, then drain fallback output
-  -> finish conf.log and read assembler/logger bus counts independently
+  -> render retained task, delivery, exit, and killed-work reports directly
+  -> repump if rendering admitted work, rendering the logger's fallback between
+     pumps when no configured logger's fork holds it
+  -> join conf.log, which hands what it left to the fallback, and render that
+  -> read assembler/logger bus counts independently
   -> exit nonzero for result/report failure or either bus's error count
 ```
 
 Valid stdout may therefore accompany a failing exit status when reasoning or
 diagnostics report an error. Retained runtime failures establish failure before
-rendering, so a failed fallback adapter cannot turn an unsuccessful batch into
-a successful one. Main checks the assembler and logger bus error counts
-independently; both are independent of queue retention, reads, and rendering.
+rendering, so rendering cannot turn an unsuccessful batch into a successful
+one. Main checks the assembler and logger bus error counts independently; both
+are independent of what ports hold, reads, and rendering.
 
 The settlement loop is the CLI's only collection point. A stable pump may
 promote collector pressure to `MaintenanceRequired`; the loop services it and

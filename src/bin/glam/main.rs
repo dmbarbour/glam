@@ -28,16 +28,18 @@ use configuration::{CLI, select_entry, selects_nothing};
 use batch::{finish_local_files, settle_batch_runtime};
 
 #[cfg(test)]
-use configuration::logger::{LogHost, LoggerSupervisor, LoggerTaskHost, MainEffects};
+use configuration::logger::test_support::{
+    hand_over_logger, held_by_logger, logger_runtime, take_from_fallback, take_unread,
+};
+#[cfg(test)]
+use configuration::logger::{LoggerTaskHost, MainEffects, render_settled_report};
 #[cfg(test)]
 use glam::reflection::{EffectLifecycle, EffectRun, TaskOutcome};
 #[cfg(test)]
 use glam::{
-    FileSourceSystem, RuntimeDeliveryOutcome, RuntimeDispositionKind, RuntimeEventJournal,
-    RuntimeReadiness,
+    EvaluationRuntime, FileSourceSystem, RuntimeDeliveryOutcome, RuntimeDispositionKind,
+    RuntimeEventJournal, RuntimeReadiness,
 };
-#[cfg(test)]
-use std::thread;
 
 trait DiagnosticBusLocal {
     fn publish_local(&self, diagnostic: Diagnostic) -> DiagnosticEvent;
@@ -305,6 +307,10 @@ mod tests {
         }
     }
 
+    fn messages(diagnostics: &[Diagnostic]) -> Vec<&str> {
+        diagnostics.iter().map(Diagnostic::message).collect()
+    }
+
     #[test]
     fn final_local_file_change_is_only_a_warning() {
         let directory =
@@ -317,27 +323,42 @@ mod tests {
             .load_top_level(&path)
             .expect("assembly read should succeed");
         fs::write(&path, "later edit").expect("test input should be changed");
-        let diagnostics = DiagnosticBus::new();
-        let queue = Arc::new(LogHost::new(&diagnostics));
-        let values = queue.runtime.values();
+        let assembler = Assembler::default();
+        let mut runtime = logger_runtime(assembler.clone());
+        let diagnostics = assembler.diagnostic_bus();
 
-        assert!(!finish_local_files(&files, None, &diagnostics, &values));
-        let warning = queue
-            .take_diagnostic()
-            .expect("final file change should emit a diagnostic");
-        assert_eq!(warning.severity(), Severity::Warning);
+        assert!(!finish_local_files(
+            &files,
+            None,
+            &diagnostics,
+            &assembler.values()
+        ));
+        let unread = take_unread(&mut runtime);
+        assert_eq!(
+            unread.len(),
+            1,
+            "final file change should emit a diagnostic"
+        );
+        assert_eq!(unread[0].severity(), Severity::Warning);
         assert_eq!(diagnostics.counts().warnings(), 1);
         assert_eq!(diagnostics.counts().errors(), 0);
     }
 
+    /// A configured logger's host over `assembler`'s runtime, whose own
+    /// reports go to `diagnostics`.
+    fn logger_host(assembler: &Assembler, diagnostics: DiagnosticBus) -> Arc<LoggerTaskHost> {
+        Arc::new(LoggerTaskHost::new(
+            &assembler.evaluation_runtime(),
+            diagnostics,
+            assembler.reflection_environment_for_role("logger"),
+        ))
+    }
+
     #[test]
-    fn logger_exit_vote_retries_new_input_before_terminal_fallback() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let assembler = Assembler::builder()
-            .evaluation_runtime(input.runtime.clone())
-            .build()
-            .expect("logger retry assembler should build");
+    fn logger_exit_vote_retries_new_input_before_its_hand_over() {
+        let assembler = Assembler::default();
+        let mut runtime = logger_runtime(assembler.clone());
+        let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
             .module(["logger_exit_retry"])
             .script(
@@ -359,45 +380,35 @@ mod tests {
         let producer = assembler
             .get(module.value(), "refl.producer")
             .expect("logger retry fixture should define its producer");
-        let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let fallback_values = fallback.clone();
-        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
-            fallback_values
-                .lock()
-                .expect("fallback collection mutex should not be poisoned")
-                .push(diagnostic.message().to_owned());
-        });
-        let installation = supervisor.install().expect("logger should install");
-        let host = Arc::new(LoggerTaskHost::new(
-            input.clone(),
-            diagnostics.clone(),
-            assembler.reflection_environment_for_role("logger"),
-        ));
+        // The producer reports on the assembler's bus, which reaches the
+        // logger's input, as an independent producer's reports do.
+        let host = logger_host(&assembler, assembler.diagnostic_bus());
+        let lifecycle = EffectLifecycle::new_closing_session(&evaluation_runtime);
         let task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &effect,
             MainEffects::new(assembler.values()),
             host.clone(),
         )
-        .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
+        .schedule(&lifecycle)
         .expect("logger root should enter coordinator work");
 
-        let report = input.runtime.pump_background(4096);
+        let report = evaluation_runtime.pump_background(4096);
         assert_eq!(report.state, glam::BackgroundPumpState::Stable);
         assert!(
-            matches!(input.runtime.readiness(), glam::RuntimeReadiness::Ready(_)),
+            matches!(evaluation_runtime.readiness(), RuntimeReadiness::Ready(_)),
             "the retryable exit should be ready for settlement before disturbance"
         );
-        let producer_lifecycle = EffectLifecycle::new(&input.runtime);
+        let producer_lifecycle = EffectLifecycle::new(&evaluation_runtime);
         let producer_task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &producer,
             MainEffects::new(assembler.values()),
             host.clone(),
         )
         .schedule(&producer_lifecycle)
         .expect("independent diagnostic producer should schedule");
-        let report = input.runtime.pump_background(4096);
+        let report = evaluation_runtime.pump_background(4096);
         assert_eq!(report.state, glam::BackgroundPumpState::Stable);
         assert!(matches!(
             producer_task.run_with(|| host.deliver()).unwrap(),
@@ -409,41 +420,32 @@ mod tests {
             TaskOutcome::Complete(_)
         ));
         assert!(matches!(
-            installation.lifecycle.status(),
+            lifecycle.status(),
             glam::reflection::EffectLifecycleStatus::Complete(_)
         ));
-        assert!(
-            fallback
-                .lock()
-                .expect("fallback collection mutex should not be poisoned")
-                .is_empty(),
+        assert_eq!(
+            held_by_logger(&mut runtime),
+            0,
             "the disturbed logger must consume the pre-settlement diagnostic"
         );
 
-        diagnostics.publish_local(Diagnostic::new(
-            &input.runtime.values(),
+        hand_over_logger(&mut runtime);
+        assembler.diagnostic_bus().publish_local(Diagnostic::new(
+            &assembler.values(),
             Severity::Info,
-            "after terminalization",
+            "after the hand-over",
         ));
-        supervisor
-            .deliver_fallback()
-            .expect("terminal route should deliver later diagnostics");
         assert_eq!(
-            *fallback
-                .lock()
-                .expect("fallback collection mutex should not be poisoned"),
-            ["after terminalization"]
+            messages(&take_from_fallback(&mut runtime)),
+            ["after the hand-over"]
         );
-        supervisor.finish(&installation);
     }
 
     #[test]
     fn logger_demand_resumes_failed_choice_before_reading_queued_input() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
         let mut resolver = None;
         let assembler = Assembler::builder()
-            .evaluation_runtime(input.runtime.clone())
+            .evaluation_runtime(EvaluationRuntime::new(0).expect("a runtime should open"))
             .reflection_environment(|environment| {
                 let (gate, gate_resolver) = environment.promise("logger stderr gate");
                 resolver = Some(gate_resolver);
@@ -452,6 +454,8 @@ mod tests {
             .expect("logger gate environment should build")
             .build()
             .expect("logger gate assembler should build");
+        let mut runtime = logger_runtime(assembler.clone());
+        let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
             .module(["logger_demand_resume"])
             .script(
@@ -469,36 +473,24 @@ mod tests {
         let effect = assembler
             .get(module.value(), "refl.effect")
             .expect("logger demand fixture should define its effect");
-        let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let fallback_values = fallback.clone();
-        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
-            fallback_values
-                .lock()
-                .expect("fallback collection mutex should not be poisoned")
-                .push(diagnostic.message().to_owned());
-        });
-        let installation = supervisor.install().expect("logger should install");
-        let host = Arc::new(LoggerTaskHost::new(
-            input.clone(),
-            DiagnosticBus::for_runtime(&input.runtime),
-            assembler.reflection_environment_for_role("logger"),
-        ));
+        let host = logger_host(&assembler, DiagnosticBus::for_runtime(&evaluation_runtime));
+        let lifecycle = EffectLifecycle::new_closing_session(&evaluation_runtime);
         let task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &effect,
             MainEffects::new(assembler.values()),
             host.clone(),
         )
-        .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
+        .schedule(&lifecycle)
         .expect("logger demand fixture should schedule");
 
-        input.runtime.pump_until_stable();
+        evaluation_runtime.pump_until_stable();
         assert!(matches!(
-            installation.lifecycle.status(),
+            lifecycle.status(),
             glam::reflection::EffectLifecycleStatus::Blocked
         ));
-        diagnostics.publish_local(Diagnostic::new(
-            &input.runtime.values(),
+        assembler.diagnostic_bus().publish_local(Diagnostic::new(
+            &assembler.values(),
             Severity::Info,
             "queued while stderr demand is blocked",
         ));
@@ -508,37 +500,23 @@ mod tests {
             .resolve(assembler.values().text("ABANDONED STDERR\n"))
             .expect("logger stderr gate should resolve once");
 
-        input.runtime.pump_until_stable();
+        evaluation_runtime.pump_until_stable();
         assert!(matches!(
             task.run_with(|| host.deliver()).unwrap(),
             TaskOutcome::Complete(_)
         ));
-        let (_generation, _store, snapshot) = input.task_capability.transaction_snapshot();
-        let mut remaining = RuntimeEventJournal::new(snapshot);
-        assert!(
-            remaining
-                .read(&input.diagnostic_reader)
-                .expect("logger input probe should match its runtime")
-                .is_none(),
+        assert_eq!(
+            held_by_logger(&mut runtime),
+            0,
             "the resumed fallback branch must consume the queued diagnostic"
         );
-        assert!(
-            fallback
-                .lock()
-                .expect("fallback collection mutex should not be poisoned")
-                .is_empty()
-        );
-        supervisor.finish(&installation);
     }
 
     #[test]
     fn recursive_logger_drains_input_queued_before_its_first_poll() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let assembler = Assembler::builder()
-            .evaluation_runtime(input.runtime.clone())
-            .build()
-            .expect("prequeued logger assembler should build");
+        let assembler = Assembler::default();
+        let mut runtime = logger_runtime(assembler.clone());
+        let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
             .module(["prequeued_logger"])
             .script(
@@ -568,65 +546,49 @@ mod tests {
         let producer = assembler
             .get(module.value(), "refl.producer")
             .expect("prequeued logger fixture should define its producer");
-        let fallback = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let fallback_messages = fallback.clone();
-        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
-            fallback_messages
-                .lock()
-                .expect("fallback collection mutex should not be poisoned")
-                .push(diagnostic.message().to_owned());
-        });
-        let installation = supervisor.install().expect("logger should install");
-        let host = Arc::new(LoggerTaskHost::new(
-            input.clone(),
-            diagnostics.clone(),
-            assembler.reflection_environment_for_role("logger"),
-        ));
+        let host = logger_host(&assembler, assembler.diagnostic_bus());
+        let lifecycle = EffectLifecycle::new_closing_session(&evaluation_runtime);
         let task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &effect,
             MainEffects::new(assembler.values()),
             host.clone(),
         )
-        .schedule_diagnostic_consumer(&installation.lifecycle, &input.diagnostic_ingress)
+        .schedule(&lifecycle)
         .expect("recursive logger root should enter coordinator work");
-        input.runtime.pump_until_stable();
+        evaluation_runtime.pump_until_stable();
         assert!(matches!(
-            input.runtime.readiness(),
+            evaluation_runtime.readiness(),
             RuntimeReadiness::Deadlocked(_)
         ));
         assert!(matches!(
-            installation.lifecycle.status(),
+            lifecycle.status(),
             glam::reflection::EffectLifecycleStatus::Blocked
         ));
 
-        let producer_lifecycle = EffectLifecycle::new(&input.runtime);
+        let producer_lifecycle = EffectLifecycle::new(&evaluation_runtime);
         let producer_task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &producer,
             MainEffects::new(assembler.values()),
             host.clone(),
         )
         .schedule(&producer_lifecycle)
         .expect("prequeued diagnostic producer should schedule");
-        let report = input.runtime.pump_background(4096);
+        let report = evaluation_runtime.pump_background(4096);
         assert_eq!(report.state, glam::BackgroundPumpState::Stable);
         assert!(matches!(
             producer_task.run_with(|| host.deliver()).unwrap(),
             TaskOutcome::Complete(_)
         ));
-        let (_generation, _store, input_snapshot) = input.task_capability.transaction_snapshot();
-        let mut input_probe = RuntimeEventJournal::new(input_snapshot);
-        assert!(
-            input_probe
-                .read(&input.diagnostic_reader)
-                .expect("diagnostic probe should match its runtime")
-                .is_some(),
+        assert_eq!(
+            held_by_logger(&mut runtime),
+            1,
             "the barrier must release only after the diagnostic is admitted"
         );
-        let release_lifecycle = EffectLifecycle::new(&input.runtime);
+        let release_lifecycle = EffectLifecycle::new(&evaluation_runtime);
         let release = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &start,
             MainEffects::new(assembler.values()),
             host.clone(),
@@ -638,8 +600,8 @@ mod tests {
             TaskOutcome::Complete(_)
         ));
 
-        input.runtime.pump_until_stable();
-        let RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
+        evaluation_runtime.pump_until_stable();
+        let RuntimeReadiness::Ready(snapshot) = evaluation_runtime.readiness() else {
             panic!("the recursive logger should drain prequeued input and vote to exit")
         };
         let report = snapshot.settle().expect("logger exit should settle");
@@ -649,29 +611,39 @@ mod tests {
             task.run_with(|| host.deliver()).is_err(),
             "settlement should terminalize the exit vote"
         );
-        supervisor.finish(&installation);
         assert_eq!(
-            supervisor
-                .fallback_and_deliver()
-                .expect("terminal logger should drain fallback input"),
-            0
-        );
-        assert!(
-            fallback
-                .lock()
-                .expect("fallback collection mutex should not be poisoned")
-                .is_empty()
+            held_by_logger(&mut runtime),
+            0,
+            "the logger read what was queued before its first poll"
         );
     }
 
+    /// Commits a value to an output whose adapter fails, and delivers it,
+    /// leaving a delivery failure for settlement to report.
+    fn fail_a_delivery(runtime: &EvaluationRuntime, message: &'static str) {
+        let failed_output = runtime
+            .output_endpoint(Ok::<Value, Error>, move |_value| Err(Error::new(message)))
+            .expect("failed output endpoint should register");
+        let capability = runtime.task_capability();
+        let (_generation, store, snapshot) = capability.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(snapshot);
+        events
+            .write(&failed_output.writer(), runtime.values().integer(1))
+            .expect("failed output intent should buffer");
+        assert_eq!(
+            capability.try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events),
+            glam::reflection::StoreCommitResult::Committed
+        );
+        assert!(matches!(
+            failed_output.delivery().deliver_next().unwrap(),
+            Some(RuntimeDeliveryOutcome::Failed(_))
+        ));
+    }
+
     #[test]
-    fn settled_report_renders_task_and_nonfallback_delivery_failures_once() {
-        let source_diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&source_diagnostics));
-        let assembler = Assembler::builder()
-            .evaluation_runtime(input.runtime.clone())
-            .build()
-            .expect("reporting assembler should build");
+    fn settled_report_renders_task_and_delivery_failures_once() {
+        let assembler = Assembler::default();
+        let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
             .module(["settled_failure_report"])
             .script(
@@ -687,26 +659,11 @@ mod tests {
         let effect = assembler
             .get(module.value(), "refl.effect")
             .expect("failure report fixture should define its effect");
-        let rendered = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let rendered_messages = rendered.clone();
-        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
-            rendered_messages
-                .lock()
-                .expect("rendered diagnostic collection should not be poisoned")
-                .push(diagnostic);
-        });
-        supervisor
-            .fallback_and_deliver()
-            .expect("reporting should begin on fallback");
-        let logger_diagnostics = DiagnosticBus::for_runtime(&input.runtime);
-        let host = Arc::new(LoggerTaskHost::new(
-            input.clone(),
-            logger_diagnostics.clone(),
-            assembler.reflection_environment_for_role("logger"),
-        ));
-        let lifecycle = EffectLifecycle::new(&input.runtime);
+        let logger_diagnostics = DiagnosticBus::for_runtime(&evaluation_runtime);
+        let host = logger_host(&assembler, logger_diagnostics.clone());
+        let lifecycle = EffectLifecycle::new(&evaluation_runtime);
         let task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &effect,
             MainEffects::new(assembler.values()),
             host.clone(),
@@ -714,70 +671,50 @@ mod tests {
         .schedule(&lifecycle)
         .expect("failure-report root should schedule");
         assert!(task.run_with(|| host.deliver()).is_err());
+        fail_a_delivery(&evaluation_runtime, "output adapter failed");
 
-        let failed_output = input
-            .runtime
-            .output_endpoint(Ok::<Value, Error>, |_value| {
-                Err(Error::new("nonfallback output adapter failed"))
-            })
-            .expect("failed output endpoint should register");
-        let (_generation, store, snapshot) = input.task_capability.transaction_snapshot();
-        let mut events = RuntimeEventJournal::new(snapshot);
-        events
-            .write(&failed_output.writer(), input.runtime.values().integer(1))
-            .expect("failed output intent should buffer");
-        assert_eq!(
-            input
-                .task_capability
-                .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events,),
-            glam::reflection::StoreCommitResult::Committed
-        );
-        assert!(matches!(
-            failed_output.delivery().deliver_next().unwrap(),
-            Some(RuntimeDeliveryOutcome::Failed(_))
-        ));
-
-        input.runtime.pump_until_stable();
-        let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
+        evaluation_runtime.pump_until_stable();
+        let RuntimeReadiness::Ready(snapshot) = evaluation_runtime.readiness() else {
             panic!("terminal failures should be retained state, not active work")
         };
         let mut report = snapshot.settle().expect("failure report should settle");
         assert_eq!(report.task_failures().len(), 1);
         assert_eq!(report.delivery_failures().failures().len(), 1);
-        assert_eq!(source_diagnostics.counts().total(), 0);
-        assert_eq!(logger_diagnostics.counts().total(), 0);
 
-        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 2);
-        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 0);
-        let rendered = rendered
-            .lock()
-            .expect("rendered diagnostic collection should not be poisoned");
+        let values = assembler.values();
+        let mut rendered = Vec::new();
+        assert_eq!(
+            render_settled_report(&mut report, &values, |diagnostic| rendered.push(diagnostic))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            render_settled_report(&mut report, &values, |diagnostic| rendered.push(diagnostic))
+                .unwrap(),
+            0
+        );
         assert_eq!(rendered.len(), 2);
         assert!(rendered.iter().any(|diagnostic| {
             rendered_text_for_test(&assembler, diagnostic).contains("reflection task failed")
         }));
-        assert!(rendered.iter().any(|diagnostic| {
-            diagnostic
-                .message()
-                .contains("nonfallback output adapter failed")
-        }));
+        assert!(
+            rendered
+                .iter()
+                .any(|diagnostic| diagnostic.message().contains("output adapter failed"))
+        );
         assert!(
             rendered
                 .iter()
                 .all(|diagnostic| { assembler.get(diagnostic.emission(), "msg.context").is_ok() })
         );
-        assert_eq!(source_diagnostics.counts().total(), 0);
+        assert_eq!(assembler.diagnostic_bus().counts().total(), 0);
         assert_eq!(logger_diagnostics.counts().total(), 0);
     }
 
     #[test]
     fn settled_report_renders_exit_errors_and_killed_work_once() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let assembler = Assembler::builder()
-            .evaluation_runtime(input.runtime.clone())
-            .build()
-            .expect("settlement-report assembler should build");
+        let assembler = Assembler::default();
+        let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
             .module(["settled_disposition_report"])
             .script(
@@ -797,26 +734,11 @@ mod tests {
         let blocked = assembler
             .get(module.value(), "refl.blocked")
             .expect("fixture should define its blocked effect");
-        let rendered = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let rendered_diagnostics = rendered.clone();
-        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
-            rendered_diagnostics
-                .lock()
-                .expect("rendered diagnostic collection should not be poisoned")
-                .push(diagnostic);
-        });
-        supervisor
-            .fallback_and_deliver()
-            .expect("reporting should begin on fallback");
-        let host = Arc::new(LoggerTaskHost::new(
-            input.clone(),
-            DiagnosticBus::for_runtime(&input.runtime),
-            assembler.reflection_environment_for_role("logger"),
-        ));
-        let exit_lifecycle = EffectLifecycle::new(&input.runtime);
-        let blocked_lifecycle = EffectLifecycle::new(&input.runtime);
+        let host = logger_host(&assembler, DiagnosticBus::for_runtime(&evaluation_runtime));
+        let exit_lifecycle = EffectLifecycle::new(&evaluation_runtime);
+        let blocked_lifecycle = EffectLifecycle::new(&evaluation_runtime);
         let _exit_task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &exit,
             MainEffects::new(assembler.values()),
             host.clone(),
@@ -824,7 +746,7 @@ mod tests {
         .schedule(&exit_lifecycle)
         .expect("exit effect should schedule");
         let _blocked_task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &blocked,
             MainEffects::new(assembler.values()),
             host.clone(),
@@ -832,17 +754,14 @@ mod tests {
         .schedule(&blocked_lifecycle)
         .expect("blocked effect should schedule");
 
-        input.runtime.pump_until_stable();
-        let glam::RuntimeReadiness::Deadlocked(snapshot) = input.runtime.readiness() else {
+        evaluation_runtime.pump_until_stable();
+        let RuntimeReadiness::Deadlocked(snapshot) = evaluation_runtime.readiness() else {
             panic!("an exit vote plus a blocked reader should retain a deadlock")
         };
         let mut report = snapshot
             .kill(glam::RuntimeKillReason::Deadlock)
             .settle()
             .expect("forced deadlock report should settle");
-        assert!(report.dispositions().iter().any(|disposition| {
-            matches!(disposition.kind(), RuntimeDispositionKind::ExitError(_))
-        }));
         let exit_message = report
             .dispositions()
             .iter()
@@ -862,11 +781,18 @@ mod tests {
         );
         assert_eq!(report.killed_work().len(), 1);
 
-        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 2);
-        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 0);
-        let rendered = rendered
-            .lock()
-            .expect("rendered diagnostic collection should not be poisoned");
+        let values = assembler.values();
+        let mut rendered = Vec::new();
+        assert_eq!(
+            render_settled_report(&mut report, &values, |diagnostic| rendered.push(diagnostic))
+                .unwrap(),
+            2
+        );
+        assert_eq!(
+            render_settled_report(&mut report, &values, |diagnostic| rendered.push(diagnostic))
+                .unwrap(),
+            0
+        );
         assert_eq!(rendered.len(), 2);
         assert!(
             rendered
@@ -887,13 +813,11 @@ mod tests {
     }
 
     #[test]
-    fn settled_report_rendering_drains_work_admitted_by_fallback_delivery() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let assembler = Assembler::builder()
-            .evaluation_runtime(input.runtime.clone())
-            .build()
-            .expect("reentrant reporting assembler should build");
+    fn batch_settlement_renders_what_its_rendering_reports() {
+        let assembler = Assembler::default();
+        let mut runtime = logger_runtime(assembler.clone());
+        hand_over_logger(&mut runtime);
+        let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
             .module(["reentrant_settled_report"])
             .script(
@@ -909,38 +833,10 @@ mod tests {
         let effect = assembler
             .get(module.value(), "refl.effect")
             .expect("fixture should define its effect");
-        let rendered = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let rendered_messages = rendered.clone();
-        let republished = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let callback_republished = republished.clone();
-        let callback_bus = diagnostics.clone();
-        let callback_values = input.runtime.values();
-        let callback_assembler = assembler.clone();
-        let supervisor = LoggerSupervisor::new(input.clone(), move |diagnostic| {
-            let text = rendered_text_for_test(&callback_assembler, &diagnostic);
-            rendered_messages
-                .lock()
-                .expect("rendered diagnostic collection should not be poisoned")
-                .push(text);
-            if !callback_republished.swap(true, std::sync::atomic::Ordering::SeqCst) {
-                callback_bus.publish_local(Diagnostic::new(
-                    &callback_values,
-                    Severity::Info,
-                    "admitted during fallback delivery",
-                ));
-            }
-        });
-        supervisor
-            .fallback_and_deliver()
-            .expect("reporting should begin on fallback");
-        let host = Arc::new(LoggerTaskHost::new(
-            input.clone(),
-            DiagnosticBus::for_runtime(&input.runtime),
-            assembler.reflection_environment_for_role("logger"),
-        ));
-        let lifecycle = EffectLifecycle::new(&input.runtime);
+        let host = logger_host(&assembler, DiagnosticBus::for_runtime(&evaluation_runtime));
+        let lifecycle = EffectLifecycle::new(&evaluation_runtime);
         let task = EffectRun::new(
-            &input.runtime,
+            &evaluation_runtime,
             &effect,
             MainEffects::new(assembler.values()),
             host.clone(),
@@ -948,205 +844,77 @@ mod tests {
         .schedule(&lifecycle)
         .expect("reentrant reporting root should schedule");
         assert!(task.run_with(|| host.deliver()).is_err());
-        input.runtime.pump_until_stable();
-        let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
-            panic!("retained task failure should be ready")
-        };
-        let mut report = snapshot
-            .settle()
-            .expect("task failure report should settle");
 
-        assert_eq!(supervisor.render_settled_report(&mut report).unwrap(), 1);
+        let rendered = std::cell::RefCell::new(Vec::new());
+        let render = |diagnostic: Diagnostic| {
+            let first = rendered.borrow().is_empty();
+            rendered
+                .borrow_mut()
+                .push(rendered_text_for_test(&assembler, &diagnostic));
+            if first {
+                assembler.diagnostic_bus().publish_local(Diagnostic::new(
+                    &assembler.values(),
+                    Severity::Info,
+                    "reported while rendering",
+                ));
+            }
+        };
+        let failed = settle_batch_runtime(&evaluation_runtime, &assembler.values(), render, || {
+            for diagnostic in take_from_fallback(&mut runtime) {
+                render(diagnostic);
+            }
+            Ok(())
+        });
+
+        assert!(failed, "the task failure fails the batch");
         assert_eq!(
-            *rendered
-                .lock()
-                .expect("rendered diagnostic collection should not be poisoned"),
+            *rendered.borrow(),
             [
                 "reflection task failed permanently".to_owned(),
-                "admitted during fallback delivery".to_owned(),
+                "reported while rendering".to_owned(),
             ]
         );
-        assert_eq!(diagnostics.counts().total(), 1);
+        assert_eq!(assembler.diagnostic_bus().counts().total(), 1);
     }
 
     #[test]
-    fn fallback_delivery_failure_is_retained_without_recursive_rendering() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let fallback_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let callback_calls = fallback_calls.clone();
-        let supervisor = LoggerSupervisor::new_fallible(input.clone(), move |_diagnostic| {
-            callback_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            Err(Error::new("fallback output adapter failed"))
-        });
-        supervisor
-            .fallback_and_deliver()
-            .expect("reporting should begin on fallback");
+    fn batch_settlement_fails_on_a_retained_delivery_failure() {
+        let assembler = Assembler::default();
+        let evaluation_runtime = assembler.evaluation_runtime();
+        fail_a_delivery(&evaluation_runtime, "authoritative adapter failure");
 
-        let failed_output = input
-            .runtime
-            .output_endpoint(Ok::<Value, Error>, |_value| {
-                Err(Error::new("initial output adapter failed"))
-            })
-            .expect("initial failed output endpoint should register");
-        let (_generation, store, snapshot) = input.task_capability.transaction_snapshot();
-        let mut events = RuntimeEventJournal::new(snapshot);
-        events
-            .write(&failed_output.writer(), input.runtime.values().integer(1))
-            .expect("initial failed output intent should buffer");
-        assert_eq!(
-            input
-                .task_capability
-                .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events),
-            glam::reflection::StoreCommitResult::Committed
-        );
-        assert!(matches!(
-            failed_output.delivery().deliver_next().unwrap(),
-            Some(RuntimeDeliveryOutcome::Failed(_))
+        assert!(settle_batch_runtime(
+            &evaluation_runtime,
+            &assembler.values(),
+            |_| {},
+            || Ok(())
         ));
-        let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
-            panic!("a retained delivery failure should be ready")
-        };
-        let mut report = snapshot
-            .settle()
-            .expect("initial delivery failure should settle");
-
-        let error = supervisor
-            .render_settled_report(&mut report)
-            .expect_err("fallback delivery should report its adapter failure");
-        assert_eq!(error.to_string(), "fallback output adapter failed");
-        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
         assert_eq!(
-            supervisor.render_settled_report(&mut report).unwrap(),
-            0,
-            "accepted fallback output must not be replayed after adapter failure"
-        );
-        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-
-        let glam::RuntimeReadiness::Ready(snapshot) = input.runtime.readiness() else {
-            panic!("failed fallback delivery should remain reportable state")
-        };
-        let mut repeated = snapshot
-            .settle()
-            .expect("fallback delivery failure should settle");
-        assert_eq!(repeated.delivery_failures().failures().len(), 2);
-        assert_eq!(supervisor.render_settled_report(&mut repeated).unwrap(), 0);
-        assert_eq!(fallback_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert!(
-            repeated
-                .delivery_failures()
+            evaluation_runtime
+                .delivery_failure_snapshot()
                 .failures()
-                .iter()
-                .any(|failure| failure.endpoint_id() == supervisor.fallback_delivery.id())
+                .len(),
+            1
         );
-    }
-
-    #[test]
-    fn batch_settlement_remains_failed_when_fallback_rendering_fails() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let supervisor = LoggerSupervisor::new_fallible(input.clone(), |_diagnostic| {
-            Err(Error::new("fallback renderer failed"))
-        });
-        supervisor
-            .fallback_and_deliver()
-            .expect("empty fallback route should activate");
-
-        let failed_output = input
-            .runtime
-            .output_endpoint(Ok::<Value, Error>, |_value| {
-                Err(Error::new("authoritative adapter failure"))
-            })
-            .expect("failed output endpoint should register");
-        let (_generation, store, snapshot) = input.task_capability.transaction_snapshot();
-        let mut events = RuntimeEventJournal::new(snapshot);
-        events
-            .write(&failed_output.writer(), input.runtime.values().integer(1))
-            .expect("failed output intent should buffer");
-        assert_eq!(
-            input
-                .task_capability
-                .try_commit_transaction(&glam::reflection::StoreJournal::new(store), &events),
-            glam::reflection::StoreCommitResult::Committed
-        );
-        assert!(matches!(
-            failed_output.delivery().deliver_next().unwrap(),
-            Some(RuntimeDeliveryOutcome::Failed(_))
-        ));
-
-        assert!(settle_batch_runtime(&input.runtime, &supervisor));
-        let failures = input.runtime.delivery_failure_snapshot().failures();
-        assert_eq!(failures.len(), 2);
-        assert!(failures.iter().any(|failure| {
-            failure
-                .error()
-                .to_string()
-                .contains("fallback renderer failed")
-        }));
     }
 
     #[test]
     fn configured_batch_settlement_services_managed_maintenance() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let supervisor = LoggerSupervisor::new(input.clone(), |_| {});
-        supervisor
-            .fallback_and_deliver()
-            .expect("empty fallback route should activate");
-        input
-            .runtime
+        let assembler = Assembler::default();
+        let evaluation_runtime = assembler.evaluation_runtime();
+        evaluation_runtime
             .request_managed_collection()
             .expect("explicit maintenance should publish");
 
-        assert!(!settle_batch_runtime(&input.runtime, &supervisor));
+        assert!(!settle_batch_runtime(
+            &evaluation_runtime,
+            &assembler.values(),
+            |_| {},
+            || Ok(())
+        ));
         assert!(matches!(
-            input.runtime.readiness(),
+            evaluation_runtime.readiness(),
             RuntimeReadiness::Ready(_)
         ));
-    }
-
-    #[test]
-    fn diagnostic_publication_racing_ingress_rearm_is_routed_once() {
-        let diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&diagnostics));
-        let supervisor = LoggerSupervisor::new(input.clone(), |_| {});
-        let first = supervisor.install().expect("first logger should install");
-        let values = input.runtime.values();
-        let publishing_bus = diagnostics.clone();
-        let publishing_values = values.clone();
-        let (ready, wait) = std::sync::mpsc::channel();
-        let (resume, resumed) = std::sync::mpsc::channel();
-        let publisher = thread::spawn(move || {
-            ready.send(()).expect("rearm test should signal readiness");
-            resumed
-                .recv()
-                .expect("rearm test should resume publication");
-            publishing_bus.publish_local(Diagnostic::new(
-                &publishing_values,
-                Severity::Warning,
-                "publication during rearm",
-            ))
-        });
-        wait.recv()
-            .expect("publisher should reach the rearm barrier");
-        supervisor.finish(&first);
-        let _second = supervisor.install().expect("logger should rearm");
-        input
-            .diagnostic_ingress
-            .activate()
-            .expect("ingress should rearm");
-        resume.send(()).expect("publisher should resume");
-        let event = publisher.join().expect("publisher should not panic");
-
-        assert_eq!(event.sequence(), diagnostics.counts().latest_sequence());
-        assert_eq!(diagnostics.counts().total(), 1);
-        assert_eq!(
-            input
-                .take_diagnostic()
-                .expect("racing publication should remain buffered")
-                .message(),
-            "publication during rearm"
-        );
-        assert!(input.take_diagnostic().is_none());
     }
 }

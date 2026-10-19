@@ -98,9 +98,9 @@ load configuration on dormant runtime
   -> finalize source tracking and optional manifest
   -> pump runtime to stable readiness or deadlock
   -> settle exit votes, or explicitly kill and settle deadlock
-  -> render retained reports through fallback
-  -> repump any work admitted by rendering
-  -> drain fallback output
+  -> render retained reports directly
+  -> repump any work admitted by rendering, rendering the logger's fallback
+  -> join the configured logger and render what it left
   -> combine result/report failures and both bus counts for exit status
 ```
 

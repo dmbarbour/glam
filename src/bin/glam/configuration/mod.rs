@@ -10,7 +10,6 @@ use glam::{
 };
 
 use crate::command_line::{CliArguments, CommandPlanParts};
-use logger::LogHost;
 
 /// The machine on which the CLI takes its turns. Its state holds the
 /// `prelude`, the `configuration` and the `environment` it selects.
@@ -21,9 +20,9 @@ const PRELUDE: &str = include_str!("prelude.g");
 
 pub(super) struct PreparedAssembly {
     pub(super) local_files: FileSourceSystem,
-    /// The CLI's runtime, which the main thread opens and drops.
+    /// The CLI's runtime, which the main thread opens and drops. Its
+    /// diagnostics wait at its `logger` machine.
     pub(super) runtime: Runtime,
-    pub(super) log_host: Arc<LogHost>,
     process_args: Option<PromiseResolver>,
     reflection_args: Option<PromiseResolver>,
 }
@@ -67,7 +66,6 @@ impl PreparedAssembly {
 
 pub(super) struct PreparationFailure {
     pub(super) local_files: FileSourceSystem,
-    pub(super) log_host: Arc<LogHost>,
     pub(super) runtime: Runtime,
     pub(super) error: Error,
 }
@@ -82,10 +80,6 @@ pub(super) fn prepare(
     let evaluation_runtime =
         EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
     let diagnostics = glam::DiagnosticBus::for_runtime(&evaluation_runtime);
-    let log_host = Arc::new(LogHost::with_runtime(
-        evaluation_runtime.clone(),
-        &diagnostics,
-    ));
     let mut process_args = None;
     let mut reflection_args = None;
     let assembler = Assembler::builder()
@@ -109,7 +103,9 @@ pub(super) fn prepare(
         .expect("main's reflection environment must be a dictionary")
         .build()
         .expect("main's assembler configuration must be valid");
-    let mut runtime = glam::transition::runtime_around(assembler);
+    let mut runtime = glam::transition::runtime_around(assembler)
+        .expect("main's runtime routes its diagnostics to its root");
+    logger::wire_logger(&mut runtime).expect("the logger's wiring is valid");
     let assembler = glam::transition::assembler(&runtime);
     if let Some((process_arguments, reflection_arguments)) = initial_environment {
         let values = assembler.values();
@@ -127,7 +123,6 @@ pub(super) fn prepare(
     if let Err(error) = load(&mut runtime) {
         return Err(Box::new(PreparationFailure {
             local_files,
-            log_host,
             runtime,
             error,
         }));
@@ -135,7 +130,6 @@ pub(super) fn prepare(
     Ok(PreparedAssembly {
         local_files,
         runtime,
-        log_host,
         process_args,
         reflection_args,
     })
@@ -318,13 +312,11 @@ mod owner_tests {
         let PreparedAssembly {
             local_files: _,
             runtime: _,
-            log_host: _,
             process_args: _,
             reflection_args: _,
         } = prepared;
         let PreparationFailure {
             local_files: _,
-            log_host: _,
             runtime: _,
             error: _,
         } = failure;

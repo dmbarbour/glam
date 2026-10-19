@@ -155,6 +155,29 @@ fn reading_too_few_is_pushback() {
 }
 
 #[test]
+fn reading_none_succeeds_at_any_input() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        assert_eq!(
+            receive(p, "b", "never", 0)?,
+            [] as [i64; 0],
+            "an input that never held a value"
+        );
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+        send(p, "a", "out", &[1])?;
+        assert_eq!(receive(p, "b", "in", 1)?, [1]);
+        p.run("b", |b| b.cut(|b| b.read("in", 0)))?;
+        assert_eq!(
+            receive(p, "b", "in", 0)?,
+            [] as [i64; 0],
+            "an input it emptied, in a cut and outside one"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
 fn a_read_outside_a_cut_waits_for_its_values() {
     let mut rt = runtime();
     let (reading, ready) = mpsc::channel();

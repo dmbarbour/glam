@@ -24,6 +24,9 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 pub struct EffectLifecycle {
     inner: Arc<EffectLifecycleState>,
     terminal: Option<EffectLifecycleTerminal>,
+    /// Whether the root's end closes its demand session, abandoning the
+    /// tasks it started and left unjoined.
+    closes_session: bool,
 }
 
 struct EffectLifecycleState {
@@ -95,6 +98,19 @@ impl EffectLifecycle {
                 changed: CountedCondvar::new(),
             }),
             terminal: None,
+            closes_session: false,
+        }
+    }
+
+    /// Constructs a lifecycle whose root's end closes its demand session,
+    /// abandoning the tasks the root started and left unjoined, as a
+    /// coordinator-owned root's end does: for a host's long-lived root, such
+    /// as the CLI's configured logger.
+    #[doc(hidden)]
+    pub fn new_closing_session(runtime: &EvaluationRuntime) -> Self {
+        Self {
+            closes_session: true,
+            ..Self::new(runtime)
         }
     }
 
@@ -118,6 +134,7 @@ impl EffectLifecycle {
                 changed: CountedCondvar::new(),
             }),
             terminal: Some(terminal),
+            closes_session: true,
         }
     }
 
@@ -167,6 +184,7 @@ impl EffectLifecycle {
     ) -> TaskStatusPublisher {
         let lifecycle = Arc::downgrade(&self.inner);
         let terminal = self.terminal.clone();
+        let closes_session = self.closes_session;
         TaskStatusPublisher::new(move |mutation, status| {
             let Some(lifecycle) = Weak::upgrade(&lifecycle) else {
                 return TaskStatusWake::new(|| {});
@@ -188,7 +206,7 @@ impl EffectLifecycle {
             let session = session.clone();
             TaskStatusWake::new(move || {
                 lifecycle.changed.notify_all();
-                if is_terminal && terminal_wake.is_some() {
+                if is_terminal && closes_session {
                     let session = session
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -729,9 +747,11 @@ mod root_inventory_tests {
         let EffectLifecycle {
             inner,
             terminal: lifecycle_terminal,
+            closes_session,
         } = lifecycle;
         let _: &Arc<EffectLifecycleState> = inner;
         let _: &Option<EffectLifecycleTerminal> = lifecycle_terminal;
+        let _: &bool = closes_session;
 
         let EffectLifecycleState {
             status: stored_status,

@@ -113,8 +113,10 @@ client-owned rendering. Current flow lives in
   adaptation, diagnostic subscribers, and terminal writers must also run
   without inherited managed-mutator authority; retain roots or owned bytes
   across those boundaries.
-- Diagnostic consumer route activation and logger-root activation occur under
-  one exclusive settlement guard. Never expose a live route without its root.
+- Diagnostics wait at the `logger` machine's input from before configuration
+  loads, so a configured logger needs no route switch. Its hand-over to
+  `logger/fallback` is one cut: the rewiring and the transfer of what the
+  logger holds commit together.
 - Nested context frames with a `msg` interface are enriched and rendered as
   diagnostic-style views, not republished events. They do not receive new
   sequence numbers or increment counts.
@@ -123,10 +125,10 @@ client-owned rendering. Current flow lives in
 - The cached Glam formatter arranges client-supplied viewer data. It must not
   gain privileged origin inspection or presentation-policy inference.
 - Retained task, delivery, exit, and killed-work failures make batch execution
-  fail independently of successful diagnostic rendering. Fallback failure
-  cannot turn a failed batch into success.
-- Settled report obligations are one-shot. Do not retain growing
-  supervisor-side identity sets to suppress repeated rendering.
+  fail independently of successful diagnostic rendering. Rendering cannot
+  turn a failed batch into success.
+- Settled report obligations are one-shot. Do not retain growing identity sets
+  to suppress repeated rendering.
 
 ## Locking and Destruction
 
@@ -139,7 +141,7 @@ client-owned rendering. Current flow lives in
 - Endpoint and ingress back-references remain weak where a strong link would
   create a bus/runtime ownership cycle.
 
-Tests around diagnostic ingress, logger activation, fallback races, structured
+Tests around diagnostic ingress, the logger's hand-over, structured
 context rendering, and failed delivery are ordering specifications. When
 changing these paths, use barriers to force the suspected race rather than
 accepting a transiently passing stress test.

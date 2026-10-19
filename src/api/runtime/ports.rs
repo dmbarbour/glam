@@ -341,11 +341,11 @@ impl PortJournal {
             cursor.observed_tail = true;
             None
         } else {
-            let buffer = buffer.expect("a buffer with items exists");
+            // A claim of none needs no buffer.
             let offset = (cursor.next - head) as usize;
             let values = buffer
-                .items
-                .range(offset..offset + n)
+                .iter()
+                .flat_map(|buffer| buffer.items.range(offset..offset + n))
                 .map(|root| Value::from_runtime_root(root.clone()))
                 .collect();
             cursor.next += n as u64;

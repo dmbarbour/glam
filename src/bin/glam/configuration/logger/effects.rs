@@ -10,12 +10,12 @@ use glam::reflection::{
     TaskValidation, ValidationResult, reflection_request_specs,
 };
 use glam::{
-    Diagnostic, DiagnosticBus, DiagnosticIngress, Error, RuntimeDeliveryOutcome,
-    RuntimeEventJournal, RuntimeEventSnapshot, RuntimeInputReader, RuntimeOutputDelivery,
-    RuntimeOutputWriter, RuntimeTaskCapability, Value, Values,
+    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, RuntimeDeliveryOutcome,
+    RuntimeEventJournal, RuntimeEventSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter,
+    RuntimeTaskCapability, Value, Values,
 };
 
-use super::supervisor::LogHost;
+use super::{DIAGNOSTICS, LOGGER};
 use crate::DiagnosticBusLocal;
 
 /// The CLI's effect specialization. Every task it runs carries a copy, so
@@ -181,17 +181,13 @@ impl SpecializationRequestWork<MainEffects> for MainRequestWork {
 fn read_log(
     context: &mut RequestContext<'_, MainEffects>,
 ) -> Result<RequestResult, glam::reflection::TaskHalt> {
-    let diagnostic_reader = context.host().diagnostic_reader.clone();
     if let Some(generation) = context.transaction_generation() {
         context.observe_host_generation(generation);
         let mut transaction = context
             .transaction()
             .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
-        if let Some(value) = event_journal(snapshot, journal)
-            .read(&diagnostic_reader)
-            .map_err(glam::reflection::TaskHalt::from)?
-        {
+        if let Some(value) = event_journal(snapshot, journal).read_port(LOGGER, DIAGNOSTICS) {
             return Diagnostic::from_transport_value(&context.host().resources.values(), &value)
                 .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
                 .map(RequestResult::Return)
@@ -206,10 +202,7 @@ fn read_log(
         let snapshot = <LoggerTaskHost as TaskHost<MainEffects>>::snapshot(context.host());
         context.observe_host_generation(snapshot.generation());
         let mut events = RuntimeEventJournal::new(snapshot.extra().clone());
-        let Some(value) = events
-            .read(&diagnostic_reader)
-            .map_err(glam::reflection::TaskHalt::from)?
-        else {
+        let Some(value) = events.read_port(LOGGER, DIAGNOSTICS) else {
             return Ok(RequestResult::Fail);
         };
         let value = Diagnostic::from_transport_value(&context.host().resources.values(), &value)
@@ -240,14 +233,13 @@ fn read_log(
     }
 }
 
-/// The logger task's host. A worker running the logger task only journals
+/// The logger task's host, which reads the diagnostics waiting at the
+/// logger machine's input. A worker running the logger task only journals
 /// and commits its outputs: delivering them, and publishing to the logger's
 /// diagnostic bus, whose subscribers render, run on client threads through
 /// [`LoggerTaskHost::deliver`], since workers never run client code.
 pub(crate) struct LoggerTaskHost {
     resources: Arc<RuntimeTaskCapability>,
-    _diagnostic_ingress: DiagnosticIngress,
-    diagnostic_reader: RuntimeInputReader,
     diagnostics: DiagnosticBus,
     /// Failures to journal or commit output, held for a client thread to
     /// publish.
@@ -262,18 +254,17 @@ pub(crate) struct LoggerTaskHost {
 
 impl LoggerTaskHost {
     pub(crate) fn new(
-        input: Arc<LogHost>,
+        runtime: &EvaluationRuntime,
         diagnostics: DiagnosticBus,
         reflection_environment: Value,
     ) -> Self {
         diagnostics
-            .bind_runtime(&input.runtime)
+            .bind_runtime(runtime)
             .expect("logger output bus must belong to the logger runtime");
         let diagnostic_bus = diagnostics.clone();
-        let runtime_id = input.runtime.id();
-        let decode_values = input.runtime.values();
-        let diagnostic_output = input
-            .runtime
+        let runtime_id = runtime.id();
+        let decode_values = runtime.values();
+        let diagnostic_output = runtime
             .output_endpoint(
                 move |value| Diagnostic::from_transport_value(&decode_values, &value),
                 move |diagnostic| {
@@ -282,9 +273,8 @@ impl LoggerTaskHost {
                 },
             )
             .expect("logger diagnostic output endpoint should be constructible");
-        let stderr_values = input.runtime.values();
-        let stderr_output = input
-            .runtime
+        let stderr_values = runtime.values();
+        let stderr_output = runtime
             .output_endpoint(
                 // `.write_stderr` writes only evaluated binary data, so the
                 // decoder needs no evaluation, nor the runtime it would own.
@@ -303,9 +293,7 @@ impl LoggerTaskHost {
         let (diagnostic_writer, diagnostic_delivery) = diagnostic_output.into_parts();
         let (stderr_writer, stderr_delivery) = stderr_output.into_parts();
         Self {
-            resources: input.task_capability.clone(),
-            _diagnostic_ingress: input.diagnostic_ingress.clone(),
-            diagnostic_reader: input.diagnostic_reader.clone(),
+            resources: runtime.task_capability(),
             diagnostics,
             failures: Mutex::new(Vec::new()),
             reflection_environment,
@@ -488,12 +476,11 @@ mod tests {
 
     use glam::reflection::ReflectionServices;
     use glam::{
-        Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber,
-        RuntimeEventJournal, Severity,
+        Assembler, Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, Severity,
     };
 
     use super::{LoggerTaskHost, MainJournal};
-    use crate::configuration::logger::LogHost;
+    use crate::configuration::logger::test_support::{held_by_logger, logger_runtime};
 
     struct Capture(Arc<Mutex<Vec<DiagnosticEvent>>>);
 
@@ -509,8 +496,6 @@ mod tests {
     fn assert_logger_task_owner_inventory(host: &LoggerTaskHost, journal: &MainJournal) {
         let LoggerTaskHost {
             resources: _,
-            _diagnostic_ingress: _,
-            diagnostic_reader: _,
             diagnostics: _,
             failures: _,
             reflection_environment,
@@ -533,24 +518,20 @@ mod tests {
 
     #[test]
     fn logger_session_output_is_separate_from_assembler_input() {
-        let input_diagnostics = DiagnosticBus::new();
-        let input = Arc::new(LogHost::new(&input_diagnostics));
+        let assembler = Assembler::default();
+        let mut runtime = logger_runtime(assembler.clone());
         let diagnostics = DiagnosticBus::new();
         let output = Arc::new(Mutex::new(Vec::new()));
         let _subscription = diagnostics.subscribe(Capture(output.clone()));
-        let assembler = Assembler::builder()
-            .evaluation_runtime(input.runtime.clone())
-            .build()
-            .expect("logger assembler should build");
         let host = LoggerTaskHost::new(
-            input.clone(),
+            &assembler.evaluation_runtime(),
             diagnostics.clone(),
             assembler.reflection_environment_for_role("logger"),
         );
 
         <LoggerTaskHost as ReflectionServices>::emit_diagnostic(
             &host,
-            Diagnostic::new(&input.runtime.values(), Severity::Error, "session output"),
+            Diagnostic::new(&assembler.values(), Severity::Error, "session output"),
         );
         // Emitting only commits the output: the task's thread may be a
         // worker, so nothing renders until a client thread delivers it.
@@ -563,10 +544,9 @@ mod tests {
         );
         host.deliver();
 
-        let (_generation, _store, snapshot) = input.task_capability.transaction_snapshot();
-        let mut events = RuntimeEventJournal::new(snapshot);
-        assert!(
-            events.read(&input.diagnostic_reader).unwrap().is_none(),
+        assert_eq!(
+            held_by_logger(&mut runtime),
+            0,
             "logger output must not return to assembler diagnostic input"
         );
         let output = output

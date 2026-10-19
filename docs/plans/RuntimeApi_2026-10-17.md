@@ -1087,6 +1087,48 @@ slice's first stage:
   ports and its descendants', a failed cut restoring what it cleared, and
   the walk counting port state.
 
+`api-ports`, the CLI's logger on machines (2026-10-19), the CLI slice's
+second stage:
+- The CLI's runtime routes its diagnostics to the root as `Runtime::open`'s
+  does: the bridge's `runtime_around` takes the default diagnostics wiring,
+  through the constructor both share.
+- Before configuration loads, the CLI wires the root's diagnostics input to
+  `logger`, a direct child of the root, and the logger's `unread` output to
+  its child `logger/fallback`. Both keep what reaches them, unwiring their
+  default pass-through; the fallback's would loop back through the logger.
+- The batch's turn runs on the root: it starts the logger, assembles on
+  `cli`, settles, joins the logger, and renders what remains.
+- A configured logger runs on the logger's fork and reads the logger's input
+  through `RuntimeEventJournal::read_port`, hidden, for the CLI until
+  loggers are turns. When it ends, the fork hands over: one cut wires the
+  logger's input on to `fallback` and sends what it holds through `unread`.
+  Without a configured logger, the logger hands over at once.
+- The CLI renders `logger/fallback` with `DefaultLogger`: between settlement
+  pumps while no fork holds the logger, after the join, and where the CLI
+  ends without a batch. Settled reports render directly, as before, and a
+  failure to render them ends settlement as failed rather than looping.
+- A configured logger's lifecycle closes its demand session when its root
+  ends (`EffectLifecycle::new_closing_session`), abandoning the tasks it left
+  unjoined, as the ingress's lifecycle terminal had done.
+- `LogHost`, `LoggerSupervisor`, its fallback endpoint and the route
+  activation leave the CLI. The bus stays as the publishers' entry, and its
+  counts, with the logger's bus's, decide the exit code.
+- The bridge's uses in the CLI rise from seven to nine: the fallback pops
+  the transport values it renders, and the CLI's ends without a batch find
+  their assembler for the renderer. The logger's test support adds two.
+- Found on the way: a read of none panicked at an input that never held a
+  value; it claims nothing.
+- Tests: in the CLI, the logger keeping diagnostics and its hand-over
+  keeping their order, and bus counts surviving reads; the configured
+  logger's exit vote, resumed choice and input queued before its first poll,
+  against the logger's input; settled reports, and settlement rendering what
+  its rendering reports. Retired with their mechanisms: the fallback
+  endpoint's delivery failures, the ingress's rearm and its race, and the
+  supervisor's teardown. `tests/runtime_ports.rs` adds reading none.
+- Not yet: the library's route switching (`DiagnosticIngress::activate`,
+  `fallback`, `set_fallback_output`, `logger_terminal`, and the consumer
+  activation) has no caller left in the CLI, and retires next.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
