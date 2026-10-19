@@ -109,11 +109,14 @@ fn a_promise_resolves_once_outside_a_cut_and_a_broken_one_fails_its_readers() {
         assert_eq!(m.depth(), 2, "the error popped nothing");
         m.discard(1)?;
 
+        m.push_text("broken by the test");
         m.break_promise()?;
         m.get("resolver")?;
+        m.push_text("again");
         let error = m.break_promise().expect_err("it resolved already");
         assert!(error.to_string().contains("already resolved"), "{error}");
-        m.discard(1)?;
+        assert_eq!(m.depth(), 2, "the error popped nothing");
+        m.discard(2)?;
 
         m.get("promised")?;
         let error = m.pop_int().expect_err("the promise was broken");
@@ -142,7 +145,7 @@ fn bind_args(m: &mut Machine<'_, '_>) -> Result<(), Error> {
     m.access("share")?;
     m.stash_pop(1)?;
     m.apply(1)?;
-    m.bind_env()
+    m.set_env_mixin()
 }
 
 #[test]

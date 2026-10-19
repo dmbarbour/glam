@@ -469,6 +469,7 @@ fn kinds_and_representations_are_observed_without_evaluation() {
             m.pop_atom_name().is_err(),
             "a path atom is not named by text"
         );
+        m.discard(1)?;
         assert_eq!(m.pop_int()?, 42);
         Ok(())
     })
@@ -532,4 +533,34 @@ fn a_runtime_moves_to_a_thread_that_takes_turns_and_retires_it() {
     .join()
     .expect("the thread should not panic");
     assert_eq!(kept, 7, "the machines move with the runtime");
+}
+
+#[test]
+fn an_operation_that_fails_does_nothing() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        m.push_text("not an integer");
+        m.pop_int().expect_err("text is no integer");
+        m.push_bytes(vec![0xff]);
+        m.pop_text().expect_err("these bytes are no UTF-8");
+        assert_eq!(m.depth(), 2, "both values stay");
+        m.discard(2)?;
+
+        m.push_int(1);
+        m.anno().expect_err("an annotation needs a target");
+        assert_eq!(m.depth(), 1, "the target stays");
+        m.discard(1)?;
+
+        m.make_dict(Vec::<&str>::new())?;
+        let error = m
+            .compile_over(
+                ["broken"],
+                [ModuleInput::script("g", "language g0\nx = (\n")],
+            )
+            .expect_err("the module does not parse");
+        assert!(!error.to_string().is_empty());
+        assert_eq!(m.depth(), 1, "the initial definitions stay");
+        Ok(())
+    })
+    .expect("the turn should succeed");
 }

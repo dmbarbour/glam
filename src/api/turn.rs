@@ -33,8 +33,8 @@ use std::thread::{self, Scope, ScopedJoinHandle};
 use bytes::Bytes;
 
 use super::runtime::{
-    DIAGNOSTICS, PortAddress, PortJournal, RuntimeEventJournal, RuntimeSharedResources, Wire,
-    WireEnd,
+    DIAGNOSTICS, PortAddress, PortJournal, RuntimeEventJournal, RuntimeSharedResources,
+    ShareJournal, Wire, WireEnd,
 };
 use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
@@ -591,7 +591,7 @@ impl Runtime {
             .evaluation_runtime()
             .shared_resources()
             .transaction_snapshot();
-        let present = PortJournal::new(events.ports).present_below(path.keys());
+        let present = RuntimeEventJournal::new(events).present_below(path.keys());
         with_port_presence(found, present, path.keys().len(), 0).into_iter()
     }
 
@@ -861,10 +861,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         }
         let absolute: Vec<Key> = self.path.iter().chain(path.keys()).cloned().collect();
         let present = match &self.cut {
-            Some(cut) => cut.events.ports.present_below(&absolute),
+            Some(cut) => cut.events.present_below(&absolute),
             None => {
                 let (_, _, events) = self.resources().transaction_snapshot();
-                PortJournal::new(events.ports).present_below(&absolute)
+                RuntimeEventJournal::new(events).present_below(&absolute)
             }
         };
         Ok(with_port_presence(found, present, absolute.len(), self.path.len()).into_iter())
@@ -953,6 +953,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             events: {
                 let mut events = cut.events.clone();
                 events.ports = cut.events.ports.branch();
+                events.shares = cut.events.shares.branch();
                 events
             },
             observed: false,
@@ -1141,6 +1142,7 @@ impl CutTransaction {
             && self.journal.merge_branch(&branch.journal);
         if serial {
             self.events.ports.merge(&branch.events.ports);
+            self.events.shares.merge(&branch.events.shares);
         }
         self.observed |= branch.observed;
         self.conflicted |= branch.conflicted || !serial;
@@ -1221,11 +1223,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Replaces the top `n` values with a list of them, the deepest first.
     pub fn make_list(&mut self, n: usize) -> Result<(), Error> {
-        let depth = self.require(n)?;
-        let items = self.state.stack.split_off(depth - n);
-        let list = self.runtime.assembler.values().list(items)?;
-        self.push(list);
-        Ok(())
+        let values = self.runtime.assembler.values();
+        self.replace_top(n, |items| values.list(items))
     }
 
     /// Replaces the top values, one for each name, with a dict from the
@@ -1247,59 +1246,65 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 )));
             }
         }
-        let depth = self.require(names.len())?;
-        let items = self.state.stack.split_off(depth - names.len());
-        let dict = self
-            .runtime
-            .assembler
-            .values()
-            .record(names.into_iter().zip(items))?;
-        self.push(dict);
-        Ok(())
+        let values = self.runtime.assembler.values();
+        self.replace_top(names.len(), |items| {
+            values.record(names.into_iter().zip(items))
+        })
     }
 
     /// Evaluates the top value to an integer and pops it.
     pub fn pop_int(&mut self) -> Result<i64, Error> {
-        let evaluated = self.evaluate_top(Ok)?;
-        evaluated
-            .as_i64()?
-            .ok_or_else(|| Error::new("the top value is not an integer within 64 bits"))
+        self.pop_evaluated(Ok, |evaluated| {
+            evaluated
+                .as_i64()?
+                .ok_or_else(|| Error::new("the top value is not an integer within 64 bits"))
+        })
     }
 
     /// Evaluates the top value to bytes and pops them.
     pub fn pop_bytes(&mut self) -> Result<Bytes, Error> {
         let values = self.runtime.assembler.values();
-        let evaluated = self.evaluate_top(|value| values.anno_binary(value))?;
-        evaluated
-            .as_bytes()?
-            .ok_or_else(|| Error::new("the top value is not binary data"))
+        self.pop_evaluated(|value| values.anno_binary(value), binary)
     }
 
     /// Evaluates the top value to UTF-8 text and pops it.
     pub fn pop_text(&mut self) -> Result<String, Error> {
-        let bytes = self.pop_bytes()?;
-        String::from_utf8(bytes.to_vec()).map_err(|_| Error::new("the top value is not UTF-8 text"))
+        let values = self.runtime.assembler.values();
+        self.pop_evaluated(
+            |value| values.anno_binary(value),
+            |evaluated| {
+                String::from_utf8(binary(evaluated)?.to_vec())
+                    .map_err(|_| Error::new("the top value is not UTF-8 text"))
+            },
+        )
     }
 
     /// Evaluates the top value to an atom named by text, such as `'name`,
     /// and pops its name.
     pub fn pop_atom_name(&mut self) -> Result<String, Error> {
         let reflection = self.runtime.assembler.reflection();
-        let name = self
-            .evaluate_top(|value| reflection.atom_key(&value))?
-            .as_bytes()?;
-        name.and_then(|name| String::from_utf8(name.to_vec()).ok())
-            .ok_or_else(|| Error::new("the atom is not named by text"))
+        self.pop_evaluated(
+            |value| reflection.atom_key(&value),
+            |name| {
+                name.as_bytes()?
+                    .and_then(|name| String::from_utf8(name.to_vec()).ok())
+                    .ok_or_else(|| Error::new("the atom is not named by text"))
+            },
+        )
     }
 
     /// Evaluates the top value to a list and replaces it with its items, the
     /// first deepest, returning how many there are.
     pub fn unpack_list(&mut self) -> Result<usize, Error> {
         let values = self.runtime.assembler.values();
-        let items = self
-            .evaluate_top(|value| values.anno_array(value))?
-            .array_items()?
-            .ok_or_else(|| Error::new("the top value is not a list"))?;
+        let items = self.pop_evaluated(
+            |value| values.anno_array(value),
+            |evaluated| {
+                evaluated
+                    .array_items()?
+                    .ok_or_else(|| Error::new("the top value is not a list"))
+            },
+        )?;
         let count = items.len();
         self.state.stack.extend(items);
         Ok(count)
@@ -1396,63 +1401,76 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// names: `asm.result`. Nothing is evaluated.
     pub fn access(&mut self, path: &str) -> Result<(), Error> {
         let values = self.runtime.assembler.values();
-        let base = self.pop()?;
-        let accessed = values.access_path(
-            &base,
-            path.split('.').map(|name| values.atom_from_text(name)),
-        )?;
-        self.push(accessed);
-        Ok(())
+        self.replace_top(1, |items| {
+            values.access_path(
+                &items[0],
+                path.split('.').map(|name| values.atom_from_text(name)),
+            )
+        })
     }
 
     /// Annotates a value: the annotation is pushed first, then its target,
     /// and the annotated value replaces them, as `anno Annotation Target`
     /// reads. Nothing is evaluated.
     pub fn anno(&mut self) -> Result<(), Error> {
-        let target = self.pop()?;
-        let annotation = self.pop()?;
-        let annotated = self.runtime.assembler.values().anno(annotation, target)?;
-        self.push(annotated);
-        Ok(())
+        let values = self.runtime.assembler.values();
+        self.replace_top(2, |items| {
+            let [annotation, target] = <[Value; 2]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top two values"));
+            values.anno(annotation, target)
+        })
     }
 
     /// Applies a function to `n` arguments: the function is pushed first,
     /// then the arguments in order, and the application replaces them.
     /// Nothing is evaluated.
     pub fn apply(&mut self, n: usize) -> Result<(), Error> {
-        let depth = self.require(n + 1)?;
-        let arguments = self.state.stack.split_off(depth - n);
-        let function = self.pop()?;
-        let applied = self
-            .runtime
-            .assembler
-            .values()
-            .apply(&function, arguments)?;
-        self.push(applied);
-        Ok(())
+        let values = self.runtime.assembler.values();
+        self.replace_top(n + 1, |items| {
+            let (function, arguments) = items
+                .split_first()
+                .unwrap_or_else(|| unreachable!("a function, then its arguments"));
+            values.apply(function, arguments.to_vec())
+        })
     }
 
     /// Evaluates the top value to weak-head normal form, in place.
     pub fn eval(&mut self) -> Result<(), Error> {
-        let evaluated = self.evaluate_top(Ok)?;
-        self.push(evaluated.into_value());
+        let evaluated = self.pop_evaluated(Ok, |evaluated| Ok(evaluated.into_value()))?;
+        self.push(evaluated);
+        Ok(())
+    }
+
+    /// Replaces the top `n` values with what `build` makes of them, the
+    /// deepest first. Where it fails, they stay: a machine's operation that
+    /// fails does nothing (reflection aside).
+    fn replace_top(
+        &mut self,
+        n: usize,
+        build: impl FnOnce(Vec<Value>) -> Result<Value, Error>,
+    ) -> Result<(), Error> {
+        let depth = self.require(n)?;
+        let built = build(self.state.stack[depth - n..].to_vec())?;
+        self.state.stack.truncate(depth - n);
+        self.push(built);
         Ok(())
     }
 
     /// Evaluates the top value, as `prepare` presents it, to weak-head
-    /// normal form, and pops it once it is evaluated: an evaluation that
-    /// fails pops nothing. One that waits on what is not known yet, such as
-    /// an unresolved promise, is pushback, [`ErrorKind::Retry`], which the
-    /// outermost cut waits out.
-    fn evaluate_top(
+    /// normal form, and converts it, popping it once both have succeeded:
+    /// where either fails, the value stays. An evaluation that waits on what
+    /// is not known yet, such as an unresolved promise, is pushback,
+    /// [`ErrorKind::Retry`], which the outermost cut waits out.
+    fn pop_evaluated<T>(
         &mut self,
         prepare: impl FnOnce(Value) -> Result<Value, Error>,
-    ) -> Result<crate::api::EvaluatedValue, Error> {
+        convert: impl FnOnce(crate::api::EvaluatedValue) -> Result<T, Error>,
+    ) -> Result<T, Error> {
         let value = prepare(self.peek()?.clone())?;
         let evaluated = self.runtime.assembler.evaluator().eval(&value);
-        let evaluated = self.note_evaluation(evaluated)?;
+        let converted = convert(self.note_evaluation(evaluated)?)?;
         self.pop()?;
-        Ok(evaluated)
+        Ok(converted)
     }
 
     /// Notes, within a cut, an evaluation that waited on what is not known
@@ -1478,7 +1496,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        self.compile_module(module_path, inputs, None)
+        let (module, diagnostics) = self.compile_module(module_path, inputs, None)?;
+        self.push(module);
+        Ok(diagnostics)
     }
 
     /// As [`Self::compile`], over initial definitions popped from the
@@ -1493,8 +1513,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let definitions = self.pop()?;
-        self.compile_module(module_path, inputs, Some(definitions))
+        let definitions = self.peek()?.clone();
+        let (module, diagnostics) = self.compile_module(module_path, inputs, Some(definitions))?;
+        self.pop()?;
+        self.push(module);
+        Ok(diagnostics)
     }
 
     fn compile_module<I, S>(
@@ -1502,7 +1525,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         module_path: I,
         inputs: impl IntoIterator<Item = ModuleInput>,
         definitions: Option<Value>,
-    ) -> Result<Vec<Diagnostic>, Error>
+    ) -> Result<(Value, Vec<Diagnostic>), Error>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -1513,57 +1536,101 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         }
         let module = builder.build()?;
         let diagnostics = module.diagnostics().to_vec();
-        self.push(module.into_value());
-        Ok(diagnostics)
+        Ok((module.into_value(), diagnostics))
     }
 
-    /// Pushes this machine's environment: the shares that it and its
-    /// ancestors bind, composed from the root down as one object, built
+    /// Pushes this machine's environment: the mixins that it and its
+    /// ancestors set, composed from the root down as one object, built
     /// lazily, so nothing is evaluated (`machines-inherit-an-environment`):
-    /// as `object _ extends` the shares, its own first, so a machine's share
-    /// overrides what its ancestors' bind.
-    /// Within a cut, the read joins the cut's transaction and sees its
-    /// bindings, and the cut runs again when a share above changes; outside
-    /// one, it reads the shares as they stand.
+    /// as `object _ extends` the mixins, its own first, so a machine's mixin
+    /// overrides what its ancestors' set. Within a cut, the read joins the
+    /// cut's transaction and sees its changes, and the cut runs again when a
+    /// mixin above changes; outside one, it reads the mixins as they stand.
     pub fn env(&mut self) {
-        let paths = environment::environment_chain(&self.path);
-        let shares = match &mut self.cut {
-            Some(cut) => paths
+        let machines = environment::environment_chain(&self.path);
+        let mixins = match &mut self.cut {
+            Some(cut) => machines
                 .iter()
-                .map(|path| {
-                    cut.observed |= cut.journal.observe_environment_read(path);
-                    cut.journal.environment_value(path)
-                })
+                .filter_map(|machine| environment::observed_mixin(cut, machine))
                 .collect::<Vec<_>>(),
             None => {
-                let snapshot = self.resources().reflection_snapshot().1;
-                paths
+                let (_, store, events) = self.resources().transaction_snapshot();
+                let shares = ShareJournal::new(&events.shares);
+                machines
                     .iter()
-                    .map(|path| snapshot.environment_value(path))
+                    .filter(|machine| shares.is_set(machine))
+                    .map(|machine| {
+                        store.environment_value(&environment::environment_share(machine))
+                    })
                     .collect()
             }
         };
         let values = self.runtime.assembler.values();
         let composed = crate::g_syntax::composed_environment_root(
             values.core(),
-            shares.into_iter().map(Value::into_runtime_root).collect(),
+            mixins.into_iter().map(Value::into_runtime_root).collect(),
             None,
         );
         self.push(Value::from_runtime_root(composed));
     }
 
-    /// Pops an object and binds it as this machine's share of the
-    /// environment, in place of one it bound before: the environments of the
-    /// machine and its descendants extend it. Only the machine binds its
-    /// share. Outside a cut, the binding commits at once; within one, with
-    /// the outermost cut.
-    pub fn bind_env(&mut self) -> Result<(), Error> {
-        let share = self.pop_own()?;
-        // Stored as a list of one, which the composition tells from an
-        // unbound share without forcing what the share holds.
-        let share = self.runtime.assembler.values().list([share])?;
-        let path = environment::environment_share(&self.path);
-        self.store_edit(|journal| journal.write_environment(path.clone(), share.clone()))
+    /// Sets the top value, an object, as this machine's mixin of the
+    /// environment, popping it: the mixin that the environments of the
+    /// machine and its descendants extend, in place of one set before. Only
+    /// the machine sets its mixin. Outside a cut, it commits at once;
+    /// within one, with the outermost cut.
+    pub fn set_env_mixin(&mut self) -> Result<(), Error> {
+        let mixin = self.peek()?.clone();
+        self.runtime.assembler.values().require(&mixin)?;
+        let machine = self.path.clone();
+        let path = environment::environment_share(&machine);
+        self.transact(|store, events| {
+            store.write_environment(path.clone(), mixin.clone());
+            events.shares.set(machine.clone());
+            Ok(())
+        })?;
+        self.pop()?;
+        Ok(())
+    }
+
+    /// Pushes this machine's own mixin of the environment, to extend and
+    /// set again, or an empty object where it has none. Within a cut, the
+    /// read joins the cut's transaction, as [`Self::env`]'s does.
+    pub fn get_env_mixin(&mut self) {
+        let machine = self.path.clone();
+        let mixin = match &mut self.cut {
+            Some(cut) => environment::observed_mixin(cut, &machine),
+            None => {
+                let (_, store, events) = self.resources().transaction_snapshot();
+                ShareJournal::new(&events.shares)
+                    .is_set(&machine)
+                    .then(|| store.environment_value(&environment::environment_share(&machine)))
+            }
+        };
+        let mixin = mixin.unwrap_or_else(|| {
+            let values = self.runtime.assembler.values();
+            Value::from_runtime_root(crate::g_syntax::composed_environment_root(
+                values.core(),
+                Vec::new(),
+                None,
+            ))
+        });
+        self.push(mixin);
+    }
+
+    /// Clears this machine's mixin of the environment, so the environments
+    /// of the machine and its descendants extend its ancestors' alone.
+    /// Outside a cut, it commits at once; within one, with the outermost
+    /// cut.
+    pub fn clear_env_mixin(&mut self) -> Result<(), Error> {
+        let machine = self.path.clone();
+        let path = environment::environment_share(&machine);
+        let unset = self.runtime.assembler.values().empty_dict();
+        self.transact(|store, events| {
+            store.write_environment(path.clone(), unset.clone());
+            events.shares.clear(machine.clone());
+            Ok(())
+        })
     }
 
     /// Pushes `value`, which must belong to this runtime, for the CLI's
@@ -1601,40 +1668,39 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// Pops a value, then a resolver, and fulfills the resolver's promise
     /// with the value, waking what waits on it. It evaluates the resolver,
     /// never the value. A promise resolves once, so resolving it again is an
-    /// error, which pops nothing; so is resolving within a cut, since a
-    /// resolution cannot be undone: a cut resolves in a commit hook
-    /// ([`Self::on_commit`]).
+    /// error, which pops nothing.
+    ///
+    /// Resolving within a cut is an error too, a known limitation: a
+    /// resolution cannot yet be undone, so a cut resolves in a commit hook
+    /// ([`Self::on_commit`]). Promises whose resolution a failed cut undoes
+    /// are worth revisiting once the heaps are fast enough.
     pub fn fulfill(&mut self) -> Result<(), Error> {
-        self.resolve_promise(2, |value| {
-            promises::Resolution::Fulfill(value.expect("fulfill pops a value"))
-        })
+        self.resolve_promise(promises::Resolution::Fulfill)
     }
 
-    /// Pops a resolver and breaks its promise, so what reads the promised
-    /// value fails. As [`Self::fulfill`], it evaluates the resolver, resolves
-    /// once, and is an error within a cut.
+    /// Pops a value, then a resolver, and breaks the resolver's promise with
+    /// the value, a message or a diagnostic, so what reads the promised
+    /// value fails with it. As [`Self::fulfill`], it evaluates the resolver,
+    /// resolves once, and is an error within a cut.
     pub fn break_promise(&mut self) -> Result<(), Error> {
-        self.resolve_promise(1, |_| promises::Resolution::Break)
+        self.resolve_promise(promises::Resolution::Break)
     }
 
-    /// Resolves the promise of the resolver `n` values down, the last of
-    /// them, popping them once it has.
+    /// Resolves the promise of the resolver below the top value, with that
+    /// value, popping both once it has.
     fn resolve_promise(
         &mut self,
-        n: usize,
-        resolution: impl FnOnce(Option<Value>) -> promises::Resolution,
+        resolution: impl FnOnce(Value) -> promises::Resolution,
     ) -> Result<(), Error> {
         if self.cut.is_some() {
             return Err(Error::new(
                 "a promise resolves outside a cut, or in its commit hook",
             ));
         }
-        let depth = self.require(n)?;
-        let resolver = self.state.stack[depth - n].clone();
-        let value = (n == 2).then(|| self.state.stack[depth - 1].clone());
-        if let Some(value) = &value {
-            self.runtime.assembler.values().require(value)?;
-        }
+        let depth = self.require(2)?;
+        let resolver = self.state.stack[depth - 2].clone();
+        let value = self.state.stack[depth - 1].clone();
+        self.runtime.assembler.values().require(&value)?;
         let resolver = self.runtime.assembler.evaluator().eval(&resolver)?;
         self.runtime.promises.resolve(
             &self.runtime.assembler.values(),
@@ -1642,7 +1708,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             &resolver.into_value(),
             resolution(value),
         )?;
-        self.state.stack.truncate(depth - n);
+        self.state.stack.truncate(depth - 2);
         Ok(())
     }
 
@@ -1669,8 +1735,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
         let path = key_path(path);
-        let value = self.pop_own()?;
-        self.store_edit(|journal| journal.write(path.clone(), value.clone()))
+        let value = self.peek()?.clone();
+        self.runtime.assembler.values().require(&value)?;
+        self.store_edit(|journal| journal.write(path.clone(), value.clone()))?;
+        self.pop()?;
+        Ok(())
     }
 
     /// Pops a function and rewrites the value at `path` in the shared heap
@@ -1681,8 +1750,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
         let path = key_path(path);
-        let updater = self.pop_own()?;
-        self.store_edit(|journal| journal.rewrite(path.clone(), updater.clone()))
+        let updater = self.peek()?.clone();
+        self.runtime.assembler.values().require(&updater)?;
+        self.store_edit(|journal| journal.rewrite(path.clone(), updater.clone()))?;
+        self.pop()?;
+        Ok(())
     }
 
     /// Pops `n` values and writes them, in order, to this machine's output
@@ -1890,20 +1962,35 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     ) -> Result<T, Error> {
         if let Some(cut) = &mut self.cut {
             cut.observed = true;
-            return action(&mut cut.events.ports);
+        }
+        self.transact(|_, events| action(&mut events.ports))
+    }
+
+    /// Runs `action` on this machine's cut's journals, or, outside a cut,
+    /// on fresh ones that commit at once, as one transaction, again where
+    /// the commit conflicts. Where `action` fails, nothing it did commits.
+    fn transact<T>(
+        &mut self,
+        mut action: impl FnMut(&mut StoreJournal, &mut RuntimeEventJournal) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        if let Some(cut) = &mut self.cut {
+            let (mut journal, mut events) = (cut.journal.clone(), cut.events.clone());
+            let result = action(&mut journal, &mut events)?;
+            (cut.journal, cut.events) = (journal, events);
+            return Ok(result);
         }
         let resources = self.resources();
         loop {
             let (_, store, events) = resources.transaction_snapshot();
-            let store = StoreJournal::new(store);
+            let mut store = StoreJournal::new(store);
             let mut events = RuntimeEventJournal::new(events);
-            let result = action(&mut events.ports)?;
+            let result = action(&mut store, &mut events)?;
             match resources.try_commit_transaction(&store, &events) {
                 StoreCommitResult::Committed => return Ok(result),
                 StoreCommitResult::Conflict => continue,
                 StoreCommitResult::MissingVolume(volume) => {
                     return Err(Error::new(format!(
-                        "reflection volume {} was revoked before the port action committed",
+                        "reflection volume {} was revoked before the action committed",
                         volume.get()
                     )));
                 }
@@ -2250,12 +2337,6 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Pops a value, checking that it belongs to this runtime before the
     /// store takes it.
-    fn pop_own(&mut self) -> Result<Value, Error> {
-        let value = self.pop()?;
-        self.runtime.assembler.values().require(&value)?;
-        Ok(value)
-    }
-
     /// Pops the top value into local state at `key`, replacing what was
     /// there.
     pub fn set(&mut self, key: impl Into<Key>) -> Result<(), Error> {
@@ -2293,11 +2374,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             ));
         }
         let path = self.path.clone();
-        self.port_action(|ports| {
-            ports.clear_below(&path);
-            Ok(())
-        })?;
-        let unbound = self.runtime.assembler.values().empty_dict();
+        let unset = self.runtime.assembler.values().empty_dict();
         let cleared = if path.is_empty() {
             vec![
                 vec![environment::SHARE.clone()],
@@ -2306,10 +2383,17 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         } else {
             vec![environment::environment_node(&path)]
         };
-        self.store_edit(|journal| {
+        if let Some(cut) = &mut self.cut {
+            // Clearing the ports claims what the inputs hold.
+            cut.observed = true;
+        }
+        self.transact(|store, events| {
+            events.ports.clear_below(&path);
             for node in &cleared {
-                journal.write_environment(node.clone(), unbound.clone());
+                store.write_environment(node.clone(), unset.clone());
             }
+            events.shares.clear_below(path.clone());
+            Ok(())
         })?;
         self.state = MachineState::default();
         Ok(())
@@ -2403,3 +2487,10 @@ mod promises;
 
 #[cfg(test)]
 mod tests;
+
+/// The bytes an evaluated binary holds.
+fn binary(evaluated: crate::api::EvaluatedValue) -> Result<Bytes, Error> {
+    evaluated
+        .as_bytes()?
+        .ok_or_else(|| Error::new("the top value is not binary data"))
+}

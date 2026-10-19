@@ -279,12 +279,13 @@ handle API goes.
    (`machines-inherit-an-environment`, maintainer, 2026-10-19), in place of
    the reflection environment an assembler's builder seals, which `.env`
    reads today.
-   - A machine binds one object, a mixin, as its share of the environment,
-     only in its own turns and transactionally. Its environment is its
-     ancestors' shares composed from the root down: `.env []` is one
-     object, built lazily, and a read of it, whole or at a path, is
-     observed, so a cut that read it runs again when a share above it
-     changes. Shares live in a store of the runtime, keyed by machine path,
+   - A machine sets one object, a mixin, as its share of the environment,
+     only in its own turns and transactionally, and may get it back to
+     extend, or clear it (`set_env_mixin`, `get_env_mixin`,
+     `clear_env_mixin`). Its environment is its ancestors' mixins composed
+     from the root down: `.env []` is one object, built lazily, and a read
+     of it, whole or at a path, is observed, so a cut that read it runs
+     again when a mixin above it changes. Shares live in a store of the runtime, keyed by machine path,
      so reflection tasks read them through their hosts until they are
      machines.
    - What is not known yet is a promised value within a share, waited on
@@ -499,7 +500,10 @@ named:
 - The process environment's variables, which the CLI builds with the
   handle API and pushes onto the root's stack
   (`glam::transition::push_value`), since a machine's dicts are keyed by
-  name and these by byte strings: `api-handle-retirement`.
+  name and these by byte strings: `api-handle-retirement`. A direction
+  for it (maintainer, 2026-10-19): users may take temporary handles to
+  values, branded by a scope that `m.scope()` isolates, so building a
+  value outside a machine's operations needs no bridge.
 
 ### Policy in glam (experiment)
 
@@ -1370,6 +1374,39 @@ maintainer's agreement):
   binding and composing the environment and wiring the logger, under half a
   percent of `minimal`'s.
 
+`api-machine-environment`, mixins, presence and atomic operations
+(2026-10-19, after the maintainer's review):
+- `m.bind_env()` becomes `m.set_env_mixin()`, beside `m.get_env_mixin()`,
+  which pushes the machine's own mixin, or an empty object where it has
+  none, to extend and set again, and `m.clear_env_mixin()` (maintainer).
+- A record of which machines have a mixin, in the runtime's transactional
+  event state beside the ports (`ShareRecord`, `ShareJournal`), changes
+  with the mixin in one transaction. Composing an environment takes from
+  it the mixins there are, so nothing tests a place in the volume against
+  `{}`, and mixins are stored as themselves: the list of one, which only
+  kept a set place from reading as `{}` while `default` tested it, goes
+  (maintainer). A reader still observes every place in the chain, set or
+  not, so setting a mixin later conflicts with it or wakes it. A machine
+  with a mixin is present in walks (maintainer).
+- Every machine operation is atomic: it succeeds per its contract, or
+  fails having done nothing, reflection aside (maintainer). Review found
+  `make_list`, `make_dict`, `access`, `anno`, `apply`, `compile_over`,
+  `heap_set`, `heap_rewrite`, the evaluating pops (`pop_int`,
+  `pop_bytes`, `pop_text`, `pop_atom_name`, `unpack_list`) and `clear`
+  changing something before they could fail; they now build first and
+  change the stack, or commit, last (`replace_top`, `pop_evaluated`, and
+  `transact`, which commits store and events as one transaction). A
+  failed `pop_atom_name` now leaves its atom, which one test relied on.
+- `break_promise` takes `fulfill`'s shape: it pops a value, a message or
+  a diagnostic, then a resolver, and breaks the promise with the value as
+  its failure's emission (maintainer). The CLI's broken argument promises
+  carry "configured CLI expansion failed" again.
+- Tests: a machine extending its own mixin and clearing it, and a machine
+  holding only a mixin present in walks (`tests/runtime_environment.rs`);
+  an operation that fails doing nothing (`tests/runtime_api.rs`); a
+  broken promise's readers failing with its message
+  (`src/api/turn/tests.rs`).
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
@@ -1378,6 +1415,10 @@ fixes force the bad interleaving in a test; repeated runs are not proof
 the public API, in `tests/`.
 
 ## Open Questions (2026-10-18)
+
+- A promise resolves only outside a cut, since a resolution cannot be
+  undone: a known limitation (maintainer, 2026-10-19). Revisit promises
+  whose resolution a failed cut undoes once the heaps are fast enough.
 
 - Names, per step (above).
 - Hook errors, settled at `api-machine-errors` (maintainer, 2026-10-19):

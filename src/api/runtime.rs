@@ -31,6 +31,7 @@ mod events;
 mod gc_activity_inventory;
 mod ports;
 mod readiness;
+mod shares;
 
 pub use events::*;
 use events::{
@@ -45,6 +46,7 @@ use readiness::{
     RuntimeSettlementSnapshot, reasoning_diagnostic, runtime_deadlock_work_from_snapshot,
     runtime_disposition_from_snapshot, runtime_killed_failure,
 };
+pub(in crate::api) use shares::ShareJournal;
 
 fn maintenance_failure_kind(
     kind: RuntimeGcMaintenanceFailureKind,

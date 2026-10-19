@@ -28,10 +28,11 @@ struct PendingPromises {
     roots: BTreeMap<u64, ManagedPromiseRoot>,
 }
 
-/// How a promise resolves.
+/// How a promise resolves: with a value, or broken with a message or a
+/// diagnostic.
 pub(super) enum Resolution {
     Fulfill(Value),
-    Break,
+    Break(Value),
 }
 
 /// A resolver's payload: which promise of which runtime it resolves.
@@ -109,17 +110,14 @@ impl Promises {
             .roots
             .remove(&id)
             .ok_or_else(|| Error::new("the promise was already resolved"))?;
-        let outcome = match &resolution {
-            Resolution::Fulfill(value) => Some(value),
-            Resolution::Break => None,
-        };
         let published = values.core().with_boundary_access(|access| {
             promise.publish(
                 &access,
-                match outcome {
-                    Some(value) => Ok(value.0.clone_core_with(&access)),
-                    None => Err(Arc::new(EvaluationFailure::message(
-                        "the promise was broken",
+                match &resolution {
+                    Resolution::Fulfill(value) => Ok(value.0.clone_core_with(&access)),
+                    Resolution::Break(failure) => Err(Arc::new(EvaluationFailure::emission_in(
+                        &access,
+                        failure.0.clone_core_with(&access),
                     ))),
                 },
             )

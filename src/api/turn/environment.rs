@@ -1,12 +1,16 @@
-//! Where machines' shares of their environment lie, and the environment
+//! Where machines' mixins of their environment lie, and the environment
 //! that reflection's hosts read from them (`machines-inherit-an-environment`).
+//! A machine's mixin is its share of the environment: the store holds it,
+//! and the runtime's share record says which machines have one.
 
 use std::sync::LazyLock;
 
+use crate::api::Value;
 use crate::core::Key;
 use crate::runtime::RuntimeValueRoot;
 
-use super::super::runtime::RuntimeSharedResources;
+use super::super::runtime::{RuntimeSharedResources, ShareJournal};
+use super::CutTransaction;
 
 /// The machine, a direct child of the root, whose environment reflection's
 /// tasks read, and through whose diagnostics port the runtime's own
@@ -36,14 +40,25 @@ pub(in crate::api) fn environment_share(machine: &[Key]) -> Vec<Key> {
     path
 }
 
-/// The paths of the shares that compose the environment of the machine at
-/// `machine`, the most specific first: its own, then each ancestor's, to
-/// the root's.
+/// The machines whose mixins compose the environment of the machine at
+/// `machine`, the most specific first: it, then each ancestor, to the root.
 pub(in crate::api) fn environment_chain(machine: &[Key]) -> Vec<Vec<Key>> {
     (0..=machine.len())
         .rev()
-        .map(|depth| environment_share(&machine[..depth]))
+        .map(|depth| machine[..depth].to_vec())
         .collect()
+}
+
+/// The mixin of the machine at `machine` within `cut`, where it has one,
+/// observing its place in the store, set or not, so that a cut that read it
+/// runs again when it changes.
+pub(super) fn observed_mixin(cut: &mut CutTransaction, machine: &[Key]) -> Option<Value> {
+    let path = environment_share(machine);
+    cut.observed |= cut.journal.observe_environment_read(&path);
+    cut.events
+        .shares
+        .is_set(machine)
+        .then(|| cut.journal.environment_value(&path))
 }
 
 /// The environment of the machine at `machine`, composed from the shares
@@ -55,10 +70,16 @@ pub(in crate::api) fn committed_environment(
     machine: &[Key],
     base: &RuntimeValueRoot,
 ) -> RuntimeValueRoot {
-    let (_, store, _) = resources.transaction_snapshot();
-    let stored = environment_chain(machine)
+    let (_, store, events) = resources.transaction_snapshot();
+    let shares = ShareJournal::new(&events.shares);
+    let mixins = environment_chain(machine)
         .iter()
-        .map(|path| store.environment_value(path).into_runtime_root())
+        .filter(|machine| shares.is_set(machine))
+        .map(|machine| {
+            store
+                .environment_value(&environment_share(machine))
+                .into_runtime_root()
+        })
         .collect();
-    crate::g_syntax::composed_environment_root(resources.values.core(), stored, Some(base))
+    crate::g_syntax::composed_environment_root(resources.values.core(), mixins, Some(base))
 }

@@ -53,17 +53,19 @@ impl PreparedAssembly {
         })
     }
 
-    /// Breaks the promises of `process.args` and `process.refl_args`, where
-    /// the command's expansion failed.
-    pub(super) fn fail_environment(&mut self) {
+    /// Breaks the promises of `process.args` and `process.refl_args` with
+    /// `message`, where the command's expansion failed.
+    pub(super) fn fail_environment(&mut self, message: &str) {
         if !std::mem::take(&mut self.environment_pending) {
             return;
         }
         let _ = self.runtime.run((), |root| {
-            root.get("args_resolver")?;
-            root.break_promise()?;
-            root.get("refl_args_resolver")?;
-            root.break_promise()
+            for resolver in ["args_resolver", "refl_args_resolver"] {
+                root.get(resolver)?;
+                root.push_text(message);
+                root.break_promise()?;
+            }
+            Ok(())
         });
     }
 }
@@ -152,7 +154,7 @@ fn bind_process(
     root.take(CLI, 1)?;
     root.swap()?;
     root.apply(1)?;
-    root.bind_env()
+    root.set_env_mixin()
 }
 
 /// Fulfills the root's promises of `process.args` and `process.refl_args`.

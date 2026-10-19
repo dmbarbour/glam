@@ -212,7 +212,7 @@ fn reflection_reads_the_refl_machine_s_environment_over_its_sealed_one() {
     rt.run((), |root| {
         root.compile(["shares"], [ModuleInput::script("g", shares)])?;
         root.access("root_share")?;
-        root.bind_env()
+        root.set_env_mixin()
     })
     .expect("the root binds its share");
     let assembler = rt.assembler();
@@ -233,5 +233,34 @@ fn reflection_reads_the_refl_machine_s_environment_over_its_sealed_one() {
     assert!(
         !text(&["glam", "version"]).is_empty(),
         "the sealed environment lies beneath"
+    );
+}
+
+#[test]
+fn a_broken_promise_fails_its_readers_with_its_message() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let error = rt
+        .run("m", |m| {
+            m.promise();
+            m.push_text("the reason it broke");
+            m.break_promise()?;
+            Ok(m.pop_int().expect_err("the promise was broken"))
+        })
+        .expect("the turn should succeed");
+    let values = rt.assembler().values();
+    let diagnostic = error
+        .diagnostic(&values)
+        .expect("a failure has a diagnostic");
+    let text = values
+        .access_names(diagnostic.emission(), ["msg", "text"])
+        .expect("the path composes");
+    let text = rt
+        .assembler()
+        .evaluator()
+        .eval(&text)
+        .expect("the message evaluates");
+    assert_eq!(
+        text.as_bytes().unwrap().as_deref(),
+        Some(b"the reason it broke".as_slice())
     );
 }

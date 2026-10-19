@@ -87,19 +87,16 @@ pub(crate) fn defined_or_root(values: &CoreValueFactory) -> RuntimeValueRoot {
     compiler_values::defined_or_root(values)
 }
 
-/// A machine's environment, composed from what its machines' shares store,
-/// the most specific first (`machines-inherit-an-environment`): an anonymous
-/// object extending each share as `object _ extends ...` would, so a share
-/// overrides those after it. Each share is wrapped in an anonymous object of
-/// its own, so named and anonymous shares mix in any order. A bound share is
-/// stored as a list of one, and one never bound reads `{}`, standing for an
-/// empty object: a list is never logically `{}`, so telling them apart
-/// forces nothing within the share, such as a promised value. Beneath them
-/// all lies `base`, a plain dictionary, where there is one. Nothing is
-/// evaluated.
+/// A machine's environment, composed from the mixins that it and its
+/// ancestors set, the most specific first (`machines-inherit-an-environment`):
+/// an anonymous object extending each mixin as `object _ extends ...` would,
+/// so a mixin overrides those after it. Each is wrapped in an anonymous
+/// object of its own, so named and anonymous mixins mix in any order. Beneath
+/// them all lies `base`, a plain dictionary, where there is one. With none,
+/// it is an empty object. Nothing is evaluated.
 pub(crate) fn composed_environment_root(
     values: &CoreValueFactory,
-    stored: Vec<RuntimeValueRoot>,
+    mixins: Vec<RuntimeValueRoot>,
     base: Option<&RuntimeValueRoot>,
 ) -> RuntimeValueRoot {
     let empty_defs = compiler_values::empty_object_defs_root(values);
@@ -124,20 +121,9 @@ pub(crate) fn composed_environment_root(
                 vec![base.clone_core_with(&access)],
             ))
         });
-        let levels = stored
+        let levels = mixins
             .iter()
-            .map(|stored| {
-                let bound = Value::builtin_call_in(
-                    &access,
-                    Builtin::Default,
-                    vec![
-                        Value::List(crate::core::List::from_values(vec![anonymous(Vec::new())])),
-                        stored.clone_core_with(&access),
-                    ],
-                );
-                let share = Value::builtin_call_in(&access, Builtin::ListHead, vec![bound]);
-                spec(anonymous(vec![spec(share)]))
-            })
+            .map(|mixin| spec(anonymous(vec![spec(mixin.clone_core_with(&access))])))
             .chain(base)
             .collect();
         access.root_runtime_value(anonymous(levels))

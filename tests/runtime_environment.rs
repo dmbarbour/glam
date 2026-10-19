@@ -1,4 +1,4 @@
-//! A machine's environment: the shares that it and its ancestors bind,
+//! A machine's environment: the mixins that it and its ancestors set,
 //! composed from the root down (`machines-inherit-an-environment`).
 
 use std::sync::mpsc;
@@ -15,8 +15,10 @@ object root_share with
     name = \"root\"
 object child_share with
     name := \"child\"
-object clashing_share with
-    name = \"clash\"
+object own_share with
+    own = \"mine\"
+extended mixin = mixin with
+    extra = \"more\"
 ";
 
 /// Binds the object `share`, which the module above defines, as the
@@ -24,7 +26,7 @@ object clashing_share with
 fn bind(m: &mut Machine<'_, '_>, share: &str) -> Result<(), Error> {
     m.compile(["shares"], [ModuleInput::script("g", SHARES)])?;
     m.access(share)?;
-    m.bind_env()
+    m.set_env_mixin()
 }
 
 /// The text at `path` in the machine's environment, evaluated.
@@ -136,4 +138,62 @@ fn a_cut_waiting_on_its_environment_wakes_when_an_ancestor_binds() {
         })
         .expect("the turn should succeed");
     assert_eq!(name, "root", "the binding woke the cut, which read it");
+}
+
+#[test]
+fn a_machine_extends_its_own_mixin_and_may_clear_it() {
+    let mut rt = runtime();
+    rt.run((), |root| bind(root, "root_share"))
+        .expect("the root sets its mixin");
+    let (extended, kept) = rt
+        .run("c", |c| {
+            c.get_env_mixin();
+            c.access("greeting")?;
+            c.eval()?;
+            assert_eq!(c.kind()?, ValueKind::Dict, "it has no mixin of its own yet");
+            c.discard(1)?;
+
+            bind(c, "own_share")?;
+            c.compile(["shares"], [ModuleInput::script("g", SHARES)])?;
+            c.access("extended")?;
+            c.get_env_mixin();
+            c.apply(1)?;
+            c.set_env_mixin()?;
+            let extended = (read(c, "own")?, read(c, "extra")?, read(c, "greeting")?);
+
+            c.clear_env_mixin()?;
+            c.env();
+            c.access("own")?;
+            c.eval()?;
+            assert_eq!(c.kind()?, ValueKind::Dict, "its mixin is gone");
+            c.discard(1)?;
+            Ok((extended, read(c, "greeting")?))
+        })
+        .expect("the turn should succeed");
+    assert_eq!(
+        extended,
+        ("mine".to_owned(), "more".to_owned(), "hello".to_owned()),
+        "its own mixin, extended and set again, over the root's"
+    );
+    assert_eq!(kept, "hello", "cleared, the environment is its ancestors'");
+}
+
+#[test]
+fn a_machine_with_a_mixin_is_present() {
+    let mut rt = runtime();
+    rt.run(["p", "c"], |c| bind(c, "root_share"))
+        .expect("a machine sets its mixin");
+    let walked = |rt: &mut Runtime| {
+        rt.machines("p")
+            .map(|(path, _)| path.keys().len())
+            .collect::<Vec<_>>()
+    };
+    assert_eq!(
+        walked(&mut rt),
+        [2],
+        "p/c holds only its mixin, and is present"
+    );
+    rt.run(["p", "c"], |c| c.clear_env_mixin())
+        .expect("it clears its mixin");
+    assert!(walked(&mut rt).is_empty(), "then nothing holds it");
 }

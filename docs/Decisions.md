@@ -2266,11 +2266,15 @@ maps the short names used here to file names.
   seal an environment in advance, and an interactive host may need to
   change one.
 - **Decision:**
-  - A machine binds one object, a mixin, as its share of the environment,
-    only in its own turns and transactionally. Its environment is its
-    ancestors' shares composed from the root down, so `.env []` is one
-    object, built lazily and recomputed as shares above it change, and a
-    read of it is observed, as any read of state is.
+  - A machine sets one object, a mixin, as its share of the environment,
+    only in its own turns and transactionally, and may get it back, to
+    extend and set again, or clear it (`set_env_mixin`, `get_env_mixin`,
+    `clear_env_mixin`; maintainer, the same day). Its environment is its
+    ancestors' mixins composed from the root down, so `.env []` is one
+    object, built lazily and recomputed as mixins above it change, and a
+    read of it is observed, as any read of state is. Which machines have a
+    mixin is recorded beside the mixins, so composing an environment
+    evaluates nothing, and a machine with a mixin is present.
   - What is not known yet is a promised value within a share, so a reader
     waits on that alone, not on the whole environment: the CLI's root binds
     `process.args` and `process.refl_args` as promises it fulfills after

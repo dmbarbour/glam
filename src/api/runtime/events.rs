@@ -7,6 +7,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use super::ports::{PortAddress, PortJournal, PortState};
+use super::shares::{ShareJournal, ShareRecord};
 use super::{RuntimeSharedResources, publish_runtime_observation};
 use crate::api::{Error, Value};
 use crate::core::Key;
@@ -177,6 +178,8 @@ pub(in crate::api) struct RuntimeEventState {
     diagnostic_routes: BTreeMap<RuntimeInputEndpointId, PortAddress>,
     /// Machines' port buffers and wiring.
     pub(in crate::api) ports: PortState,
+    /// Which machines have a share of their environment.
+    pub(in crate::api) shares: ShareRecord,
 }
 
 impl RuntimeEventState {
@@ -186,6 +189,7 @@ impl RuntimeEventState {
             outputs: RuntimeOutputState::default(),
             diagnostic_routes: BTreeMap::new(),
             ports: PortState::new(),
+            shares: ShareRecord::new(),
         }
     }
 
@@ -194,6 +198,7 @@ impl RuntimeEventState {
             runtime,
             inputs: self.inputs.clone(),
             ports: self.ports.clone(),
+            shares: self.shares.clone(),
         }
     }
 
@@ -276,7 +281,8 @@ impl RuntimeEventState {
                 .push_back(intent.delivery);
         }
         let ports_changed = self.ports.commit(&journal.ports);
-        input_changed || !journal.outputs.is_empty() || ports_changed
+        let shares_changed = self.shares.commit(&journal.shares);
+        input_changed || !journal.outputs.is_empty() || ports_changed || shares_changed
     }
 
     fn admit_input(
@@ -313,6 +319,7 @@ pub struct RuntimeEventSnapshot {
     runtime: EvaluationRuntimeId,
     pub(in crate::api) inputs: RedBlackTreeMapSync<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
     pub(in crate::api) ports: PortState,
+    pub(in crate::api) shares: ShareRecord,
 }
 
 #[derive(Clone)]
@@ -340,12 +347,15 @@ pub struct RuntimeEventJournal {
     outputs: Vec<RuntimeOutputIntent>,
     /// Machines' port actions in this transaction.
     pub(in crate::api) ports: PortJournal,
+    /// Which machines this transaction gave a share, or took one from.
+    pub(in crate::api) shares: ShareJournal,
 }
 
 impl RuntimeEventJournal {
     #[doc(hidden)]
     pub fn new(snapshot: RuntimeEventSnapshot) -> Self {
         let ports = PortJournal::new(snapshot.ports.clone());
+        let shares = ShareJournal::new(&snapshot.shares);
         Self {
             runtime: snapshot.runtime,
             snapshot,
@@ -353,7 +363,16 @@ impl RuntimeEventJournal {
             cursors: BTreeMap::new(),
             outputs: Vec::new(),
             ports,
+            shares,
         }
+    }
+
+    /// The machines below `machine` that hold state here: port state, or a
+    /// share of their environment.
+    pub(in crate::api) fn present_below(&self, machine: &[Key]) -> BTreeSet<Vec<Key>> {
+        let mut present = self.ports.present_below(machine);
+        present.extend(self.shares.set_below(machine));
+        present
     }
 
     /// Reads and claims the next value from `input` in this transaction's
