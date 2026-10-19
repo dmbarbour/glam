@@ -275,10 +275,34 @@ handle API goes.
         `MainEffects` and the logger's `EffectRun` retire.
      Later, `logger/fallback` applies the glam formatter, into which the
      Rust frame summaries of `rendering.rs` move.
-   - CLI slice, environment: `process.args` and `process.refl_args` become
-     state at paths that the CLI writes after expansion, in place of
-     promises.
-7. `api-request-queues` — absorbs `lifecycle-queues`. A request queue is,
+7. `api-machine-environment` — machines inherit an environment
+   (`machines-inherit-an-environment`, maintainer, 2026-10-19), in place of
+   the reflection environment an assembler's builder seals, which `.env`
+   reads today.
+   - A machine binds one object, a mixin, as its share of the environment,
+     only in its own turns and transactionally. Its environment is its
+     ancestors' shares composed from the root down: `.env []` is one
+     object, built lazily, and a read of it, whole or at a path, is
+     observed, so a cut that read it runs again when a share above it
+     changes. Shares live in a store of the runtime, keyed by machine path,
+     so reflection tasks read them through their hosts until they are
+     machines.
+   - What is not known yet is a promised value within a share, waited on
+     alone: a small machine API allocates a promise and fulfills or breaks
+     it, its resolver an opaque glam value whose second resolution fails,
+     which `api-request-queues` builds on.
+   - Reflection tasks are logical children of a `refl` machine under the
+     root: it supplies their environment, and the runtime's own
+     diagnostics leave through its diagnostics output rather than entering
+     the root's input, so a host may intervene there. Each role's machine
+     binds its `glam` entry.
+   - The composed environment's cost is measured before anything caches
+     it, within a transaction or across them by the shares' revisions.
+   - CLI slice: the CLI's root binds `process` in its share, with
+     `process.args` and `process.refl_args` promised values that the CLI
+     fulfills after `conf.cli`'s expansion, in place of the builder's
+     promises, which retire with its environment closure.
+8. `api-request-queues` — absorbs `lifecycle-queues`. A request queue is,
    logically, transactional operations on a log in the heap or a volume,
    whose elements pair a value with an optional promise, so writes and
    queries mix in one queue (the lifecycle review's decision 8). Whether
@@ -302,7 +326,7 @@ handle API goes.
      order; a second resolution fails; a collected resolver, or one broken
      by hand, breaks the request; a resolver reads the status; a status
      change wakes a cut that failed on it.
-8. `api-reflection-model` — a design step, without code, ahead of the
+9. `api-reflection-model` — a design step, without code, ahead of the
    settlement it shapes (maintainer, 2026-10-19): how the reflection API, as
    `refl.*` and `anno refl:(…)` present it, maps to machines. Spawned tasks
    (`.task.new` and its relatives) become named machines in the tree that
@@ -323,7 +347,7 @@ handle API goes.
      network is designed. Reflection's operations come when it is time,
      such as `.todo.add`, `.todo.del` and `.todo.list` (maintainer, the same
      day).
-9. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+10. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
    decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
    quiescent when every machine waits on input or a heap change, retrying
    its current atomic step, and no evaluation work remains; turns in
@@ -339,7 +363,7 @@ handle API goes.
    machine as it was.
    - CLI slice: the CLI's two settlement loops become one, and the bridge
      behavior below that settlement retires goes.
-10. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
+11. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
    `lifecycle-host-calls` (L3, L7, L8, L9). The reflection hosts
    (`AssemblerReflectionHost`, `LoggerTaskHost`, `IsolatedTaskHost`) reduce
    to queues and store state that machines serve, and `TaskHost`'s
@@ -354,7 +378,7 @@ handle API goes.
      reads, for the manifest and the final check that no file changed. The
      CLI opens its runtime with `Runtime::open`, and the bridge's
      constructor goes.
-11. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+12. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
     - The turn supplies the effects API, evaluates the program to weak-head
@@ -377,13 +401,13 @@ handle API goes.
       providers, their per-branch journals become machine state that cuts
       restore, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
       public API.
-12. `api-handle-retirement` — the public handle types go: `Assembler`,
+13. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-13. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+14. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions
@@ -418,11 +442,11 @@ need no runtime, and stay as they are.
 
 | Concern | Today | Needs | Steps |
 |---|---|---|---|
-| Preparation | `FileSourceSystem`, `EvaluationRuntime`, `DiagnosticBus`, and an `Assembler` whose reflection environment holds two promises | an owner, then the environment and sources in their target form | 2, 6, 10 |
+| Preparation | `FileSourceSystem`, `EvaluationRuntime`, `DiagnosticBus`, and an `Assembler` whose reflection environment holds two promises | an owner, then the environment and sources in their target form | 2, 6, 7, 11 |
 | Configuration and assembly | compiles `configuration` and `assembly` over initial definitions; access, `defined_or`, `context:` annotations, evaluation to bytes | data operations | 3 |
-| Logging | `DefaultLogger` renders as a subscriber; a configured logger is an `EffectRun` on its own thread with `MainEffects` (`read_log`, `write_stderr`), supervised, with a fallback endpoint | forks, ports, then turns that run effects | 5, 6, 11 |
-| Settlement | two loops over readiness, maintenance, deadlock kills and quiescence reports | the reflection model, then `rt.settle()` and a report that a machine emits | 8, 9 |
-| Configured CLI | `conf.cli` runs as an isolated effect search over argv: `CliEffects`, with nested `TokenEffects` searches, per-branch journals, and a search again for each completion candidate | effect providers | 11 |
+| Logging | `DefaultLogger` renders as a subscriber; a configured logger is an `EffectRun` on its own thread with `MainEffects` (`read_log`, `write_stderr`), supervised, with a fallback endpoint | forks, ports, then turns that run effects | 5, 6, 12 |
+| Settlement | two loops over readiness, maintenance, deadlock kills and quiescence reports | the reflection model, then `rt.settle()` and a report that a machine emits | 9, 10 |
+| Configured CLI | `conf.cli` runs as an isolated effect search over argv: `CliEffects`, with nested `TokenEffects` searches, per-branch journals, and a search again for each completion candidate | effect providers | 12 |
 
 ### The bridge
 
@@ -462,9 +486,13 @@ named:
   reflection model's implementation.
 - The runtime's own diagnostics, routed from the assembler's bus into the
   root's diagnostics input as if a child had sent them, and one whose
-  routing fails waiting at the root: the reflection model's
-  implementation, when reflection tasks are machines whose writes fail as
-  any machine's do.
+  routing fails waiting at the root: `api-machine-environment` moves the
+  route to the `refl` machine's diagnostics output, and the reflection
+  model's implementation retires it, when reflection tasks are machines
+  whose writes fail as any machine's do.
+- The reflection environment that an assembler's builder seals, with
+  promises it creates for `process.args` and `process.refl_args`:
+  `api-machine-environment`.
 
 ### Policy in glam (experiment)
 
@@ -561,13 +589,13 @@ Before the handles go, turns cover what `tests/public_api.rs` (47 tests),
   reading operations (3);
 - promises, protected volumes, reflection environments and roles, by state
   at paths, request queues, and volumes allocated through the reflection
-  API (6, 7, 10);
+  API (7, 8, 11);
 - the diagnostic formatter and diagnostic updates, by the logger machine
   (6);
 - reasoning reports, retryable blocked errors and draining, by settlement
-  (9);
-- sources, imports, invocations and provenance, by hosts as machines (10);
-- effect specialization, by effect providers (11);
+  (10);
+- sources, imports, invocations and provenance, by hosts as machines (11);
+- effect specialization, by effect providers (12);
 - conflict analysis and workers, by `RuntimeConfig` and `activate_workers`
   (1, 2).
 

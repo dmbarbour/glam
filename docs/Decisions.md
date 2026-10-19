@@ -2251,6 +2251,45 @@ maps the short names used here to file names.
   and the hand-over is its own rewiring (maintainer, the same day).
 - **Recorded in:** runtime API plan, `api-ports`.
 
+### Machines inherit an environment that each binds a share of
+`machines-inherit-an-environment` · 2026-10-19 · maintainer · accepted
+- **Context:** `.env Path`, a reader of an environment controlled from
+  outside, reads one immutable dictionary that an assembler's builder
+  seals: `process.*`, and a `glam.*` entry per role. `process.args` and
+  `process.refl_args` depend on `conf.cli`'s expansion, which runs within
+  that environment, so they are promises the builder creates and the CLI
+  fulfills. The builder and its resolvers are handle API, a turn cannot
+  seal an environment in advance, and an interactive host may need to
+  change one.
+- **Decision:**
+  - A machine binds one object, a mixin, as its share of the environment,
+    only in its own turns and transactionally. Its environment is its
+    ancestors' shares composed from the root down, so `.env []` is one
+    object, built lazily and recomputed as shares above it change, and a
+    read of it is observed, as any read of state is.
+  - What is not known yet is a promised value within a share, so a reader
+    waits on that alone, not on the whole environment: the CLI's root binds
+    `process.args` and `process.refl_args` as promises it fulfills after
+    expansion. A small machine API allocates and fulfills promises.
+  - Reflection tasks are logical children of a `refl` machine under the
+    root, which supplies their environment and through whose diagnostics
+    output their logs pass, so a host may intervene there. Each role's
+    machine binds its `glam` entry.
+  - Shares live in a store of the runtime, keyed by machine path, so
+    reflection tasks read them through their hosts until they are machines.
+- **Alternatives rejected:** a promise of the whole environment left on the
+  root machine's stack, which binds once, waits on everything at once, and
+  hides the convention on a stack; the shared heap, which any task may
+  overwrite and whose unwritten paths read as undefined; a protected volume
+  with a read-only capability, which readers would call rather than read,
+  and which must still be sealed in advance; bindings per path rather than
+  one object per machine.
+- **Consequences:** `.env` reads, free while the environment was immutable,
+  are observed, and a program reading one often may keep `.env []`; the
+  runtime may cache the composition, by measurement. The builder's
+  environment closure and its promise resolvers retire from the CLI.
+- **Recorded in:** runtime API plan, `api-machine-environment`.
+
 ### Quiescence is every machine waiting; settlement reports what remains unresolved
 `quiescence-reports-unresolved-state` · 2026-10-19 · maintainer · accepted
 - **Context:** the batch CLI has no clear end, unlike `--interactive`, which
