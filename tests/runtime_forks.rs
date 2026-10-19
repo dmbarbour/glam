@@ -149,21 +149,16 @@ fn a_panic_in_a_fork_resumes_at_its_join_and_marks_each_machine_it_unwinds() {
         })
     }));
     assert!(panicked.is_err(), "the panic resumes through the turn");
-    for path in [vec!["m"], vec!["m", "p"]] {
-        let error = rt
-            .run(path, |_| Ok(()))
-            .expect_err("the panic left the machine in error");
-        assert!(error.to_string().contains("in error"), "{error}");
-    }
-    let (errors, kept) = rt
+    assert!(
+        rt.failed("m") && rt.failed(["m", "p"]),
+        "the panic left each machine it unwound in error"
+    );
+    let kept = rt
         .recover(["m", "p"], |p| {
-            let errors = p.unpack_list()?;
-            p.discard(errors)?;
             p.get("before")?;
-            Ok((errors, p.pop_int()?))
+            p.pop_int()
         })
         .expect("the machine recovers after a panic");
-    assert_eq!(errors, 1, "the panic's diagnostic");
     assert_eq!(kept, 5, "a fork's changes stay when it unwinds");
 
     let unjoined = catch_unwind(AssertUnwindSafe(|| {
@@ -200,16 +195,9 @@ fn a_join_returns_the_fork_s_outcome_and_its_machine_stays_in_error() {
         ] {
             assert!(error.to_string().contains("in error"), "{error}");
         }
-        let (errors, left) = m.recover("f", |f| {
-            let errors = f.unpack_list()?;
-            f.discard(errors)?;
-            Ok((errors, f.pop_int()?))
-        })?;
-        assert_eq!(
-            (errors, left),
-            (1, 7),
-            "the error's diagnostic sits above what the fork left"
-        );
+        assert!(m.failed("f")?, "observing the error recovered nothing");
+        let left = m.recover("f", |f| f.pop_int())?;
+        assert_eq!(left, 7, "the fork's machine is as its turn left it");
         m.run("f", |_| Ok(()))?;
 
         let failing = m.fork("g", |g| Err(g.fail()))?;
@@ -258,12 +246,9 @@ fn implicit_joins_propagate_the_first_error_in_join_order() {
         })
         .expect_err("an unjoined fork's error ends the turn");
     assert_eq!(error.to_string(), "e errs");
-    let errors = rt
-        .recover("n", |n| n.unpack_list())
-        .expect("the turn's machine recovers");
-    assert_eq!(
-        errors, 1,
-        "the fork's error left the turn's machine in error too"
+    assert!(
+        rt.failed("n") && rt.failed(["n", "e"]),
+        "the fork's error left its machine, and the turn's, in error"
     );
 }
 

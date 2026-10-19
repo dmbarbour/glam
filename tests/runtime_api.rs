@@ -144,11 +144,7 @@ fn an_operation_without_its_values_fails_and_the_turn_keeps_what_it_did() {
         .expect_err("apply needs a function and an argument");
     assert!(underflow.to_string().contains("needs 2"), "{underflow}");
     let kept = rt
-        .recover("m", |m| {
-            let errors = m.unpack_list()?;
-            m.discard(errors)?;
-            m.pop_int()
-        })
+        .recover("m", |m| m.pop_int())
         .expect("the recovering turn should succeed");
     assert_eq!(kept, 1, "a turn is not atomic");
 }
@@ -156,66 +152,36 @@ fn an_operation_without_its_values_fails_and_the_turn_keeps_what_it_did() {
 #[test]
 fn a_turn_that_ends_in_error_leaves_its_machine_in_error_until_recovered() {
     let mut rt = runtime();
+    assert!(!rt.failed("m"), "an absent machine is in no error");
     rt.run("m", |m| {
         m.push_int(1);
         Err::<(), _>(Error::new("the turn errs"))
     })
     .expect_err("the turn erred");
+    assert!(rt.failed("m"));
     let error = rt
         .run("m", |_| Ok(()))
         .expect_err("returning the error recovered nothing");
     assert!(error.to_string().contains("in error"), "{error}");
+    assert!(rt.failed("m"), "asking, or being refused, recovers nothing");
     rt.run(["m", "child"], |c| {
         c.push_int(2);
         Ok(())
     })
     .expect("only a machine's own error bars it, not its parent's");
 
-    let (errors, below) = rt
-        .recover("m", |m| {
-            let errors = m.unpack_list()?;
-            m.discard(errors)?;
-            Ok((errors, m.pop_int()?))
-        })
+    let below = rt
+        .recover("m", |m| m.pop_int())
         .expect("a recovering turn enters");
     assert_eq!(
-        (errors, below),
-        (1, 1),
-        "the list of diagnostics sits on the stack as the turn left it"
+        below, 1,
+        "the turn finds the machine as the failed turn left it"
     );
-    let errors = rt
-        .recover("m", |m| m.unpack_list())
+    assert!(!rt.failed("m"));
+    rt.recover("m", |_| Ok(()))
         .expect("a recovering turn enters a machine in no error too");
-    assert_eq!(errors, 0, "with an empty list");
     rt.run("m", |_| Ok(()))
         .expect("the machine takes turns again");
-}
-
-#[test]
-fn a_registered_error_marks_the_machine_without_doubling() {
-    let mut rt = runtime();
-    rt.run("m", |m| {
-        m.register_error(&Error::new("the state is spoiled"));
-        Ok(())
-    })
-    .expect("the turn itself succeeds");
-    rt.run("m", |_| Ok(()))
-        .expect_err("the registered error left the machine in error");
-    let errors = rt
-        .recover("m", |m| m.unpack_list())
-        .expect("the machine recovers");
-    assert_eq!(errors, 1);
-
-    rt.run("m", |m| -> Result<(), Error> {
-        let error = Error::new("returned early");
-        m.register_error(&error);
-        Err(error)
-    })
-    .expect_err("the turn returns its error");
-    let errors = rt
-        .recover("m", |m| m.unpack_list())
-        .expect("the machine recovers");
-    assert_eq!(errors, 1, "what the turn registered describes it");
 }
 
 #[test]
@@ -228,14 +194,11 @@ fn a_panicking_turn_leaves_its_machine_in_error() {
         })
     }));
     assert!(panicked.is_err());
-    let (errors, kept) = rt
-        .recover("m", |m| {
-            let errors = m.unpack_list()?;
-            m.discard(errors)?;
-            Ok((errors, m.pop_int()?))
-        })
+    assert!(rt.failed("m"));
+    let kept = rt
+        .recover("m", |m| m.pop_int())
         .expect("the machine recovers after a panic");
-    assert_eq!((errors, kept), (1, 3));
+    assert_eq!(kept, 3);
 }
 
 #[test]
@@ -250,6 +213,7 @@ fn a_descendant_in_error_bars_its_parent_s_operations_until_recovered() {
             })
             .expect_err("the child's turn erred");
         assert_eq!(error.to_string(), "the child errs");
+        assert!(m.failed("child")?);
         for error in [
             m.run("child", |_| Ok(()))
                 .expect_err("the child is in error"),
@@ -259,10 +223,9 @@ fn a_descendant_in_error_bars_its_parent_s_operations_until_recovered() {
             assert!(error.to_string().contains("in error"), "{error}");
         }
         m.recover("child", |_| Ok(()))?;
-        m.take("child", 2)?;
-        let errors = m.unpack_list()?;
-        m.discard(errors)?;
-        assert_eq!((errors, m.pop_int()?), (1, 9));
+        assert!(!m.failed("child")?);
+        m.take("child", 1)?;
+        assert_eq!(m.pop_int()?, 9);
         Ok(())
     })
     .expect("the parent's turn should succeed");

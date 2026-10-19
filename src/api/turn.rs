@@ -37,7 +37,6 @@ use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
 use crate::core::Key;
-use crate::diagnostic::Severity;
 use crate::reflection::{ConflictAnalysisStrategy, StoreCommitResult, StoreJournal};
 
 /// What opening a runtime takes. It configures the runtime alone:
@@ -185,11 +184,10 @@ struct MachineState {
     stash: Vec<Value>,
     locals: HashMap<Key, Value>,
     children: HashMap<Key, Child>,
-    /// The diagnostics of the errors that left the machine logically in
-    /// error: a turn that ended in one or panicked, or a registration. Until
-    /// a recovering entry takes them, nothing enters the machine or its
-    /// state.
-    errors: Vec<Value>,
+    /// Whether the machine is in error: a turn on it ended in an error or a
+    /// panic. Until a recovering entry clears it, nothing enters the machine
+    /// or its state.
+    failed: bool,
 }
 
 /// How an operation reaches a descendant. Only the descendant's own error
@@ -218,11 +216,21 @@ impl MachineState {
             && self.stash.is_empty()
             && self.locals.is_empty()
             && self.children.is_empty()
-            && self.errors.is_empty()
+            && !self.failed
     }
 
-    fn failed(&self) -> bool {
-        !self.errors.is_empty()
+    /// The descendant at `path`, if present, without creating it. It fails
+    /// when the descendant, or a machine between, is forked.
+    fn find(&self, path: &[Key]) -> Result<Option<&MachineState>, Error> {
+        let mut state = self;
+        for (depth, key) in path.iter().enumerate() {
+            match state.children.get(key) {
+                None => return Ok(None),
+                Some(Child::Idle(child)) => state = child,
+                Some(Child::Forked) => return Err(forked(&path[..=depth])),
+            }
+        }
+        Ok(Some(state))
     }
 
     /// The descendant at `path`, created empty if absent. It fails when the
@@ -238,7 +246,7 @@ impl MachineState {
             {
                 Child::Idle(child) => {
                     let target = depth + 1 == path.len();
-                    if target && reach == Reach::Enter && child.failed() {
+                    if target && reach == Reach::Enter && child.failed {
                         return Err(failed(path));
                     }
                     state = child;
@@ -271,7 +279,7 @@ impl MachineState {
         // Only the forked machine's own error bars it, checked below.
         let parent = self.descendant(parent, Reach::Internal)?;
         match parent.children.insert(key.clone(), Child::Forked) {
-            Some(Child::Idle(state)) if state.failed() => {
+            Some(Child::Idle(state)) if state.failed => {
                 parent.children.insert(key.clone(), Child::Idle(state));
                 Err(failed(path))
             }
@@ -316,7 +324,7 @@ impl MachineState {
                 Some(Child::Forked) => return Err(forked(&path[..=depth])),
             }
         }
-        if state.failed() {
+        if state.failed {
             return Err(failed(path));
         }
         Ok(())
@@ -331,7 +339,7 @@ fn forked(path: &[Key]) -> Error {
 
 fn failed(path: &[Key]) -> Error {
     Error::new(format!(
-        "machine {path:?} is in error until a recovering entry takes its errors"
+        "machine {path:?} is in error until a recovering entry enters it"
     ))
 }
 
@@ -399,10 +407,9 @@ impl Runtime {
         self.enter(path.into(), Reach::Enter, turn)
     }
 
-    /// As [`Self::run`], for a machine that may be in error: the turn starts
-    /// with a list of the diagnostics of its errors pushed onto its stack,
-    /// as the failed turns left it, and the list is empty when it is not in
-    /// error.
+    /// As [`Self::run`], for a machine that may be in error: it clears the
+    /// error, and the turn finds the machine as the failed turn left it, to
+    /// inspect and repair by its own conventions.
     pub fn recover<'env, R>(
         &'env mut self,
         path: impl Into<MachinePath>,
@@ -418,19 +425,15 @@ impl Runtime {
         turn: impl for<'scope> FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error>,
     ) -> Result<R, Error> {
         let Runtime { root, shared, .. } = self;
-        if path.keys().is_empty() && reach == Reach::Enter && root.failed() {
+        if path.keys().is_empty() && reach == Reach::Enter && root.failed {
             return Err(failed(&[]));
         }
-        let state = std::mem::take(root.descendant(path.keys(), reach)?);
+        let mut state = std::mem::take(root.descendant(path.keys(), reach)?);
+        state.failed &= reach != Reach::Recover;
         let shared: &'env Shared = shared;
         let (state, outcome) = thread::scope(|scope| {
             let mut machine = Machine::new(shared, scope, state);
-            let outcome = machine.take_turn(|m| {
-                if reach == Reach::Recover {
-                    m.push_errors()?;
-                }
-                turn(m)
-            });
+            let outcome = machine.take_turn(turn);
             (machine.state, outcome)
         });
         *root
@@ -438,6 +441,16 @@ impl Runtime {
             .expect("no machine is forked between turns") = state;
         root.prune(path.keys());
         outcome.unwrap_or_else(|panic| resume_unwind(panic))
+    }
+
+    /// Whether the machine at `path` is in error, which only
+    /// [`Self::recover`] clears. An absent machine is an empty one, in no
+    /// error.
+    pub fn failed(&self, path: impl Into<MachinePath>) -> bool {
+        self.root
+            .find(path.into().keys())
+            .expect("no machine is forked between turns")
+            .is_some_and(|state| state.failed)
     }
 }
 
@@ -554,17 +567,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             (Ok(Ok(result)), None) => Ok(fork_error.map_or(Ok(result), Err)),
             (Ok(Err(error)), None) => Ok(Err(error)),
         };
-        match &outcome {
-            Err(panic) => {
-                let diagnostic = self.panic_value(panic.as_ref());
-                self.state.errors.push(diagnostic);
-            }
-            // Errors the turn registered describe its machine already.
-            Ok(Err(error)) if !self.state.failed() => {
-                let diagnostic = self.error_value(error);
-                self.state.errors.push(diagnostic);
-            }
-            Ok(_) => {}
+        if matches!(outcome, Err(_) | Ok(Err(_))) {
+            self.state.failed = true;
         }
         outcome
     }
@@ -625,8 +629,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// As [`Self::run`], for a descendant that may be in error, as
-    /// [`Runtime::recover`] is: the turn starts with a list of the
-    /// diagnostics of its errors, possibly empty, pushed onto its stack.
+    /// [`Runtime::recover`] is: it clears the error, and the turn finds the
+    /// descendant as the failed turn left it.
     pub fn recover<'b, R>(
         &mut self,
         path: impl Into<MachinePath>,
@@ -647,7 +651,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     where
         'scope: 'b,
     {
-        let state = std::mem::take(self.state.descendant(&path, reach)?);
+        let mut state = std::mem::take(self.state.descendant(&path, reach)?);
+        state.failed &= reach != Reach::Recover;
         let runtime: &'b Shared = self.runtime;
         let cut = self.cut.take();
         let cut_offset = match cut {
@@ -658,12 +663,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             let mut child = Machine::new(runtime, scope, state);
             child.cut = cut;
             child.cut_offset = cut_offset;
-            let outcome = child.take_turn(|c| {
-                if reach == Reach::Recover {
-                    c.push_errors()?;
-                }
-                turn(c)
-            });
+            let outcome = child.take_turn(turn);
             (child.state, child.cut, outcome)
         });
         self.cut = cut;
@@ -675,49 +675,12 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         outcome.unwrap_or_else(|panic| resume_unwind(panic))
     }
 
-    /// Pushes a list of the diagnostics of this machine's errors, taking
-    /// them, as a recovering entry does.
-    fn push_errors(&mut self) -> Result<(), Error> {
-        let errors = std::mem::take(&mut self.state.errors);
-        let list = self.runtime.assembler.values().list(errors)?;
-        self.push(list);
-        Ok(())
-    }
-
-    /// Registers `error` as leaving this machine logically in error, apart
-    /// from any logging: once this turn ends, nothing enters the machine
-    /// until a recovering entry takes its errors. A turn that registered an
-    /// error and then ends in one keeps only what it registered.
-    pub fn register_error(&mut self, error: &Error) {
-        let diagnostic = self.error_value(error);
-        self.state.errors.push(diagnostic);
-    }
-
-    /// The diagnostic object of an error, for a machine's errors.
-    fn error_value(&self, error: &Error) -> Value {
-        let values = self.runtime.assembler.values();
-        error
-            .diagnostic(&values)
-            .and_then(|diagnostic| diagnostic.enrich(&values))
-            .unwrap_or_else(|_| self.message_value(&error.to_string()))
-    }
-
-    /// The diagnostic object of a panic that ended a turn.
-    fn panic_value(&self, panic: &(dyn Any + Send)) -> Value {
-        let message = panic
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("a panic");
-        self.message_value(&format!("a turn panicked: {message}"))
-    }
-
-    fn message_value(&self, message: &str) -> Value {
-        let values = self.runtime.assembler.values();
-        let diagnostic = Diagnostic::new(&values, Severity::Error, message);
-        diagnostic
-            .enrich(&values)
-            .unwrap_or_else(|_| diagnostic.emission().clone())
+    /// Whether the descendant at `path` is in error, which only
+    /// [`Self::recover`] clears. An absent descendant is an empty one, in no
+    /// error. It fails when the descendant, or a machine between, is forked.
+    pub fn failed(&self, path: impl Into<MachinePath>) -> Result<bool, Error> {
+        let path = descendant_path(path)?;
+        Ok(self.state.find(&path)?.is_some_and(|state| state.failed))
     }
 
     /// Moves the top `n` values, keeping their order, onto the stack of the

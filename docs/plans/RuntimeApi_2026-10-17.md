@@ -165,10 +165,9 @@ handle API goes.
      its fork reruns the outermost cut (maintainer, 2026-10-18).
    - Then `api-machine-errors` (maintainer, 2026-10-19;
      `machine-errors-mark-and-recover`): an error or panic that ends a
-     turn leaves its machine in error, which only a recovering entry
-     enters, pushing a list of the errors' diagnostics; forks return
-     nothing to Rust, and their joins return their outcome; hooks handle
-     their own errors. Diagnostics, first planned as machine state, go
+     turn sets its machine's error flag, which only a recovering entry
+     clears; forks return nothing to Rust, and their joins return their
+     outcome; hooks handle their own errors. Diagnostics, first planned as machine state, go
      instead to communication (below).
    - After it, `api-fine-grained-reruns` (maintainer, 2026-10-18): today
      every inconsistency reruns the outermost cut, whether a commit
@@ -854,28 +853,25 @@ another cut or scope, and a fork leaving its scope.
 
 `api-machine-errors` (2026-10-19), in `src/api/turn.rs`, after a discussion
 with the maintainer that day:
-- A machine's state holds its errors: the diagnostic objects (each an
-  `Error`'s diagnostic, enriched) of what left it logically in error. An
-  error or panic that ends a turn records itself, whether the turn was the
-  runtime's, a descendant's or a fork's; a panic that unwinds through
-  several turns marks each machine it leaves. Observing the error, as a
-  turn's result or a join's, never recovers it.
-- Entry: `rt.run` and `m.run` fail on a machine in error without entering.
-  `rt.recover` and `m.recover` enter any machine and push a list of its
-  errors' diagnostics, empty when it has none, onto its stack as the
-  failed turns left it, taking them. `give`, `take` and `fork` fail on a
-  machine in error. Only the target's own error bars it: a machine in
-  error between bars nothing below it (maintainer). Forking a machine in
-  error is refused; the parent recovers it first.
-- `m.register_error(&error)` marks the turn's machine apart from any
-  logging. A turn that registered errors and then ends in one keeps only
-  what it registered, so a turn that registers an error and returns it
-  records it once.
+- A machine's state holds an error flag. An error or panic that ends a
+  turn sets it, whether the turn was the runtime's, a descendant's or a
+  fork's; a panic that unwinds through several turns flags each machine it
+  leaves. Nothing else sets it, and observing the error, as a turn's
+  result or a join's, never clears it. A flagged machine is not pruned.
+- Entry: `rt.run` and `m.run` fail on a flagged machine without entering.
+  `rt.recover` and `m.recover` clear the flag and enter the machine as the
+  failed turn left it. `give`, `take` and `fork` fail on a flagged
+  machine. Only the target's own flag bars it: a flagged machine between
+  bars nothing below it (maintainer). Forking a flagged machine is
+  refused; the parent recovers it first.
+- `rt.failed(path)` and `m.failed(path)` read the flag without clearing
+  it; an absent machine is in no error, and the machine's version fails
+  where a machine on the path is forked.
 - Forks return nothing to Rust: `m.fork`'s closure returns `Result<(),
   Error>`, a fork leaves what it computed on its machine's stack, for
   `take` after the join, and `Fork<'scope>` carries no result type. `m.join`
   returns the fork's outcome, success, a failure (`Backtrack`) or another
-  error, and the forked machine stays in error.
+  error, and the forked machine stays flagged.
 - Implicit joins, at the end of a turn, cut attempt or `m.scope`, join in
   the order the forks were made, and the outcome is the body's own error,
   or else the first fork's: an operation diverges if a join does, and
@@ -883,21 +879,22 @@ with the maintainer that day:
   returns a `Result`.
 - Hooks are `FnOnce(&mut Machine) + Send + 'static` and return nothing:
   they handle their own failures, and a cut's outcome is only its own. A
-  hook runs on its machine even if a later error left it in error, since
-  it sees only the values it captured.
-- Diagnostics are not captured in machine state, as first proposed: a long
-  turn would hold them back. They are left to communication, at the ports
-  re-plan of `api-heap-communication`.
-- Tests: `tests/runtime_api.rs` covers a turn's error marking its machine,
-  recovery pushing the list as the turn left it, an empty list, a
-  registered error without doubling, a panic marking, and a descendant in
-  error barring its parent's operations. `tests/runtime_forks.rs` covers a
-  join returning a fork's outcome with its machine left in error, a
-  failure staying `Backtrack`, implicit joins in join order after the
-  body, and a panic marking each machine it unwinds. The forked tests
-  elsewhere leave their counts on their machines' stacks; a cut's forked
-  reader now fails until its value is ready, and the cut waits on what it
-  read.
+  hook runs on its machine even if a later error flagged it, since it sees
+  only the values it captured.
+- First built the same day with a list of the errors' diagnostics in place
+  of the flag, pushed by recovery, and `m.register_error`; the maintainer
+  reduced it to the flag, since recovery reads the machine's state, not
+  messages. Diagnostics are left to communication, at the ports re-plan of
+  `api-heap-communication`.
+- Tests: `tests/runtime_api.rs` covers a turn's error flagging its machine,
+  the queries, recovery finding the machine as the turn left it and
+  entering an unflagged one, a panic flagging, and a descendant in error
+  barring its parent's operations. `tests/runtime_forks.rs` covers a join
+  returning a fork's outcome with its machine left flagged, a failure
+  staying `Backtrack`, implicit joins in join order after the body, and a
+  panic flagging each machine it unwinds. The forked tests elsewhere leave
+  their counts on their machines' stacks; a cut's forked reader now fails
+  until its value is ready, and the cut waits on what it read.
 
 ## Verification
 

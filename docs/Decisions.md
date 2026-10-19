@@ -2128,27 +2128,31 @@ maps the short names used here to file names.
   hook's error replaced its cut's outcome by a rule the maintainer was
   unsure of.
 - **Decision:**
-  - An error or panic that ends a turn leaves its machine in error: the
-    error's diagnostic joins the machine's state. Observing an error, as a
-    turn's or a join's result, never recovers it.
-  - Recovery is an entry: `rt.recover` and `m.recover` enter a machine
-    and push a list of its errors' diagnostics, possibly empty, onto its
-    stack as it was left, while `run`, `give`, `take` and `fork` fail on a
-    machine in error. No machine runs normally with a pending error, and
-    whoever recovers knows what is on the stack. Only the target's own
-    error matters, not that of machines between.
-  - `m.register_error` marks a machine logically in error apart from
-    logging diagnostics; what a turn registered describes it, so its
-    escaping error is not recorded again.
+  - An error or panic that ends a turn sets its machine's error flag, part
+    of the machine's state. Only that sets it, and only as the turn
+    returns. Observing an error, as a turn's or a join's result, never
+    clears it.
+  - Recovery is an entry: `rt.recover` and `m.recover` clear the flag and
+    enter the machine as the failed turn left it, to inspect and repair by
+    its own conventions, while `run`, `give`, `take` and `fork` fail on a
+    machine in error. No machine runs normally with a pending error. Only
+    the target's own flag matters, not that of machines between.
+  - `rt.failed(path)` and `m.failed(path)` read the flag without clearing
+    it, so a host or parent decides whether and how to recover.
   - Forks return nothing to Rust: what a fork computes stays on its
     machine's stack. A join returns the fork's outcome, keeping success,
     failure (`Backtrack`) and divergence (another error) apart, and an
     implicit join propagates them: the body's own outcome first, then the
     forks' in the deterministic order they were made.
   - Hooks return nothing and handle their own errors.
-  - Panics resume at the join, explicit or implicit, and mark each machine
+  - Panics resume at the join, explicit or implicit, and flag each machine
     whose turn they unwind.
 - **Alternatives rejected:**
+  - first built the same day: a list of the errors' diagnostics in the
+    machine's state, pushed onto its stack by recovery, with
+    `m.register_error` to add one before returning. Diagnostics serve
+    people, not recovery, which needs the machine's state, and the
+    registration took only Rust errors (maintainer, the same day);
   - marking only errors nobody received, which assumed the tree;
   - a separate acknowledgement operation, or acknowledgement within a turn,
     either of which conflates recovery with running;
@@ -2158,7 +2162,10 @@ maps the short names used here to file names.
     open non-determinism's interaction with transactions and backtracking.
 - **Consequences:** settlement can find every machine left in error. The
   open question on hook errors is settled. A fork's results travel as
-  glam values, as a machine's always have.
+  glam values, as a machine's always have. Of several forks that fail at
+  an implicit join, only the first's error reaches the outcome; the
+  others leave their flags, and their diagnostics await the diagnostics
+  channel of the ports re-plan.
 - **Recorded in:** runtime API plan, `api-machine-errors`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
