@@ -306,6 +306,16 @@ Their sections hold their earlier evidence.
   a validation per waiter. A wake indexed by what each waiter observed
   keeps the contract. Measure once machines wait in numbers, from
   `api-request-queues`.
+- **Port routing** (`perf-port-routing`), not measured, after the
+  representations, as the runtime API plan goes ahead of performance
+  (maintainer, 2026-10-19). As `api-ports` built them, each write walks
+  the wiring from the writer's output, through its parent's and its own
+  wires and the pass-throughs on the way, every time; any wiring change
+  conflicts with every transaction that routed (one revision); `pending`
+  scans all buffers; and buffers are never removed. Routes could be
+  cached by wiring revision and collapsed through switchboards, wiring
+  observed per owner, and buffers indexed by machine. Measure once ports
+  carry the CLI's diagnostics.
 - **Debug annotations** (`perf-debug-annotations`). Each module definition
   carries `anno {context: {g: {origin, line, definition}}} value` for
   diagnostics; building without it saved 8 to 10% of the `chain` family

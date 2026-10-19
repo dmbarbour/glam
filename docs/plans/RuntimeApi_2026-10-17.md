@@ -196,7 +196,8 @@ handle API goes.
      again; `m.retry()` raises it (maintainer). Within a cut, a port
      operation that cannot proceed returns `Retry`. Outside one, `read`
      and `write` block until they can, as a Kahn network's do, and
-     `try_read` and `try_write` return `Retry` instead (maintainer). The
+     `try_read` returns `Retry` instead (maintainer); `try_write` comes
+     with bounded buffers, deferred (maintainer, 2026-10-19). The
      outermost cut still turns a `Backtrack` from its last alternative
      into such a wait. A cut variant that returns `Retry` instead of
      waiting belongs with `api-alternatives`.
@@ -219,13 +220,13 @@ handle API goes.
      (maintainer), so a reader drains a port with a static `n`.
    - Buffers belong to receiving ports: several wires from one port
      duplicate, several into one merge in commit order. They are unbounded
-     by default (maintainer: for reflection's purposes, at the risk any
-     evaluation already runs), with a capacity that blocks the writer as an
-     option; dropping with a report, or breaking the connection, later.
-   - Buffers and wiring live in the reflection store, in a private volume,
-     so they are serializable within cuts, and an empty read or a full
-     buffer waits through the existing wakes. Their cost is measured before
-     anything specializes them.
+     (maintainer: for reflection's purposes, at the risk any evaluation
+     already runs). Bounded buffers, with a capacity that blocks the
+     writer, are deferred, to keep this simple (maintainer, 2026-10-19);
+     dropping with a report, or breaking the connection, later still.
+   - Buffers and wiring are transactional state, serializable within cuts,
+     and a short read waits through the existing wakes. Their cost is
+     measured before anything specializes them (`perf-port-routing`).
    - Unwired ports do not default to their parent's (maintainer). The
      diagnostics wiring is part of the runtime's default configuration,
      with an option for none (maintainer): each child's diagnostics output
@@ -986,8 +987,8 @@ with the maintainer that day:
   the machine's output through the wires its ancestors own and the
   pass-throughs of machines on the way, appending each value to every
   buffer reached; an output with no wire on the way is a plain error, and
-  a loop is an error. `try_write` is the same until buffers may be
-  bounded. `read(port, n)` and `try_read` claim `n` values or meet
+  a loop is an error. `try_write`, the same as `write` while buffers are
+  unbounded, was removed when bounded buffers were deferred. `read(port, n)` and `try_read` claim `n` values or meet
   pushback, `Retry`: within a cut both return it, and outside one `read`
   waits, as a failed cut does, while `try_read` returns it. `available`,
   `input_connected` and `output_connected` observe; `wire` and `unwire`

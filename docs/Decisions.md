@@ -2210,12 +2210,13 @@ maps the short names used here to file names.
     child, and a child's output to its input collects from the child. A
     value reaching an output follows every wire from it, its parent's
     outward and its own inward. Wiring is transactional state.
-  - Buffers belong to receiving ports, unbounded by default. Several wires
-    from one port duplicate, and several into one merge in commit order.
+  - Buffers belong to receiving ports, unbounded; bounded buffers are
+    deferred (maintainer, the same day). Several wires from one port
+    duplicate, and several into one merge in commit order.
   - Too few to read, or a full buffer, is pushback: a divergence, the new
     error kind `Retry`, which a cut recognizes by waiting and running
     again, while `Backtrack` stays for alternatives. Outside a cut, `read`
-    and `write` block, and `try_read` and `try_write` return `Retry`. A
+    and `write` block, and `try_read` returns `Retry`. A
     write to an unconnected output is a plain error.
   - Diagnostics wiring is default configuration, with an option for none
     (`DiagnosticsWiring`): each child's diagnostics output to its parent's

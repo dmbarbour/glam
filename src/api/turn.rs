@@ -1486,12 +1486,6 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
-    /// As [`Self::write`]; once buffers may be bounded, it returns
-    /// [`ErrorKind::Retry`] where a write would wait.
-    pub fn try_write(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
-        self.write(port, n)
-    }
-
     /// Pushes the next `n` values of this machine's input `port`, in the
     /// order they arrived, taking them. It reads what is committed, never
     /// this transaction's own writes. When fewer than `n` are there, it is
