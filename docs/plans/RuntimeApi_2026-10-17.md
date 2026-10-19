@@ -293,9 +293,9 @@ handle API goes.
      which `api-request-queues` builds on.
    - Reflection tasks are logical children of a `refl` machine under the
      root: it supplies their environment, and the runtime's own
-     diagnostics leave through its diagnostics output rather than entering
-     the root's input, so a host may intervene there. Each role's machine
-     binds its `glam` entry.
+     diagnostics enter its diagnostics input, as if they were its
+     children's, passing through to the root's by default, so a host may
+     intervene there. Each role's machine binds its `glam` entry.
    - The composed environment's cost is measured before anything caches
      it, within a transaction or across them by the shares' revisions.
    - CLI slice: the CLI's root binds `process` in its share, with
@@ -486,10 +486,16 @@ named:
   reflection model's implementation.
 - The runtime's own diagnostics, routed from the assembler's bus into the
   root's diagnostics input as if a child had sent them, and one whose
-  routing fails waiting at the root: `api-machine-environment` moves the
-  route to the `refl` machine's diagnostics output, and the reflection
+  routing fails waiting where it entered: `api-machine-environment` moves
+  the route to the `refl` machine's diagnostics input, and the reflection
   model's implementation retires it, when reflection tasks are machines
   whose writes fail as any machine's do.
+- Reflection's hosts reading the `refl` machine's environment as the
+  shares stand, outside any transaction, over the role's sealed
+  environment, so a change to a share wakes no task that read it, and the
+  CLI's logger host taking its environment once, through
+  `glam::transition::reflection_environment`: the reflection model's
+  implementation.
 - The reflection environment that an assembler's builder seals, with
   promises it creates for `process.args` and `process.refl_args`:
   `api-machine-environment`.
@@ -1306,6 +1312,28 @@ maintainer's agreement):
   waits); outside a cut, an unresolved promise as pushback that pops
   nothing; single resolution, the refusal within a cut, a broken promise's
   readers failing, and a value that is no resolver.
+
+`api-machine-environment`, reflection's environment (2026-10-19):
+- Once a `Runtime` holds its runtime, machines supply reflection's
+  environment: an assembler's reflection host, the assembly's and each
+  compilation's macro host alike, reads the `refl` machine's environment,
+  composed from the shares as they stand, over the environment it was
+  sealed with, which lies beneath them all (`ObjectFromDict`). An
+  assembler without a `Runtime` reads its sealed environment as before.
+  Roles still derive from the sealed environment, a plain dictionary, so
+  each role's `glam` entry stays there for now.
+- The reads are outside any transaction, a bridge until reflection tasks
+  are machines: a promised value in a share wakes its waiters, as a promise
+  wakes any work, but rebinding a share wakes no task that read it.
+- The runtime's own diagnostics enter the `refl` machine's diagnostics
+  input, as if they were its children's, and pass through to the root's by
+  default; one whose routing fails waits at `refl`.
+- `glam::transition::reflection_environment(machine, role)` gives the CLI
+  a role's environment as a machine sees it, for the configured logger's
+  host, which the CLI creates within a turn.
+- Tests in `src/api/turn/tests.rs`: reflection reading the `refl`
+  machine's environment over its sealed one, and the runtime's diagnostics
+  following the root's wiring through `refl`.
 
 ## Verification
 

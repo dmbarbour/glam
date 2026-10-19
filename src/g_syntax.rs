@@ -94,11 +94,13 @@ pub(crate) fn defined_or_root(values: &CoreValueFactory) -> RuntimeValueRoot {
 /// its own, so named and anonymous shares mix in any order. A bound share is
 /// stored as a list of one, and one never bound reads `{}`, standing for an
 /// empty object: a list is never logically `{}`, so telling them apart
-/// forces nothing within the share, such as a promised value. Nothing is
+/// forces nothing within the share, such as a promised value. Beneath them
+/// all lies `base`, a plain dictionary, where there is one. Nothing is
 /// evaluated.
 pub(crate) fn composed_environment_root(
     values: &CoreValueFactory,
     stored: Vec<RuntimeValueRoot>,
+    base: Option<&RuntimeValueRoot>,
 ) -> RuntimeValueRoot {
     let empty_defs = compiler_values::empty_object_defs_root(values);
     values.with_boundary_access(|access| {
@@ -115,6 +117,13 @@ pub(crate) fn composed_environment_root(
         };
         let spec =
             |object: Value| Value::builtin_call_in(&access, Builtin::ObjectSpec, vec![object]);
+        let base = base.map(|base| {
+            spec(Value::builtin_call_in(
+                &access,
+                Builtin::ObjectFromDict,
+                vec![base.clone_core_with(&access)],
+            ))
+        });
         let levels = stored
             .iter()
             .map(|stored| {
@@ -129,6 +138,7 @@ pub(crate) fn composed_environment_root(
                 let share = Value::builtin_call_in(&access, Builtin::ListHead, vec![bound]);
                 spec(anonymous(vec![spec(share)]))
             })
+            .chain(base)
             .collect();
         access.root_runtime_value(anonymous(levels))
     })

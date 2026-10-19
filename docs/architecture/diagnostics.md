@@ -92,8 +92,11 @@ original event or publish a second message.
 ## Runtime Diagnostic Ingress
 
 A runtime binds its assembler bus and installs one long-lived
-`DiagnosticIngress`, which routes every diagnostic into the root machine's
-`diagnostics` input (`machines-communicate-through-wired-ports`). The ingress
+`DiagnosticIngress`, which routes every diagnostic into the `diagnostics`
+input of the `refl` machine under the root, as if its children had sent it,
+so by default it passes through to the root's input
+(`machines-communicate-through-wired-ports`,
+`machines-inherit-an-environment`). The ingress
 converts
 each structured diagnostic to a runtime-rooted transport value before entering
 runtime mutation admission. Valid bus publication remains counted even if

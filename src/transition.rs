@@ -20,6 +20,14 @@ pub fn assembler(runtime: &Runtime) -> &Assembler {
     runtime.assembler()
 }
 
+/// The reflection environment of `role` as `machine` sees it: its shares,
+/// as they stand, over the role's sealed environment. Used by the CLI's
+/// `configuration::logger` module for the configured logger's host, until
+/// loggers are turns.
+pub fn reflection_environment(machine: &Machine<'_, '_>, role: &str) -> Value {
+    machine.reflection_environment(role)
+}
+
 /// Pops a machine's top value without evaluating it. Used by the CLI's
 /// `configuration` module to hand the configuration, and the logger it
 /// selects, to what has not moved to turns, and by its

@@ -9,6 +9,7 @@ use super::DiagnosticCounts;
 use super::diagnostics::DiagnosticCallback;
 use super::error::net_build_error;
 use super::runtime::RuntimeSharedResources;
+use super::turn::environment::{REFL, committed_environment};
 use super::{
     Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, DiagnosticSubscription,
     Error, EvaluationRuntime, NetBuilder, NetPort, PromiseResolver, ReasoningFailure,
@@ -74,7 +75,7 @@ impl CompilationExecution {
         ));
         host.seal_environment(reflection_environment_for_role(
             &reasoning.runtime.values(),
-            &reasoning.environment(),
+            &reasoning.sealed_environment(),
             "macro",
         ))?;
         let task_profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
@@ -248,12 +249,30 @@ impl AssemblerReflectionHost {
     }
 }
 
-impl TaskEnvironment for AssemblerReflectionHost {
-    fn reflection_environment(&self) -> Value {
+impl AssemblerReflectionHost {
+    /// The environment this host was sealed with, a plain dictionary.
+    fn sealed_environment(&self) -> &RuntimeValueRoot {
         self.reflection_environment
             .get()
             .expect("reasoning host must be sealed before it runs tasks")
-            .value(self.resources.id)
+    }
+}
+
+impl TaskEnvironment for AssemblerReflectionHost {
+    /// The sealed environment, or, once machines supply reflection's
+    /// environment, the `refl` machine's over it
+    /// (`machines-inherit-an-environment`).
+    fn reflection_environment(&self) -> Value {
+        let sealed = self.sealed_environment();
+        if self.resources.machine_environment() {
+            Value::from_runtime_root(committed_environment(
+                &self.resources,
+                std::slice::from_ref(&*REFL),
+                sealed,
+            ))
+        } else {
+            sealed.value(self.resources.id)
+        }
     }
 }
 
@@ -396,6 +415,12 @@ impl ReasoningSession {
 
     fn environment(&self) -> Value {
         self.host.reflection_environment()
+    }
+
+    /// The environment the session's host was sealed with, from which the
+    /// environments of other roles derive.
+    fn sealed_environment(&self) -> Value {
+        self.host.sealed_environment().value(self.runtime.id())
     }
 
     fn diagnostics(&self) -> DiagnosticBus {
@@ -1033,11 +1058,13 @@ impl Assembler {
 
     /// Returns this session environment with another authoritative reasoning
     /// role. Service sessions retain the client-provided environment while
-    /// identifying themselves independently from the assembler session.
+    /// identifying themselves independently from the assembler session. It
+    /// derives from the environment the session was sealed with, beneath any
+    /// that machines supply.
     pub fn reflection_environment_for_role(&self, role: impl AsRef<str>) -> Value {
         reflection_environment_for_role(
             &self.values(),
-            &self.reasoning.environment(),
+            &self.reasoning.sealed_environment(),
             role.as_ref(),
         )
     }

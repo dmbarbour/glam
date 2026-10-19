@@ -2231,8 +2231,10 @@ maps the short names used here to file names.
     reports what it owns beside the rule that applies (maintainer, the same
     day). Until reflection
     tasks are machines, the runtime routes its own diagnostics, the
-    assembler's bus, into the root's diagnostics input, as if a child had
-    sent them, so they follow the root's wiring.
+    assembler's bus, into the diagnostics input of a `refl` machine under
+    the root, as if its children had sent them, so by default they pass
+    through to the root's input and follow its wiring
+    (`machines-inherit-an-environment`).
   - `m.pending()` lists a machine's inputs holding values, a read of all
     its buffers, so a cut waiting on it wakes when any input receives.
 - **Alternatives rejected:** communication by heap logs with readers'

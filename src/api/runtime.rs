@@ -1,5 +1,6 @@
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind};
+use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(test)]
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
@@ -199,6 +200,10 @@ pub(crate) struct RuntimeSharedResources {
     pub(super) ids: Arc<RuntimeIds>,
     pub(super) mutation_admission: Arc<RuntimeMutationAdmission>,
     pub(super) work: Weak<EvaluationWorkCoordinator>,
+    /// Whether machines supply reflection's environment, from shares that
+    /// they bind, as they do once a `Runtime` holds the runtime
+    /// (`machines-inherit-an-environment`).
+    machine_environment: AtomicBool,
 }
 
 pub(super) struct RuntimeTransactionState {
@@ -277,6 +282,16 @@ pub(in crate::api) fn publish_runtime_observation(
 impl RuntimeSharedResources {
     /// Advances the observation epoch, waking what waits for a change, for
     /// a change outside the transactional state: a promise's resolution.
+    /// Lets machines supply reflection's environment from now on.
+    pub(in crate::api) fn enable_machine_environment(&self) {
+        self.machine_environment.store(true, Ordering::Release);
+    }
+
+    /// Whether machines supply reflection's environment.
+    pub(in crate::api) fn machine_environment(&self) -> bool {
+        self.machine_environment.load(Ordering::Acquire)
+    }
+
     pub(in crate::api) fn publish_change(&self) {
         self.publish_observation(self.mutation_admission.mutation_guard());
     }
@@ -708,6 +723,7 @@ impl EvaluationRuntime {
             ids,
             mutation_admission,
             work: Arc::downgrade(&work),
+            machine_environment: AtomicBool::new(false),
         });
         shared_resources.register_runtime_core();
         let default_reflection_profile = Arc::new(ReflectionTaskProfile::unsealed());
@@ -1786,6 +1802,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
             ids,
             mutation_admission,
             work: Arc::downgrade(&work),
+            machine_environment: AtomicBool::new(false),
         });
         shared_resources.register_runtime_core();
         EvaluationRuntime {

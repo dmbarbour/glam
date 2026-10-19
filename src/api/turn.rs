@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, LazyLock, Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 use std::thread::{self, Scope, ScopedJoinHandle};
 
 use bytes::Bytes;
@@ -463,15 +463,16 @@ impl Runtime {
         diagnostics_wiring: DiagnosticsWiring,
     ) -> Result<Self, Error> {
         let evaluation_runtime = assembler.evaluation_runtime();
-        evaluation_runtime
-            .shared_resources()
-            .set_diagnostics_wiring(diagnostics_wiring == DiagnosticsWiring::ToRoot);
+        let resources = evaluation_runtime.shared_resources();
+        resources.set_diagnostics_wiring(diagnostics_wiring == DiagnosticsWiring::ToRoot);
+        resources.enable_machine_environment();
         // Until reflection tasks are machines, the runtime's own diagnostics
-        // join the root's diagnostics input as if a child had sent them.
+        // enter the `refl` machine's diagnostics input, as if they were its
+        // children's, and pass through it to the root's by default.
         if diagnostics_wiring == DiagnosticsWiring::ToRoot {
             assembler.diagnostic_bus().route_to_port(
                 &evaluation_runtime,
-                (),
+                [environment::REFL.clone()],
                 DIAGNOSTICS.clone(),
             )?;
         }
@@ -700,28 +701,6 @@ pub struct Fork<'scope> {
 }
 
 static NEXT_FORK: AtomicU64 = AtomicU64::new(0);
-
-/// The keys of the environment volume: a machine's share lies under
-/// `children` at each key of its path, then at `share`, so a subtree's
-/// shares go with one write.
-static CHILDREN: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("children"));
-static SHARE: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("share"));
-
-/// The node of the machine at `machine` in the environment volume.
-fn environment_node(machine: &[Key]) -> Vec<Key> {
-    machine
-        .iter()
-        .flat_map(|key| [CHILDREN.clone(), key.clone()])
-        .collect()
-}
-
-/// Where the share of the machine at `machine` lies in the environment
-/// volume.
-fn environment_share(machine: &[Key]) -> Vec<Key> {
-    let mut path = environment_node(machine);
-    path.push(SHARE.clone());
-    path
-}
 
 impl<'scope, 'env> Machine<'scope, 'env> {
     fn new(
@@ -1547,12 +1526,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// bindings, and the cut runs again when a share above changes; outside
     /// one, it reads the shares as they stand.
     pub fn env(&mut self) {
-        // The most specific share first: this machine's, then each
-        // ancestor's, to the root's.
-        let paths = (0..=self.path.len())
-            .rev()
-            .map(|depth| environment_share(&self.path[..depth]))
-            .collect::<Vec<_>>();
+        let paths = environment::environment_chain(&self.path);
         let shares = match &mut self.cut {
             Some(cut) => paths
                 .iter()
@@ -1573,6 +1547,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let composed = crate::g_syntax::composed_environment_root(
             values.core(),
             shares.into_iter().map(Value::into_runtime_root).collect(),
+            None,
         );
         self.push(Value::from_runtime_root(composed));
     }
@@ -1587,8 +1562,20 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         // Stored as a list of one, which the composition tells from an
         // unbound share without forcing what the share holds.
         let share = self.runtime.assembler.values().list([share])?;
-        let path = environment_share(&self.path);
+        let path = environment::environment_share(&self.path);
         self.store_edit(|journal| journal.write_environment(path.clone(), share.clone()))
+    }
+
+    /// The reflection environment of `role` as this machine sees it, its
+    /// shares as they stand over the role's sealed environment, for the
+    /// CLI's transition (`crate::transition`).
+    pub(crate) fn reflection_environment(&self, role: &str) -> Value {
+        let base = self.runtime.assembler.reflection_environment_for_role(role);
+        Value::from_runtime_root(environment::committed_environment(
+            &self.resources(),
+            &self.path,
+            &base.into_runtime_root(),
+        ))
     }
 
     /// Pushes a promised value, which waits until it is resolved, then its
@@ -2304,9 +2291,12 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })?;
         let unbound = self.runtime.assembler.values().empty_dict();
         let cleared = if path.is_empty() {
-            vec![vec![SHARE.clone()], vec![CHILDREN.clone()]]
+            vec![
+                vec![environment::SHARE.clone()],
+                vec![environment::CHILDREN.clone()],
+            ]
         } else {
-            vec![environment_node(&path)]
+            vec![environment::environment_node(&path)]
         };
         self.store_edit(|journal| {
             for node in &cleared {
@@ -2400,6 +2390,7 @@ fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
     path.into_iter().map(Into::into).collect()
 }
 
+pub(in crate::api) mod environment;
 mod promises;
 
 #[cfg(test)]

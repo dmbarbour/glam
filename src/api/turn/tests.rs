@@ -93,9 +93,13 @@ fn the_runtime_s_diagnostics_follow_the_root_s_wiring() {
             .expect("a turn")
     };
     assert_eq!(
-        (held(&mut rt, ().into()), held(&mut rt, "sink".into())),
-        (1, 0),
-        "the sink's default pass-through loops back, so it waits at the root"
+        (
+            held(&mut rt, "refl".into()),
+            held(&mut rt, ().into()),
+            held(&mut rt, "sink".into())
+        ),
+        (1, 0, 0),
+        "the sink's default pass-through loops back, so it waits where it entered, at `refl`"
     );
 
     rt.run("sink", |sink| {
@@ -108,9 +112,13 @@ fn the_runtime_s_diagnostics_follow_the_root_s_wiring() {
     bus.publish(Diagnostic::new(&values, Severity::Warning, "routed"))
         .expect("the diagnostic should publish");
     assert_eq!(
-        (held(&mut rt, ().into()), held(&mut rt, "sink".into())),
-        (1, 1),
-        "it passes through the root to the sink"
+        (
+            held(&mut rt, "refl".into()),
+            held(&mut rt, ().into()),
+            held(&mut rt, "sink".into())
+        ),
+        (1, 0, 1),
+        "it passes through `refl` and the root to the sink"
     );
 }
 
@@ -195,4 +203,35 @@ fn a_hand_over_cut_reruns_when_a_diagnostic_arrives_and_keeps_their_order() {
         .run("logger", |logger| Ok(logger.available(diagnostics())))
         .expect("a turn");
     assert_eq!(left, 0);
+}
+
+#[test]
+fn reflection_reads_the_refl_machine_s_environment_over_its_sealed_one() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let shares = "language g0\nobject root_share with\n    greeting = \"hello\"\n";
+    rt.run((), |root| {
+        root.compile(["shares"], [ModuleInput::script("g", shares)])?;
+        root.access("root_share")?;
+        root.bind_env()
+    })
+    .expect("the root binds its share");
+    let assembler = rt.assembler();
+    let values = assembler.values();
+    let environment = assembler.reflection_environment();
+    let text = |path: &[&str]| -> String {
+        let value = values
+            .access_names(&environment, path.iter().copied())
+            .expect("the path composes");
+        let value = assembler.evaluator().eval(&value).expect("it evaluates");
+        String::from_utf8(value.as_bytes().unwrap().unwrap().to_vec()).unwrap()
+    };
+    assert_eq!(
+        text(&["greeting"]),
+        "hello",
+        "the root's share, through `refl`"
+    );
+    assert!(
+        !text(&["glam", "version"]).is_empty(),
+        "the sealed environment lies beneath"
+    );
 }
