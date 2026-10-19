@@ -186,10 +186,20 @@ handle API goes.
    the buffers are shared state, and the topology belongs to the wiring.
    - A machine reads and writes named ports. `m.write(port, n)` pops `n`
      values, in order, and sends them; values rather than lists, so that
-     nothing is forced. `m.read(port, n)` pushes the next `n`, and fails
-     (`Backtrack`) when fewer are available, so a cut reading a port waits
-     for them. Stack operations keep a static arity, with `n` a static
-     parameter, as `dup(4)` stands for a Forth-like `dup4` (maintainer).
+     nothing is forced. `m.read(port, n)` pushes the next `n`. Stack
+     operations keep a static arity, with `n` a static parameter, as
+     `dup(4)` stands for a Forth-like `dup4` (maintainer).
+   - Too few to read, or a full buffer, is pushback, a divergence, not a
+     failure that seeks alternatives (maintainer): `Backtrack` is for an
+     alternative operation, and a new kind, `Retry`, is the divergence a
+     cut recognizes, waiting for a change in what it observed and running
+     again; `m.retry()` raises it (maintainer). Within a cut, a port
+     operation that cannot proceed returns `Retry`. Outside one, `read`
+     and `write` block until they can, as a Kahn network's do, and
+     `try_read` and `try_write` return `Retry` instead (maintainer). The
+     outermost cut still turns a `Backtrack` from its last alternative
+     into such a wait. A cut variant that returns `Retry` instead of
+     waiting belongs with `api-alternatives`.
    - A port name has two independent roles, input and output
      (maintainer). Wiring is directional and external:
      `m.wire(source, destination)` and `m.unwire`, with endpoints a
@@ -201,9 +211,8 @@ handle API goes.
      routes. Wiring is transactional state, so rewiring within a cut is
      atomic. `m.input_connected(port)` and `m.output_connected(port)` tell
      whether a role has a wire.
-   - A write to an unconnected output fails (maintainer), as a read of
-     fewer than are available and a write into a full buffer do: all with
-     `Backtrack`, a proposal, so that a cut waits for data, space or a wire.
+   - A write to an unconnected output is a plain error (maintainer): it
+     is structure, not flow, and waiting would not help.
      `m.available(port)` counts what an input holds, transactionally
      (maintainer), so a reader drains a port with a static `n`.
    - Buffers belong to receiving ports: several wires from one port
@@ -215,20 +224,27 @@ handle API goes.
      so they are serializable within cuts, and an empty read or a full
      buffer waits through the existing wakes. Their cost is measured before
      anything specializes them.
-   - Unwired ports do not default to their parent's (maintainer), but the
-     diagnostics port is wired by default (maintainer): each child's
-     diagnostics output to its parent's diagnostics input, and each
-     machine's diagnostics input to its own output, but the root's. So
-     diagnostics accumulate at the root's input, and any machine may
-     intervene, by unwiring its own pass-through and reading its input. A
-     turn that ends in error might emit its error on its machine's
-     diagnostics output by default, so that an unobserved failure, such as
-     a fork's left to its turn's end, still reaches a person.
-   - The host reads the root's diagnostics input in a root turn, or wires
-     it to a logger's input. Until reflection tasks are machines, the
-     runtime feeds their diagnostics (`.log`) and its own reports into the
-     root's diagnostics input, as if a hidden child of the root wrote
-     them: a bridge that goes with the reflection API's alignment.
+   - Unwired ports do not default to their parent's (maintainer). Wires
+     stay local, so a child's output cannot feed its parent's input. The
+     diagnostics wiring is instead part of the runtime's default
+     configuration, with an option for none (maintainer): each child's
+     diagnostics output is exported to its parent's own diagnostics
+     output, and at the root to a collecting machine, at a reserved key,
+     where diagnostics accumulate. Any machine intervenes by rewiring
+     locally, such as routing a child's export through a filter. A turn
+     that ends in error might emit its error on its machine's diagnostics
+     output by default, so that an unobserved failure, such as a fork's
+     left to its turn's end, still reaches a person.
+   - The host reads the collecting machine in a turn, or wires its output
+     to a logger. Until reflection tasks are machines, the runtime feeds
+     their diagnostics (`.log`) and its own reports into the collecting
+     machine, a bridge that goes with the reflection API's alignment.
+   - Ports live beside the runtime's existing transactional event state,
+     whose FIFO buffers, cursor validation and combined commit with the
+     store they extend: buffers by receiving port, wiring by the machine
+     that owns it, all in Rust structures that force nothing, with glam
+     values as payloads. A read sees committed state only, never its own
+     transaction's writes, as glam's log reads do.
    - Deferred: hierarchical subchannels; closing a channel and the end of
      a stream; built-in mergers, duplicators and filters, which machines
      users write stand in for meanwhile; further buffer policies.
@@ -967,9 +983,8 @@ the public API, in `tests/`.
   with this model (maintainer, 2026-10-19), perhaps making spawned tasks
   (`.task.new` and its relatives) persistent machines in the tree. A later
   step, ordered after the ports re-plan and `api-effect-providers`.
-- Communication's open details, at `api-ports`: whether a write to an
-  unconnected output fails with `Backtrack` or with another error, and how
-  far the API specializes buffers, by measurement.
+- Communication's open details, at `api-ports`: how far the API
+  specializes buffers, by measurement.
 - The ownership plan's open details, each settled when its step starts:
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state

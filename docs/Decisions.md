@@ -1967,6 +1967,9 @@ maps the short names used here to file names.
   turns rather than threads that borrow the runtime. The runtime is affine
   rather than thread-affine: `Send`, so it may move between threads, but
   not `Sync` (maintainer, the same day).
+  `machines-communicate-through-wired-ports` (2026-10-19): machines also
+  communicate through ports that their ancestors wire, with buffers in
+  shared transactional state.
 - **Recorded in:** runtime API review.
 
 ### Effect providers answer within turns; background effects go through queues
@@ -2182,6 +2185,47 @@ maps the short names used here to file names.
   where a turn that ends in error might emit one on its machine's
   diagnostics port by default.
 - **Recorded in:** runtime API plan, `api-machine-errors`.
+
+### Machines communicate through ports wired from outside
+`machines-communicate-through-wired-ports` · 2026-10-19 · maintainer · accepted
+- **Context:** `runtime-api-turns-on-machines` modeled all communication as
+  state and logs in the shared heap, rejecting point-to-point channels as a
+  hindrance to extension. With machines in a tree
+  (`machines-form-a-tree`), a parent can wire its children from outside,
+  as in dataflow and Kahn process networks, which the maintainer has long
+  worked with.
+- **Decision:**
+  - A machine reads and writes named ports, each name with an input and an
+    output role: `m.write(port, n)` pops `n` values and sends them, and
+    `m.read(port, n)` pushes the next `n`, static arities that force
+    nothing.
+  - Wiring is directional, external and local: a machine wires its own
+    ports and its descendants', from a descendant's output or its own
+    input to a descendant's input or its own output. A machine wiring its
+    own input to its own output is a switchboard. Wiring is transactional
+    state.
+  - Buffers belong to receiving ports, unbounded by default. Several wires
+    from one port duplicate, and several into one merge in commit order.
+  - Too few to read, or a full buffer, is pushback: a divergence, the new
+    error kind `Retry`, which a cut recognizes by waiting and running
+    again, while `Backtrack` stays for alternatives. Outside a cut, `read`
+    and `write` block, and `try_read` and `try_write` return `Retry`. A
+    write to an unconnected output is a plain error.
+  - Diagnostics wiring is default configuration, with an option for none:
+    each child's diagnostics output exported to its parent's, up to a
+    collecting machine at the root.
+- **Alternatives rejected:** communication by heap logs with readers'
+  cursors (`api-heap-communication`), which leaves topology inside the
+  machines; unwired ports defaulting to their parent's; wires from a
+  child's output to its parent's input, which leave the local scope;
+  lists as port values, which would force their spines; `Backtrack` for
+  pushback, which would let an alternative operation treat an empty
+  buffer as a decision.
+- **Consequences:** this amends `runtime-api-turns-on-machines`'s
+  rejection of point-to-point channels: buffers stay shared, transactional
+  state, and the topology belongs to the wiring, which a parent may change.
+  Ports extend the runtime's existing transactional event state.
+- **Recorded in:** runtime API plan, `api-ports`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
