@@ -417,7 +417,7 @@ pub(super) fn configured_cli(arguments: CliArguments, inspection: Option<bool>) 
     let expansion = match expand_configured(prepared.assembler(), &configuration, arguments) {
         Ok(expansion) => expansion,
         Err(error) => {
-            prepared.fail_environment("configured CLI expansion failed");
+            prepared.fail_environment();
             for diagnostic in error.diagnostics() {
                 prepared
                     .assembler()

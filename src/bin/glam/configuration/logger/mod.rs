@@ -86,12 +86,17 @@ pub(crate) fn start_logger<'scope>(
     };
     let task_diagnostics = diagnostics.clone();
     let task_values = evaluation_runtime.values();
+    // The configured logger's environment as the logger machine sees it,
+    // taken once, since the logger is not yet a turn.
+    let environment = root.run(LOGGER, |logger| {
+        Ok(glam::transition::reflection_environment(logger, "logger"))
+    })?;
     let scheduled = custom.and_then(|custom| {
         let lifecycle = EffectLifecycle::new_closing_session(&evaluation_runtime);
         let host = Arc::new(LoggerTaskHost::new(
             &evaluation_runtime,
             diagnostics.clone(),
-            assembler.reflection_environment_for_role("logger"),
+            environment,
         ));
         let run = EffectRun::new(
             &evaluation_runtime,

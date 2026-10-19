@@ -5,8 +5,8 @@ use std::path::PathBuf;
 use std::sync::Arc;
 
 use glam::{
-    Assembler, Error, EvaluationRuntime, FileSourceSystem, Machine, ModuleInput, PromiseResolver,
-    Runtime, Value, ValueKind, Values,
+    Assembler, Error, EvaluationRuntime, FileSourceSystem, Machine, ModuleInput, Runtime, Value,
+    ValueKind, Values,
 };
 
 use crate::command_line::{CliArguments, CommandPlanParts};
@@ -23,8 +23,9 @@ pub(super) struct PreparedAssembly {
     /// The CLI's runtime, which the main thread opens and drops. Its
     /// diagnostics wait at its `logger` machine.
     pub(super) runtime: Runtime,
-    process_args: Option<PromiseResolver>,
-    reflection_args: Option<PromiseResolver>,
+    /// Whether `process.args` and `process.refl_args` still wait on the
+    /// command's expansion.
+    environment_pending: bool,
 }
 
 impl PreparedAssembly {
@@ -44,23 +45,26 @@ impl PreparedAssembly {
     }
 
     pub(super) fn resolve_environment(&mut self, command: &CommandPlanParts) -> Result<(), Error> {
-        let values = self.assembler().values();
-        if let Some(resolver) = self.process_args.take() {
-            resolver.resolve(argument_values(&values, &command.process_args))?;
+        if !std::mem::take(&mut self.environment_pending) {
+            return Ok(());
         }
-        if let Some(resolver) = self.reflection_args.take() {
-            resolver.resolve(argument_values(&values, &command.reflection_args))?;
-        }
-        Ok(())
+        self.runtime.run((), |root| {
+            fulfill_process(root, &command.process_args, &command.reflection_args)
+        })
     }
 
-    pub(super) fn fail_environment(&mut self, message: &str) {
-        if let Some(resolver) = self.process_args.take() {
-            let _ = resolver.fail_message(message);
+    /// Breaks the promises of `process.args` and `process.refl_args`, where
+    /// the command's expansion failed.
+    pub(super) fn fail_environment(&mut self) {
+        if !std::mem::take(&mut self.environment_pending) {
+            return;
         }
-        if let Some(resolver) = self.reflection_args.take() {
-            let _ = resolver.fail_message(message);
-        }
+        let _ = self.runtime.run((), |root| {
+            root.get("args_resolver")?;
+            root.break_promise()?;
+            root.get("refl_args_resolver")?;
+            root.break_promise()
+        });
     }
 }
 
@@ -80,47 +84,16 @@ pub(super) fn prepare(
     let evaluation_runtime =
         EvaluationRuntime::new(0).expect("a dormant evaluation runtime is valid");
     let diagnostics = glam::DiagnosticBus::for_runtime(&evaluation_runtime);
-    let mut process_args = None;
-    let mut reflection_args = None;
     let assembler = Assembler::builder()
         .source_system(local_files.clone())
         .evaluation_runtime(evaluation_runtime)
         .diagnostic_bus(diagnostics)
-        .reflection_environment(|environment| {
-            let (process_value, process_resolver) =
-                environment.promise("canonical process arguments");
-            let (reflection_value, reflection_resolver) =
-                environment.promise("canonical reflection arguments");
-            process_args = Some(process_resolver);
-            reflection_args = Some(reflection_resolver);
-            Ok(process_reflection_environment(
-                &environment.values(),
-                reflection_value,
-                process_value,
-                cli_arguments,
-            ))
-        })
-        .expect("main's reflection environment must be a dictionary")
         .build()
         .expect("main's assembler configuration must be valid");
     let mut runtime = glam::transition::runtime_around(assembler)
         .expect("main's runtime routes its diagnostics to its root");
     logger::wire_logger(&mut runtime).expect("the logger's wiring is valid");
-    let assembler = glam::transition::assembler(&runtime);
-    if let Some((process_arguments, reflection_arguments)) = initial_environment {
-        let values = assembler.values();
-        process_args
-            .take()
-            .expect("bootstrap process argument resolver should be present")
-            .resolve(argument_values(&values, &process_arguments))
-            .expect("fresh bootstrap process argument promise should resolve");
-        reflection_args
-            .take()
-            .expect("bootstrap reflection argument resolver should be present")
-            .resolve(argument_values(&values, &reflection_arguments))
-            .expect("fresh bootstrap reflection argument promise should resolve");
-    }
-    if let Err(error) = load(&mut runtime) {
+    if let Err(error) = load(&mut runtime, &cli_arguments, initial_environment.as_ref()) {
         return Err(Box::new(PreparationFailure {
             local_files,
             runtime,
@@ -130,73 +103,93 @@ pub(super) fn prepare(
     Ok(PreparedAssembly {
         local_files,
         runtime,
-        process_args,
-        reflection_args,
+        environment_pending: initial_environment.is_none(),
     })
 }
 
-fn process_reflection_environment(
-    values: &Values,
-    reflection_arguments: Value,
-    process_arguments: Value,
-    cli_arguments: CliArguments,
-) -> Value {
-    fn os_value(values: &Values, value: &std::ffi::OsStr) -> Value {
-        values.bytes(value.as_encoded_bytes().to_vec())
-    }
-
-    let variables = values
+/// The process's environment variables, by name, as byte strings.
+fn environment_variables(values: &Values) -> Value {
+    values
         .dictionary(env::vars_os().map(|(name, value)| {
             (
                 values.bytes(name.as_encoded_bytes().to_vec()),
-                os_value(values, &value),
+                values.bytes(value.as_encoded_bytes().to_vec()),
             )
         }))
-        .expect("OS environment names must be keyable binary values");
-    let cli_arguments = values
-        .list(
-            cli_arguments
-                .args()
-                .iter()
-                .map(|argument| os_value(values, argument)),
-        )
-        .expect("CLI argument values share one runtime");
-    values
-        .record([(
-            "process",
-            values
-                .record([
-                    ("args", process_arguments),
-                    ("env", variables),
-                    ("refl_args", reflection_arguments),
-                    (
-                        "cli",
-                        values
-                            .record([("args", cli_arguments)])
-                            .expect("CLI values share one runtime"),
-                    ),
-                ])
-                .expect("process values share one runtime"),
-        )])
-        .expect("process environment values share one runtime")
+        .expect("OS environment names must be keyable binary values")
 }
 
-fn argument_values(values: &Values, arguments: &[std::ffi::OsString]) -> Value {
-    values
-        .list(
-            arguments
-                .iter()
-                .map(|argument| values.bytes(argument.as_encoded_bytes().to_vec())),
-        )
-        .expect("argument values share one runtime")
+/// Pushes `arguments` as a list of byte strings.
+fn push_arguments(m: &mut Machine<'_, '_>, arguments: &[std::ffi::OsString]) -> Result<(), Error> {
+    for argument in arguments {
+        m.push_bytes(argument.as_encoded_bytes().to_vec());
+    }
+    m.make_list(arguments.len())
 }
 
-/// Compiles the prelude and the configuration on the `cli` machine, and
-/// selects the environment.
-fn load(runtime: &mut Runtime) -> Result<(), Error> {
+/// Binds the root's share of the environment, which reflection reads:
+/// `process`, with the user's arguments at `cli.args`, the variables at
+/// `env`, and, at `args` and `refl_args`, promised values that the CLI
+/// fulfills once `conf.cli`'s expansion settles them, through the resolvers
+/// the root keeps at `args_resolver` and `refl_args_resolver`.
+fn bind_process(
+    root: &mut Machine<'_, '_>,
+    values: &Values,
+    cli_arguments: &CliArguments,
+) -> Result<(), Error> {
+    root.promise();
+    root.set("args_resolver")?;
+    glam::transition::push_value(root, environment_variables(values))?;
+    root.promise();
+    root.set("refl_args_resolver")?;
+    push_arguments(root, cli_arguments.args())?;
+    root.make_dict(["args"])?;
+    root.make_dict(["args", "env", "refl_args", "cli"])?;
+    root.run(CLI, |m| {
+        m.get("prelude")?;
+        m.access("process_share")
+    })?;
+    root.take(CLI, 1)?;
+    root.swap()?;
+    root.apply(1)?;
+    root.bind_env()
+}
+
+/// Fulfills the root's promises of `process.args` and `process.refl_args`.
+fn fulfill_process(
+    root: &mut Machine<'_, '_>,
+    args: &[std::ffi::OsString],
+    refl_args: &[std::ffi::OsString],
+) -> Result<(), Error> {
+    root.get("args_resolver")?;
+    push_arguments(root, args)?;
+    root.fulfill()?;
+    root.get("refl_args_resolver")?;
+    push_arguments(root, refl_args)?;
+    root.fulfill()
+}
+
+/// Compiles the prelude on the `cli` machine, binds the root's share of the
+/// environment, fulfilling its promises where the arguments are already
+/// known, then compiles the configuration and selects the environment.
+fn load(
+    runtime: &mut Runtime,
+    cli_arguments: &CliArguments,
+    initial_environment: Option<&InitialCliEnvironment>,
+) -> Result<(), Error> {
+    let values = glam::transition::assembler(runtime).values();
+    runtime.run((), |root| {
+        root.run(CLI, |m| {
+            m.compile(["glam_cli"], [ModuleInput::script("g", PRELUDE)])?;
+            m.set("prelude")
+        })?;
+        bind_process(root, &values, cli_arguments)?;
+        if let Some((args, refl_args)) = initial_environment {
+            fulfill_process(root, args, refl_args)?;
+        }
+        Ok(())
+    })?;
     runtime.run(CLI, |m| {
-        m.compile(["glam_cli"], [ModuleInput::script("g", PRELUDE)])?;
-        m.set("prelude")?;
         m.get("prelude")?;
         m.access("configuration_definitions")?;
         m.compile_over(
@@ -312,8 +305,7 @@ mod owner_tests {
         let PreparedAssembly {
             local_files: _,
             runtime: _,
-            process_args: _,
-            reflection_args: _,
+            environment_pending: _,
         } = prepared;
         let PreparationFailure {
             local_files: _,

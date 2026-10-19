@@ -28,6 +28,13 @@ pub fn reflection_environment(machine: &Machine<'_, '_>, role: &str) -> Value {
     machine.reflection_environment(role)
 }
 
+/// Pushes a value the handle API built onto a machine's stack. Used by the
+/// CLI's `configuration` module for the process environment's variables,
+/// whose keys are byte strings that a machine's dicts do not build.
+pub fn push_value(machine: &mut Machine<'_, '_>, value: Value) -> Result<(), Error> {
+    machine.push_value(value)
+}
+
 /// Pops a machine's top value without evaluating it. Used by the CLI's
 /// `configuration` module to hand the configuration, and the logger it
 /// selects, to what has not moved to turns, and by its

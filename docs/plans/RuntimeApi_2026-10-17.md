@@ -496,9 +496,10 @@ named:
   CLI's logger host taking its environment once, through
   `glam::transition::reflection_environment`: the reflection model's
   implementation.
-- The reflection environment that an assembler's builder seals, with
-  promises it creates for `process.args` and `process.refl_args`:
-  `api-machine-environment`.
+- The process environment's variables, which the CLI builds with the
+  handle API and pushes onto the root's stack
+  (`glam::transition::push_value`), since a machine's dicts are keyed by
+  name and these by byte strings: `api-handle-retirement`.
 
 ### Policy in glam (experiment)
 
@@ -1334,6 +1335,32 @@ maintainer's agreement):
 - Tests in `src/api/turn/tests.rs`: reflection reading the `refl`
   machine's environment over its sealed one, and the runtime's diagnostics
   following the root's wiring through `refl`.
+
+`api-machine-environment`, the CLI slice (2026-10-19):
+- The CLI's assembler no longer seals a reflection environment of its
+  own. Before its configuration loads, the CLI's root binds its share,
+  `process`: the user's arguments at `cli.args`, the variables at `env`,
+  and promised values at `args` and `refl_args`, whose resolvers the root
+  keeps in its local state. The CLI fulfills them after `conf.cli`'s
+  expansion, at once where the arguments are known from the start, and
+  breaks them where the expansion fails; a broken promise carries no
+  message of its own, where the builder's failed with "configured CLI
+  expansion failed".
+- The prelude gains `process_share`, which makes the share an object.
+  `load` compiles the prelude on `cli`, binds the share on the root, then
+  compiles the configuration, so the configuration's reflection reads
+  `process` as before.
+- The configured logger's host takes its environment from the logger
+  machine (`glam::transition::reflection_environment`), once, as it
+  starts. `PromiseResolver` and the builder's environment closure leave the
+  CLI.
+- The bridge's uses in the CLI rise from nine to eleven: the process
+  variables pushed onto the root's stack, and the logger host's
+  environment.
+- Tests: `tests/cli.rs` (54), whose configured loggers read
+  `process.refl_args` and compare `process.args` with `process.cli.args`,
+  and whose configured CLIs and assemblies read the arguments, all pass
+  unchanged.
 
 ## Verification
 

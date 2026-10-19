@@ -1566,6 +1566,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.store_edit(|journal| journal.write_environment(path.clone(), share.clone()))
     }
 
+    /// Pushes `value`, which must belong to this runtime, for the CLI's
+    /// transition (`crate::transition`).
+    pub(crate) fn push_value(&mut self, value: Value) -> Result<(), Error> {
+        self.runtime.assembler.values().require(&value)?;
+        self.push(value);
+        Ok(())
+    }
+
     /// The reflection environment of `role` as this machine sees it, its
     /// shares as they stand over the role's sealed environment, for the
     /// CLI's transition (`crate::transition`).

@@ -12,6 +12,10 @@ empty_env = object (abstract_global_path configuration.env) with {}
 # What compiling the configuration starts from.
 configuration_definitions = {env:empty_env}
 
+# The share of the environment that the CLI's root machine binds, which
+# reflection reads with `.env`: the `process` the CLI runs as.
+process_share process = std.object_from_dict {process:process}
+
 # A configuration entry: the value at `path`, or `fallback` where it is
 # undefined. A failure names the entry and the path looked up.
 entry name path fallback value =
