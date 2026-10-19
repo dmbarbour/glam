@@ -205,9 +205,10 @@ fn a_fork_s_hooks_run_on_its_machine() {
                 f.push_text("forked");
                 f.set("name")?;
                 f.on_commit(0, move |f| {
-                    f.get("name")?;
-                    log.lock().unwrap().push(f.pop_text()?);
-                    Ok(())
+                    f.get("name").expect("the fork's machine holds its name");
+                    log.lock()
+                        .unwrap()
+                        .push(f.pop_text().expect("the name is text"));
                 })
             })?;
             m.join(fork)
@@ -231,20 +232,19 @@ fn a_failed_cut_waits_on_what_its_forks_read() {
         })?;
         let ready = root.cut(|m| {
             attempts.set(attempts.get() + 1);
+            // The reader fails until the value is ready, and its join
+            // passes the failure on, so the cut waits on what it read.
             let reader = m.fork("reader", |r| {
                 r.heap_get(["ready"]);
                 r.eval()?;
-                Ok(r.kind()? == glam::ValueKind::Number)
+                if r.kind()? == glam::ValueKind::Number {
+                    return Ok(());
+                }
+                Err(r.fail())
             })?;
-            if m.join(reader)? {
-                return Ok(());
-            }
             let waiting = waiting.clone();
-            m.on_abort(0, move |_| {
-                waiting.send(()).expect("the writer listens");
-                Ok(())
-            })?;
-            Err(m.fail())
+            m.on_abort(0, move |_| waiting.send(()).expect("the writer listens"))?;
+            m.join(reader)
         });
         root.join(writer)?;
         ready
@@ -260,12 +260,21 @@ fn a_fork_within_a_cut_borrows_what_the_turn_declared_before_it() {
         .run("m", |m| {
             let words = ["declared", "in", "the", "turn"];
             // Made at the turn's level, it joins there, after the cut.
-            let outside = m.fork("outside", |_| Ok(1))?;
-            let inside = m.cut(|m| {
-                let fork = m.fork("inside", |_| Ok(words.len()))?;
+            let outside = m.fork("outside", |o| {
+                o.push_int(1);
+                Ok(())
+            })?;
+            m.cut(|m| {
+                let fork = m.fork("inside", |i| {
+                    i.push_int(words.len() as i64);
+                    Ok(())
+                })?;
                 m.join(fork)
             })?;
-            Ok(inside + m.join(outside)?)
+            m.join(outside)?;
+            m.take("inside", 1)?;
+            m.take("outside", 1)?;
+            Ok(m.pop_int()? + m.pop_int()?)
         })
         .expect("the turn should succeed");
     assert_eq!(total, 5);

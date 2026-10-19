@@ -2,8 +2,8 @@
 
 Status: `api-runtime-turns` built 2026-10-17; `api-cli-bridge`,
 `api-machine-data`, `api-cuts`, `api-virtual-resources`,
-`api-machine-tree` and `api-forks-in-cuts` 2026-10-18, with
-`api-cli-prelude` kept and
+`api-machine-tree` and `api-forks-in-cuts` 2026-10-18, and
+`api-machine-errors` 2026-10-19, with `api-cli-prelude` kept and
 `api-scoped-threads` superseded by `api-machine-tree`
 (see [As built](#as-built)). The CLI's transition was re-planned the
 same day, after a survey of the CLI (see [CLI Transition](#cli-transition)):
@@ -163,10 +163,13 @@ handle API goes.
      branch of its journal that merges at the join, with siblings
      serializable: a child whose reads overlap what the cut wrote after
      its fork reruns the outermost cut (maintainer, 2026-10-18).
-   - Then, to discuss first, `api-machine-errors`: error isolation between
-     machines, error states and their explicit clearing, diagnostics
-     captured in machine state, and joining a child's diagnostics into its
-     parent's queue (maintainer, 2026-10-18).
+   - Then `api-machine-errors` (maintainer, 2026-10-19;
+     `machine-errors-mark-and-recover`): an error or panic that ends a
+     turn leaves its machine in error, which only a recovering entry
+     enters, pushing a list of the errors' diagnostics; forks return
+     nothing to Rust, and their joins return their outcome; hooks handle
+     their own errors. Diagnostics, first planned as machine state, go
+     instead to communication (below).
    - After it, `api-fine-grained-reruns` (maintainer, 2026-10-18): today
      every inconsistency reruns the outermost cut, whether a commit
      conflict, a fork's branch that read what the cut wrote after the
@@ -180,6 +183,15 @@ handle API goes.
    capabilities; volumes allocated through the reflection API. Retention,
    backpressure and discovery are settled here, after a look at Kafka, DDS
    and MQTT conventions.
+   - To be re-planned, to discuss first (maintainer, 2026-10-19): with a
+     tree of machines, communication may be ports, named by machines and
+     wired from outside by their parents to channels in shared state,
+     unwired ports taking their parent's, as in dataflow and Kahn process
+     networks. Diagnostics would be the first convention: a default
+     diagnostics channel, redirected per machine or subtree. That amends
+     rather than reverses `runtime-api-turns-on-machines`'s rejection of
+     point-to-point channels, since the channels stay shared state and the
+     topology belongs to the wiring.
    - CLI slice, diagnostics: the CLI appends diagnostics to a log in turns.
      `DiagnosticBus`, `LogHost` and the supervisor's fallback endpoint
      retire.
@@ -840,6 +852,53 @@ another cut or scope, and a fork leaving its scope.
   data, beside a cut's snapshot and journal; the CLI's batch, with no
   cuts or descendants' turns, does not pay it.
 
+`api-machine-errors` (2026-10-19), in `src/api/turn.rs`, after a discussion
+with the maintainer that day:
+- A machine's state holds its errors: the diagnostic objects (each an
+  `Error`'s diagnostic, enriched) of what left it logically in error. An
+  error or panic that ends a turn records itself, whether the turn was the
+  runtime's, a descendant's or a fork's; a panic that unwinds through
+  several turns marks each machine it leaves. Observing the error, as a
+  turn's result or a join's, never recovers it.
+- Entry: `rt.run` and `m.run` fail on a machine in error without entering.
+  `rt.recover` and `m.recover` enter any machine and push a list of its
+  errors' diagnostics, empty when it has none, onto its stack as the
+  failed turns left it, taking them. `give`, `take` and `fork` fail on a
+  machine in error. Only the target's own error bars it: a machine in
+  error between bars nothing below it (maintainer). Forking a machine in
+  error is refused; the parent recovers it first.
+- `m.register_error(&error)` marks the turn's machine apart from any
+  logging. A turn that registered errors and then ends in one keeps only
+  what it registered, so a turn that registers an error and returns it
+  records it once.
+- Forks return nothing to Rust: `m.fork`'s closure returns `Result<(),
+  Error>`, a fork leaves what it computed on its machine's stack, for
+  `take` after the join, and `Fork<'scope>` carries no result type. `m.join`
+  returns the fork's outcome, success, a failure (`Backtrack`) or another
+  error, and the forked machine stays in error.
+- Implicit joins, at the end of a turn, cut attempt or `m.scope`, join in
+  the order the forks were made, and the outcome is the body's own error,
+  or else the first fork's: an operation diverges if a join does, and
+  fails if a join fails, in that deterministic order. `m.scope`'s body
+  returns a `Result`.
+- Hooks are `FnOnce(&mut Machine) + Send + 'static` and return nothing:
+  they handle their own failures, and a cut's outcome is only its own. A
+  hook runs on its machine even if a later error left it in error, since
+  it sees only the values it captured.
+- Diagnostics are not captured in machine state, as first proposed: a long
+  turn would hold them back. They are left to communication, at the ports
+  re-plan of `api-heap-communication`.
+- Tests: `tests/runtime_api.rs` covers a turn's error marking its machine,
+  recovery pushing the list as the turn left it, an empty list, a
+  registered error without doubling, a panic marking, and a descendant in
+  error barring its parent's operations. `tests/runtime_forks.rs` covers a
+  join returning a fork's outcome with its machine left in error, a
+  failure staying `Backtrack`, implicit joins in join order after the
+  body, and a panic marking each machine it unwinds. The forked tests
+  elsewhere leave their counts on their machines' stacks; a cut's forked
+  reader now fails until its value is ready, and the cut waits on what it
+  read.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
@@ -850,13 +909,13 @@ the public API, in `tests/`.
 ## Open Questions (2026-10-18)
 
 - Names, per step (above).
-- Hook errors, for a later discussion and review (maintainer,
-  2026-10-18, unsure of the rule built in `api-cuts`): each hook runs
-  although one before it erred, and the first hook error replaces a cut's
-  result or explicit failure but not another error. Alternatives include
-  hooks that stop at the first error, hook errors reported apart from the
-  cut's outcome, such as to a log once `api-heap-communication` lands, and
-  hooks that return no error.
+- Hook errors, settled at `api-machine-errors` (maintainer, 2026-10-19):
+  hooks return no error and handle their own failures, so a cut's outcome
+  is only its own.
+- Aligning the reflection API, as `refl.*` and `anno refl:(…)` present it,
+  with this model (maintainer, 2026-10-19), perhaps making spawned tasks
+  (`.task.new` and its relatives) persistent machines in the tree. A later
+  step, ordered after the ports re-plan and `api-effect-providers`.
 - Communication's conventions, at `api-heap-communication`, and how far
   the API specializes queues and the like, by measurement.
 - The ownership plan's open details, each settled when its step starts:

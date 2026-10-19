@@ -4,7 +4,9 @@
 //! A machine is named by its path of [`Key`]s from the root, the empty path,
 //! and holds glam values: a stack, a stash beside it, local state by key,
 //! and its children. It starts empty, and an empty machine stores nothing. A
-//! turn is not atomic: what it changes before an error stays. Each action on
+//! turn is not atomic: what it changes before an error stays, and an error
+//! or panic that ends it leaves its machine in error, which only a
+//! recovering entry enters (`machine-errors-mark-and-recover`). Each action on
 //! the shared heap is atomic by itself, and a cut groups actions into one
 //! transaction that also bounds a backtracking search
 //! (`turn-cuts-bound-transactions-and-search`).
@@ -35,6 +37,7 @@ use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
 use crate::core::Key;
+use crate::diagnostic::Severity;
 use crate::reflection::{ConflictAnalysisStrategy, StoreCommitResult, StoreJournal};
 
 /// What opening a runtime takes. It configures the runtime alone:
@@ -72,9 +75,20 @@ impl RuntimeConfig {
 /// let mut rt = glam::Runtime::open(glam::RuntimeConfig::new())?;
 /// let words = ["forks", "may", "borrow"];
 /// let total = rt.run("parent", |m| {
-///     let left = m.fork("left", |_| Ok(words[..1].len()))?;
-///     let right = m.fork("right", |_| Ok(words[1..].len()))?;
-///     Ok(m.join(left)? + m.join(right)?)
+///     let left = m.fork("left", |c| {
+///         c.push_int(words[..1].len() as i64);
+///         Ok(())
+///     })?;
+///     let right = m.fork("right", |c| {
+///         c.push_int(words[1..].len() as i64);
+///         Ok(())
+///     })?;
+///     m.join(left)?;
+///     m.join(right)?;
+///     // What a fork leaves is on its machine's stack.
+///     m.take("left", 1)?;
+///     m.take("right", 1)?;
+///     Ok(m.pop_int()? + m.pop_int()?)
 /// })?;
 /// assert_eq!(total, 3);
 /// # Ok::<(), glam::Error>(())
@@ -171,6 +185,24 @@ struct MachineState {
     stash: Vec<Value>,
     locals: HashMap<Key, Value>,
     children: HashMap<Key, Child>,
+    /// The diagnostics of the errors that left the machine logically in
+    /// error: a turn that ended in one or panicked, or a registration. Until
+    /// a recovering entry takes them, nothing enters the machine or its
+    /// state.
+    errors: Vec<Value>,
+}
+
+/// How an operation reaches a descendant. Only the descendant's own error
+/// matters: a machine between in error bars nothing below it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    /// Into its state, which must not be in error.
+    Enter,
+    /// To recover it, in error or not.
+    Recover,
+    /// The runtime's own: to return a machine to its place, or to run a hook
+    /// where a cut registered it, whatever errors came after.
+    Internal,
 }
 
 #[derive(Clone)]
@@ -186,11 +218,17 @@ impl MachineState {
             && self.stash.is_empty()
             && self.locals.is_empty()
             && self.children.is_empty()
+            && self.errors.is_empty()
+    }
+
+    fn failed(&self) -> bool {
+        !self.errors.is_empty()
     }
 
     /// The descendant at `path`, created empty if absent. It fails when the
-    /// descendant, or a machine between, is forked.
-    fn descendant(&mut self, path: &[Key]) -> Result<&mut MachineState, Error> {
+    /// descendant, or a machine between, is forked, and when the descendant
+    /// is in error where `reach` forbids it.
+    fn descendant(&mut self, path: &[Key], reach: Reach) -> Result<&mut MachineState, Error> {
         let mut state = self;
         for (depth, key) in path.iter().enumerate() {
             match state
@@ -198,7 +236,13 @@ impl MachineState {
                 .entry(key.clone())
                 .or_insert_with(|| Child::Idle(MachineState::default()))
             {
-                Child::Idle(child) => state = child,
+                Child::Idle(child) => {
+                    let target = depth + 1 == path.len();
+                    if target && reach == Reach::Enter && child.failed() {
+                        return Err(failed(path));
+                    }
+                    state = child;
+                }
                 Child::Forked => return Err(forked(&path[..=depth])),
             }
         }
@@ -224,8 +268,13 @@ impl MachineState {
         let (key, parent) = path
             .split_last()
             .ok_or_else(|| Error::new("a machine forks its descendants, not itself"))?;
-        let parent = self.descendant(parent)?;
+        // Only the forked machine's own error bars it, checked below.
+        let parent = self.descendant(parent, Reach::Internal)?;
         match parent.children.insert(key.clone(), Child::Forked) {
+            Some(Child::Idle(state)) if state.failed() => {
+                parent.children.insert(key.clone(), Child::Idle(state));
+                Err(failed(path))
+            }
             Some(Child::Idle(state)) if state.has_fork() => {
                 parent.children.insert(key.clone(), Child::Idle(state));
                 Err(Error::new(format!(
@@ -242,7 +291,7 @@ impl MachineState {
     fn join_in(&mut self, path: &[Key], state: MachineState) {
         let (key, parent) = path.split_last().expect("a fork's path is not empty");
         let parent = self
-            .descendant(parent)
+            .descendant(parent, Reach::Internal)
             .expect("the machines above a fork stay until its join");
         parent.children.insert(key.clone(), Child::Idle(state));
         self.prune(path);
@@ -256,7 +305,8 @@ impl MachineState {
     }
 
     /// Fails when the descendant at `path`, or a machine between, is
-    /// forked. An absent descendant is an empty one, and stays absent.
+    /// forked, and when the descendant is in error. An absent descendant is
+    /// an empty one, and stays absent.
     fn reachable(&self, path: &[Key]) -> Result<(), Error> {
         let mut state = self;
         for (depth, key) in path.iter().enumerate() {
@@ -266,6 +316,9 @@ impl MachineState {
                 Some(Child::Forked) => return Err(forked(&path[..=depth])),
             }
         }
+        if state.failed() {
+            return Err(failed(path));
+        }
         Ok(())
     }
 }
@@ -273,6 +326,12 @@ impl MachineState {
 fn forked(path: &[Key]) -> Error {
     Error::new(format!(
         "machine {path:?} is running on a fork until its join"
+    ))
+}
+
+fn failed(path: &[Key]) -> Error {
+    Error::new(format!(
+        "machine {path:?} is in error until a recovering entry takes its errors"
     ))
 }
 
@@ -328,22 +387,54 @@ impl Runtime {
     /// joins before it returns. A panic in the turn, or in a fork it left
     /// unjoined, resumes here once every fork has joined; what the turn
     /// changed stays.
+    ///
+    /// An error or panic that ends the turn leaves the machine in error, and
+    /// returning it is no recovery: until [`Self::recover`] enters it, this
+    /// fails on it without entering. Machines below it stay reachable.
     pub fn run<'env, R>(
         &'env mut self,
         path: impl Into<MachinePath>,
         turn: impl for<'scope> FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error>,
     ) -> Result<R, Error> {
-        let path = path.into();
+        self.enter(path.into(), Reach::Enter, turn)
+    }
+
+    /// As [`Self::run`], for a machine that may be in error: the turn starts
+    /// with a list of the diagnostics of its errors pushed onto its stack,
+    /// as the failed turns left it, and the list is empty when it is not in
+    /// error.
+    pub fn recover<'env, R>(
+        &'env mut self,
+        path: impl Into<MachinePath>,
+        turn: impl for<'scope> FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
+        self.enter(path.into(), Reach::Recover, turn)
+    }
+
+    fn enter<'env, R>(
+        &'env mut self,
+        path: MachinePath,
+        reach: Reach,
+        turn: impl for<'scope> FnOnce(&mut Machine<'scope, 'env>) -> Result<R, Error>,
+    ) -> Result<R, Error> {
         let Runtime { root, shared, .. } = self;
-        let state = std::mem::take(root.descendant(path.keys())?);
+        if path.keys().is_empty() && reach == Reach::Enter && root.failed() {
+            return Err(failed(&[]));
+        }
+        let state = std::mem::take(root.descendant(path.keys(), reach)?);
         let shared: &'env Shared = shared;
         let (state, outcome) = thread::scope(|scope| {
             let mut machine = Machine::new(shared, scope, state);
-            let outcome = machine.take_turn(turn);
+            let outcome = machine.take_turn(|m| {
+                if reach == Reach::Recover {
+                    m.push_errors()?;
+                }
+                turn(m)
+            });
             (machine.state, outcome)
         });
         *root
-            .descendant(path.keys())
+            .descendant(path.keys(), Reach::Internal)
             .expect("no machine is forked between turns") = state;
         root.prune(path.keys());
         outcome.unwrap_or_else(|panic| resume_unwind(panic))
@@ -375,18 +466,28 @@ struct PendingFork<'scope> {
     thread: ScopedJoinHandle<'scope, ForkReturn>,
 }
 
-/// What a fork's thread returns at its join: its machine, a panic that
-/// ended its turn, and, for a fork within a cut, its branch of the cut's
-/// transaction.
+/// What a fork's thread returns at its join: its machine, how its turn
+/// ended, and, for a fork within a cut, its branch of the cut's transaction.
 struct ForkReturn {
     state: MachineState,
+    outcome: Result<(), Error>,
     panic: Option<Box<dyn Any + Send>>,
     branch: Option<CutTransaction>,
 }
 
+/// What joining a fork found.
+struct Joined {
+    outcome: Result<(), Error>,
+    panic: Option<Box<dyn Any + Send>>,
+    /// Whether the fork's branch merged in a serial order.
+    serial: bool,
+}
+
 /// A fork of a machine, from [`Machine::fork`], which [`Machine::join`]
-/// joins. Its lifetime is the scope it was made in, so only the machine
-/// that made it joins it, and only in the cut or scope that made it:
+/// joins. A fork returns nothing to Rust: what it leaves is on its machine's
+/// stack, for its owner to take. Its lifetime is the scope it was made in,
+/// so only the machine that made it joins it, and only in the cut or scope
+/// that made it:
 ///
 /// ```compile_fail
 /// let mut rt = glam::Runtime::open(glam::RuntimeConfig::new()).unwrap();
@@ -413,9 +514,8 @@ struct ForkReturn {
 ///     m.join(fork)
 /// });
 /// ```
-pub struct Fork<'scope, R> {
+pub struct Fork<'scope> {
     id: u64,
-    result: Arc<Mutex<Option<Result<R, Error>>>>,
     /// Invariant, so that no fork passes for one of a narrower scope.
     _scope: PhantomData<fn(&'scope ()) -> &'scope ()>,
 }
@@ -438,27 +538,46 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         }
     }
 
-    /// Runs `turn` on this machine, then joins the forks it left. A panic,
-    /// in the turn or in such a fork, returns once every fork has joined.
+    /// Runs `turn` on this machine, then joins the forks it left, in the
+    /// order they were made: the turn's outcome is its own error, or else
+    /// the first of theirs. A panic, in the turn or in such a fork, returns
+    /// once every fork has joined. An error or panic that ends the turn
+    /// leaves the machine in error.
     fn take_turn<R>(
         &mut self,
         turn: impl FnOnce(&mut Self) -> Result<R, Error>,
     ) -> thread::Result<Result<R, Error>> {
         let outcome = catch_unwind(AssertUnwindSafe(|| turn(self)));
-        let fork_panic = self.join_forks();
-        match (outcome, fork_panic) {
+        let (fork_panic, fork_error) = self.join_forks();
+        let outcome = match (outcome, fork_panic) {
             (Err(panic), _) | (Ok(_), Some(panic)) => Err(panic),
-            (Ok(outcome), None) => Ok(outcome),
+            (Ok(Ok(result)), None) => Ok(fork_error.map_or(Ok(result), Err)),
+            (Ok(Err(error)), None) => Ok(Err(error)),
+        };
+        match &outcome {
+            Err(panic) => {
+                let diagnostic = self.panic_value(panic.as_ref());
+                self.state.errors.push(diagnostic);
+            }
+            // Errors the turn registered describe its machine already.
+            Ok(Err(error)) if !self.state.failed() => {
+                let diagnostic = self.error_value(error);
+                self.state.errors.push(diagnostic);
+            }
+            Ok(_) => {}
         }
+        outcome
     }
 
     /// Runs `body` on this machine within a fresh thread scope, whose
-    /// lifetime brands the forks made in it, then joins those it left. A
-    /// panic, in `body` or in such a fork, resumes once they have joined.
-    fn within_scope<'b, T>(
+    /// lifetime brands the forks made in it, then joins those it left, as
+    /// a turn does: the outcome is `body`'s error, or else the first of
+    /// theirs. A panic, in `body` or in such a fork, resumes once they have
+    /// joined.
+    fn within_scope<'b, R>(
         &mut self,
-        body: impl for<'inner> FnOnce(&mut Machine<'inner, 'b>) -> T,
-    ) -> T
+        body: impl for<'inner> FnOnce(&mut Machine<'inner, 'b>) -> Result<R, Error>,
+    ) -> Result<R, Error>
     where
         'scope: 'b,
     {
@@ -473,13 +592,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 forks: Vec::new(),
             };
             let outcome = catch_unwind(AssertUnwindSafe(|| body(&mut inner)));
-            let fork_panic = inner.join_forks();
+            let (fork_panic, fork_error) = inner.join_forks();
             self.state = std::mem::take(&mut inner.state);
             self.cut = inner.cut.take();
             self.cut_offset = std::mem::take(&mut inner.cut_offset);
             match (outcome, fork_panic) {
                 (Err(panic), _) | (Ok(_), Some(panic)) => resume_unwind(panic),
-                (Ok(outcome), None) => outcome,
+                (Ok(Ok(result)), None) => fork_error.map_or(Ok(result), Err),
+                (Ok(Err(error)), None) => Err(error),
             }
         })
     }
@@ -489,6 +609,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// the turn joins it: its actions on shared state join the cut's
     /// transaction, and the descendant's state, part of this machine's,
     /// returns with it when the cut undoes what it did.
+    ///
+    /// As [`Runtime::run`] does, it fails on a descendant in error without
+    /// entering, and an error or panic that ends the turn leaves the
+    /// descendant in error.
     pub fn run<'b, R>(
         &mut self,
         path: impl Into<MachinePath>,
@@ -497,13 +621,33 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     where
         'scope: 'b,
     {
-        let path = path.into().0;
-        if path.is_empty() {
-            return Err(Error::new(
-                "a machine takes turns on its descendants, not itself",
-            ));
-        }
-        let state = std::mem::take(self.state.descendant(&path)?);
+        self.descend(descendant_path(path)?, Reach::Enter, turn)
+    }
+
+    /// As [`Self::run`], for a descendant that may be in error, as
+    /// [`Runtime::recover`] is: the turn starts with a list of the
+    /// diagnostics of its errors, possibly empty, pushed onto its stack.
+    pub fn recover<'b, R>(
+        &mut self,
+        path: impl Into<MachinePath>,
+        turn: impl for<'inner> FnOnce(&mut Machine<'inner, 'b>) -> Result<R, Error>,
+    ) -> Result<R, Error>
+    where
+        'scope: 'b,
+    {
+        self.descend(descendant_path(path)?, Reach::Recover, turn)
+    }
+
+    fn descend<'b, R>(
+        &mut self,
+        path: Vec<Key>,
+        reach: Reach,
+        turn: impl for<'inner> FnOnce(&mut Machine<'inner, 'b>) -> Result<R, Error>,
+    ) -> Result<R, Error>
+    where
+        'scope: 'b,
+    {
+        let state = std::mem::take(self.state.descendant(&path, reach)?);
         let runtime: &'b Shared = self.runtime;
         let cut = self.cut.take();
         let cut_offset = match cut {
@@ -514,31 +658,81 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             let mut child = Machine::new(runtime, scope, state);
             child.cut = cut;
             child.cut_offset = cut_offset;
-            let outcome = child.take_turn(turn);
+            let outcome = child.take_turn(|c| {
+                if reach == Reach::Recover {
+                    c.push_errors()?;
+                }
+                turn(c)
+            });
             (child.state, child.cut, outcome)
         });
         self.cut = cut;
         *self
             .state
-            .descendant(&path)
+            .descendant(&path, Reach::Internal)
             .expect("a descendant's place stays during its turn") = state;
         self.state.prune(&path);
         outcome.unwrap_or_else(|panic| resume_unwind(panic))
     }
 
+    /// Pushes a list of the diagnostics of this machine's errors, taking
+    /// them, as a recovering entry does.
+    fn push_errors(&mut self) -> Result<(), Error> {
+        let errors = std::mem::take(&mut self.state.errors);
+        let list = self.runtime.assembler.values().list(errors)?;
+        self.push(list);
+        Ok(())
+    }
+
+    /// Registers `error` as leaving this machine logically in error, apart
+    /// from any logging: once this turn ends, nothing enters the machine
+    /// until a recovering entry takes its errors. A turn that registered an
+    /// error and then ends in one keeps only what it registered.
+    pub fn register_error(&mut self, error: &Error) {
+        let diagnostic = self.error_value(error);
+        self.state.errors.push(diagnostic);
+    }
+
+    /// The diagnostic object of an error, for a machine's errors.
+    fn error_value(&self, error: &Error) -> Value {
+        let values = self.runtime.assembler.values();
+        error
+            .diagnostic(&values)
+            .and_then(|diagnostic| diagnostic.enrich(&values))
+            .unwrap_or_else(|_| self.message_value(&error.to_string()))
+    }
+
+    /// The diagnostic object of a panic that ended a turn.
+    fn panic_value(&self, panic: &(dyn Any + Send)) -> Value {
+        let message = panic
+            .downcast_ref::<&str>()
+            .copied()
+            .or_else(|| panic.downcast_ref::<String>().map(String::as_str))
+            .unwrap_or("a panic");
+        self.message_value(&format!("a turn panicked: {message}"))
+    }
+
+    fn message_value(&self, message: &str) -> Value {
+        let values = self.runtime.assembler.values();
+        let diagnostic = Diagnostic::new(&values, Severity::Error, message);
+        diagnostic
+            .enrich(&values)
+            .unwrap_or_else(|_| diagnostic.emission().clone())
+    }
+
     /// Moves the top `n` values, keeping their order, onto the stack of the
     /// descendant at `path`. Moving none only checks that the descendant is
-    /// not forked.
+    /// neither forked nor in error.
     pub fn give(&mut self, path: impl Into<MachinePath>, n: usize) -> Result<(), Error> {
         let path = descendant_path(path)?;
         if n == 0 {
             return self.state.reachable(&path);
         }
         let depth = self.require(n)?;
-        self.state.descendant(&path)?;
+        self.state.descendant(&path, Reach::Enter)?;
         let items = self.state.stack.split_off(depth - n);
         self.state
-            .descendant(&path)
+            .descendant(&path, Reach::Enter)
             .expect("the descendant was just reached")
             .stack
             .extend(items);
@@ -547,13 +741,13 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Moves the top `n` values of the descendant at `path`, keeping their
     /// order, onto this machine's stack. Moving none only checks that the
-    /// descendant is not forked.
+    /// descendant is neither forked nor in error.
     pub fn take(&mut self, path: impl Into<MachinePath>, n: usize) -> Result<(), Error> {
         let path = descendant_path(path)?;
         if n == 0 {
             return self.state.reachable(&path);
         }
-        let descendant = self.state.descendant(&path)?;
+        let descendant = self.state.descendant(&path, Reach::Enter)?;
         let held = descendant.stack.len();
         let items = (held >= n).then(|| descendant.stack.split_off(held - n));
         self.state.prune(&path);
@@ -563,32 +757,34 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Forks the descendant at `path`: takes it, with its own descendants,
-    /// to a new thread that takes a turn on it. The fork's closure may
-    /// borrow what outlives this scope; it joins at [`Self::join`], or at
-    /// the end of the turn, [`Self::scope`] or cut that made it. Until then,
-    /// neither it nor a machine below it is reachable.
+    /// to a new thread that takes a turn on it. It fails on a descendant
+    /// already forked, or in error. The fork's closure may borrow what
+    /// outlives this scope, and returns nothing: what the fork leaves is on
+    /// its machine's stack, for [`Self::take`] after the join. It joins at
+    /// [`Self::join`], or at the end of the turn, [`Self::scope`] or cut that
+    /// made it. Until then, neither it nor a machine below it is reachable.
     ///
     /// Within a cut, the fork joins the cut's transaction: it works on a
     /// branch of it, which sees what the cut wrote before the fork and
     /// merges at the join, in join order. Should the fork have read what the
     /// cut wrote after the fork, no serial order explains it, and the
     /// outermost cut runs again.
-    pub fn fork<R: Send + 'scope>(
+    pub fn fork(
         &mut self,
         path: impl Into<MachinePath>,
-        turn: impl for<'inner> FnOnce(&mut Machine<'inner, 'scope>) -> Result<R, Error> + Send + 'scope,
-    ) -> Result<Fork<'scope, R>, Error> {
+        turn: impl for<'inner> FnOnce(&mut Machine<'inner, 'scope>) -> Result<(), Error> + Send + 'scope,
+    ) -> Result<Fork<'scope>, Error> {
         self.fork_with(thread::Builder::new(), path, turn)
     }
 
     /// As [`Self::fork`], with the thread configured by `builder`, such as
     /// its name and stack size.
-    pub fn fork_with<R: Send + 'scope>(
+    pub fn fork_with(
         &mut self,
         builder: thread::Builder,
         path: impl Into<MachinePath>,
-        turn: impl for<'inner> FnOnce(&mut Machine<'inner, 'scope>) -> Result<R, Error> + Send + 'scope,
-    ) -> Result<Fork<'scope, R>, Error> {
+        turn: impl for<'inner> FnOnce(&mut Machine<'inner, 'scope>) -> Result<(), Error> + Send + 'scope,
+    ) -> Result<Fork<'scope>, Error> {
         let path = path.into().0;
         let state = self.state.fork_out(&path)?;
         let branch = self.cut.as_ref().map(|cut| CutTransaction {
@@ -607,8 +803,6 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let start = Arc::new(Mutex::new(Some((state, branch))));
         let taken = Arc::clone(&start);
         let id = NEXT_FORK.fetch_add(1, Ordering::Relaxed);
-        let result = Arc::new(Mutex::new(None));
-        let fork_result = Arc::clone(&result);
         let runtime = self.runtime;
         let thread = builder.spawn_scoped(self.scope, move || {
             let (state, branch) = taken
@@ -617,34 +811,31 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .take()
                 .expect("a fork's thread takes its machine once");
             // The fork's turn is a scope of its own, as every turn is.
-            let (state, branch, panic) = thread::scope(|scope| {
+            let fork_return = thread::scope(|scope| {
                 let mut machine = Machine::new(runtime, scope, state);
                 machine.cut = branch;
                 machine.cut_offset = cut_offset;
-                let panic = match machine.take_turn(turn) {
-                    Ok(outcome) => {
-                        *fork_result.lock().unwrap_or_else(PoisonError::into_inner) = Some(outcome);
-                        None
-                    }
-                    Err(panic) => Some(panic),
+                let (outcome, panic) = match machine.take_turn(turn) {
+                    Ok(outcome) => (outcome, None),
+                    Err(panic) => (Ok(()), Some(panic)),
                 };
-                (machine.state, machine.cut, panic)
+                ForkReturn {
+                    state: machine.state,
+                    outcome,
+                    panic,
+                    branch: machine.cut,
+                }
             });
             // The thread ends with its turn, so, as a worker does, it gives
             // back the collector caches it held.
             glam_gc::Heap::release_current_thread_caches();
-            ForkReturn {
-                state,
-                panic,
-                branch,
-            }
+            fork_return
         });
         match thread {
             Ok(thread) => {
                 self.forks.push(PendingFork { id, path, thread });
                 Ok(Fork {
                     id,
-                    result,
                     _scope: PhantomData,
                 })
             }
@@ -663,67 +854,68 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Waits for `fork`'s turn to end, returns its machine to its place, and
-    /// returns the turn's result. A panic in the fork resumes here. Within a
-    /// cut, the fork's branch merges; should the fork have read what the cut
-    /// wrote after the fork, this fails, and the outermost cut runs again
-    /// whatever its body returns.
-    pub fn join<R>(&mut self, fork: Fork<'scope, R>) -> Result<R, Error> {
+    /// returns how the turn ended: success, a failure ([`ErrorKind::Backtrack`])
+    /// or another error. An error leaves the forked machine in error whether
+    /// or not it is observed here, and a panic in the fork resumes here.
+    /// Within a cut, the fork's branch merges; should the fork have read
+    /// what the cut wrote after the fork, this fails, and the outermost cut
+    /// runs again whatever its body returns.
+    pub fn join(&mut self, fork: Fork<'scope>) -> Result<(), Error> {
         let index = self
             .forks
             .iter()
             .position(|pending| pending.id == fork.id)
             .expect("a fork's scope is its machine's, and it joins once");
         let pending = self.forks.remove(index);
-        let (panic, serial) = self.join_pending(pending);
-        if let Some(panic) = panic {
+        let joined = self.join_pending(pending);
+        if let Some(panic) = joined.panic {
             resume_unwind(panic);
         }
-        if !serial {
+        if !joined.serial {
             return Err(Error::new(
                 "the fork read what its cut wrote after the fork, so the cut runs again",
             ));
         }
-        fork.result
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner)
-            .take()
-            .expect("a joined fork that did not panic left its result")
+        joined.outcome
     }
 
     /// Runs `body` as a scope of this machine: the forks made in it join by
-    /// its end, as a turn's do, and none leaves it. A panic in `body` or in
-    /// such a fork resumes once they have joined.
+    /// its end, in the order they were made, as a turn's do, and none leaves
+    /// it. Its outcome is `body`'s error, or else the first of theirs. A
+    /// panic in `body` or in such a fork resumes once they have joined.
     pub fn scope<'b, R>(
         &mut self,
-        body: impl for<'inner> FnOnce(&mut Machine<'inner, 'b>) -> R,
-    ) -> R
+        body: impl for<'inner> FnOnce(&mut Machine<'inner, 'b>) -> Result<R, Error>,
+    ) -> Result<R, Error>
     where
         'scope: 'b,
     {
         self.within_scope(body)
     }
 
-    /// Joins the unjoined forks, oldest first, returning the first panic
-    /// among them.
-    fn join_forks(&mut self) -> Option<Box<dyn Any + Send>> {
+    /// Joins the unjoined forks, in the order they were made, returning the
+    /// first panic and the first error among their turns.
+    fn join_forks(&mut self) -> (Option<Box<dyn Any + Send>>, Option<Error>) {
         let mut first_panic = None;
+        let mut first_error = None;
         for pending in std::mem::take(&mut self.forks) {
-            if let (Some(panic), _) = self.join_pending(pending) {
+            let joined = self.join_pending(pending);
+            if let Some(panic) = joined.panic {
                 first_panic.get_or_insert(panic);
             }
+            if let Err(error) = joined.outcome {
+                first_error.get_or_insert(error);
+            }
         }
-        first_panic
+        (first_panic, first_error)
     }
 
     /// Joins a fork's thread and returns its machine to its place, merging
-    /// its branch into this machine's cut. Returns the fork's panic, and
-    /// whether its branch merged in a serial order.
-    fn join_pending(
-        &mut self,
-        pending: PendingFork<'scope>,
-    ) -> (Option<Box<dyn Any + Send>>, bool) {
+    /// its branch into this machine's cut.
+    fn join_pending(&mut self, pending: PendingFork<'scope>) -> Joined {
         let ForkReturn {
             state,
+            outcome,
             panic,
             branch,
         } = pending
@@ -736,7 +928,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             (Some(branch), Some(cut)) => cut.merge(branch),
             _ => true,
         };
-        (panic, serial)
+        Joined {
+            outcome,
+            panic,
+            serial,
+        }
     }
 }
 
@@ -785,7 +981,7 @@ struct Hook {
     run: Box<HookFn>,
 }
 
-type HookFn = dyn FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send;
+type HookFn = dyn FnOnce(&mut Machine<'_, '_>) + Send;
 
 /// When an aborted outermost cut runs again.
 enum CutRetry {
@@ -1234,8 +1430,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 _ if cut.conflicted => CutRetry::Now,
                 Ok(result) => match resources.commit_reflection(&cut.journal) {
                     StoreCommitResult::Committed => {
-                        let hook_error = self.run_hooks(cut.commit_hooks);
-                        return with_hook_error(Ok(result), hook_error);
+                        self.run_hooks(cut.commit_hooks);
+                        return Ok(result);
                     }
                     StoreCommitResult::Conflict => CutRetry::Now,
                     StoreCommitResult::MissingVolume(volume) => {
@@ -1254,14 +1450,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 Err(error) => CutRetry::Never(error),
             };
             self.state = start;
-            if let Some(hook_error) = self.run_hooks(cut.abort_hooks.into_iter().rev()) {
-                // An error that ended the cut came first; a hook's error
-                // ends a cut that would run again.
-                return Err(match next {
-                    CutRetry::Never(error) => error,
-                    _ => hook_error,
-                });
-            }
+            self.run_hooks(cut.abort_hooks.into_iter().rev());
             match next {
                 CutRetry::Now => {}
                 CutRetry::AfterChange(journal) => self.await_change(&resources, &journal),
@@ -1282,24 +1471,23 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     ///
     /// A hook runs on this machine, with its local state as it then stands,
     /// but on a stack holding only the captured values, in their order, and
-    /// an empty stash; the machine's own stack and stash return after. Hooks
-    /// are best effort: each runs although one before it failed, and a
-    /// panic within a cut abandons it without running them. A cut returns a
-    /// hook's error in place of its result, or of an explicit failure, but
-    /// not of another error.
+    /// an empty stash; the machine's own stack and stash return after. It
+    /// runs even on a machine a later error left in error, since it sees
+    /// only what it captured. Hooks are best effort, and the host's: a hook
+    /// handles its own failures, by logging through the machine or
+    /// otherwise, and a cut's outcome is only its own. A panic within a cut
+    /// abandons it without running them.
     pub fn on_commit(
         &mut self,
         items: usize,
-        hook: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static,
+        hook: impl FnOnce(&mut Machine<'_, '_>) + Send + 'static,
     ) -> Result<(), Error> {
         let hook = self.hook(items, hook)?;
         match &mut self.cut {
-            Some(cut) => {
-                cut.commit_hooks.push(hook);
-                Ok(())
-            }
-            None => self.run_hooks([hook]).map_or(Ok(()), Err),
+            Some(cut) => cut.commit_hooks.push(hook),
+            None => self.run_hooks([hook]),
         }
+        Ok(())
     }
 
     /// Pops `items` values and registers `hook` to run if a failure
@@ -1311,7 +1499,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     pub fn on_abort(
         &mut self,
         items: usize,
-        hook: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static,
+        hook: impl FnOnce(&mut Machine<'_, '_>) + Send + 'static,
     ) -> Result<(), Error> {
         let hook = self.hook(items, hook)?;
         if let Some(cut) = &mut self.cut {
@@ -1323,7 +1511,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     fn hook(
         &mut self,
         items: usize,
-        run: impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static,
+        run: impl FnOnce(&mut Machine<'_, '_>) + Send + 'static,
     ) -> Result<Hook, Error> {
         let depth = self.require(items)?;
         Ok(Hook {
@@ -1334,9 +1522,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Runs hooks in turn, each on the machine that registered it, which is
-    /// this one or a descendant, and returns the first error.
-    fn run_hooks(&mut self, hooks: impl IntoIterator<Item = Hook>) -> Option<Error> {
-        let mut first_error = None;
+    /// this one or a descendant.
+    fn run_hooks(&mut self, hooks: impl IntoIterator<Item = Hook>) {
         for Hook {
             machine,
             items,
@@ -1345,26 +1532,25 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         {
             debug_assert!(machine.starts_with(&self.cut_offset));
             let below = machine[self.cut_offset.len()..].to_vec();
-            let outcome = if below.is_empty() {
-                self.run_hook(items, run)
+            if below.is_empty() {
+                self.run_hook(items, run);
             } else {
-                self.run(below, move |m| m.run_hook(items, run))
-            };
-            if let Err(error) = outcome {
-                first_error.get_or_insert(error);
+                self.descend(below, Reach::Internal, move |m| {
+                    m.run_hook(items, run);
+                    Ok(())
+                })
+                .expect("a hook's machine stays reachable until the hook runs");
             }
         }
-        first_error
     }
 
     /// Runs a hook on a stack of its captured values and an empty stash.
-    fn run_hook(&mut self, items: Vec<Value>, run: Box<HookFn>) -> Result<(), Error> {
+    fn run_hook(&mut self, items: Vec<Value>, run: Box<HookFn>) {
         let stack = std::mem::replace(&mut self.state.stack, items);
         let stash = std::mem::take(&mut self.state.stash);
-        let outcome = run(self);
+        run(self);
         self.state.stack = stack;
         self.state.stash = stash;
-        outcome
     }
 
     fn nested_cut<'b, R>(
@@ -1389,8 +1575,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             cut.journal = journal;
             cut.commit_hooks.truncate(commit_hooks);
             let aborted = cut.abort_hooks.split_off(abort_hooks);
-            let hook_error = self.run_hooks(aborted.into_iter().rev());
-            return with_hook_error(outcome, hook_error);
+            self.run_hooks(aborted.into_iter().rev());
         }
         outcome
     }
@@ -1514,16 +1699,6 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             return Err(underflow("stack", n, depth));
         }
         Ok(depth)
-    }
-}
-
-/// A cut's outcome once its hooks have run: a hook's error replaces a
-/// result or an explicit failure, but not another error, which came first.
-fn with_hook_error<R>(outcome: Result<R, Error>, hook_error: Option<Error>) -> Result<R, Error> {
-    match (outcome, hook_error) {
-        (Err(error), _) if error.kind() != ErrorKind::Backtrack => Err(error),
-        (_, Some(hook_error)) => Err(hook_error),
-        (outcome, None) => outcome,
     }
 }
 

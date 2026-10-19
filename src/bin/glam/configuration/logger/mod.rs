@@ -166,7 +166,7 @@ fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<Value>, Error> {
 }
 
 pub(crate) struct LoggerRun<'scope> {
-    pub(crate) thread: Fork<'scope, ()>,
+    pub(crate) thread: Fork<'scope>,
     pub(crate) diagnostics: DiagnosticBus,
     pub(crate) supervisor: Arc<LoggerSupervisor>,
 }

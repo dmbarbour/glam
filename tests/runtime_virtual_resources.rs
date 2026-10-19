@@ -18,7 +18,7 @@ fn runtime() -> Runtime {
 fn attempts_around(
     reads: impl Fn(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static,
     interleaved: impl FnOnce(&mut Machine<'_, '_>),
-) -> usize {
+) -> i64 {
     let mut rt = runtime();
     let (read_sender, read_receiver) = mpsc::channel();
     let (done_sender, done_receiver) = mpsc::channel();
@@ -34,7 +34,8 @@ fn attempts_around(
                 }
                 Ok(())
             })?;
-            Ok(attempts.get())
+            m.push_int(attempts.get());
+            Ok(())
         })?;
         read_receiver.recv().expect("the reader reads first");
         root.run("writer", |w| {
@@ -42,7 +43,9 @@ fn attempts_around(
             Ok(())
         })?;
         done_sender.send(()).expect("the reader waits");
-        root.join(reader)
+        root.join(reader)?;
+        root.take("reader", 1)?;
+        root.pop_int()
     })
     .expect("the cut should commit")
 }
@@ -182,18 +185,18 @@ fn a_failed_cut_waits_until_a_virtual_resource_it_read_is_written() {
                     // Signals the watcher as the failure backtracks, before
                     // the cut waits, forcing the write after the read.
                     let waiting = waiting.clone();
-                    m.on_abort(0, move |_| {
-                        waiting.send(()).expect("the watcher listens");
-                        Ok(())
-                    })?;
+                    m.on_abort(0, move |_| waiting.send(()).expect("the watcher listens"))?;
                     Err(m.fail())
                 })?;
-                Ok(attempts.get())
+                m.push_int(attempts.get());
+                Ok(())
             })?;
             blocked.recv().expect("the reader should fail first");
             host_ready.store(true, Ordering::SeqCst);
             root.virtual_set(["host", "ready"])?;
-            root.join(reader)
+            root.join(reader)?;
+            root.take("reader", 1)?;
+            root.pop_int()
         })
         .expect("the cut should commit once the host is ready");
     assert_eq!(

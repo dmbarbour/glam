@@ -2120,6 +2120,47 @@ maps the short names used here to file names.
   - A host embeds its threads as forked machines within a long turn.
 - **Recorded in:** runtime API plan, `api-machine-tree`.
 
+### An error that ends a turn leaves its machine in error until recovered
+`machine-errors-mark-and-recover` · 2026-10-19 · maintainer · accepted
+- **Context:** a turn is not atomic, so an error that ends one may leave
+  its machine's state spoiled. Errors could also go unobserved: a fork
+  joined at its scope's end dropped its error and its Rust result, and a
+  hook's error replaced its cut's outcome by a rule the maintainer was
+  unsure of.
+- **Decision:**
+  - An error or panic that ends a turn leaves its machine in error: the
+    error's diagnostic joins the machine's state. Observing an error, as a
+    turn's or a join's result, never recovers it.
+  - Recovery is an entry: `rt.recover` and `m.recover` enter a machine
+    and push a list of its errors' diagnostics, possibly empty, onto its
+    stack as it was left, while `run`, `give`, `take` and `fork` fail on a
+    machine in error. No machine runs normally with a pending error, and
+    whoever recovers knows what is on the stack. Only the target's own
+    error matters, not that of machines between.
+  - `m.register_error` marks a machine logically in error apart from
+    logging diagnostics; what a turn registered describes it, so its
+    escaping error is not recorded again.
+  - Forks return nothing to Rust: what a fork computes stays on its
+    machine's stack. A join returns the fork's outcome, keeping success,
+    failure (`Backtrack`) and divergence (another error) apart, and an
+    implicit join propagates them: the body's own outcome first, then the
+    forks' in the deterministic order they were made.
+  - Hooks return nothing and handle their own errors.
+  - Panics resume at the join, explicit or implicit, and mark each machine
+    whose turn they unwind.
+- **Alternatives rejected:**
+  - marking only errors nobody received, which assumed the tree;
+  - a separate acknowledgement operation, or acknowledgement within a turn,
+    either of which conflates recovery with running;
+  - diagnostics captured in machine state, which a long turn would hold
+    back; communication takes them instead;
+  - failure winning over an earlier divergence among joins, which would
+    open non-determinism's interaction with transactions and backtracking.
+- **Consequences:** settlement can find every machine left in error. The
+  open question on hook errors is settled. A fork's results travel as
+  glam values, as a machine's always have.
+- **Recorded in:** runtime API plan, `api-machine-errors`.
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable

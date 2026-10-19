@@ -34,15 +34,29 @@ fn heap_undefined(rt: &mut Runtime, path: &[&str]) -> bool {
 type Log = Arc<Mutex<Vec<&'static str>>>;
 
 /// A hook that records `entry` in `log`.
-fn record(
-    log: &Log,
-    entry: &'static str,
-) -> impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + use<> {
+fn record(log: &Log, entry: &'static str) -> impl FnOnce(&mut Machine<'_, '_>) + use<> {
     let log = log.clone();
-    move |_| {
-        log.lock().unwrap().push(entry);
-        Ok(())
-    }
+    move |_| log.lock().unwrap().push(entry)
+}
+
+/// A hook's work, which handles its own errors by failing the test: it
+/// pops two captured items, and writes their sum with the machine's count.
+fn tally(m: &mut Machine<'_, '_>) -> Result<(), Error> {
+    assert_eq!(
+        (m.depth(), m.stash_depth()),
+        (2, 0),
+        "a hook's stack holds only its items"
+    );
+    let (top, below) = (m.pop_int()?, m.pop_int()?);
+    assert_eq!((below, top), (20, 30), "the items keep their order");
+    m.get("count")?;
+    let count = m.pop_int()?;
+    m.push_int(count + below + top);
+    m.heap_set(["total"])?;
+    m.push_int(count + 1);
+    m.set("count")?;
+    m.push_text("left behind");
+    Ok(())
 }
 
 /// Whether the top value, evaluated, is `{}`; it is popped.
@@ -228,23 +242,7 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
             m.push_int(10);
             m.push_int(20);
             m.push_int(30);
-            m.on_commit(2, |m| {
-                assert_eq!(
-                    (m.depth(), m.stash_depth()),
-                    (2, 0),
-                    "a hook's stack holds only its items"
-                );
-                let (top, below) = (m.pop_int()?, m.pop_int()?);
-                assert_eq!((below, top), (20, 30), "the items keep their order");
-                m.get("count")?;
-                let count = m.pop_int()?;
-                m.push_int(count + below + top);
-                m.heap_set(["total"])?;
-                m.push_int(count + 1);
-                m.set("count")?;
-                m.push_text("left behind");
-                Ok(())
-            })?;
+            m.on_commit(2, |m| tally(m).expect("the hook's work should succeed"))?;
             m.push_int(2);
             m.set("count")
         })?;
@@ -260,7 +258,10 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
         m.cut(|m| {
             let failed: Result<(), Error> = m.cut(|m| {
                 m.push_text("compensation");
-                m.on_abort(1, |m| m.heap_set(["undone"]))?;
+                m.on_abort(1, |m| {
+                    m.heap_set(["undone"])
+                        .expect("the compensation should write")
+                })?;
                 m.push_text("attempt");
                 m.heap_set(["undone"])?;
                 Err(m.fail())
@@ -291,46 +292,25 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
 }
 
 #[test]
-fn a_hook_s_error_replaces_a_result_or_a_failure_but_not_another_error() {
+fn a_hook_handles_its_own_failures_and_a_cut_s_outcome_is_its_own() {
     let mut rt = runtime();
     let log = Log::default();
-    rt.run("hooks", |m| {
-        let committed: Result<i64, Error> = m.cut(|m| {
-            m.on_commit(0, |_| Err(Error::new("the first hook errs")))?;
-            m.on_commit(0, record(&log, "the second hook runs"))?;
-            Ok(1)
-        });
-        assert_eq!(
-            committed
-                .expect_err("the hook's error replaces the result")
-                .to_string(),
-            "the first hook errs"
-        );
-        assert_eq!(*log.lock().unwrap(), ["the second hook runs"]);
-        m.cut(|m| {
-            let failed: Result<(), Error> = m.cut(|m| {
-                m.on_abort(0, |_| Err(Error::new("the abort hook errs")))?;
-                Err(m.fail())
-            });
-            let error = failed.expect_err("the cut fails");
-            assert_eq!(
-                (error.kind(), error.to_string().as_str()),
-                (ErrorKind::Failure, "the abort hook errs"),
-                "the hook's error replaces the failure"
-            );
-            let errored: Result<(), Error> = m.cut(|m| {
-                m.on_abort(0, |_| Err(Error::new("the abort hook errs")))?;
-                Err(Error::new("the body errs"))
-            });
-            assert_eq!(
-                errored.expect_err("the cut errs").to_string(),
-                "the body errs",
-                "the body's error came first"
-            );
-            Ok(())
+    let committed = rt
+        .run("hooks", |m| {
+            m.cut(|m| {
+                let log = log.clone();
+                m.on_commit(0, move |m| {
+                    // Nothing is on the hook's stack to pop.
+                    if m.pop_int().is_err() {
+                        log.lock().unwrap().push("the hook handled its failure");
+                    }
+                })?;
+                Ok(1)
+            })
         })
-    })
-    .expect("the turn should succeed");
+        .expect("a hook's failure is no cut's");
+    assert_eq!(committed, 1);
+    assert_eq!(*log.lock().unwrap(), ["the hook handled its failure"]);
 }
 
 #[test]
@@ -351,19 +331,19 @@ fn a_failed_cut_waits_until_something_it_observed_changes() {
                     // Signals the writer as the failure backtracks, before
                     // the cut waits, forcing the write after the read.
                     let waiting = waiting.clone();
-                    m.on_abort(0, move |_| {
-                        waiting.send(()).expect("the writer listens");
-                        Ok(())
-                    })?;
+                    m.on_abort(0, move |_| waiting.send(()).expect("the writer listens"))?;
                     Err(m.fail())
                 })?;
                 assert_eq!(value, 5);
-                Ok(attempts.get())
+                m.push_int(attempts.get());
+                Ok(())
             })?;
             blocked.recv().expect("the reader should fail first");
             root.push_int(5);
             root.heap_set(["ready"])?;
-            root.join(reader)
+            root.join(reader)?;
+            root.take("reader", 1)?;
+            root.pop_int()
         })
         .expect("the cut should commit once the value is ready");
     assert_eq!(attempts, 2, "the cut runs again once, after the write");
@@ -396,13 +376,16 @@ fn a_conflicting_commit_reruns_the_cut_at_once() {
                     m.push_int(x * 2);
                     m.heap_set(["doubled"])
                 })?;
-                Ok(attempts.get())
+                m.push_int(attempts.get());
+                Ok(())
             })?;
             read_receiver.recv().expect("the doubler reads first");
             root.push_int(10);
             root.heap_set(["x"])?;
             written_sender.send(()).expect("the doubler waits");
-            root.join(doubler)
+            root.join(doubler)?;
+            root.take("doubler", 1)?;
+            root.pop_int()
         })
         .expect("the cut should commit");
     assert_eq!(attempts, 2, "the conflict reruns the cut");
@@ -462,7 +445,7 @@ fn hooks_run_on_the_machine_that_registered_them() {
             m.run("child", |c| {
                 c.on_abort(0, |c| {
                     c.push_int(1);
-                    c.set("compensated")
+                    c.set("compensated").expect("the compensation should set");
                 })
             })?;
             Err(Error::new("the cut errs"))
@@ -474,13 +457,13 @@ fn hooks_run_on_the_machine_that_registered_them() {
                 c.set("name")?;
                 let log = log.clone();
                 c.on_commit(0, move |c| {
-                    c.get("name")?;
-                    log.lock().unwrap().push(if c.pop_text()? == "child" {
+                    c.get("name").expect("the child holds its name");
+                    let name = c.pop_text().expect("the name is text");
+                    log.lock().unwrap().push(if name == "child" {
                         "the child's hook ran on the child"
                     } else {
                         "elsewhere"
                     });
-                    Ok(())
                 })
             })
         })
