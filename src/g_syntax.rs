@@ -87,6 +87,46 @@ pub(crate) fn defined_or_root(values: &CoreValueFactory) -> RuntimeValueRoot {
     compiler_values::defined_or_root(values)
 }
 
+/// A machine's environment, composed from `shares`, the most specific first
+/// (`machines-inherit-an-environment`): an anonymous object extending each
+/// share as `object _ extends ...` would, so a share overrides those after
+/// it. Each share is wrapped in an anonymous object of its own, so
+/// named and anonymous shares mix in any order, and one that is `{}`, never
+/// bound, stands for an empty object. Nothing is evaluated.
+pub(crate) fn composed_environment_root(
+    values: &CoreValueFactory,
+    shares: Vec<RuntimeValueRoot>,
+) -> RuntimeValueRoot {
+    let empty_defs = compiler_values::empty_object_defs_root(values);
+    values.with_boundary_access(|access| {
+        let anonymous = |deps: Vec<Value>| {
+            Value::builtin_call_in(
+                &access,
+                Builtin::ObjectInstanceFromParts,
+                vec![
+                    Value::Dict(Dict::new_sync()),
+                    Value::List(crate::core::List::from_values(deps)),
+                    empty_defs.clone_core_with(&access),
+                ],
+            )
+        };
+        let spec =
+            |object: Value| Value::builtin_call_in(&access, Builtin::ObjectSpec, vec![object]);
+        let levels = shares
+            .iter()
+            .map(|share| {
+                let share = Value::builtin_call_in(
+                    &access,
+                    Builtin::Default,
+                    vec![anonymous(Vec::new()), share.clone_core_with(&access)],
+                );
+                spec(anonymous(vec![spec(share)]))
+            })
+            .collect();
+        access.root_runtime_value(anonymous(levels))
+    })
+}
+
 pub(crate) fn require_defined_root(values: &CoreValueFactory) -> RuntimeValueRoot {
     compiler_values::require_defined_root(values)
 }

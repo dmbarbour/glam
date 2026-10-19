@@ -178,6 +178,7 @@ pub struct StoreSnapshot {
     revision: u64,
     heap_volume: VolumeId,
     runtime_volume: VolumeId,
+    environment_volume: VolumeId,
     query_domain: Arc<QueryDomain>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -196,6 +197,16 @@ impl StoreSnapshot {
     /// evaluated: a missing key reads `{}`.
     pub(crate) fn heap_value(&self, path: &[Key]) -> PublicValue {
         value_at_path(&self.values, self.root(), path)
+    }
+
+    /// The value at `path` in the machines' environment volume, as a lazy
+    /// access: a missing key reads `{}`.
+    pub(crate) fn environment_value(&self, path: &[Key]) -> PublicValue {
+        let root = self
+            .roots
+            .get(&self.environment_volume)
+            .expect("the environment volume must always exist");
+        value_at_path(&self.values, root, path)
     }
 
     pub(crate) fn volume(&self, volume: VolumeId) -> Option<&PublicValue> {
@@ -367,6 +378,26 @@ impl StoreJournal {
     /// Earlier observations remain intact.
     pub(crate) fn observe_read(&mut self, path: &[Key]) -> bool {
         self.observe_volume_read(self.snapshot.heap_volume, path)
+    }
+
+    /// Records a read at `path` in the machines' environment volume, as
+    /// [`Self::observe_read`] does in the user heap.
+    pub(crate) fn observe_environment_read(&mut self, path: &[Key]) -> bool {
+        self.observe_volume_read(self.snapshot.environment_volume, path)
+    }
+
+    /// The value at `path` in the machines' environment volume, with this
+    /// journal's writes, as a lazy access: a missing key reads `{}`.
+    pub(crate) fn environment_value(&self, path: &[Key]) -> PublicValue {
+        let root = self
+            .volume_view(self.snapshot.environment_volume)
+            .expect("the environment volume must always exist");
+        value_at_path(&self.snapshot.values, &root, path)
+    }
+
+    /// Writes `value` at `path` in the machines' environment volume.
+    pub(crate) fn write_environment(&mut self, path: Vec<Key>, value: PublicValue) {
+        self.write_volume(self.snapshot.environment_volume, path, value);
     }
 
     pub(crate) fn observe_volume_read(&mut self, volume: VolumeId, path: &[Key]) -> bool {
@@ -640,6 +671,9 @@ pub struct ReflectionStore {
     identity: Arc<()>,
     heap_volume: VolumeId,
     runtime_volume: VolumeId,
+    /// Each machine's share of its environment, which only the machine
+    /// writes (`machines-inherit-an-environment`).
+    environment_volume: VolumeId,
     query_domain: Arc<QueryDomain>,
     query_retirements: Receiver<EvaluationQueryId>,
     next_volume: u64,
@@ -657,18 +691,21 @@ impl ReflectionStore {
     ) -> Self {
         let heap_volume = VolumeId::from_u64(1).expect("one is a nonzero volume ID");
         let runtime_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
+        let environment_volume = VolumeId::from_u64(3).expect("three is a nonzero volume ID");
         let (query_domain, query_retirements) = QueryDomain::new();
         let public_values = Values::from_core_factory(values.clone());
         Self {
             identity: Arc::new(()),
             heap_volume,
             runtime_volume,
+            environment_volume,
             query_domain,
             query_retirements,
-            next_volume: 3,
+            next_volume: 4,
             roots: RedBlackTreeMapSync::new_sync()
                 .insert(heap_volume, public_values.empty_dict())
-                .insert(runtime_volume, public_values.empty_dict()),
+                .insert(runtime_volume, public_values.empty_dict())
+                .insert(environment_volume, public_values.empty_dict()),
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -683,6 +720,7 @@ impl ReflectionStore {
             revision: self.revision,
             heap_volume: self.heap_volume,
             runtime_volume: self.runtime_volume,
+            environment_volume: self.environment_volume,
             query_domain: self.query_domain.clone(),
             roots: self.roots.clone(),
             strategy: self.strategy.clone(),
@@ -739,7 +777,10 @@ impl ReflectionStore {
     }
 
     pub(crate) fn revoke_volume(&mut self, volume: VolumeId) -> Option<PublicValue> {
-        if volume == self.heap_volume || volume == self.runtime_volume {
+        if volume == self.heap_volume
+            || volume == self.runtime_volume
+            || volume == self.environment_volume
+        {
             return None;
         }
         let root = self.roots.get(&volume).cloned()?;

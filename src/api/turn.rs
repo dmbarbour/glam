@@ -27,7 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::marker::PhantomData;
 use std::panic::{AssertUnwindSafe, catch_unwind, resume_unwind};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, LazyLock, Mutex, PoisonError};
 use std::thread::{self, Scope, ScopedJoinHandle};
 
 use bytes::Bytes;
@@ -696,6 +696,28 @@ pub struct Fork<'scope> {
 }
 
 static NEXT_FORK: AtomicU64 = AtomicU64::new(0);
+
+/// The keys of the environment volume: a machine's share lies under
+/// `children` at each key of its path, then at `share`, so a subtree's
+/// shares go with one write.
+static CHILDREN: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("children"));
+static SHARE: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("share"));
+
+/// The node of the machine at `machine` in the environment volume.
+fn environment_node(machine: &[Key]) -> Vec<Key> {
+    machine
+        .iter()
+        .flat_map(|key| [CHILDREN.clone(), key.clone()])
+        .collect()
+}
+
+/// Where the share of the machine at `machine` lies in the environment
+/// volume.
+fn environment_share(machine: &[Key]) -> Vec<Key> {
+    let mut path = environment_node(machine);
+    path.push(SHARE.clone());
+    path
+}
 
 impl<'scope, 'env> Machine<'scope, 'env> {
     fn new(
@@ -1484,6 +1506,56 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(diagnostics)
     }
 
+    /// Pushes this machine's environment: the shares that it and its
+    /// ancestors bind, composed from the root down as one object, built
+    /// lazily, so nothing is evaluated (`machines-inherit-an-environment`):
+    /// as `object _ extends` the shares, its own first, so a machine's share
+    /// overrides what its ancestors' bind.
+    /// Within a cut, the read joins the cut's transaction and sees its
+    /// bindings, and the cut runs again when a share above changes; outside
+    /// one, it reads the shares as they stand.
+    pub fn env(&mut self) {
+        // The most specific share first: this machine's, then each
+        // ancestor's, to the root's.
+        let paths = (0..=self.path.len())
+            .rev()
+            .map(|depth| environment_share(&self.path[..depth]))
+            .collect::<Vec<_>>();
+        let shares = match &mut self.cut {
+            Some(cut) => paths
+                .iter()
+                .map(|path| {
+                    cut.observed |= cut.journal.observe_environment_read(path);
+                    cut.journal.environment_value(path)
+                })
+                .collect::<Vec<_>>(),
+            None => {
+                let snapshot = self.resources().reflection_snapshot().1;
+                paths
+                    .iter()
+                    .map(|path| snapshot.environment_value(path))
+                    .collect()
+            }
+        };
+        let values = self.runtime.assembler.values();
+        let composed = crate::g_syntax::composed_environment_root(
+            values.core(),
+            shares.into_iter().map(Value::into_runtime_root).collect(),
+        );
+        self.push(Value::from_runtime_root(composed));
+    }
+
+    /// Pops an object and binds it as this machine's share of the
+    /// environment, in place of one it bound before: the environments of the
+    /// machine and its descendants extend it. Only the machine binds its
+    /// share. Outside a cut, the binding commits at once; within one, with
+    /// the outermost cut.
+    pub fn bind_env(&mut self) -> Result<(), Error> {
+        let share = self.pop_own()?;
+        let path = environment_share(&self.path);
+        self.store_edit(|journal| journal.write_environment(path.clone(), share.clone()))
+    }
+
     /// Pushes the value at `path` in the shared heap, without evaluating
     /// it: a missing key reads `{}`. Within a cut, the read joins the cut's
     /// transaction and sees its writes; outside one, it reads the heap as it
@@ -2105,9 +2177,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// local state and children, and the initial ports of the machine and
     /// its descendants: nothing waiting in their inputs, and the wiring they
     /// own back to the defaults. What arrives at their inputs later stays,
-    /// and the wires its parent owns to and from it stay. The ports change
-    /// as a write does: at once outside a cut, with the outermost cut within
-    /// one. It fails, changing nothing, while a descendant is forked.
+    /// and the wires its parent owns to and from it stay. The shares of the
+    /// environment that the machine and its descendants bind go too. The
+    /// ports and shares change as a write does: at once outside a cut, with
+    /// the outermost cut within one. It fails, changing nothing, while a
+    /// descendant is forked.
     pub fn clear(&mut self) -> Result<(), Error> {
         if self.state.has_fork() {
             return Err(Error::new(
@@ -2118,6 +2192,17 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.port_action(|ports| {
             ports.clear_below(&path);
             Ok(())
+        })?;
+        let unbound = self.runtime.assembler.values().empty_dict();
+        let cleared = if path.is_empty() {
+            vec![vec![SHARE.clone()], vec![CHILDREN.clone()]]
+        } else {
+            vec![environment_node(&path)]
+        };
+        self.store_edit(|journal| {
+            for node in &cleared {
+                journal.write_environment(node.clone(), unbound.clone());
+            }
         })?;
         self.state = MachineState::default();
         Ok(())

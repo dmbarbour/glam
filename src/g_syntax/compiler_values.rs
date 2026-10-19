@@ -137,6 +137,10 @@ pub(in crate::g_syntax) fn defined_or_root(values: &CoreValueFactory) -> Runtime
     cache(values).defined_or.clone()
 }
 
+pub(in crate::g_syntax) fn empty_object_defs_root(values: &CoreValueFactory) -> RuntimeValueRoot {
+    cache(values).empty_object_defs.clone()
+}
+
 pub(in crate::g_syntax) fn require_defined_root(values: &CoreValueFactory) -> RuntimeValueRoot {
     cache(values).require_defined.clone()
 }

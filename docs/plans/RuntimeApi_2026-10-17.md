@@ -1251,6 +1251,32 @@ maintainer's agreement):
 - Tests added to `tests/runtime_ports.rs`: a machine reporting its own
   wiring with the default rule, and turning its default wiring off and on.
 
+`api-machine-environment`, shares and their composition (2026-10-19):
+- The reflection store gains a third fixed volume, the machines'
+  environment volume, beside the user heap and the runtime's own. A
+  machine's share lies under `children` at each key of its path, then at
+  `share`, so one write unbinds a subtree.
+- `m.bind_env()` pops an object and binds it as the machine's share, and
+  `m.env()` pushes the machine's environment, composed lazily
+  (`g_syntax::composed_environment_root`): an anonymous object extending
+  each share, the machine's own first, as `object _ extends` would, so a
+  share overrides those above it. Each share is wrapped in an anonymous
+  object of its own, since glam rejects a named dependency before an
+  anonymous one, and an unbound share, `{}`, stands for an empty object
+  through `default`. Whether a share may redefine an inherited name
+  without `:=` is glam's object semantics; a named one may.
+- Within a cut, reading the shares is observed in the cut's store journal,
+  and binding is a store write, so forks in cuts, validation and waits work
+  as the heap's do. Outside a cut, `env` reads the committed shares.
+- `clear` unbinds the shares of the machine and its descendants. Shares do
+  not count as presence in the `machines` walk: finding them would read the
+  volume's structure, which may be lazy.
+- Tests in `tests/runtime_environment.rs`: the composition from the root
+  down, a share overriding its ancestors'; an unbound environment as an
+  empty object; a binding undone by a cut that ends in error and unbound by
+  `clear`; a cut waiting on its environment woken when an ancestor binds
+  (forced through a channel).
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
