@@ -483,6 +483,15 @@ handle API goes.
    machine as it was.
    - CLI slice: the CLI's two settlement loops become one, and the bridge
      behavior below that settlement retires goes.
+   - Candidate (maintainer, 2026-10-20): recognize a self-wait from
+     outside, for the report: a cut that waits on the value of a promise
+     it resolves itself, which only its commit would settle. Inspecting a
+     deadlocked machine's or reflection task's state, its staged
+     resolutions beside where its wait ends, can explain the divergence,
+     a better diagnostic than a bare deadlock, without the cross-layer
+     check that evaluation would otherwise need at every wait. Turns
+     already fail such a cut when their own evaluation returns
+     (`api-transactional-promises`).
 16. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
    `lifecycle-host-calls` (L3, L7, L8, L9). The reflection hosts
    (`AssemblerReflectionHost`, `LoggerTaskHost`, `IsolatedTaskHost`) reduce
