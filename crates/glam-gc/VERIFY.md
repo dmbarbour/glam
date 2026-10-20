@@ -1337,4 +1337,6 @@ inventories with its module opt-in, and `SAFETY.md` records its argument.
 `Arena::owner_slot_is_marked` and its chunk's mark-word read, before
 test-only, now serve marking; the read's reviewed argument, exclusive
 collection, is unchanged. On 2026-10-20, `scripts/check.sh full` passed, and
-Miri with strict provenance passed the six ephemeron tests.
+Miri with strict provenance passed the six ephemeron tests. At `4a0ad255`,
+with a nightly toolchain installed, `check-miri.sh` passed the library suite
+(237 passed, 4 ignored), and both sanitizers passed (239 passed, 2 ignored).
