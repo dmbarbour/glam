@@ -237,8 +237,11 @@ is `'pending`, `'fulfilled` or `'broken`; a promised value has none, since it
 stands for whatever it evaluates to. Within a cut a status read observes the
 promise's place in the runtime's volume, which a resolution writes once it
 has published the value, so the read conflicts and wakes precisely. A
-resolution within a cut is staged in the transaction and sent once the cut
-commits; outside one it is immediate.
+resolution is a store edit (`promise-resolution-commits-with-its-cut`):
+within a cut it commits with the cut, which sees it in the promise's status
+but not in its value, and outside one it commits on its own. A resolution
+that another commits first conflicts, and the rerun finds the promise
+resolved.
 
 The runtime transaction lock makes reflection-store and generic event changes
 atomic. A failed validation cannot partially edit the heap, consume admitted

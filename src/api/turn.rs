@@ -660,6 +660,17 @@ struct Joined {
     serial: bool,
 }
 
+/// How a fork's branch merged into its cut.
+enum Merged {
+    Serial,
+    /// No serial order explains it, so the outermost cut runs again.
+    Conflicted,
+    /// It resolved a promise that the cut resolved too since the fork: an
+    /// error, as resolving it again in sequence is, since running again
+    /// would only race again.
+    ResolvedTwice,
+}
+
 /// A fork of a machine, from [`Machine::fork`], which [`Machine::join`]
 /// joins. A fork returns nothing to Rust: what it leaves is on its machine's
 /// stack, for its owner to take. Its lifetime is the scope it was made in,
@@ -1092,14 +1103,20 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             .unwrap_or_else(|panic| resume_unwind(panic));
         self.state.join_in(&pending.path, state);
         // A panic may have abandoned the cut a branch came from.
-        let serial = match (branch, &mut self.cut) {
+        let merged = match (branch, &mut self.cut) {
             (Some(branch), Some(cut)) => cut.merge(branch),
-            _ => true,
+            _ => Merged::Serial,
+        };
+        let outcome = match merged {
+            Merged::ResolvedTwice => outcome.and(Err(Error::new(
+                "the fork resolved a promise that its cut resolved too",
+            ))),
+            Merged::Serial | Merged::Conflicted => outcome,
         };
         Joined {
             outcome,
             panic,
-            serial,
+            serial: !matches!(merged, Merged::Conflicted),
         }
     }
 }
@@ -1132,23 +1149,28 @@ struct CutTransaction {
 }
 
 impl CutTransaction {
-    /// Merges a fork's branch of this transaction, returning whether it
-    /// merged in a serial order. A branch that did not still brings its
-    /// hooks, so that its abort hooks run as the attempt aborts.
-    fn merge(&mut self, branch: CutTransaction) -> bool {
+    /// Merges a fork's branch of this transaction, returning how it merged.
+    /// A branch that did not merge still brings its hooks, so that its abort
+    /// hooks run as the attempt aborts.
+    fn merge(&mut self, branch: CutTransaction) -> Merged {
+        let merged = if self.journal.resolves_as_well(&branch.journal) {
+            Merged::ResolvedTwice
         // Both journals merge, or neither: the ports' check changes nothing.
-        let serial = !self.events.ports.conflicts_with(&branch.events.ports)
-            && self.journal.merge_branch(&branch.journal);
-        if serial {
+        } else if !self.events.ports.conflicts_with(&branch.events.ports)
+            && self.journal.merge_branch(&branch.journal)
+        {
             self.events.ports.merge(&branch.events.ports);
             self.events.shares.merge(&branch.events.shares);
-        }
+            Merged::Serial
+        } else {
+            Merged::Conflicted
+        };
         self.observed |= branch.observed;
-        self.conflicted |= branch.conflicted || !serial;
+        self.conflicted |= branch.conflicted || matches!(merged, Merged::Conflicted);
         self.awaits_evaluation |= branch.awaits_evaluation;
         self.commit_hooks.extend(branch.commit_hooks);
         self.abort_hooks.extend(branch.abort_hooks);
-        serial
+        merged
     }
 }
 
@@ -1675,14 +1697,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let evaluated = self.runtime.assembler.evaluator().eval(&top);
         let resolver = self.note_evaluation(evaluated)?.into_value();
         let promise = self.resolver_promise(&resolver)?;
-        let status = self
-            .promises()
-            .status(promise)
-            .ok_or_else(|| Error::new("the runtime has no such promise"))?;
         if let Some(cut) = &mut self.cut {
+            // The cut sees its own resolution, as its own writes.
+            if let Some(staged) = cut.journal.staged_status(promise) {
+                return Ok(staged);
+            }
             cut.observed |= cut.journal.observe_promise_read(promise);
         }
-        Ok(status)
+        self.promises()
+            .status(promise)
+            .ok_or_else(|| Error::new("the runtime has no such promise"))
     }
 
     /// The promise that `resolver`, evaluated, resolves.
@@ -1709,10 +1733,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// never the value. A promise resolves once, so resolving it again is an
     /// error, which pops nothing.
     ///
-    /// Resolving within a cut is an error too, a known limitation: a
-    /// resolution cannot yet be undone, so a cut resolves in a commit hook
-    /// ([`Self::on_commit`]). Promises whose resolution a failed cut undoes
-    /// are worth revisiting once the heaps are fast enough.
+    /// Within a cut, the resolution is part of the cut's transaction
+    /// (`promise-resolution-commits-with-its-cut`): the promise resolves
+    /// when the outermost cut commits, and a failed cut resolves nothing.
+    /// The cut sees its own resolution in [`Self::promise_status`], but not
+    /// the promised value, which waits for the commit, so a cut that reads
+    /// the value of a promise it resolves waits forever. Where another
+    /// resolution commits first, the cut's commit conflicts, and running
+    /// again it finds the promise resolved.
     pub fn fulfill(&mut self) -> Result<(), Error> {
         self.resolve_promise(Resolution::Fulfill)
     }
@@ -1720,7 +1748,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// Pops a value, then a resolver, and breaks the resolver's promise with
     /// the value, a message or a diagnostic, so what reads the promised
     /// value fails with it. As [`Self::fulfill`], it evaluates the resolver,
-    /// resolves once, and is an error within a cut.
+    /// resolves once, and within a cut resolves when the cut commits.
     pub fn break_promise(&mut self) -> Result<(), Error> {
         self.resolve_promise(Resolution::Break)
     }
@@ -1731,28 +1759,19 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         &mut self,
         resolution: impl FnOnce(crate::runtime::RuntimeValueRoot) -> Resolution,
     ) -> Result<(), Error> {
-        if self.cut.is_some() {
-            return Err(Error::new(
-                "a promise resolves outside a cut, or in its commit hook",
-            ));
-        }
         let depth = self.require(2)?;
         let resolver = self.state.stack[depth - 2].clone();
         let value = self.state.stack[depth - 1].clone();
-        let values = self.runtime.assembler.values();
-        values.require(&value)?;
-        let resolver = self.runtime.assembler.evaluator().eval(&resolver)?;
-        let promise = self.resolver_promise(&resolver.into_value())?;
-        let promises = self.promises();
-        let publication = values
-            .core()
-            .with_boundary_access(|access| {
-                promises.resolve(&access, promise, resolution(value.into_runtime_root()))
-            })
-            .map_err(|error| Error::new(error.as_ref()))?;
-        publication.notify();
-        // What read the promise pending sees it change.
-        self.store_edit(|journal| journal.write_promise(promise))?;
+        self.runtime.assembler.values().require(&value)?;
+        let evaluated = self.runtime.assembler.evaluator().eval(&resolver);
+        let resolver = self.note_evaluation(evaluated)?.into_value();
+        let promise = self.resolver_promise(&resolver)?;
+        let resolution = resolution(value.into_runtime_root());
+        self.transact(|store, _| {
+            store
+                .resolve(promise, resolution.clone())
+                .map_err(|error| Error::new(error.as_ref()))
+        })?;
         self.state.stack.truncate(depth - 2);
         Ok(())
     }

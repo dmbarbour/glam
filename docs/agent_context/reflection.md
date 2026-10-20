@@ -69,8 +69,8 @@ and control flow.
 - `.vol.*` take an opaque volume handle first; `.heap.vol` is an effect
   returning the heap's handle, not a value in the API, since every dotted
   path is effect sugar. `.promise.*` take a resolver, never the promised
-  value; a status read in a cut is a store read, and a resolution in a cut
-  is sent once it commits.
+  value; a status read in a cut is a store read, and a resolution is a
+  store edit that commits with its cut, so a lost race conflicts.
 - Choice frames, journals, immediate sequence state, and host queues remain
   task-owned. An outer `.cut` snapshots shared heap and specialization data
   without inserting either into local state; failed alternatives discard

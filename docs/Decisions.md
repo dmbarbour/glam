@@ -2319,7 +2319,9 @@ maps the short names used here to file names.
     stands for whatever it evaluates to.
   - Machines and reflection share one family of promises: allocating,
     reading a status, fulfilling, breaking. A resolution within a cut is
-    an asynchronous send, once the cut commits.
+    an asynchronous send, once the cut commits. (Amended by
+    `promise-resolution-commits-with-its-cut`: it is part of the cut's
+    transaction.)
   - Ports offer no first-class channel capabilities: authority over a
     channel is the wiring. First-class capabilities are volumes: an opaque
     handle and generic effects (`.vol.new`, `.vol.get`, `.vol.set`,
@@ -2341,6 +2343,43 @@ maps the short names used here to file names.
   capability dict that `Assembler::create_volume` returns retires with the
   handle API.
 - **Recorded in:** runtime API plan, `api-requests`.
+
+### A promise's resolution commits with its cut
+`promise-resolution-commits-with-its-cut` · 2026-10-20 · maintainer · accepted
+- **Context:** a resolution cannot be undone, so a turn refused one within
+  a cut and resolved in a commit hook, while reflection staged it and sent
+  it once its cut committed. A resolution that another beat between the
+  staging and the sending was lost without notice. The maintainer asked
+  for more than a commit hook (2026-10-20), and held that resolving a
+  promise without knowing its status may diverge.
+- **Decision:**
+  - A resolution is an edit of the store's transactions, for turns and
+    reflection alike: within a cut it is staged in the cut's journal and
+    commits with the outermost cut, and a failed cut resolves nothing;
+    outside one it commits on its own.
+  - The commit settles the promise's record under the store's lock, and
+    writes the promise's place, so readers of its status conflict and
+    wake. The committer publishes the value, and wakes what waits on it,
+    once it has released the store.
+  - A resolution that another commits first makes its transaction
+    conflict; running again, the transaction finds the promise resolved,
+    and resolving it fails unless it checked. Forks of one cut that
+    resolve one promise fail the second join, an error, since running
+    again would race again.
+  - A cut sees its own resolution in a promise's status, as its own
+    writes, but not in the promised value, which waits for the commit.
+- **Alternatives rejected:** refusing resolution within cuts, which left
+  turns a commit hook and reflection a send whose lost race went unseen;
+  evaluation within the transaction that fulfills, so a cut could read
+  the value it resolves, which would need transactional promise cells and
+  waits until the heaps are fast enough.
+- **Consequences:** a cut that waits on the value of a promise it
+  resolves waits forever, a known limitation. Amends
+  `requests-travel-on-ports`, whose resolution within a cut was an
+  asynchronous send. Publishing after the store's lock leaves a moment
+  when a promise's status says resolved and its value still waits, which
+  ends as the committer publishes.
+- **Recorded in:** runtime API plan, `api-transactional-promises`.
 
 ### Quiescence is every machine waiting; settlement reports what remains unresolved
 `quiescence-reports-unresolved-state` · 2026-10-19 · maintainer · accepted

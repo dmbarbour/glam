@@ -1,4 +1,4 @@
-use super::promises::{PromiseId, PromiseStatus, Promises, Resolution, resolver_promise};
+use super::promises::{PromiseId, Promises, Resolution, resolver_promise};
 use super::volume_handle::handle_volume;
 use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
@@ -2431,10 +2431,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.store_snapshot(context, branch).promises().clone()
     }
 
-    /// Resolves `promise`: within a cut, once the outermost cut commits, as
-    /// a send is (`requests-travel-on-ports`); outside one, at once. A
-    /// promise already resolved, or resolved within this cut already, is an
-    /// error.
+    /// Resolves `promise` (`promise-resolution-commits-with-its-cut`):
+    /// within a cut, as part of its transaction, when the outermost cut
+    /// commits; outside one, in a commit of its own. A promise already
+    /// resolved, or resolved within this cut already, is an error, and so
+    /// is one that another resolution beats to the commit, found running
+    /// again.
     fn resolve_promise(
         &self,
         context: &mut EvaluationPollContext,
@@ -2442,79 +2444,33 @@ impl<S: TaskSpecialization> EffectTask<S> {
         promise: PromiseId,
         resolution: Resolution,
     ) -> Result<(), TaskHalt> {
-        let promises = self.promises(context, branch);
-        match promises.status(promise) {
-            Some(PromiseStatus::Pending) => {}
-            Some(_) => return Err(TaskHalt::new("the promise was already resolved")),
-            None => return Err(TaskHalt::new("the runtime has no such promise")),
-        }
         if let Some(transaction) = branch.transaction.as_mut() {
-            if transaction
-                .resolutions
-                .iter()
-                .any(|(staged, _)| *staged == promise)
-            {
-                return Err(TaskHalt::new("the cut resolves the promise already"));
-            }
-            transaction.resolutions.push((promise, resolution));
-            return Ok(());
+            return transaction
+                .store
+                .resolve(promise, resolution)
+                .map_err(|error| TaskHalt::new(error.as_ref()));
         }
-        let published = context
-            .with_runtime_access(|access| promises.resolve(&access, promise, resolution))
-            .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        published.notify();
-        self.write_promises(context, &[promise]);
-        Ok(())
-    }
-
-    /// Sends a committed cut's resolutions, in order. Where another
-    /// resolution came first, since the cut's, it stands, and the cut's is
-    /// lost, as a duplicate server's is.
-    fn send_resolutions(
-        &self,
-        context: &mut EvaluationPollContext,
-        promises: &Arc<Promises>,
-        resolutions: Vec<(PromiseId, Resolution)>,
-    ) {
-        let mut resolved = Vec::new();
-        for (promise, resolution) in resolutions {
-            if let Ok(published) =
-                context.with_runtime_access(|access| promises.resolve(&access, promise, resolution))
-            {
-                published.notify();
-                resolved.push(promise);
-            }
-        }
-        self.write_promises(context, &resolved);
-    }
-
-    /// Writes resolved promises' places in the store, so the transactions
-    /// that read them see the change.
-    fn write_promises(&self, context: &mut EvaluationPollContext, promises: &[PromiseId]) {
-        if promises.is_empty() {
-            return;
-        }
+        // One suspension covers each attempt's snapshot, staging and commit.
         context.suspend(|| {
             loop {
                 let snapshot = self.host.snapshot();
                 let mut store = StoreJournal::new(snapshot.store().clone());
-                for promise in promises {
-                    store.write_promise(*promise);
-                }
+                store
+                    .resolve(promise, resolution.clone())
+                    .map_err(|error| TaskHalt::new(error.as_ref()))?;
                 match self.host.commit(TaskCommit::new(
                     store,
                     snapshot.extra().clone(),
                     S::Journal::default(),
                 )) {
-                    // A write that reads nothing conflicts with nothing, but
-                    // a conflict analysis may be coarse: write again, afresh.
-                    CommitResult::Conflict => continue,
-                    CommitResult::Committed
-                    | CommitResult::Closed
-                    | CommitResult::MissingVolume(_) => break,
+                    CommitResult::Conflict => {}
+                    CommitResult::Committed | CommitResult::Closed => return Ok(()),
+                    CommitResult::MissingVolume(volume) => {
+                        return Err(missing_volume_error(volume));
+                    }
                 }
             }
-        });
+        })
     }
 
     fn interpret_request(
@@ -2786,10 +2742,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::PromiseStatus(promise) => {
                 let checkpoint = branch.retry_candidate();
-                let status = self
-                    .promises(context, &branch)
-                    .status(promise)
-                    .ok_or_else(|| TaskHalt::new("the runtime has no such promise"))?;
+                // The cut sees its own resolution, as its own writes.
+                let staged = branch
+                    .transaction
+                    .as_ref()
+                    .and_then(|transaction| transaction.store.staged_status(promise));
+                let status = match staged {
+                    Some(status) => status,
+                    None => self
+                        .promises(context, &branch)
+                        .status(promise)
+                        .ok_or_else(|| TaskHalt::new("the runtime has no such promise"))?,
+                };
                 // Within a cut the read joins the transaction, which the
                 // promise's resolution then conflicts with.
                 if let Some(transaction) = branch.transaction.as_mut() {
@@ -3096,15 +3060,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     );
                     match context.suspend(|| self.host.commit(commit)) {
                         CommitResult::Committed => {
-                            let transaction = completed
-                                .transaction
-                                .take()
-                                .expect("a committed cut held its transaction");
-                            self.send_resolutions(
-                                context,
-                                transaction.snapshot.store().promises(),
-                                transaction.resolutions,
-                            );
+                            completed.transaction = None;
                         }
                         CommitResult::Conflict => {
                             let frame = self

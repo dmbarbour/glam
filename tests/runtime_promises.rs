@@ -1,9 +1,10 @@
-//! Promises that machines allocate and resolve, once, outside cuts
-//! (`machines-inherit-an-environment`).
+//! Promises that machines allocate and resolve, once
+//! (`machines-inherit-an-environment`), within cuts as part of their
+//! transactions (`promise-resolution-commits-with-its-cut`).
 
 use std::sync::mpsc;
 
-use glam::{Error, ErrorKind, Machine, ModuleInput, Runtime, RuntimeConfig};
+use glam::{Error, ErrorKind, Machine, ModuleInput, PromiseStatus, Runtime, RuntimeConfig};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -95,7 +96,7 @@ fn outside_a_cut_an_unresolved_promise_is_pushback_that_pops_nothing() {
 }
 
 #[test]
-fn a_promise_resolves_once_outside_a_cut_and_a_broken_one_fails_its_readers() {
+fn a_promise_resolves_once_and_a_broken_one_fails_its_readers() {
     let mut rt = runtime();
     rt.run("m", |m| {
         m.promise();
@@ -103,14 +104,6 @@ fn a_promise_resolves_once_outside_a_cut_and_a_broken_one_fails_its_readers() {
         m.set("promised")?;
 
         m.get("resolver")?;
-        m.push_int(1);
-        let error = m
-            .cut(|m| m.fulfill())
-            .expect_err("a cut cannot undo a resolution");
-        assert!(error.to_string().contains("outside a cut"), "{error}");
-        assert_eq!(m.depth(), 2, "the error popped nothing");
-        m.discard(1)?;
-
         m.push_text("broken by the test");
         m.break_promise()?;
         m.get("resolver")?;
@@ -184,4 +177,130 @@ fn a_promised_value_in_a_share_waits_alone_until_fulfilled() {
         args, 5,
         "the environment read at once, its promised `args` alone waited"
     );
+}
+
+#[test]
+fn a_cut_s_resolution_commits_with_it() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        m.promise();
+        m.set("resolver")?;
+        m.set("promised")?;
+
+        let abandoned = m.cut(|m| -> Result<(), Error> {
+            m.get("resolver")?;
+            m.push_int(1);
+            m.fulfill()?;
+            m.get("resolver")?;
+            assert_eq!(
+                m.promise_status()?,
+                PromiseStatus::Fulfilled,
+                "the cut sees its own resolution"
+            );
+            Err(Error::new("abandoned"))
+        });
+        assert!(abandoned.is_err());
+        m.get("resolver")?;
+        assert_eq!(
+            m.promise_status()?,
+            PromiseStatus::Pending,
+            "the failed cut resolved nothing"
+        );
+        m.discard(1)?;
+
+        m.cut(|m| {
+            m.get("resolver")?;
+            m.push_int(2);
+            m.fulfill()
+        })?;
+        m.get("promised")?;
+        assert_eq!(m.pop_int()?, 2, "the committed cut resolved it");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_resolution_beaten_to_the_commit_fails_when_its_cut_runs_again() {
+    let mut rt = runtime();
+    let (staged, staging) = mpsc::channel();
+    let (raced, racing) = mpsc::channel();
+    rt.run("p", |p| {
+        p.promise();
+        p.set("resolver")?;
+        p.set("promised")?;
+        p.get("resolver")?;
+        p.give("server", 1)?;
+        let fork = p.fork("server", move |s| {
+            s.set("reply")?;
+            let mut attempts = 0;
+            let outcome = s.cut(|s| {
+                attempts += 1;
+                s.get("reply")?;
+                s.push_int(1);
+                s.fulfill()?;
+                if attempts == 1 {
+                    staged.send(()).expect("the parent waits for the staging");
+                    racing.recv().expect("the parent resolves first");
+                }
+                Ok(())
+            });
+            let error = outcome.expect_err("running again, it finds the promise resolved");
+            assert!(error.to_string().contains("already resolved"), "{error}");
+            assert_eq!(attempts, 2, "the first commit conflicted");
+            Ok(())
+        })?;
+        staging.recv().expect("the server stages its resolution");
+        p.get("resolver")?;
+        p.push_int(2);
+        p.fulfill()?;
+        raced.send(()).expect("the server awaits the race");
+        p.join(fork)?;
+        p.get("promised")?;
+        assert_eq!(p.pop_int()?, 2, "the first resolution stands");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn forks_resolving_one_promise_within_one_cut_fail_the_second_join() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.promise();
+        p.set("resolver")?;
+        p.set("promised")?;
+        let error = p
+            .cut(|p| {
+                for server in ["first", "second"] {
+                    p.get("resolver")?;
+                    p.give(server, 1)?;
+                }
+                let first = p.fork("first", |s| {
+                    s.push_int(1);
+                    s.fulfill()
+                })?;
+                let second = p.fork("second", |s| {
+                    s.push_int(2);
+                    s.fulfill()
+                })?;
+                p.join(first)?;
+                p.join(second)
+            })
+            .expect_err("the second resolution fails");
+        assert!(
+            error
+                .to_string()
+                .contains("resolved a promise that its cut resolved too"),
+            "{error}"
+        );
+        p.get("resolver")?;
+        assert_eq!(
+            p.promise_status()?,
+            PromiseStatus::Pending,
+            "the failed cut resolved nothing"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
 }

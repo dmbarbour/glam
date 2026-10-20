@@ -17,8 +17,8 @@ use crate::evaluation::{
 };
 use crate::reflection::{
     ConflictAnalysisStrategy, DeathNotice, ExactConflictAnalysis, ReasoningSessionId,
-    ReflectionQueryMutation, ReflectionQueryWriter, ReflectionStore, RuntimeInputEndpointId,
-    StoreCommitResult, VolumeId,
+    ReflectionQueryMutation, ReflectionQueryWriter, ReflectionStore, Resolution,
+    RuntimeInputEndpointId, StoreCommitResult, VolumeId,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeCoreState, RuntimeGcLeaseOutcome, RuntimeGcMaintenanceDisposition,
@@ -376,7 +376,7 @@ impl RuntimeSharedResources {
             return crate::reflection::StoreCommitResult::Conflict;
         }
         let mutation = self.mutation_guard();
-        let (result, changed) = {
+        let (result, changed, settled) = {
             let mut state = self
                 .transactions
                 .state
@@ -402,11 +402,17 @@ impl RuntimeSharedResources {
             (
                 crate::reflection::StoreCommitResult::Committed,
                 reflection_changed || event_changed,
+                state.reflection.take_settled(),
             )
         };
         if changed {
             self.publish_observation(mutation);
+        } else {
+            drop(mutation);
         }
+        // Publication takes the mutation gate itself, so it waits until the
+        // commit has released it.
+        crate::reflection::publish_settled(self.values.core(), settled);
         result
     }
 
@@ -455,8 +461,9 @@ impl RuntimeSharedResources {
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
             contain_client_conflict_analysis(|| state.reflection.try_commit_with_change(journal))
+                .map(|committed| (committed, state.reflection.take_settled()))
         };
-        let (result, changed) = match committed {
+        let ((result, changed), settled) = match committed {
             Ok(committed) => committed,
             Err(payload) => {
                 drop(mutation);
@@ -465,7 +472,12 @@ impl RuntimeSharedResources {
         };
         if changed {
             self.publish_observation(mutation);
+        } else {
+            drop(mutation);
         }
+        // Publication takes the mutation gate itself, so it waits until the
+        // commit has released it.
+        crate::reflection::publish_settled(self.values.core(), settled);
         result
     }
 
@@ -528,37 +540,33 @@ impl RuntimeSharedResources {
                 DeathNotice::Resolver(promise) => resolvers.push(promise),
             }
         }
-        let broken = if resolvers.is_empty() {
-            Vec::new()
-        } else {
-            values.with_boundary_access(|access| {
-                resolvers
-                    .iter()
-                    .filter_map(|&promise| Some((promise, promises.lose(&access, promise)?)))
-                    .collect::<Vec<_>>()
-            })
-        };
-        let broken = broken
-            .into_iter()
-            .map(|(promise, publication)| {
-                publication.notify();
-                promise
-            })
-            .collect::<Vec<_>>();
-        // What read a broken promise pending sees it change, as after any
-        // resolution.
-        if !broken.is_empty() {
+        // A lost resolver's promise breaks as any resolution does, with a
+        // commit, and its record goes either way.
+        let mut broken = false;
+        if !resolvers.is_empty() {
+            let lost = values.construct_runtime_value_root(|_| {
+                crate::core::Value::binary_from_text("resolver lost")
+            });
             loop {
                 let mut journal =
                     crate::reflection::StoreJournal::new(self.reflection_snapshot().1);
-                for &promise in &broken {
-                    journal.write_promise(promise);
+                let mut staged = false;
+                for &promise in &resolvers {
+                    staged |= journal
+                        .resolve(promise, Resolution::Break(lost.clone()))
+                        .is_ok();
                 }
-                // A write that reads nothing conflicts with nothing, but a
-                // conflict analysis may be coarse: write again, afresh.
-                if self.commit_reflection(&journal) != StoreCommitResult::Conflict {
+                if !staged {
                     break;
                 }
+                // A resolution committed first conflicts: stage again, afresh.
+                if self.commit_reflection(&journal) != StoreCommitResult::Conflict {
+                    broken = true;
+                    break;
+                }
+            }
+            for &promise in &resolvers {
+                promises.forget(promise);
             }
         }
         let mut reclaimed = false;
@@ -578,7 +586,7 @@ impl RuntimeSharedResources {
                 self.publish_observation(mutation);
             }
         }
-        !broken.is_empty() || reclaimed
+        broken || reclaimed
     }
 
     pub(super) fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {

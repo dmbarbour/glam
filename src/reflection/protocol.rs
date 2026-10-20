@@ -3,7 +3,6 @@ use std::fmt;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
-use super::promises::{PromiseId, Resolution};
 use super::requests::{
     ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionRequestWork,
     reflection_request_specs,
@@ -721,9 +720,6 @@ pub(super) struct Transaction<S: TaskSpecialization> {
     pub(super) store: StoreJournal,
     pub(super) journal: S::Journal,
     pub(super) observed: bool,
-    /// The resolutions to send once the transaction commits, in order
-    /// (`requests-travel-on-ports`).
-    pub(super) resolutions: Vec<(PromiseId, Resolution)>,
 }
 
 impl<S: TaskSpecialization> Transaction<S> {
@@ -735,7 +731,6 @@ impl<S: TaskSpecialization> Transaction<S> {
             store,
             journal,
             observed: false,
-            resolutions: Vec::new(),
         }
     }
 
@@ -986,13 +981,11 @@ mod root_inventory_tests {
             store,
             journal,
             observed,
-            resolutions,
         } = transaction;
         let _: &HostSnapshot<ProtocolRootTestEffects> = snapshot;
         let _: &StoreJournal = store;
         let _: &Vec<PublicValue> = journal;
         let _: &bool = observed;
-        let _: &Vec<(PromiseId, Resolution)> = resolutions;
     }
 
     fn assert_borrowed_protocol_context_inventory<S: TaskSpecialization>(

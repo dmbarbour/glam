@@ -328,7 +328,8 @@ handle API goes.
      `.promise.status`, `.promise.fulfill` and `.promise.break`, with the
      resolvers turns use. Within a cut a resolution is an asynchronous
      send: it goes once the cut commits, as a turn's in a commit hook does
-     (maintainer).
+     (maintainer). (Superseded by `api-transactional-promises`: it commits
+     with the cut.)
    - Volumes as first-class capabilities (maintainer): an opaque volume
      handle and generic effects, `.vol.new`, `.vol.get`, `.vol.set` and
      `.vol.rewrite`, with `.heap.vol` an effect returning the shared heap's
@@ -1631,7 +1632,8 @@ maintainer's agreement):
   between the cut's staging and its commit, it stands and the cut's is
   lost, as a duplicate server's would fail. A failed or abandoned
   alternative's resolutions go with it; an isolated search never commits,
-  so sends none.
+  so sends none. (Superseded: `api-transactional-promises` makes the
+  resolution part of the commit, and a lost race a conflict.)
 - Tests: in `tests/runtime_requests.rs`, a resolver reading its promise's
   status, a pending promised value being pushback and a fulfilled one no
   resolver; a cut that read a promise pending conflicting with its
@@ -1688,6 +1690,35 @@ ephemerons and volumes as cells in the managed heap. It amends
   living while any copy of its handle does, and settlement reclaiming a
   volume by itself.
 
+`api-transactional-promises` (2026-10-20), after the maintainer asked for
+more than a commit hook (`promise-resolution-commits-with-its-cut`):
+- A resolution is a store edit, `StoreEdit::Resolve`, which writes the
+  promise's place without changing data and carries its resolution, so a
+  journal's branching, merging, replay and conflict analysis serve it as
+  they serve any write. `StoreJournal::resolve` stages one, refusing a
+  promise already resolved or resolved in the journal already.
+  Validation conflicts where the record no longer holds the promise
+  pending, and the commit settles the record under the store's lock
+  (`Promises::settle`), leaving the promised value for the committer to
+  publish once it has released the store and the mutation gate
+  (`publish_settled`), since publication takes the gate itself.
+- Turns resolve within cuts, through `transact`, instead of refusing, and
+  read their own resolution in `promise_status`. A fork's join reports a
+  promise resolved by both the fork and its cut since the fork as an
+  error (`Merged::ResolvedTwice`), not a conflict. Reflection stages into
+  its transaction's journal, or commits a resolution of its own outside a
+  cut, retrying a conflict, whose rerun then finds the promise resolved;
+  its post-commit send is gone. Death notices break a lost resolver's
+  promise through the same commit.
+- Tests: in `tests/runtime_promises.rs`, a cut's resolution committing
+  with it, seen within the cut, and undone with a failed cut; a resolution
+  beaten to the commit failing when its cut runs again (forced: the
+  server's cut stages, then the parent resolves outside a cut, then the
+  server commits); forks resolving one promise within one cut failing the
+  second join. In `src/reflection/store/tests.rs`, of two journals
+  resolving one promise, the second conflicting. The reflection cut test
+  now expects a cut to see its own resolution.
+
 ## Verification
 
 Runtime changes run `scripts/check.sh full` before commit. Concurrency
@@ -1703,7 +1734,11 @@ the public API, in `tests/`.
   cut defers a resolution to its commit: a turn's in a commit hook,
   reflection's by itself, an asynchronous send (maintainer, 2026-10-20).
   Doing better would need evaluation itself under the transaction that
-  fulfills the promise. `api-transactional-promises` takes this up.
+  fulfills the promise. *Settled in part (2026-10-20,
+  `api-transactional-promises`):* a resolution commits with its cut, and a
+  failed cut resolves nothing; what remains is a cut reading the value of
+  a promise it resolves, which waits forever until evaluation runs within
+  the transaction.
 
 - Names, per step (above).
 - Hook errors, settled at `api-machine-errors` (maintainer, 2026-10-19):

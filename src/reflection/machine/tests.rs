@@ -23,7 +23,7 @@ use crate::reflection::{
     ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
     ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionStore,
     ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment, TaskValidation,
-    ValidationResult, reflection_request_specs,
+    ValidationResult, publish_settled, reflection_request_specs,
 };
 use crate::test_support::ResultTestExt as _;
 
@@ -670,33 +670,20 @@ impl TestHost {
     /// Fulfills `promise` as a resolver outside this host would: the
     /// promised value, then its place in the store.
     fn fulfill(&self, promise: PromiseId, value: PublicValue) {
-        let (values, promises) = {
-            let state = self.state.lock().unwrap();
-            (
-                state.store.values().clone(),
-                state.store.snapshot().promises().clone(),
-            )
-        };
-        values
-            .with_boundary_access(|access| {
-                promises.resolve(
-                    &access,
-                    promise,
-                    Resolution::Fulfill(value.into_runtime_root()),
-                )
-            })
-            .expect("the promise is pending")
-            .notify();
-        {
+        let (values, settled) = {
             let mut state = self.state.lock().unwrap();
             let mut journal = StoreJournal::new(state.store.snapshot());
-            journal.write_promise(promise);
+            journal
+                .resolve(promise, Resolution::Fulfill(value.into_runtime_root()))
+                .expect("the promise is pending");
             assert_eq!(
                 state.store.try_commit(&journal),
                 StoreCommitResult::Committed
             );
             state.generation += 1;
-        }
+            (state.store.values().clone(), state.store.take_settled())
+        };
+        publish_settled(&values, settled);
         self.publish_runtime_observation();
     }
 
@@ -914,7 +901,7 @@ impl TaskHost<TestEffects> for TestHost {
     fn commit(&self, commit: TaskCommit<TestEffects>) -> CommitResult {
         self.probe_callback_boundary(CallbackProbeKind::Commit);
         let (store, snapshot, journal) = commit.into_parts();
-        {
+        let settled = {
             let mut state = self.state.lock().unwrap();
             if state.closed {
                 return CommitResult::Closed;
@@ -942,7 +929,9 @@ impl TaskHost<TestEffects> for TestHost {
                 state.extra_revision += 1;
             }
             state.generation += 1;
-        }
+            (state.store.values().clone(), state.store.take_settled())
+        };
+        publish_settled(&settled.0, settled.1);
         journal.reflection.commit_updates();
         self.publish_runtime_observation();
         CommitResult::Committed
@@ -975,7 +964,7 @@ impl TaskHost<StandardEffects> for TestHost {
 
     fn commit(&self, commit: TaskCommit<StandardEffects>) -> CommitResult {
         let (store, _snapshot, _journal) = commit.into_parts();
-        {
+        let settled = {
             let mut state = self.state.lock().unwrap();
             if state.closed {
                 return CommitResult::Closed;
@@ -988,7 +977,9 @@ impl TaskHost<StandardEffects> for TestHost {
                 }
             }
             state.generation += 1;
-        }
+            (state.store.values().clone(), state.store.take_settled())
+        };
+        publish_settled(&settled.0, settled.1);
         self.publish_runtime_observation();
         CommitResult::Committed
     }
@@ -9235,11 +9226,15 @@ fn a_promise_effect_needs_a_resolver_and_resolves_once() {
 }
 
 #[test]
-fn a_cut_sends_its_resolution_once_it_commits() {
+fn a_cut_s_resolution_commits_with_it() {
     let (assembler, effect) = compile_effect(
-        ".promise.new >>= (\\p -> .cut (.promise.fulfill p.resolver \"sent\" =>> .promise.status p.resolver) >>= (\\inside -> .promise.status p.resolver >>= (\\after -> .r (if inside == 'pending then (if after == 'fulfilled then p.promise else \"unsent\") else \"early\"))))",
+        ".promise.new >>= (\\p -> .cut (.promise.fulfill p.resolver \"sent\" =>> .promise.status p.resolver) >>= (\\inside -> .promise.status p.resolver >>= (\\after -> .r (if inside == 'fulfilled then (if after == 'fulfilled then p.promise else \"unsent\") else \"unseen\"))))",
     );
-    assert_eq!(effect_text(&assembler, &effect).unwrap(), b"sent");
+    assert_eq!(
+        effect_text(&assembler, &effect).unwrap(),
+        b"sent",
+        "the cut sees its own resolution, and the commit resolves it"
+    );
 
     let (assembler, effect) = compile_effect(
         ".promise.new >>= (\\p -> .cut (.alt (.promise.fulfill p.resolver \"lost\" =>> .fail) (.r ())) =>> .promise.status p.resolver >>= (\\s -> .r (if s == 'pending then \"unsent\" else \"sent\")))",

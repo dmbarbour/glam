@@ -9,6 +9,11 @@
 //! volume, which its resolution writes, so a transaction that read it pending
 //! conflicts with the resolution, and one that failed wakes to it.
 //!
+//! A resolution is an edit of a transaction (`promise-resolution-commits-with-its-cut`):
+//! staged in its journal, it settles the record with the commit, under the
+//! store's lock, and the committer then publishes the value and wakes what
+//! waits on it.
+//!
 //! A resolver's payload reports its death to the store, and the runtime then
 //! breaks its promise, if still pending, with "resolver lost", and drops its
 //! record (`opaque-resources-reclaimed-when-unreachable`). A resolver keeps
@@ -80,6 +85,70 @@ impl PromiseStatus {
 pub(crate) enum Resolution {
     Fulfill(RuntimeValueRoot),
     Break(RuntimeValueRoot),
+}
+
+impl Resolution {
+    pub(super) fn fulfilled(&self) -> bool {
+        matches!(self, Self::Fulfill(_))
+    }
+
+    /// The status it gives its promise.
+    pub(super) fn status(&self) -> PromiseStatus {
+        if self.fulfilled() {
+            PromiseStatus::Fulfilled
+        } else {
+            PromiseStatus::Broken
+        }
+    }
+}
+
+/// A resolution committed and settled, its promised value not yet published.
+pub(crate) struct Settled {
+    root: ManagedPromiseRoot,
+    resolution: Resolution,
+}
+
+impl Settled {
+    pub(super) fn new(root: ManagedPromiseRoot, resolution: Resolution) -> Self {
+        Self { root, resolution }
+    }
+
+    /// Publishes the resolution into the promised value, returning what to
+    /// notify once the caller has left `access`.
+    pub(crate) fn publish(
+        self,
+        access: &RuntimeValueAccess<'_>,
+    ) -> Option<ManagedPromisePublication> {
+        self.root
+            .publish(
+                access,
+                match self.resolution {
+                    Resolution::Fulfill(value) => Ok(value.clone_core_with(access)),
+                    Resolution::Break(failure) => Err(Arc::new(EvaluationFailure::emission_in(
+                        access,
+                        failure.clone_core_with(access),
+                    ))),
+                },
+            )
+            .ok()
+    }
+}
+
+/// Publishes what a commit settled, outside the store's lock and every
+/// access region, then wakes what waits on it.
+pub(crate) fn publish_settled(values: &crate::core::CoreValueFactory, settled: Vec<Settled>) {
+    if settled.is_empty() {
+        return;
+    }
+    let publications = values.with_boundary_access(|access| {
+        settled
+            .into_iter()
+            .filter_map(|settled| settled.publish(&access))
+            .collect::<Vec<_>>()
+    });
+    for publication in publications {
+        publication.notify();
+    }
 }
 
 /// A resolver's payload: which promise of which runtime it resolves, and
@@ -184,65 +253,21 @@ impl Promises {
         self.pending().entries.remove(&promise);
     }
 
-    /// Settles `promise`, whose resolver is gone: its record goes, and where
-    /// it was pending it breaks with "resolver lost", returning the
-    /// publication to notify once the caller has left `access`.
-    pub(crate) fn lose(
-        &self,
-        access: &RuntimeValueAccess<'_>,
-        promise: PromiseId,
-    ) -> Option<ManagedPromisePublication> {
-        let PromiseEntry::Pending(root) = self.pending().entries.remove(&promise)? else {
+    /// Settles `promise` as a commit resolving it does, under the store's
+    /// lock, returning its root for the committer to publish the
+    /// resolution into once the lock is released, or `None` where it was
+    /// not pending.
+    pub(super) fn settle(&self, promise: PromiseId, fulfilled: bool) -> Option<ManagedPromiseRoot> {
+        let mut pending = self.pending();
+        let Some(PromiseEntry::Pending(_)) = pending.entries.get(&promise) else {
             return None;
         };
-        root.publish(
-            access,
-            Err(Arc::new(EvaluationFailure::emission_in(
-                access,
-                Value::binary_from_text("resolver lost"),
-            ))),
-        )
-        .ok()
-    }
-
-    /// Resolves `promise`: once, so a second resolution fails. The caller
-    /// notifies what waits on the promised value once it has left `access`,
-    /// then writes the promise's place in the store, so transactions that
-    /// read it see the change.
-    pub(crate) fn resolve(
-        &self,
-        access: &RuntimeValueAccess<'_>,
-        promise: PromiseId,
-        resolution: Resolution,
-    ) -> Result<ManagedPromisePublication, Arc<str>> {
-        let fulfilled = matches!(resolution, Resolution::Fulfill(_));
-        let root = {
-            let mut pending = self.pending();
-            match pending.entries.get(&promise) {
-                Some(PromiseEntry::Pending(_)) => {}
-                Some(PromiseEntry::Resolved { .. }) => {
-                    return Err("the promise was already resolved".into());
-                }
-                None => return Err("the store has no such promise".into()),
-            }
-            match pending
-                .entries
-                .insert(promise, PromiseEntry::Resolved { fulfilled })
-            {
-                Some(PromiseEntry::Pending(root)) => root,
-                _ => unreachable!("the entry was pending"),
-            }
-        };
-        root.publish(
-            access,
-            match resolution {
-                Resolution::Fulfill(value) => Ok(value.clone_core_with(access)),
-                Resolution::Break(failure) => Err(Arc::new(EvaluationFailure::emission_in(
-                    access,
-                    failure.clone_core_with(access),
-                ))),
-            },
-        )
-        .map_err(|_| "the promise was already resolved".into())
+        match pending
+            .entries
+            .insert(promise, PromiseEntry::Resolved { fulfilled })
+        {
+            Some(PromiseEntry::Pending(root)) => Some(root),
+            _ => unreachable!("the entry was pending"),
+        }
     }
 }

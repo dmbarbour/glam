@@ -66,7 +66,8 @@ fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<Eva
 
 /// Compile-exhaustive ownership latch for the durable reflection-store
 /// state. Public values are compatibility roots; the promises hold each
-/// pending promise's rooted owner until it resolves or its resolver dies;
+/// pending promise's rooted owner until it resolves or its resolver dies,
+/// and the settled resolutions hold them until their committer publishes;
 /// death notices, the heap's handle payload, query identity, conflict
 /// metadata, and revision state are edge-free companions.
 fn assert_store_root_boundary_inventory(
@@ -117,6 +118,15 @@ fn assert_store_root_boundary_inventory(
             let _: &ConflictAddress = address;
             let _: &PublicValue = initial;
         }
+        StoreEdit::Resolve {
+            address,
+            promise,
+            resolution,
+        } => {
+            let _: &ConflictAddress = address;
+            let _: &PromiseId = promise;
+            let _: &Resolution = resolution;
+        }
     }
 
     let StoreJournal {
@@ -148,6 +158,7 @@ fn assert_store_root_boundary_inventory(
         death_notice_receiver,
         heap_handle,
         revoked,
+        settled,
         roots,
         revision,
         latest_changes,
@@ -166,6 +177,7 @@ fn assert_store_root_boundary_inventory(
     let _: &Receiver<DeathNotice> = death_notice_receiver;
     let _: &Arc<VolumeHandle> = heap_handle;
     let _: &BTreeSet<VolumeId> = revoked;
+    let _: &Vec<Settled> = settled;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
     let _: &u64 = revision;
     let _: &BTreeMap<ConflictAddress, u64> = latest_changes;
@@ -871,5 +883,51 @@ fn a_reclaimed_volume_drops_late_writes_and_conflicts_its_readers() {
     assert!(
         !store.reclaim_volume(heap_volume()),
         "the shared heap is never reclaimed"
+    );
+}
+
+#[test]
+fn of_two_transactions_resolving_one_promise_the_second_conflicts() {
+    let mut store = store();
+    let values = store.values.clone();
+    let promise = values.with_boundary_access(|access| store.promises().allocate(&access).0);
+    let public = crate::api::Values::from_core_factory(values.clone());
+    let resolution = |value: &str| {
+        Resolution::Fulfill(
+            public
+                .wrap(Value::binary_from_text(value))
+                .into_runtime_root(),
+        )
+    };
+    let mut first = StoreJournal::new(store.snapshot());
+    let mut second = StoreJournal::new(store.snapshot());
+    first
+        .resolve(promise, resolution("first"))
+        .expect("the promise is pending");
+    assert!(
+        first.resolve(promise, resolution("again")).is_err(),
+        "a transaction resolves a promise once"
+    );
+    assert_eq!(first.staged_status(promise), Some(PromiseStatus::Fulfilled));
+    second
+        .resolve(promise, resolution("second"))
+        .expect("the promise is still pending");
+
+    assert_eq!(store.try_commit(&first), StoreCommitResult::Committed);
+    assert_eq!(store.take_settled().len(), 1, "the commit settled it");
+    assert_eq!(
+        store.promises().status(promise),
+        Some(PromiseStatus::Fulfilled)
+    );
+    assert_eq!(
+        store.try_commit(&second),
+        StoreCommitResult::Conflict,
+        "the second resolution lost the race"
+    );
+    assert!(store.take_settled().is_empty());
+    let mut late = StoreJournal::new(store.snapshot());
+    assert!(
+        late.resolve(promise, resolution("late")).is_err(),
+        "running again, it finds the promise resolved"
     );
 }

@@ -21,7 +21,7 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
-use super::promises::{PromiseId, Promises};
+use super::promises::{PromiseId, PromiseStatus, Promises, Resolution, Settled};
 use super::volume_handle::{VolumeHandle, handle_value};
 use crate::api::{Value as PublicValue, Values};
 use crate::core::{
@@ -304,6 +304,13 @@ enum StoreEdit {
         address: ConflictAddress,
         initial: PublicValue,
     },
+    /// Resolves a promise, at its place in the runtime's volume, which it
+    /// writes without changing data (`promise-resolution-commits-with-its-cut`).
+    Resolve {
+        address: ConflictAddress,
+        promise: PromiseId,
+        resolution: Resolution,
+    },
 }
 
 impl StoreEdit {
@@ -311,7 +318,8 @@ impl StoreEdit {
         match self {
             Self::Set { address, .. }
             | Self::Rewrite { address, .. }
-            | Self::Create { address, .. } => address,
+            | Self::Create { address, .. }
+            | Self::Resolve { address, .. } => address,
         }
     }
 }
@@ -433,7 +441,9 @@ impl StoreJournal {
 
     fn replay(&mut self, edit: StoreEdit) {
         match &edit {
-            StoreEdit::Set { value: None, .. } | StoreEdit::Rewrite { updater: None, .. } => {
+            StoreEdit::Set { value: None, .. }
+            | StoreEdit::Rewrite { updater: None, .. }
+            | StoreEdit::Resolve { .. } => {
                 self.edits.push(edit);
             }
             StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {
@@ -534,17 +544,71 @@ impl StoreJournal {
         self.observe_volume_read(self.snapshot.runtime_volume, &promise_path(promise))
     }
 
-    /// Records `promise`'s resolution, which changes no data: once
-    /// committed, it conflicts with the transactions that read the
-    /// promise's status and wakes those waiting on it.
-    pub(crate) fn write_promise(&mut self, promise: PromiseId) {
-        self.edits.push(StoreEdit::Set {
+    /// Stages `promise`'s resolution (`promise-resolution-commits-with-its-cut`):
+    /// once the transaction commits, the promise is settled with the commit,
+    /// which conflicts with the transactions that read its status and wakes
+    /// those waiting on it. A promise already resolved, or resolved within
+    /// this transaction already, is an error, which stages nothing. Where
+    /// another resolution commits first, this transaction's commit
+    /// conflicts.
+    pub(crate) fn resolve(
+        &mut self,
+        promise: PromiseId,
+        resolution: Resolution,
+    ) -> Result<(), Arc<str>> {
+        match self.snapshot.promises.status(promise) {
+            Some(PromiseStatus::Pending) => {}
+            Some(_) => return Err("the promise was already resolved".into()),
+            None => return Err("the runtime has no such promise".into()),
+        }
+        if self.staged_status(promise).is_some() {
+            return Err("the transaction resolves the promise already".into());
+        }
+        self.edits.push(StoreEdit::Resolve {
             address: ConflictAddress::reflection(
                 self.snapshot.runtime_volume,
                 ConflictPath::from_keys(promise_path(promise)),
             ),
-            value: None,
+            promise,
+            resolution,
         });
+        Ok(())
+    }
+
+    /// The status this transaction gives `promise`, where it resolves it.
+    pub(crate) fn staged_status(&self, promise: PromiseId) -> Option<PromiseStatus> {
+        self.edits.iter().find_map(|edit| match edit {
+            StoreEdit::Resolve {
+                promise: staged,
+                resolution,
+                ..
+            } if *staged == promise => Some(resolution.status()),
+            _ => None,
+        })
+    }
+
+    /// Whether `branch`, a branch of this journal, resolves a promise that
+    /// this journal resolved too since the fork: a second resolution, an
+    /// error rather than a conflict, since running again would race again.
+    pub(crate) fn resolves_as_well(&self, branch: &StoreJournal) -> bool {
+        let base = branch
+            .branch
+            .as_ref()
+            .expect("only a branch merges into its journal")
+            .base;
+        let resolved = |edits: &[StoreEdit]| {
+            edits
+                .iter()
+                .filter_map(|edit| match edit {
+                    StoreEdit::Resolve { promise, .. } => Some(*promise),
+                    _ => None,
+                })
+                .collect::<BTreeSet<_>>()
+        };
+        let ours = resolved(self.edits.get(base..).unwrap_or_default());
+        resolved(branch.edits.get(base..).unwrap_or_default())
+            .iter()
+            .any(|promise| ours.contains(promise))
     }
 
     /// Records a read of the virtual resource at `path`: a proxy for host
@@ -812,6 +876,8 @@ pub struct ReflectionStore {
     /// The volumes revoked through their owners, whose late edits are errors;
     /// a reclaimed volume's are dropped, since nothing can read it.
     revoked: BTreeSet<VolumeId>,
+    /// What the last commit settled, for its committer to publish.
+    settled: Vec<Settled>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     revision: u64,
     latest_changes: BTreeMap<ConflictAddress, u64>,
@@ -844,6 +910,7 @@ impl ReflectionStore {
             death_notice_receiver,
             heap_handle,
             revoked: BTreeSet::new(),
+            settled: Vec::new(),
             roots: RedBlackTreeMapSync::new_sync()
                 .insert(heap_volume, public_values.empty_dict())
                 .insert(runtime_volume, public_values.empty_dict())
@@ -958,6 +1025,13 @@ impl ReflectionStore {
         &self.promises
     }
 
+    /// What the commits since the last call settled, for the committer to
+    /// publish once it has released the store
+    /// (`promise-resolution-commits-with-its-cut`).
+    pub(crate) fn take_settled(&mut self) -> Vec<Settled> {
+        std::mem::take(&mut self.settled)
+    }
+
     /// The death notices that dying volume handles and resolvers have
     /// queued since the last call.
     pub(crate) fn take_death_notices(&self) -> Vec<DeathNotice> {
@@ -1032,6 +1106,14 @@ impl ReflectionStore {
         if self.conflicts(journal) {
             return StoreCommitResult::Conflict;
         }
+        // A resolution that another committed first conflicts, and the
+        // transaction, running again, finds the promise resolved.
+        if journal.edits.iter().any(|edit| {
+            matches!(edit, StoreEdit::Resolve { promise, .. }
+                if self.promises.status(*promise) != Some(PromiseStatus::Pending))
+        }) {
+            return StoreCommitResult::Conflict;
+        }
         StoreCommitResult::Committed
     }
 
@@ -1054,6 +1136,17 @@ impl ReflectionStore {
         self.revision = self.revision.wrapping_add(1);
         for path in normalized_edit_paths(&journal.edits) {
             self.latest_changes.insert(path, self.revision);
+        }
+        for edit in &journal.edits {
+            if let StoreEdit::Resolve {
+                promise,
+                resolution,
+                ..
+            } = edit
+                && let Some(root) = self.promises.settle(*promise, resolution.fulfilled())
+            {
+                self.settled.push(Settled::new(root, resolution.clone()));
+            }
         }
         self.retire_queries();
         true
@@ -1165,7 +1258,7 @@ fn dependency(edits: &[StoreEdit], volume: VolumeId, path: ConflictPath) -> Opti
     for edit in edits.iter().rev() {
         let (edit_volume, edit_path) = edit.address().reflection_parts();
         match edit {
-            StoreEdit::Set { .. }
+            StoreEdit::Set { .. } | StoreEdit::Resolve { .. }
                 if edit_volume == volume && edit_path.is_prefix_of(&dependency) =>
             {
                 return None;
@@ -1177,7 +1270,10 @@ fn dependency(edits: &[StoreEdit], volume: VolumeId, path: ConflictPath) -> Opti
             {
                 dependency = edit_path.clone();
             }
-            StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } | StoreEdit::Create { .. } => {}
+            StoreEdit::Set { .. }
+            | StoreEdit::Rewrite { .. }
+            | StoreEdit::Create { .. }
+            | StoreEdit::Resolve { .. } => {}
         }
     }
     Some(dependency)
@@ -1257,7 +1353,9 @@ pub(crate) fn decode_query_state(
 
 fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEdit) -> PublicValue {
     PublicValue::from_runtime_root(access.root_runtime_value(match edit {
-        StoreEdit::Set { value: None, .. } | StoreEdit::Rewrite { updater: None, .. } => {
+        StoreEdit::Set { value: None, .. }
+        | StoreEdit::Rewrite { updater: None, .. }
+        | StoreEdit::Resolve { .. } => {
             return root;
         }
         StoreEdit::Create { initial, .. } => return initial.clone(),
