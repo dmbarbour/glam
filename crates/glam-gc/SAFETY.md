@@ -126,8 +126,9 @@ Ephemerons and weak references (`api-ephemerons`, 2026-10-20,
 table. Once the roots' worklist drains, marking repeats a round over the live
 ephemerons, marking the value of each whose key it marked and tracing from
 those values, until a round marks nothing new; it then clears each ephemeron
-whose key stayed unmarked, before any sweep, and queues its notice for the
-heap's owner. A weak reference is an ephemeron whose key is its value.
+whose key stayed unmarked, before any sweep. Clearing is silent: an owner
+notices a cleared ephemeron when it next views it. A weak reference is an
+ephemeron whose key is its value.
 
 The current collector is therefore a non-moving, stop-the-world full
 collector. A bare `Gc<T>` is not liveness evidence. Live root slots,
@@ -1475,11 +1476,11 @@ both live, allocated and of their types in this heap, as for
 in every build, as `root_checked` does. `weak` and `weak_checked` pass one
 value as both key and value. Either occupies a free slot of the heap's
 ephemeron table under the data mutex, while the calling mutator's admission
-keeps any collection out: it writes the key's and value's addresses and the
-notice token, then sets the slot's count to one.
+keeps any collection out: it writes the key's and value's addresses, then
+sets the slot's count to one.
 
-A slot holds an atomic reference count, the key's and value's addresses as
-atomic pointers, and a notice token. Its chunk, which records its heap's
+A slot holds an atomic reference count and the key's and value's addresses
+as atomic pointers. Its chunk, which records its heap's
 identity, is shared through an `Arc` by the table and every handle of its
 slots, so a handle that outlives its heap frees no memory under it: it can
 then only be cloned and dropped. Clones and drops change the count as roots'
@@ -1509,9 +1510,7 @@ discovery when the key is marked, then drains the worklist; the rounds end
 when one marks nothing new, at most one round per ephemeron. A handle dropped
 concurrently may still count as live, which conservatively keeps its value
 for that collection. Clearing stores null into the slot's key and value with
-Release and copies the notice into the heap's queue, all before the sweep that
-may reclaim them, and `Heap::take_ephemeron_notices` drains that queue under
-the data mutex.
+Release, before the sweep that may reclaim them, and reports nothing.
 
 ### `root_pool` chunks and slots
 

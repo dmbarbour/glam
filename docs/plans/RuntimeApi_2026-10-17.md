@@ -438,7 +438,7 @@ handle API goes.
 12. `api-ephemerons` — ephemerons in glam-gc, the second stage's first
    part: a root kind whose value is traced only while its key is reachable
    by other paths, with weak references as the case where they coincide,
-   and notices for cleared entries. Its marking iterates to a fixpoint
+   cleared silently. Its marking iterates to a fixpoint
    after the ordinary worklist drains, under the collector's exclusive
    post-mark authority, and it passes glam-gc's own gates.
 13. `api-volume-cells` — volumes as cells in the managed heap, closing the
@@ -1768,20 +1768,23 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   settlement reports it as a deadlock.
 
 `api-ephemerons` (2026-10-20), in glam-gc:
-- An ephemeron is a slot in its heap's ephemeron table: a reference count,
-  the key's and value's addresses as atomic pointers, and a notice token,
-  in chunks that the table and the handles share, so a handle outlives its
-  heap safely. `MutatorAccess::ephemeron` and `ephemeron_checked` make one
-  from views or from checked bare pointers; `weak` and `weak_checked` make
-  a weak reference, an ephemeron whose key is its value. A handle views its
-  key and value under a matching mutator until it is cleared, and reports
-  its notice.
+- An ephemeron is a slot in its heap's ephemeron table: a reference count
+  and the key's and value's addresses as atomic pointers, in chunks that
+  the table and the handles share, so a handle outlives its heap safely.
+  `MutatorAccess::ephemeron` and `ephemeron_checked` make one from views or
+  from checked bare pointers; `weak` and `weak_checked` make a weak
+  reference, an ephemeron whose key is its value. A handle views its key
+  and value under a matching mutator until it is cleared.
 - Marking: once the roots' worklist drains, rounds over the live
   ephemerons mark the value of each whose key is marked, draining the
   worklist after each, until a round marks nothing new; then each whose key
-  stayed unmarked is cleared, before the sweep, and its notice queued for
-  `Heap::take_ephemeron_notices`. Each collection rebuilds the table's free
-  list from the slots no handle references.
+  stayed unmarked is cleared, before the sweep. Each collection rebuilds
+  the table's free list from the slots no handle references.
+- Clearing is silent (maintainer, the same day). The first build queued a
+  notice token per cleared ephemeron that a handle held, until the heap's
+  owner took them, which an owner that never took them would grow without
+  bound. An owner instead notices a cleared ephemeron as it uses it, or as
+  it next traces what holds it, and cleans its container then.
 - glam does not use them yet; `api-volume-cells` will, keying each
   volume's committed values on its cell. The crate's `SAFETY.md` records
   the one new unsafe site, view construction, and the invariants it rests

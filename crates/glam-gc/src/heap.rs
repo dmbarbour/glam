@@ -561,19 +561,6 @@ impl Heap {
 
     /// Returns current run pressure and finalization-batch statistics.
     ///
-    /// Takes the notice tokens of the ephemerons that collections have
-    /// cleared since the last call, in the order they were cleared.
-    pub fn take_ephemeron_notices(&self) -> Vec<u64> {
-        std::mem::take(
-            &mut self
-                .inner
-                .data
-                .lock()
-                .expect("heap state should not be poisoned")
-                .ephemeron_notices,
-        )
-    }
-
     /// This operation is observational and never requests or performs
     /// collection.
     #[must_use]
@@ -929,9 +916,6 @@ struct ManagedData {
     allocation_pressure: AllocationPressure,
     root_pool: RootPool,
     ephemerons: EphemeronTable,
-    /// The notices of the ephemerons that collections cleared, until the
-    /// heap's owner takes them.
-    ephemeron_notices: Vec<u64>,
     virgin_run_activations: u64,
     recycled_run_activations: u64,
     cold_class_discoveries: u64,
@@ -2559,9 +2543,9 @@ impl MarkAttempt {
 
     /// Marks the value of each live ephemeron whose key is marked, tracing
     /// from it, until a round marks nothing new, since a value may reach
-    /// another ephemeron's key; then clears the ephemerons whose keys stayed
-    /// unmarked, queueing their notices. Runs once the roots' worklist has
-    /// drained, before anything is swept
+    /// another ephemeron's key; then clears, silently, the ephemerons whose
+    /// keys stayed unmarked. Runs once the roots' worklist has drained,
+    /// before anything is swept
     /// (`opaque-resources-reclaimed-when-unreachable`).
     fn trace_ephemerons(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
         let mut pending = data.ephemerons.live_entries();
@@ -2585,8 +2569,7 @@ impl MarkAttempt {
         }
         // Every key still pending stayed unmarked through the last round.
         for entry in pending {
-            let notice = data.ephemerons.clear(entry);
-            data.ephemeron_notices.push(notice);
+            data.ephemerons.clear(entry);
         }
         Ok(())
     }
@@ -3976,13 +3959,12 @@ impl HeapInner {
         &self,
         key: ErasedGc,
         value: ErasedGc,
-        notice: u64,
     ) -> Ephemeron<K, V> {
         self.data
             .lock()
             .expect("heap state should not be poisoned")
             .ephemerons
-            .occupy(self.id, key, value, notice)
+            .occupy(self.id, key, value)
     }
 
     /// Registers an ephemeron of bare managed pointers, which prove nothing,
@@ -3991,7 +3973,6 @@ impl HeapInner {
         &self,
         key: crate::Gc<K>,
         value: crate::Gc<V>,
-        notice: u64,
         expected: (&'static ObjectMetadata, &'static ObjectMetadata),
     ) -> Ephemeron<K, V> {
         let (key, value) = (key.erase(), value.erase());
@@ -4002,7 +3983,7 @@ impl HeapInner {
                 error.raise();
             }
         }
-        state.ephemerons.occupy(self.id, key, value, notice)
+        state.ephemerons.occupy(self.id, key, value)
     }
 
     #[cfg(test)]
@@ -12008,17 +11989,23 @@ mod tests {
         (node, traces)
     }
 
+    fn referenced_ephemerons(heap: &Heap) -> usize {
+        heap.inner
+            .data
+            .lock()
+            .unwrap()
+            .ephemerons
+            .referenced_count()
+    }
+
     #[test]
     fn an_ephemeron_keeps_its_value_while_its_key_lives_then_clears() {
         let heap = Heap::new();
         let (key_root, ephemeron, value_traces) = heap.mutate(|mutator| {
             let (key, _) = ephemeron_node(mutator);
             let (value, value_traces) = ephemeron_node(mutator);
-            let ephemeron = mutator.ephemeron_checked(
-                key.duplicate_in(mutator),
-                value.duplicate_in(mutator),
-                7,
-            );
+            let ephemeron =
+                mutator.ephemeron_checked(key.duplicate_in(mutator), value.duplicate_in(mutator));
             (mutator.root_checked(key), ephemeron, value_traces)
         });
 
@@ -12026,16 +12013,12 @@ mod tests {
         assert_eq!(value_traces.load(Ordering::Relaxed), 1, "the key keeps it");
         assert!(!ephemeron.is_cleared());
         heap.mutate(|mutator| assert!(ephemeron.get(mutator).is_some()));
-        assert!(heap.take_ephemeron_notices().is_empty());
 
         drop(key_root);
         heap.collect_full().unwrap();
         assert_eq!(value_traces.load(Ordering::Relaxed), 1, "nothing keeps it");
         assert!(ephemeron.is_cleared());
-        assert_eq!(ephemeron.notice(), 7);
         heap.mutate(|mutator| assert!(ephemeron.get(mutator).is_none()));
-        assert_eq!(heap.take_ephemeron_notices(), [7]);
-        assert!(heap.take_ephemeron_notices().is_empty(), "taken once");
     }
 
     #[test]
@@ -12045,11 +12028,8 @@ mod tests {
             let (key, _) = ephemeron_node(mutator);
             let (value, _) = ephemeron_node(mutator);
             connect_graph_nodes(mutator, &value, &key);
-            let ephemeron = mutator.ephemeron_checked(
-                key.duplicate_in(mutator),
-                value.duplicate_in(mutator),
-                1,
-            );
+            let ephemeron =
+                mutator.ephemeron_checked(key.duplicate_in(mutator), value.duplicate_in(mutator));
             (
                 ephemeron,
                 collector_slot(&heap, &key),
@@ -12061,7 +12041,6 @@ mod tests {
         assert!(ephemeron.is_cleared(), "only its own value reached the key");
         assert!(!slot_is_marked(&heap, key_slot));
         assert!(!slot_is_marked(&heap, value_slot));
-        assert_eq!(heap.take_ephemeron_notices(), [1]);
     }
 
     #[test]
@@ -12078,12 +12057,10 @@ mod tests {
             let second = mutator.ephemeron_checked(
                 second_key.duplicate_in(mutator),
                 second_value.duplicate_in(mutator),
-                2,
             );
             let first = mutator.ephemeron_checked(
                 first_key.duplicate_in(mutator),
                 first_value.duplicate_in(mutator),
-                1,
             );
             (
                 mutator.root_checked(first_key),
@@ -12104,9 +12081,6 @@ mod tests {
         drop(root);
         heap.collect_full().unwrap();
         assert!(ephemerons.iter().all(crate::Ephemeron::is_cleared));
-        let mut notices = heap.take_ephemeron_notices();
-        notices.sort_unstable();
-        assert_eq!(notices, [1, 2]);
     }
 
     #[test]
@@ -12114,7 +12088,7 @@ mod tests {
         let heap = Heap::new();
         let (root, weak) = heap.mutate(|mutator| {
             let (node, _) = ephemeron_node(mutator);
-            let weak = mutator.weak_checked(node.duplicate_in(mutator), 3);
+            let weak = mutator.weak_checked(node.duplicate_in(mutator));
             (mutator.root_checked(node), weak)
         });
 
@@ -12128,7 +12102,6 @@ mod tests {
         heap.collect_full().unwrap();
         assert!(weak.is_cleared());
         heap.mutate(|mutator| assert!(weak.get(mutator).is_none()));
-        assert_eq!(heap.take_ephemeron_notices(), [3]);
     }
 
     #[test]
@@ -12136,45 +12109,17 @@ mod tests {
         let heap = Heap::new();
         let (root, ephemeron) = heap.mutate(|mutator| {
             let (node, _) = ephemeron_node(mutator);
-            let weak = mutator.weak_checked(node.duplicate_in(mutator), 4);
+            let weak = mutator.weak_checked(node.duplicate_in(mutator));
             (mutator.root_checked(node), weak)
         });
         let copy = ephemeron.clone();
         drop(ephemeron);
-        assert_eq!(
-            heap.inner
-                .data
-                .lock()
-                .unwrap()
-                .ephemerons
-                .referenced_count(),
-            1
-        );
+        assert_eq!(referenced_ephemerons(&heap), 1);
         drop(copy);
         heap.collect_full().unwrap();
-        assert_eq!(
-            heap.inner
-                .data
-                .lock()
-                .unwrap()
-                .ephemerons
-                .referenced_count(),
-            0
-        );
-        assert!(
-            heap.take_ephemeron_notices().is_empty(),
-            "no one held it, so its clearing reports nothing"
-        );
-        let again = heap.mutate(|mutator| mutator.weak(root.as_gc(mutator), 5));
-        assert_eq!(
-            heap.inner
-                .data
-                .lock()
-                .unwrap()
-                .ephemerons
-                .referenced_count(),
-            1
-        );
+        assert_eq!(referenced_ephemerons(&heap), 0);
+        let again = heap.mutate(|mutator| mutator.weak(root.as_gc(mutator)));
+        assert_eq!(referenced_ephemerons(&heap), 1);
         heap.collect_full().unwrap();
         heap.mutate(|mutator| assert!(again.get(mutator).is_some()));
     }
@@ -12186,7 +12131,7 @@ mod tests {
         let other = Heap::new();
         let weak = heap.mutate(|mutator| {
             let (node, _) = ephemeron_node(mutator);
-            mutator.weak_checked(node, 6)
+            mutator.weak_checked(node)
         });
         other.mutate(|mutator| {
             let _ = weak.get(mutator);

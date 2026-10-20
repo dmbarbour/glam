@@ -1316,20 +1316,21 @@ the sanitizers run at its `dynamic` level, by judgement
 ## Ephemerons and weak references
 
 `api-ephemerons` (runtime API plan, 2026-10-20) added the ephemeron table,
-its marking rounds and clearing, and `Heap::take_ephemeron_notices`.
+its marking rounds and clearing, silent once the maintainer chose it the
+same day: owners notice a cleared ephemeron as they view it.
 `heap::tests` covers:
 
 - an ephemeron whose key a root reaches keeps its value through a
-  collection, and once the root goes, the next collection clears it, leaves
-  its value untraced, and queues its notice, which is taken once;
+  collection, and once the root goes, the next collection clears it and
+  leaves its value untraced;
 - a value that reaches its own key, the cycle a hidden root would keep,
   dies with the key, both slots unmarked;
 - marking to a fixpoint: an ephemeron placed first in the table, whose key
   only another ephemeron's value reaches, keeps its value through the second
   round, and both clear together once their root goes;
 - a weak reference views its value while a root reaches it, then clears;
-- an ephemeron no handle references reports nothing when its key dies, and
-  its slot returns to the free list at the collection and is reused;
+- an ephemeron no handle references returns its slot to the free list at
+  the collection, and the slot is reused;
 - viewing an ephemeron through another heap's mutator panics.
 
 The one new unsafe site, `Ephemeron::get`'s view construction, joined the
@@ -1337,6 +1338,7 @@ inventories with its module opt-in, and `SAFETY.md` records its argument.
 `Arena::owner_slot_is_marked` and its chunk's mark-word read, before
 test-only, now serve marking; the read's reviewed argument, exclusive
 collection, is unchanged. On 2026-10-20, `scripts/check.sh full` passed, and
-Miri with strict provenance passed the six ephemeron tests. At `4a0ad255`,
+Miri with strict provenance passed the six ephemeron tests, before clearing
+became silent. At `4a0ad255`,
 with a nightly toolchain installed, `check-miri.sh` passed the library suite
 (237 passed, 4 ignored), and both sanitizers passed (239 passed, 2 ignored).

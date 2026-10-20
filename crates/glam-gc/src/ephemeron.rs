@@ -6,21 +6,22 @@
 //! the value of each live ephemeron whose key it marked, tracing from those
 //! values, and repeats until a round marks nothing new: a value may reach
 //! another ephemeron's key. An ephemeron whose key stays unmarked is then
-//! cleared, before the sweep reclaims anything, and its notice token is
-//! queued for the heap's owner to take. A weak reference is an ephemeron
-//! whose key and value coincide.
+//! cleared, before the sweep reclaims anything. Clearing is silent: an owner
+//! notices a cleared ephemeron when it next uses it, or when it next traces
+//! what holds it. A weak reference is an ephemeron whose key and value
+//! coincide.
 //!
-//! An ephemeron is a slot in its heap's table: a reference count, the key's
-//! and the value's addresses, and a notice token. Handles share the slot as
-//! roots share theirs, by its count. A slot is reused only once its count is
-//! zero, by the next collection's rebuild of the free list, and nothing
-//! creates ephemerons during a collection.
+//! An ephemeron is a slot in its heap's table: a reference count and the
+//! key's and value's addresses. Handles share the slot as roots share
+//! theirs, by its count. A slot is reused only once its count is zero, by the
+//! next collection's rebuild of the free list, and nothing creates
+//! ephemerons during a collection.
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicU64, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
 
 use crate::root_pool::HeapId;
 use crate::trace::ErasedGc;
@@ -31,13 +32,12 @@ const SLOTS_PER_CHUNK: usize = 64;
 /// The most references one slot counts, as for roots.
 const MAX_REFERENCES: usize = isize::MAX as usize;
 
-/// One ephemeron: a reference count, the key's and value's addresses, null
-/// once cleared, and the token its clearing reports.
+/// One ephemeron: a reference count and the key's and value's addresses,
+/// null once cleared.
 struct EphemeronSlot {
     references: AtomicUsize,
     key: AtomicPtr<()>,
     value: AtomicPtr<()>,
-    notice: AtomicU64,
 }
 
 impl EphemeronSlot {
@@ -46,7 +46,6 @@ impl EphemeronSlot {
             references: AtomicUsize::new(0),
             key: AtomicPtr::new(std::ptr::null_mut()),
             value: AtomicPtr::new(std::ptr::null_mut()),
-            notice: AtomicU64::new(0),
         }
     }
 }
@@ -85,7 +84,6 @@ impl EphemeronTable {
         heap: HeapId,
         key: ErasedGc,
         value: ErasedGc,
-        notice: u64,
     ) -> Ephemeron<K, V> {
         let (chunk, index) = self.free.pop().unwrap_or_else(|| {
             let chunk = self.chunks.len();
@@ -107,7 +105,6 @@ impl EphemeronTable {
         // transfer of the handle.
         slot.key.store(key.as_ptr().as_ptr(), Ordering::Relaxed);
         slot.value.store(value.as_ptr().as_ptr(), Ordering::Relaxed);
-        slot.notice.store(notice, Ordering::Relaxed);
         slot.references.store(1, Ordering::Relaxed);
         Ephemeron {
             chunk,
@@ -142,13 +139,12 @@ impl EphemeronTable {
         entries
     }
 
-    /// Clears `entry`, whose key the collection left unmarked, returning its
-    /// notice. The caller holds exclusive collection, before any sweep.
-    pub(crate) fn clear(&self, entry: EphemeronEntry) -> u64 {
+    /// Clears `entry`, whose key the collection left unmarked. The caller
+    /// holds exclusive collection, before any sweep.
+    pub(crate) fn clear(&self, entry: EphemeronEntry) {
         let slot = &self.chunks[entry.chunk].slots[entry.index];
         slot.key.store(std::ptr::null_mut(), Ordering::Release);
         slot.value.store(std::ptr::null_mut(), Ordering::Release);
-        slot.notice.load(Ordering::Relaxed)
     }
 
     /// Rebuilds the free list from the slots no handle references. The
@@ -181,10 +177,10 @@ impl EphemeronTable {
 /// A shareable ephemeron in a live heap: its value lives while its key is
 /// reachable by some other path, and it keeps neither alive by itself.
 ///
-/// Once a collection finds the key unreachable, the ephemeron is cleared and
-/// its notice token queued, for [`crate::Heap::take_ephemeron_notices`]. Like
-/// a root, it may outlive its heap, and can then only be cloned and dropped.
-#[must_use = "an ephemeron reports nothing once dropped"]
+/// Once a collection finds the key unreachable, the ephemeron is cleared,
+/// silently: its owner notices when it next views it. Like a root, it may
+/// outlive its heap, and can then only be cloned and dropped.
+#[must_use = "an ephemeron keeps nothing alive"]
 pub struct Ephemeron<K: Trace, V: Trace> {
     chunk: Arc<EphemeronChunk>,
     index: usize,
@@ -229,12 +225,6 @@ impl<K: Trace, V: Trace> Ephemeron<K, V> {
     pub fn is_cleared(&self) -> bool {
         self.slot().key.load(Ordering::Acquire).is_null()
     }
-
-    /// The token its clearing reports.
-    #[must_use]
-    pub fn notice(&self) -> u64 {
-        self.slot().notice.load(Ordering::Relaxed)
-    }
 }
 
 impl<K: Trace, V: Trace> Clone for Ephemeron<K, V> {
@@ -270,7 +260,7 @@ impl<K: Trace, V: Trace> fmt::Debug for Ephemeron<K, V> {
 
 /// A weak reference: an ephemeron whose key is its value, which it views
 /// while some other path reaches it.
-#[must_use = "a weak reference reports nothing once dropped"]
+#[must_use = "a weak reference keeps nothing alive"]
 pub struct Weak<T: Trace>(Ephemeron<T, T>);
 
 impl<T: Trace> Weak<T> {
@@ -290,12 +280,6 @@ impl<T: Trace> Weak<T> {
     #[must_use]
     pub fn is_cleared(&self) -> bool {
         self.0.is_cleared()
-    }
-
-    /// The token its clearing reports.
-    #[must_use]
-    pub fn notice(&self) -> u64 {
-        self.0.notice()
     }
 }
 

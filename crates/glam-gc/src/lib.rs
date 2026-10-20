@@ -9,9 +9,9 @@
 //!   stale-cursor epoch.
 //! - **Ephemerons.** An ephemeron keeps its value only while its key is
 //!   reachable by another path; marking repeats over the ephemerons until a
-//!   round marks nothing new, then clears those whose keys stayed unmarked
-//!   before the sweep and queues their notices. A weak reference is an
-//!   ephemeron whose key is its value.
+//!   round marks nothing new, then silently clears those whose keys stayed
+//!   unmarked, before the sweep. A weak reference is an ephemeron whose key
+//!   is its value.
 //! - **Finalization.** Dead identities that need `Drop` move into a durable,
 //!   non-rootable finalization batch. It drains outside collector locks under
 //!   the installed finalizer mutator, and completed regions return allocator
