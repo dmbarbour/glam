@@ -361,7 +361,9 @@ handle API goes.
    offer, with each mechanism's pros and cons and a recommendation
    ([review](../reviews/OpaqueFinalization_2026-10-20.md)); the maintainer
    suggests modelling resolvers and volume handles as special values in
-   the heap, which the collector then sees.
+   the managed heap, glam-gc's, which the collector then sees. ("Heap"
+   names several things: the managed heap is glam-gc's allocations, the
+   shared heap the store's volume that `.heap.*` reaches.)
    - The inventory (2026-10-20), by each value's fate once the bridge is
      gone:
      - Stay, reshaped: volume handles (`VolumeHandle`), never reclaimed
@@ -391,11 +393,31 @@ handle API goes.
        volume's handles. A volume's identity matters to conflict analysis,
        which keys on volume IDs, not to users, who do not compare volumes
        (maintainer).
-   - Implementation steps the ADR is expected to settle: weak references
-     with death notices in glam-gc; resolvers as managed cells, finalized;
-     volume handles as managed cells, the store holding volumes weakly;
-     draining the external owners after each collection.
-10. `api-transactional-promises` — promise resolution within cuts, with
+   - The review recommends staging (2026-10-20): resolvers stay opaque
+     payloads, a resolver keeping its promise alive but never the reverse
+     (maintainer), finalized through death notices, which also reclaim
+     acyclic volumes, `api-death-notices`; then ephemerons in glam-gc,
+     `api-ephemerons`, and volumes as cells in the managed heap,
+     `api-volume-cells`, so cycles through volumes are collected.
+     Ephemerons also serve the design's scope-unique dictionary keys.
+   - Maintainer decisions (2026-10-20): the first stage's leak of cycles
+     through volumes is acceptable while temporary, and the plan returns
+     to it; a lost resolver breaks its promise with "resolver lost";
+     settlement always collects before it reports. Open: whether volumes'
+     committed values stay in the store, held through ephemerons keyed on
+     the volume's cell (recommended), or move into the cell, a transaction
+     recording each volume's snapshot when it first reads it, as the
+     maintainer first envisioned.
+10. `api-death-notices` — the first stage of `api-opaque-finalization`.
+   Each volume has one payload, which its handles share and the store
+   caches weakly; a volume handle's or resolver's payload queues a notice
+   when it dies; the runtime drains its external owners after each
+   collection and processes the notices there: a lost resolver's promise
+   breaks with "resolver lost" and its record goes, and a dead volume's
+   root and conflict entries go. A transaction keeps the volumes it
+   touches alive, and settlement collects before it reports. Cycles
+   through volumes leak until `api-volume-cells`, a known limitation.
+11. `api-transactional-promises` — promise resolution within cuts, with
    specialized attention, more than a commit hook for the public
    reflection API (maintainer, 2026-10-20). A resolution cannot be
    undone, so a turn refuses one within a cut, and resolves in a commit
@@ -410,7 +432,18 @@ handle API goes.
    better than an asynchronous send (maintainer, 2026-10-20). It follows
    `api-opaque-finalization`, whose design reshapes the record of
    promises.
-11. `api-reflection-model` — a design step, without code, ahead of the
+12. `api-ephemerons` — ephemerons in glam-gc, the second stage's first
+   part: a root kind whose value is traced only while its key is reachable
+   by other paths, with weak references as the case where they coincide,
+   and notices for cleared entries. Its marking iterates to a fixpoint
+   after the ordinary worklist drains, under the collector's exclusive
+   post-mark authority, and it passes glam-gc's own gates.
+13. `api-volume-cells` — volumes as cells in the managed heap, closing the
+   first stage's leak: a volume's identity is a managed cell, a value kind
+   to which handles are edges, and the store holds its committed values
+   through ephemerons keyed on it, unless the design step settles on the
+   cell holding them. Cycles through volumes are then collected.
+14. `api-reflection-model` — a design step, without code, ahead of the
    settlement it shapes (maintainer, 2026-10-19): how the reflection API, as
    `refl.*` and `anno refl:(…)` present it, maps to machines. Spawned tasks
    (`.task.new` and its relatives) become named machines in the tree that
@@ -431,7 +464,7 @@ handle API goes.
      network is designed. Reflection's operations come when it is time,
      such as `.todo.add`, `.todo.del` and `.todo.list` (maintainer, the same
      day).
-12. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+15. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
    decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
    quiescent when every machine waits on input or a heap change, retrying
    its current atomic step, and no evaluation work remains; turns in
@@ -447,7 +480,7 @@ handle API goes.
    machine as it was.
    - CLI slice: the CLI's two settlement loops become one, and the bridge
      behavior below that settlement retires goes.
-13. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
+16. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
    `lifecycle-host-calls` (L3, L7, L8, L9). The reflection hosts
    (`AssemblerReflectionHost`, `LoggerTaskHost`, `IsolatedTaskHost`) reduce
    to queues and store state that machines serve, and `TaskHost`'s
@@ -462,7 +495,7 @@ handle API goes.
      reads, for the manifest and the final check that no file changed. The
      CLI opens its runtime with `Runtime::open`, and the bridge's
      constructor goes.
-14. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+17. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
     - The turn supplies the effects API, evaluates the program to weak-head
@@ -485,13 +518,13 @@ handle API goes.
       providers, their per-branch journals become machine state that cuts
       restore, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
       public API.
-15. `api-handle-retirement` — the public handle types go: `Assembler`,
+18. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-16. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+19. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions

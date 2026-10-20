@@ -3,8 +3,10 @@
 Status: findings and a recommendation for the design step
 `api-opaque-finalization` (runtime API plan). No code changed. The
 maintainer asked what weak references glam-gc could feasibly offer, with
-each mechanism's pros and cons and a recommendation (2026-10-20); nothing
-here is decided until the step's ADR.
+each mechanism's pros and cons and a recommendation (2026-10-20), then
+answered its questions the same day (see
+[Maintainer Decisions](#maintainer-decisions-2026-10-20)). The step's ADR
+records what is settled.
 
 Revision reviewed: `49ba7006` (clean `main`).
 
@@ -21,12 +23,17 @@ go with the bridge; compilation origins and construction brands hold no
 resource.
 
 The maintainer suggested modelling resolvers and volume handles as special
-values in the heap, so the collector sees them. This review asks what each
-needs, what glam-gc would have to offer, and at what cost.
+values in the managed heap, so the collector sees them. This review asks
+what each needs, what glam-gc would have to offer, and at what cost.
+
+**Terms.** "Heap" names several things. Here the *managed heap* is
+glam-gc's: the allocations that hold glam values, which the collector
+traces. The *shared heap* is the store's volume that `.heap.*` reads and
+writes, one volume among others.
 
 ## Current Model
 
-- **Opaque payloads live outside the heap.** A `Value::Opaque` holds an
+- **Opaque payloads live outside the managed heap.** A `Value::Opaque` holds an
   `ExternalOwnerHandle`: a runtime ID, a registry ID and a lease, an
   `Arc<()>` (`src/core/managed/external_owners.rs:17`). The payload stays in
   the runtime's external-owner registry. Every copy of the value clones the
@@ -55,7 +62,7 @@ needs, what glam-gc would have to offer, and at what cost.
   user-visible weak-key semantics", "first-class Glam finalizers and
   resurrection", "GC-aware persistent containers" and "precise reclamation
   through opaque host payloads" (`crates/glam-gc/SAFETY.md:1742`). Managed
-  `Drop` is passive: it may not enter the heap, call the runtime, or treat a
+  `Drop` is passive: it may not enter the managed heap, call the runtime, or treat a
   managed edge as live. Active cleanup belongs in the external-owner
   registry. An opaque payload that is part of a managed cycle may not hold
   a root as a stand-in for tracing (`SAFETY.md:1227`).
@@ -103,12 +110,15 @@ needs, what glam-gc would have to offer, and at what cost.
 
 ## What Each Resource Needs
 
-**Resolvers need no place in the heap.** A resolver's liveness is already
-exact under the leases, except through hidden roots: a pending promise
-reaches nothing, so the record's root on it cannot keep a resolver alive.
-Machines' stacks, state and port buffers have explicit lifetimes and drop
-their roots. The heap volume is always live, so a resolver kept there is
-correctly alive. That leaves cycles through collectable volumes, which are
+**Resolvers need no place in the managed heap.** A resolver can stay an
+opaque payload: its liveness is already exact under the leases, except
+through hidden roots. A resolver may keep its promise alive, but never the
+reverse (maintainer, 2026-10-20), and the record keeps that shape: it roots
+each pending promise while its resolver lives, and a pending promise
+reaches nothing, so it cannot keep its resolver alive. Machines' stacks,
+state and port buffers have explicit lifetimes and drop their roots. The
+shared heap's volume is always live, so a resolver kept there is correctly
+alive. That leaves cycles through collectable volumes, which are
 the volumes' problem (F1). Given prompt draining and a safe point, the
 resolver's payload `Drop` is a sound death notice: it queues the promise's
 ID, and the runtime breaks the promise and drops its record. The status
@@ -116,7 +126,8 @@ record then needs no `Resolved` marker forever: once the resolver is gone,
 nothing can ask.
 
 **Volumes need the collector.** A volume's value can reach its own
-handles, and the store must hold the value somewhere. Unless that holding
+handles, and the store must hold the value somewhere, in the managed heap
+or beside it. Unless that holding
 is visible to the collector as conditional on the handles, cycles through
 volumes never die. This is the elephant: no amount of reference counting
 over external owners collects it.
@@ -159,7 +170,7 @@ ephemeron whose key and value coincide, so M3 subsumes M2.
 - Pros: exactly the store's shape, a runtime-owned table whose entries
   should live as long as their keys. The store keeps its persistent map and
   snapshots; each committed volume value is held by an ephemeron keyed on
-  the volume's identity in the heap, so a volume holding its own handle is
+  the volume's identity in the managed heap, so a volume holding its own handle is
   ordinary garbage.
 - Cons: the fixpoint costs a pass per round over the ephemerons, bounded by
   the number of volumes and usually a round or two. A new root kind
@@ -183,25 +194,40 @@ intact.
 
 ### M5. Active managed finalizers
 
-Managed `Drop` that enters the heap or calls the runtime.
+Managed `Drop` that enters the managed heap or calls the runtime.
 - Pros: none here that M1–M3 lack.
 - Cons: overturns the passive-`Drop` rule and the finalization guarantees
   the collector's gates certified.
 
-### M6. Volume cells owning committed values, held weakly
+### M6. Volume cells owning committed values
 
-The volume's identity is a managed cell that traces its committed value;
-handles are edges to it, and the store holds cells through weak references
-(M2).
-- Pros: needs only weak references; the volume's value lives exactly as
-  long as its handles, by ordinary tracing.
-- Cons: the store's snapshots stop being free. A transaction would capture
-  each volume's value when it first reads it, and conflict at once if the
-  volume changed since its snapshot (versioned reads, as TL2 does), to
-  keep reads consistent. That reworks the store's transactions, which
-  ephemerons leave alone.
+The maintainer's first vision (2026-10-20): a volume is a cell in the
+managed heap that traces its committed value; handles are edges to it, and
+a transaction records a volume's snapshot when it first reads the volume.
+- Pros: ordinary tracing collects volumes, cycles included, with no new
+  collector mechanism; the store holds no volume values, and a reclaimed
+  volume's conflict entries could be pruned by a watermark, the oldest
+  live transaction's revision, rather than by notices.
+- Cons: isolation. A transaction that first reads a volume after another
+  commits to it would see a later state than its other reads. Keeping reads
+  consistent means one of two things. It could conflict at the first read
+  whenever the volume changed since the transaction began (versioned reads,
+  as TL2 does), which is coarser than today's conflict analysis by path. Or
+  each cell could keep the versions that live transactions may still read
+  (multiversioning), which the store's persistent maps already give its
+  snapshots for free.
 
 ## Recommendation
+
+In both M3 and M6 a volume becomes a cell in the managed heap: its
+identity, to which handles are edges. They differ in where its committed
+values live. M6 moves them into the cell and rebuilds isolation around
+first reads; M3 leaves them in the store's persistent map, held through
+ephemerons keyed on the cell, so snapshots and conflict analysis by path
+stay as they are. Ephemerons also serve more than volumes: the design's
+scope-unique atoms, `anno 'scope_unique`, as dictionary keys, model a heap
+within a pure computation whose entries are collected with their keys
+(`Design.md`, "Ephemerons").
 
 Stage the work, resolvers first:
 
@@ -215,26 +241,27 @@ Stage the work, resolvers first:
    settlement collects before it reports (F5). Resolvers are then done,
    and acyclic volumes are reclaimed. Cycles through volumes leak until
    the runtime retires, documented as a known limitation.
-2. **Ephemerons in glam-gc (M3), then volume identities in the heap.** A
-   new root kind, with weak references as its degenerate case, and a
-   managed volume identity as a value kind whose committed values the store
-   holds through ephemerons keyed on it. This closes F1 for volumes without
-   reworking the store's snapshots, which M6 would.
+2. **Ephemerons in glam-gc (M3), then volumes as cells in the managed
+   heap.** A new root kind, with weak references as its degenerate case,
+   and a volume's identity as a managed cell, a value kind whose committed
+   values the store holds through ephemerons keyed on it. This closes F1
+   for volumes without reworking the store's snapshots, which M6 would.
 
 Prefer M3 over M6: both need collector work and a managed volume identity,
 but M3 keeps the store's transactions as they are, and its extra collector
 cost, the fixpoint, is bounded by the number of volumes. Reject M4 and M5:
 notices carry what finalizers need, and the collector's rules stay intact.
 
-Possible step names, which the ADR settles: `api-death-notices` (stage 1),
-then `gc-ephemerons` and `api-volume-identities` (stage 2).
+Planned steps: `api-death-notices` (stage 1), then `api-ephemerons` and
+`api-volume-cells` (stage 2).
 
-## Questions for the Maintainer
+## Maintainer Decisions (2026-10-20)
 
-1. Stage 1 alone leaks cycles through volumes. Is that acceptable as a
-   documented limitation until stage 2, or should stage 2 come first?
-2. A lost resolver breaks its promise once a collection notices. Is a
-   fixed message, such as "its resolver was lost", right, or should the
-   failure name the promise's origin where one is known?
-3. Settlement would collect before reporting (F5). Should that be every
-   settlement, or only when promises are pending?
+1. Stage 1's leak of cycles through volumes is acceptable while temporary;
+   the plan returns to it in stage 2.
+2. A lost resolver breaks its promise with a plain "resolver lost".
+3. Settlement always collects before it reports, rather than only when
+   promises are pending, so later weak references, ephemerons or
+   finalizers that make noise add no special cases.
+
+Open: stage 2's mechanism, M3 (recommended) or M6.
