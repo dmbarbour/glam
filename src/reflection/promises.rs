@@ -130,17 +130,13 @@ impl Settled {
 }
 
 /// Publishes what a commit settled into the promised values, waking what
-/// waits on them, once the committer has released the store and holds no
-/// access region. Returns whether it published anything, for the committer
-/// then to advance the observation epoch again: fulfillment is logically
-/// asynchronous, after the commit that claimed the promises
+/// waits on them as evaluation does, once the committer has released the
+/// store and holds no access region: fulfillment is logically asynchronous,
+/// after the commit that claimed the promises
 /// (`promise-resolution-commits-with-its-cut`).
-pub(crate) fn publish_settled(
-    values: &crate::core::CoreValueFactory,
-    settled: Vec<Settled>,
-) -> bool {
+pub(crate) fn publish_settled(values: &crate::core::CoreValueFactory, settled: Vec<Settled>) {
     if settled.is_empty() {
-        return false;
+        return;
     }
     let publications = values.with_boundary_access(|access| {
         settled
@@ -154,7 +150,6 @@ pub(crate) fn publish_settled(
     for publication in publications {
         publication.notify();
     }
-    true
 }
 
 /// A resolver's payload: which promise of which runtime it resolves, and

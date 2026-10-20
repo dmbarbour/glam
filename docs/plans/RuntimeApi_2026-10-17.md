@@ -1726,21 +1726,33 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   second join. In `src/reflection/store/tests.rs`, of two journals
   resolving one promise, the second conflicting. The reflection cut test
   now expects a cut to see its own resolution.
-- Publication order, after the maintainer's review the same day: the
+- Publication order, after the maintainer's reviews the same day. The
   first build advanced the observation epoch before publishing the
-  values, so a cut waiting on a promised value could wake to the epoch,
-  find the value missing, and wait again past its publication. A second
-  build published under the mutation admission the committer still held,
-  before the epoch advance, through new admitted variants of promise
-  publication. The maintainer preferred two epochs, cheaper to maintain
-  (2026-10-20): the commit claims the promises and advances the epoch;
-  fulfillment, logically asynchronous, publishes the values through the
-  ordinary path, waking what waits on the promises, and advances the
-  epoch again (`RuntimeSharedResources::fulfill_settled`). The admitted
-  variants went. It costs one extra advance per commit that resolves a
-  promise. An ordering test forces the check: a hook just before
-  fulfillment's epoch advance finds the value already assigned, and it
-  fails when the hook moves ahead of publication.
+  values, so a turn's cut waiting on a promised value could wake to the
+  epoch, find the value missing, and wait again past its publication. A
+  second build published under the mutation admission the committer still
+  held, before the advance; a third, preferred as cheaper, advanced the
+  epoch a second time after fulfillment. The maintainer then asked why a
+  cut waiting on a promise waits differently from evaluation: a turn's
+  cut whose evaluation waited waited on the epoch alone, which no
+  finished evaluation advances, so the same cut waiting on a lazy value
+  finished elsewhere, or on a promise publishing after the commit, had no
+  wake. Now the commit claims the promises and advances the epoch;
+  fulfillment publishes the values, waking evaluation's waiters; and a
+  turn's cut subscribes as evaluation does. Its pushback keeps what its
+  evaluation waited on (`Error`), the cut collects it, and on retry it
+  pumps or waits on that work, a promise's follower
+  (`promise_root_wait`) or a lazy route, through the work generation,
+  counting itself an observer of the epoch
+  (`EvaluationWorkCoordinator::observe_epoch_as_client`), whose advances
+  then move the work generation too, so a change in what it read wakes
+  it as well. The second epoch and the admitted publication went.
+- Forced tests in `src/api/turn/tests.rs`: a cut waiting on a promised
+  value, and one waiting on a lazy value that needs it, each read it
+  pending, then the resolving commit wakes them before fulfillment
+  (a hook holds fulfillment until they have read it pending again), and
+  they must wake to the fulfillment alone. Both failed with fulfillment
+  advancing nothing, before the subscription, and pass with it.
 - A cut that waits on a promise it resolves (maintainer: a wait can know
   its promise). A turn's pushback keeps what its evaluation waited on, in
   `Error`: a promise, or the work producing what it needed. Where its cut

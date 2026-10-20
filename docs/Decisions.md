@@ -2362,10 +2362,12 @@ maps the short names used here to file names.
     wake; it advances the observation epoch as any commit does, and the
     promise is claimed, so it cannot resolve twice. Fulfillment is
     logically asynchronous, after it (maintainer, 2026-10-20): the
-    committer publishes the value, waking what waits on the promise
-    itself, then advances the epoch again. A cut that the first advance
-    woke before the value was there, and that waited again, wakes once
-    more; a single advance before the publication would lose that wake.
+    committer publishes the value, which wakes what waits on the promise
+    as evaluation does. A turn's cut whose evaluation waited waits that way
+    too, on what its evaluation waited on as well as on the epoch, so a
+    cut that the commit's advance woke before the value was there wakes
+    again when it publishes; a cut waiting on the epoch alone would lose
+    that wake, as it would a lazy value finished with no commit at all.
     The commit decides atomically, and publishing after it is safe while
     the gap is brief.
   - A resolution that another commits first makes its transaction

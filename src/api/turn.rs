@@ -40,6 +40,11 @@ use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
 use crate::core::Key;
+use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute, WorkDependency};
+
+/// How many polls a cut whose evaluation waited reserves each time it pumps
+/// the work it waits on.
+const AWAIT_PUMP_ALLOWANCE: usize = 4_096;
 use crate::reflection::{
     ConflictAnalysisStrategy, Promises, Resolution, StoreCommitResult, StoreJournal,
     resolver_promise,
@@ -969,6 +974,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             observed: false,
             conflicted: false,
             awaits_evaluation: false,
+            awaited: Vec::new(),
             commit_hooks: Vec::new(),
             abort_hooks: Vec::new(),
         });
@@ -1144,6 +1150,9 @@ struct CutTransaction {
     /// Whether an evaluation waited on what is not known yet, such as an
     /// unresolved promise, so any change may wake the cut.
     awaits_evaluation: bool,
+    /// What its evaluations waited on, whose progress wakes the cut as any
+    /// change does.
+    awaited: Vec<WorkDependency>,
     commit_hooks: Vec<Hook>,
     abort_hooks: Vec<Hook>,
 }
@@ -1168,6 +1177,7 @@ impl CutTransaction {
         self.observed |= branch.observed;
         self.conflicted |= branch.conflicted || matches!(merged, Merged::Conflicted);
         self.awaits_evaluation |= branch.awaits_evaluation;
+        self.awaited.extend(branch.awaited);
         self.commit_hooks.extend(branch.commit_hooks);
         self.abort_hooks.extend(branch.abort_hooks);
         merged
@@ -1192,9 +1202,10 @@ enum CutRetry {
     /// Once something its journals observed has changed: it failed, or
     /// met pushback.
     AfterChange(Box<(StoreJournal, RuntimeEventJournal)>),
-    /// Once anything has changed since the observation epoch it began at:
-    /// an evaluation waited on what was not known yet.
-    AfterAnyChange(u64),
+    /// Once anything has changed since the observation epoch it began at,
+    /// or what its evaluations waited on can progress: an evaluation waited
+    /// on what was not known yet.
+    AfterEvaluation(u64, Vec<WorkDependency>),
     /// Never: an error ended it.
     Never(Error),
 }
@@ -1512,6 +1523,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             }
             cut.observed = true;
             cut.awaits_evaluation = true;
+            cut.awaited.extend(error.awaited().cloned());
         }
         result
     }
@@ -2292,8 +2304,12 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// An explicit failure, from [`Self::fail`], is the intent to
     /// backtrack: a nested cut returns it, so its caller may try another
     /// alternative, and the outermost cut runs `body` again, on the state it
-    /// started from, once something it observed has changed. The outermost
-    /// cut also runs `body` again when its commit conflicts with another's.
+    /// started from, once something it observed has changed. Pushback, an
+    /// evaluation that waited on what is not known yet, runs it again once
+    /// anything has changed or what the evaluation waited on can progress,
+    /// a promise fulfilled or a lazy value's work runnable or done. The
+    /// outermost cut also runs `body` again when its commit conflicts with
+    /// another's.
     /// Other errors end the outermost cut. Rust effects within `body` must
     /// tolerate a rerun, or wait for a commit or undo an abort with
     /// [`Self::on_commit`] and [`Self::on_abort`].
@@ -2317,6 +2333,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 observed: false,
                 conflicted: false,
                 awaits_evaluation: false,
+                awaited: Vec::new(),
                 commit_hooks: Vec::new(),
                 abort_hooks: Vec::new(),
             });
@@ -2348,7 +2365,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                     if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
                         && cut.awaits_evaluation =>
                 {
-                    CutRetry::AfterAnyChange(generation)
+                    CutRetry::AfterEvaluation(generation, cut.awaited.clone())
                 }
                 Err(error)
                     if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
@@ -2372,14 +2389,70 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                     let (journal, events) = &*journals;
                     self.await_change(&resources, journal, events)
                 }
-                CutRetry::AfterAnyChange(generation) => {
-                    self.runtime
-                        .assembler
-                        .evaluation_runtime()
-                        .pump_until_stable();
-                    resources.wait_for_change(generation);
+                CutRetry::AfterEvaluation(generation, awaited) => {
+                    self.await_evaluation(&resources, generation, &awaited);
                 }
                 CutRetry::Never(error) => return Err(error),
+            }
+        }
+    }
+
+    /// Waits, for a cut whose evaluation waited, until anything has changed
+    /// since the observation epoch `generation`, or until what its
+    /// evaluations waited on can progress: a promise fulfilled, or a lazy
+    /// value's work runnable or done. That progress needs no change in shared
+    /// state, so the cut subscribes to it as evaluation does, pumping the
+    /// work it waits on, and counts itself an observer of the epoch, whose
+    /// advances then move the work generation it waits on too.
+    fn await_evaluation(
+        &self,
+        resources: &RuntimeSharedResources,
+        generation: u64,
+        awaited: &[WorkDependency],
+    ) {
+        let runtime = self.runtime.assembler.evaluation_runtime();
+        let context = self.runtime.assembler.eval_context();
+        let waits = awaited
+            .iter()
+            .filter_map(|dependency| match dependency {
+                WorkDependency::Wait(wait) => Some(wait.clone()),
+                WorkDependency::Promise(promise) => {
+                    crate::eval::promise_root_wait(&context, promise).ok()
+                }
+                #[cfg(test)]
+                WorkDependency::Test(_) => None,
+            })
+            .collect::<Vec<_>>();
+        let coordinator = self.runtime.assembler.values().core().work_coordinator();
+        let Some(coordinator) = coordinator.filter(|_| !waits.is_empty()) else {
+            runtime.pump_until_stable();
+            resources.wait_for_change(generation);
+            return;
+        };
+        let _observation = coordinator.observe_epoch_as_client();
+        let mut route = ExactDemandRoute::default();
+        loop {
+            runtime.pump_until_stable();
+            let work = coordinator.client_work_generation();
+            if resources.observations.current().get() != generation {
+                return;
+            }
+            let mut progressed = false;
+            let mut busy = None;
+            for wait in &waits {
+                match context.pump_wait_on_route(wait, AWAIT_PUMP_ALLOWANCE, &mut route) {
+                    EvaluationPumpOutcome::TargetReady => return,
+                    EvaluationPumpOutcome::BudgetExhausted => progressed = true,
+                    EvaluationPumpOutcome::Busy => busy = Some(wait),
+                    EvaluationPumpOutcome::NoProgress => {}
+                }
+            }
+            if progressed {
+                continue;
+            }
+            match busy {
+                Some(wait) => context.wait_for_claimed_task_on_route(wait, &mut route),
+                None => coordinator.wait_for_client_change(work),
             }
         }
     }

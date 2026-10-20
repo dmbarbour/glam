@@ -429,44 +429,80 @@ fn settlement_collects_and_acts_on_death_notices_first() {
     .expect("the turn should succeed");
 }
 
-#[test]
-fn a_resolution_publishes_its_value_before_the_epoch_advances_again() {
+/// Whether a cut waiting on a promised value wakes to its fulfillment alone.
+/// The waiter's cut reads the value with `read` and finds it pending; the
+/// parent's resolving commit wakes it before the value publishes, and it
+/// reads it pending again and waits again; only then does the value
+/// publish. Should the waiter miss that, an unrelated commit wakes it after
+/// a while, so the test ends either way.
+fn waiter_wakes_on_fulfillment(
+    read: impl Fn(&mut Machine<'_, '_>) -> Result<i64, Error> + Send + Sync + 'static,
+) -> bool {
+    use std::sync::mpsc;
+    use std::time::Duration;
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
-    rt.run("m", |m| {
-        m.promise();
-        m.set("resolver")?;
-        let promised = m.peek()?.clone();
-        let values = m.runtime.assembler.values();
-        let seen = Arc::new(Mutex::new(None));
-        let hook_seen = Arc::clone(&seen);
-        // A cut waiting on the promised value wakes as the epoch advances.
-        // The commit's own advance may come before the value; the one after
-        // fulfillment must not, or a cut that woke early and waited again
-        // would miss it (`promise-resolution-commits-with-its-cut`).
-        m.resources().before_epoch_advance_for_test(move || {
-            let assigned = values.with_access(|scoped| {
-                match scoped
-                    .clone_core(&promised)
-                    .expect("the value is this runtime's")
+    let (attempted, attempts) = mpsc::channel();
+    let (done, finished) = mpsc::channel();
+    rt.run("p", move |p| {
+        p.promise();
+        p.set("resolver")?;
+        p.give("waiter", 1)?;
+        let fork = p.fork("waiter", move |w| {
+            w.set("promised")?;
+            let value = w.cut(|w| {
+                let value = read(w);
+                if value
+                    .as_ref()
+                    .is_err_and(|error| error.kind() == ErrorKind::Retry)
                 {
-                    crate::core::Value::Promised(promise) => promise
-                        .access(scoped.runtime_access())
-                        .assignment()
-                        .is_some(),
-                    _ => false,
+                    attempted.send(()).expect("the parent counts the attempts");
                 }
-            });
-            *hook_seen.lock().unwrap() = Some(assigned);
+                value
+            })?;
+            done.send(value).expect("the parent awaits the value");
+            Ok(())
+        })?;
+        attempts.recv().expect("the waiter's first attempt waits");
+        p.resources().before_fulfillment_for_test(move || {
+            attempts
+                .recv_timeout(Duration::from_secs(10))
+                .expect("the resolving commit wakes the waiter, which reads it pending again");
         });
-        m.get("resolver")?;
-        m.push_int(1);
-        m.fulfill()?;
-        assert_eq!(
-            *seen.lock().unwrap(),
-            Some(true),
-            "the value published before the epoch advanced again"
-        );
-        Ok(())
+        p.get("resolver")?;
+        p.push_int(7);
+        p.fulfill()?;
+        let woke = finished.recv_timeout(Duration::from_secs(5));
+        if woke.is_err() {
+            p.push_int(0);
+            p.heap_set(["nudge"])?;
+        }
+        p.join(fork)?;
+        assert!(woke.as_ref().is_err() || *woke.as_ref().unwrap() == 7);
+        Ok(woke.is_ok())
     })
-    .expect("the turn should succeed");
+    .expect("the turn should succeed")
+}
+
+#[test]
+fn a_cut_waiting_on_a_promised_value_wakes_to_its_fulfillment() {
+    assert!(
+        waiter_wakes_on_fulfillment(|w| {
+            w.get("promised")?;
+            w.pop_int()
+        }),
+        "the waiter missed the fulfillment"
+    );
+}
+
+#[test]
+fn a_cut_waiting_on_a_lazy_value_wakes_to_the_fulfillment_it_needs() {
+    assert!(
+        waiter_wakes_on_fulfillment(|w| {
+            w.get("promised")?;
+            w.make_dict(["value"])?;
+            w.access("value")?;
+            w.pop_int()
+        }),
+        "the waiter missed the fulfillment"
+    );
 }

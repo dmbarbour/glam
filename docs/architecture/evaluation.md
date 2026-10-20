@@ -996,9 +996,12 @@ domain has already retired. The store's promises, which machines and
 reflection resolve, settle with the commit that resolves them, under the
 store's lock, and the commit advances the observation epoch. Fulfillment then
 follows as a logically asynchronous event: the committer publishes each value,
-waking what waits on the promise, and advances the epoch again, so a waiter
-that the commit's advance woke before the value was there wakes once more
-(`promise-resolution-commits-with-its-cut`).
+waking what waits on the promise as evaluation does
+(`promise-resolution-commits-with-its-cut`). A turn's cut whose evaluation
+waited subscribes the same way: it pumps or waits on the work its evaluation
+waited on, a promise's follower or a lazy route, through the work generation,
+and counts itself an observer of the epoch, whose advances then move the work
+generation too, so either wakes it.
 
 A task-owned promise has an active wait record only while its assignment is
 unresolved. Its producer obligation publishes the same terminal assignment

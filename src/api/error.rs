@@ -131,6 +131,11 @@ impl Error {
         }
     }
 
+    /// What an evaluation that waited was waiting on.
+    pub(crate) fn awaited(&self) -> Option<&crate::evaluation::WorkDependency> {
+        self.awaited.as_ref().map(|Awaited(dependency)| dependency)
+    }
+
     /// The cell of the promise that an evaluation which waited ultimately
     /// waited on, following the work that would produce what it needed.
     pub(crate) fn awaited_promise(

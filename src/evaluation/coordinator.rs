@@ -845,6 +845,11 @@ pub(crate) struct EvaluationWorkCoordinator {
     background_demand: Mutex<Option<Arc<EvaluationDemandState>>>,
     state: Mutex<WorkCoordinatorState>,
     work_available: CountedCondvar,
+    /// Clients that wait on the observation epoch and on evaluation progress
+    /// at once, as a turn's cut does after its evaluation waited: while any
+    /// wait, each epoch advance also advances the work generation, the one
+    /// thing they wait on.
+    client_epoch_observers: std::sync::atomic::AtomicUsize,
     #[cfg(test)]
     work_wait_probe: OnceLock<std::sync::mpsc::Sender<()>>,
     #[cfg(test)]
@@ -1261,6 +1266,42 @@ impl EvaluationWorkCoordinator {
     }
 }
 
+/// A client's registration to wait on the observation epoch through the work
+/// generation, until it drops.
+pub(crate) struct ClientEpochObservation<'a> {
+    coordinator: &'a EvaluationWorkCoordinator,
+}
+
+impl Drop for ClientEpochObservation<'_> {
+    fn drop(&mut self) {
+        self.coordinator
+            .client_epoch_observers
+            .fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
+impl EvaluationWorkCoordinator {
+    /// Registers a client that waits on the observation epoch and on
+    /// evaluation progress at once, through the work generation, until the
+    /// returned registration drops. The client reads the work generation,
+    /// then the epoch, after registering.
+    pub(crate) fn observe_epoch_as_client(&self) -> ClientEpochObservation<'_> {
+        self.client_epoch_observers
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        ClientEpochObservation { coordinator: self }
+    }
+
+    /// The work generation, for a client to wait on.
+    pub(crate) fn client_work_generation(&self) -> u64 {
+        self.work_generation()
+    }
+
+    /// Waits until the work generation has moved past `generation`.
+    pub(crate) fn wait_for_client_change(&self, generation: u64) {
+        self.wait_for_change_for(generation, None, CoordinatorWaiterClass::ExactClient);
+    }
+}
+
 impl fmt::Debug for EvaluationWorkCoordinator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self
@@ -1296,6 +1337,7 @@ impl EvaluationWorkCoordinator {
             background_demand: Mutex::new(None),
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: CountedCondvar::new(),
+            client_epoch_observers: std::sync::atomic::AtomicUsize::new(0),
             #[cfg(test)]
             work_wait_probe: OnceLock::new(),
             #[cfg(test)]
@@ -1428,6 +1470,7 @@ impl EvaluationWorkCoordinator {
             background_demand: Mutex::new(None),
             state: Mutex::new(WorkCoordinatorState::default()),
             work_available: CountedCondvar::new(),
+            client_epoch_observers: std::sync::atomic::AtomicUsize::new(0),
             work_wait_probe: OnceLock::new(),
             test_values: Some(values.clone()),
             terminal_publication_probe: Mutex::new(None),
@@ -3273,6 +3316,13 @@ impl EvaluationWorkCoordinator {
         for registration in registrations {
             changed |= queue_current_observation(&mut state, registration, epoch);
         }
+        // The epoch advanced before this reads the count, and a client counts
+        // itself before it reads the epoch, so either this sees the client or
+        // the client sees the epoch.
+        changed |= self
+            .client_epoch_observers
+            .load(std::sync::atomic::Ordering::SeqCst)
+            != 0;
         if changed {
             state.advance_work_generation(
                 CoordinatorMutationKind::ObservationWake,

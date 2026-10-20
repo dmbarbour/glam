@@ -211,10 +211,10 @@ pub(crate) struct RuntimeSharedResources {
     /// they bind, as they do once a `Runtime` holds the runtime
     /// (`machines-inherit-an-environment`).
     machine_environment: AtomicBool,
-    /// Runs once, at the next fulfillment, just before its epoch advance,
-    /// for ordering tests.
+    /// Runs once, at the next fulfillment, before it publishes anything, for
+    /// ordering tests.
     #[cfg(test)]
-    before_epoch_advance: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    before_fulfillment: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 pub(super) struct RuntimeTransactionState {
@@ -591,30 +591,24 @@ impl RuntimeSharedResources {
 
     /// Fulfills what a commit settled, as a logically asynchronous event
     /// after the commit (`promise-resolution-commits-with-its-cut`): the
-    /// commit claimed the promises and advanced the observation epoch; their
-    /// values now publish, waking what waits on them, and the epoch advances
-    /// again, so a waiter that the first advance woke before the values were
-    /// there wakes once more.
+    /// commit claimed the promises and advanced the observation epoch, which
+    /// wakes their status's readers; their values now publish, which wakes
+    /// what waits on them as evaluation does, turns' cuts among them.
     fn fulfill_settled(&self, settled: Vec<crate::reflection::Settled>) {
-        if crate::reflection::publish_settled(self.values.core(), settled) {
-            #[cfg(test)]
-            self.run_before_epoch_advance();
-            self.publish_observation(self.mutation_guard());
-        }
-    }
-
-    /// Runs `hook` at the next fulfillment, just before its epoch advance.
-    #[cfg(test)]
-    pub(crate) fn before_epoch_advance_for_test(&self, hook: impl FnOnce() + Send + 'static) {
-        *self.before_epoch_advance.lock().unwrap() = Some(Box::new(hook));
-    }
-
-    #[cfg(test)]
-    fn run_before_epoch_advance(&self) {
-        let hook = self.before_epoch_advance.lock().unwrap().take();
-        if let Some(hook) = hook {
+        #[cfg(test)]
+        if !settled.is_empty()
+            && let Some(hook) = self.before_fulfillment.lock().unwrap().take()
+        {
             hook();
         }
+        crate::reflection::publish_settled(self.values.core(), settled);
+    }
+
+    /// Runs `hook` at the next fulfillment, after its commit and before it
+    /// publishes anything.
+    #[cfg(test)]
+    pub(crate) fn before_fulfillment_for_test(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_fulfillment.lock().unwrap() = Some(Box::new(hook));
     }
 
     pub(super) fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
@@ -843,7 +837,7 @@ impl EvaluationRuntime {
             work: Arc::downgrade(&work),
             machine_environment: AtomicBool::new(false),
             #[cfg(test)]
-            before_epoch_advance: Mutex::new(None),
+            before_fulfillment: Mutex::new(None),
         });
         shared_resources.register_runtime_core();
         let default_reflection_profile = Arc::new(ReflectionTaskProfile::unsealed());
@@ -1946,7 +1940,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
             work: Arc::downgrade(&work),
             machine_environment: AtomicBool::new(false),
             #[cfg(test)]
-            before_epoch_advance: Mutex::new(None),
+            before_fulfillment: Mutex::new(None),
         });
         shared_resources.register_runtime_core();
         EvaluationRuntime {
