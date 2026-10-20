@@ -14,7 +14,7 @@ use crate::{
     class::{
         AllocationClass, AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for,
     },
-    ephemeron::{Ephemeron, EphemeronTable},
+    ephemeron::ReachedEphemeron,
     root_pool::{HeapId, RootPool},
     run::{AllocationClassId, RunGeometry},
     thread_cache::{
@@ -915,7 +915,6 @@ struct ManagedData {
     free_runs: Vec<RunLocation>,
     allocation_pressure: AllocationPressure,
     root_pool: RootPool,
-    ephemerons: EphemeronTable,
     virgin_run_activations: u64,
     recycled_run_activations: u64,
     cold_class_discoveries: u64,
@@ -2389,6 +2388,9 @@ struct MarkAttempt {
     completed_worklist_pushes: usize,
     peak_object_worklist_len: usize,
     peak_object_worklist_capacity: usize,
+    /// The ephemerons marking has reached whose values it has not yet
+    /// marked through them.
+    ephemerons: Vec<ReachedEphemeron>,
 }
 
 impl MarkAttempt {
@@ -2520,12 +2522,13 @@ impl MarkAttempt {
     }
 
     fn trace_worklist(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
+        let mut ephemerons = std::mem::take(&mut self.ephemerons);
         while let Some(work) = self.worklist.pop() {
             let mut visit = |edge| {
                 self.discover(data, edge)
                     .unwrap_or_else(|error| error.raise_traced_edge(work, edge));
             };
-            let mut visitor = Visitor::new(&mut visit);
+            let mut visitor = Visitor::marking(&mut visit, &mut ephemerons);
             // SAFETY: `TraceWork` is constructed only after checked discovery
             // proves that `work.value` identifies one live initialized
             // allocation with this canonical metadata. The attempt retains
@@ -2538,26 +2541,33 @@ impl MarkAttempt {
                 .checked_add(1)
                 .expect("traced-object count exhausted");
         }
+        self.ephemerons = ephemerons;
         Ok(())
     }
 
-    /// Marks the value of each live ephemeron whose key is marked, tracing
-    /// from it, until a round marks nothing new, since a value may reach
-    /// another ephemeron's key; then clears, silently, the ephemerons whose
-    /// keys stayed unmarked. Runs once the roots' worklist has drained,
-    /// before anything is swept
+    /// Marks the value of each reached ephemeron whose key is marked,
+    /// tracing from it, until a round marks nothing new, since a value may
+    /// reach another ephemeron or its key; then clears, silently, the
+    /// ephemerons whose keys stayed unmarked. Runs once the roots' worklist
+    /// has drained, before anything is swept
     /// (`opaque-resources-reclaimed-when-unreachable`).
     fn trace_ephemerons(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
-        let mut pending = data.ephemerons.live_entries();
         loop {
             let mut marked = false;
             let mut index = 0;
-            while index < pending.len() {
-                let entry = pending[index];
-                let key = collector_slot_in(&data.arena, &data.classes, entry.key)?;
+            while index < self.ephemerons.len() {
+                // SAFETY: this collection recorded the ephemeron, holds
+                // exclusive authority, and has swept nothing.
+                let pair = unsafe { self.ephemerons[index].pair() };
+                let Some((key, value)) = pair.load() else {
+                    // An earlier collection cleared it: it holds nothing.
+                    self.ephemerons.swap_remove(index);
+                    continue;
+                };
+                let key = collector_slot_in(&data.arena, &data.classes, key)?;
                 if data.arena.owner_slot_is_marked(key.owner) {
-                    marked |= self.discover(data, entry.value)?;
-                    pending.swap_remove(index);
+                    marked |= self.discover(data, value)?;
+                    self.ephemerons.swap_remove(index);
                 } else {
                     index += 1;
                 }
@@ -2565,11 +2575,13 @@ impl MarkAttempt {
             if !marked {
                 break;
             }
+            // Tracing the newly marked values may record more ephemerons.
             self.trace_worklist(data)?;
         }
-        // Every key still pending stayed unmarked through the last round.
-        for entry in pending {
-            data.ephemerons.clear(entry);
+        // Every key still recorded stayed unmarked through the last round.
+        for reached in self.ephemerons.drain(..) {
+            // SAFETY: as above.
+            unsafe { reached.pair() }.clear();
         }
         Ok(())
     }
@@ -3083,7 +3095,6 @@ impl HeapInner {
             // No mutator creates roots until the epoch below discards the
             // free lists threads took.
             data.root_pool.rebuild_free_lists();
-            data.ephemerons.rebuild_free_list();
             self.publish_allocation_lease_epoch(current_epoch, next_epoch);
             SweepSummary {
                 reclaimed_slots: post_mark.dead_set.no_drop_dead_slots,
@@ -3912,13 +3923,19 @@ impl HeapInner {
     ) -> Root<T> {
         debug_assert!(std::ptr::eq(expected, metadata_for::<T>()));
         let value = value.erase();
+        self.validate_rootable(value, expected);
+        self.register_proven_root(cache, value)
+    }
+
+    /// Checks that a bare managed pointer, which proves nothing, identifies
+    /// an allocated value of this heap with `expected` metadata, which no
+    /// pending finalization holds, and panics if not.
+    pub(crate) fn validate_rootable(&self, value: ErasedGc, expected: &'static ObjectMetadata) {
         let state = self.data.lock().expect("heap state should not be poisoned");
         if let Err(error) = validate_rootable_in_state(&state, value, expected) {
             drop(state);
             error.raise();
         }
-        drop(state);
-        self.register_proven_root(cache, value)
     }
 
     /// Registers a root for a value its caller proved live, allocated and of
@@ -3951,39 +3968,6 @@ impl HeapInner {
 
     pub(crate) fn id(&self) -> HeapId {
         self.id
-    }
-
-    /// Registers an ephemeron of a key and value its caller proved live,
-    /// allocated and of their types in this heap, under its admission.
-    pub(crate) fn register_ephemeron<K: Trace, V: Trace>(
-        &self,
-        key: ErasedGc,
-        value: ErasedGc,
-    ) -> Ephemeron<K, V> {
-        self.data
-            .lock()
-            .expect("heap state should not be poisoned")
-            .ephemerons
-            .occupy(self.id, key, value)
-    }
-
-    /// Registers an ephemeron of bare managed pointers, which prove nothing,
-    /// checking both as for a checked root.
-    pub(crate) fn register_checked_ephemeron<K: Trace, V: Trace>(
-        &self,
-        key: crate::Gc<K>,
-        value: crate::Gc<V>,
-        expected: (&'static ObjectMetadata, &'static ObjectMetadata),
-    ) -> Ephemeron<K, V> {
-        let (key, value) = (key.erase(), value.erase());
-        let mut state = self.data.lock().expect("heap state should not be poisoned");
-        for (pointer, metadata) in [(key, expected.0), (value, expected.1)] {
-            if let Err(error) = validate_rootable_in_state(&state, pointer, metadata) {
-                drop(state);
-                error.raise();
-            }
-        }
-        state.ephemerons.occupy(self.id, key, value)
     }
 
     #[cfg(test)]
@@ -11978,24 +11962,15 @@ mod tests {
     };
 
     /// Allocates a graph node counting its traces.
-    fn ephemeron_node(
-        mutator: &crate::MutatorAccess<'_>,
-    ) -> (crate::Gc<GraphNode>, Arc<AtomicUsize>) {
+    fn ephemeron_node<'m>(
+        mutator: &'m crate::MutatorAccess<'_>,
+    ) -> (crate::GcRef<'m, GraphNode>, Arc<AtomicUsize>) {
         let traces = Arc::new(AtomicUsize::new(0));
         let node = mutator
             .allocator::<GraphNode>()
             .unwrap()
-            .alloc(graph_node(Arc::clone(&traces)));
+            .alloc_view(graph_node(Arc::clone(&traces)));
         (node, traces)
-    }
-
-    fn referenced_ephemerons(heap: &Heap) -> usize {
-        heap.inner
-            .data
-            .lock()
-            .unwrap()
-            .ephemerons
-            .referenced_count()
     }
 
     #[test]
@@ -12004,21 +11979,24 @@ mod tests {
         let (key_root, ephemeron, value_traces) = heap.mutate(|mutator| {
             let (key, _) = ephemeron_node(mutator);
             let (value, value_traces) = ephemeron_node(mutator);
-            let ephemeron =
-                mutator.ephemeron_checked(key.duplicate_in(mutator), value.duplicate_in(mutator));
-            (mutator.root_checked(key), ephemeron, value_traces)
+            let ephemeron = mutator.ephemeron(key, value);
+            (mutator.root(key), mutator.root(ephemeron), value_traces)
         });
 
         heap.collect_full().unwrap();
         assert_eq!(value_traces.load(Ordering::Relaxed), 1, "the key keeps it");
-        assert!(!ephemeron.is_cleared());
-        heap.mutate(|mutator| assert!(ephemeron.get(mutator).is_some()));
+        heap.mutate(|mutator| {
+            let (key, _) = ephemeron.as_gc(mutator).entry().expect("the key lives");
+            assert!(key.same_allocation(key_root.as_gc(mutator)));
+        });
 
         drop(key_root);
         heap.collect_full().unwrap();
         assert_eq!(value_traces.load(Ordering::Relaxed), 1, "nothing keeps it");
-        assert!(ephemeron.is_cleared());
-        heap.mutate(|mutator| assert!(ephemeron.get(mutator).is_none()));
+        heap.mutate(|mutator| {
+            assert!(ephemeron.get(mutator).is_cleared());
+            assert!(ephemeron.as_gc(mutator).entry().is_none());
+        });
     }
 
     #[test]
@@ -12027,60 +12005,73 @@ mod tests {
         let (ephemeron, key_slot, value_slot) = heap.mutate(|mutator| {
             let (key, _) = ephemeron_node(mutator);
             let (value, _) = ephemeron_node(mutator);
+            let (key, value) = (key.edge(), value.edge());
             connect_graph_nodes(mutator, &value, &key);
-            let ephemeron =
-                mutator.ephemeron_checked(key.duplicate_in(mutator), value.duplicate_in(mutator));
-            (
-                ephemeron,
-                collector_slot(&heap, &key),
-                collector_slot(&heap, &value),
-            )
+            let (key_slot, value_slot) =
+                (collector_slot(&heap, &key), collector_slot(&heap, &value));
+            let ephemeron = mutator.ephemeron_checked(key, value);
+            (mutator.root(ephemeron), key_slot, value_slot)
         });
 
         heap.collect_full().unwrap();
-        assert!(ephemeron.is_cleared(), "only its own value reached the key");
+        heap.mutate(|mutator| {
+            assert!(
+                ephemeron.get(mutator).is_cleared(),
+                "only its own value reached the key"
+            );
+        });
         assert!(!slot_is_marked(&heap, key_slot));
         assert!(!slot_is_marked(&heap, value_slot));
     }
 
+    /// A value holding a key and the ephemeron keyed on it.
+    type KeyAndEphemeron = (
+        crate::Gc<GraphNode>,
+        crate::Gc<crate::Ephemeron<GraphNode, GraphNode>>,
+    );
+
     #[test]
     fn ephemerons_mark_to_a_fixpoint_through_one_another() {
         let heap = Heap::new();
-        let (root, ephemerons, traces) = heap.mutate(|mutator| {
+        let (key_root, first, second_value_traces, second_slot) = heap.mutate(|mutator| {
             let (first_key, _) = ephemeron_node(mutator);
-            let (first_value, first_traces) = ephemeron_node(mutator);
             let (second_key, _) = ephemeron_node(mutator);
-            let (second_value, second_traces) = ephemeron_node(mutator);
-            connect_graph_nodes(mutator, &first_value, &second_key);
-            // The second comes first in the table, so the first round finds
-            // its key unmarked, and only the next round marks its value.
-            let second = mutator.ephemeron_checked(
-                second_key.duplicate_in(mutator),
-                second_value.duplicate_in(mutator),
-            );
-            let first = mutator.ephemeron_checked(
-                first_key.duplicate_in(mutator),
-                first_value.duplicate_in(mutator),
-            );
+            let (second_value, second_value_traces) = ephemeron_node(mutator);
+            // Only the first's value reaches the second ephemeron and its
+            // key, so marking records the second only in its first round,
+            // and marks its value only in the next.
+            let second = mutator.ephemeron(second_key, second_value);
+            let second_slot = collector_slot(&heap, &second.edge());
+            let first_value = mutator
+                .allocator::<KeyAndEphemeron>()
+                .unwrap()
+                .alloc_view((second_key.edge(), second.edge()));
+            let first = mutator.ephemeron(first_key, first_value);
             (
-                mutator.root_checked(first_key),
-                [first, second],
-                [first_traces, second_traces],
+                mutator.root(first_key),
+                mutator.root(first),
+                second_value_traces,
+                second_slot,
             )
         });
 
         heap.collect_full().unwrap();
-        assert_eq!(traces[0].load(Ordering::Relaxed), 1);
         assert_eq!(
-            traces[1].load(Ordering::Relaxed),
+            second_value_traces.load(Ordering::Relaxed),
             1,
-            "the first value reached the second key"
+            "the first value reached the second ephemeron and its key"
         );
-        assert!(ephemerons.iter().all(|ephemeron| !ephemeron.is_cleared()));
+        heap.mutate(|mutator| assert!(first.as_gc(mutator).entry().is_some()));
 
-        drop(root);
+        drop(key_root);
         heap.collect_full().unwrap();
-        assert!(ephemerons.iter().all(crate::Ephemeron::is_cleared));
+        heap.mutate(|mutator| assert!(first.get(mutator).is_cleared()));
+        assert_eq!(
+            second_value_traces.load(Ordering::Relaxed),
+            1,
+            "nothing reached the second ephemeron to keep its value"
+        );
+        assert!(!slot_is_marked(&heap, second_slot), "nor the second itself");
     }
 
     #[test]
@@ -12088,53 +12079,44 @@ mod tests {
         let heap = Heap::new();
         let (root, weak) = heap.mutate(|mutator| {
             let (node, _) = ephemeron_node(mutator);
-            let weak = mutator.weak_checked(node.duplicate_in(mutator));
-            (mutator.root_checked(node), weak)
+            let weak = mutator.weak_checked(node.edge());
+            (mutator.root(node), mutator.root(weak))
         });
 
         heap.collect_full().unwrap();
         heap.mutate(|mutator| {
-            let viewed = weak.get(mutator).expect("the root reaches it");
+            let viewed = weak.as_gc(mutator).target().expect("the root reaches it");
             assert!(viewed.same_allocation(root.as_gc(mutator)));
         });
 
         drop(root);
         heap.collect_full().unwrap();
-        assert!(weak.is_cleared());
-        heap.mutate(|mutator| assert!(weak.get(mutator).is_none()));
+        heap.mutate(|mutator| assert!(weak.as_gc(mutator).target().is_none()));
     }
 
     #[test]
-    fn an_unreferenced_ephemeron_slot_is_reused_after_a_collection() {
+    fn an_ephemeron_nothing_reaches_keeps_nothing_alive() {
         let heap = Heap::new();
-        let (root, ephemeron) = heap.mutate(|mutator| {
-            let (node, _) = ephemeron_node(mutator);
-            let weak = mutator.weak_checked(node.duplicate_in(mutator));
-            (mutator.root_checked(node), weak)
+        let (key_root, value_traces, ephemeron_slot, value_slot) = heap.mutate(|mutator| {
+            let (key, _) = ephemeron_node(mutator);
+            let (value, value_traces) = ephemeron_node(mutator);
+            let ephemeron = mutator.ephemeron(key, value);
+            (
+                mutator.root(key),
+                value_traces,
+                collector_slot(&heap, &ephemeron.edge()),
+                collector_slot(&heap, &value.edge()),
+            )
         });
-        let copy = ephemeron.clone();
-        drop(ephemeron);
-        assert_eq!(referenced_ephemerons(&heap), 1);
-        drop(copy);
-        heap.collect_full().unwrap();
-        assert_eq!(referenced_ephemerons(&heap), 0);
-        let again = heap.mutate(|mutator| mutator.weak(root.as_gc(mutator)));
-        assert_eq!(referenced_ephemerons(&heap), 1);
-        heap.collect_full().unwrap();
-        heap.mutate(|mutator| assert!(again.get(mutator).is_some()));
-    }
 
-    #[test]
-    #[should_panic(expected = "ephemeron does not belong to this heap")]
-    fn an_ephemeron_is_viewed_only_through_its_own_heap() {
-        let heap = Heap::new();
-        let other = Heap::new();
-        let weak = heap.mutate(|mutator| {
-            let (node, _) = ephemeron_node(mutator);
-            mutator.weak_checked(node)
-        });
-        other.mutate(|mutator| {
-            let _ = weak.get(mutator);
-        });
+        heap.collect_full().unwrap();
+        assert_eq!(
+            value_traces.load(Ordering::Relaxed),
+            0,
+            "a live key keeps no value through an ephemeron that died"
+        );
+        assert!(!slot_is_marked(&heap, ephemeron_slot));
+        assert!(!slot_is_marked(&heap, value_slot));
+        drop(key_root);
     }
 }

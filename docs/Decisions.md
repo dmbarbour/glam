@@ -3015,9 +3015,10 @@ maps the short names used here to file names.
     on the notices there, a safe point.
   - Volumes become cells in the managed heap, a value kind to which
     handles are edges, and the store holds their committed values through
-    ephemerons keyed on the cell: a glam-gc root kind whose value is traced
-    only while its key is reachable by other paths, with weak references
-    as the case where key and value coincide. The store's snapshots and
+    ephemerons keyed on the cell: glam-gc managed cells, living as any
+    value does, whose value is traced only while their key is reachable by
+    other paths, with weak references as the case where key and value
+    coincide. The store's snapshots and
     its conflict analysis by path stay as they are.
   - Staged: notices first, which finish resolvers and reclaim acyclic
     volumes; cycles through volumes leak until volumes are cells, accepted

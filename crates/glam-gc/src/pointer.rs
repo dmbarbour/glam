@@ -215,6 +215,21 @@ impl<'m, T: Trace> GcRef<'m, T> {
         }
     }
 
+    /// Views another value of this view's heap for as long as this view.
+    ///
+    /// # Safety
+    ///
+    /// `pointer` must identify a live, initialized `U` in this view's heap,
+    /// which this view's admission keeps live.
+    pub(crate) unsafe fn sibling<U: Trace>(self, pointer: NonNull<U>) -> GcRef<'m, U> {
+        GcRef {
+            pointer,
+            #[cfg(debug_assertions)]
+            generation: self.generation,
+            marker: PhantomData,
+        }
+    }
+
     /// Borrows the viewed value for the rest of the view's lifetime.
     #[must_use]
     #[inline(always)]

@@ -122,18 +122,21 @@ finalized-word release versus concurrent allocation, and verifies mixed
 detached/attached terminal topology.
 
 Ephemerons and weak references (`api-ephemerons`, 2026-10-20,
-`opaque-resources-reclaimed-when-unreachable`) add a heap-owned ephemeron
-table. Once the roots' worklist drains, marking repeats a round over the live
-ephemerons, marking the value of each whose key it marked and tracing from
-those values, until a round marks nothing new; it then clears each ephemeron
-whose key stayed unmarked, before any sweep. Clearing is silent: an owner
-notices a cleared ephemeron when it next views it. A weak reference is an
-ephemeron whose key is its value.
+`opaque-resources-reclaimed-when-unreachable`) are managed cells of two
+words, the key's and value's addresses, which live as any allocation does.
+Marking marks a reached ephemeron but traces neither word: it records the
+ephemeron. Once the worklist drains, marking repeats a round over the
+recorded ephemerons, marking the value of each whose key it marked and
+tracing from those values, which may record more, until a round marks
+nothing new; it then clears each recorded ephemeron whose key stayed
+unmarked, before any sweep. Clearing is silent: an owner notices a cleared
+ephemeron when it next views it. A weak reference is an ephemeron whose key
+is its value.
 
 The current collector is therefore a non-moving, stop-the-world full
 collector. A bare `Gc<T>` is not liveness evidence. Live root slots,
-edges traced from them, ephemeron values whose keys those reach, and durable
-pending-finalizer records preserve exact allocations across collection; eager
+edges traced from them, the values of reached ephemerons whose keys those
+reach, and durable pending-finalizer records preserve exact allocations across collection; eager
 sweep or finalization may reclaim every other allocation. A matching mutator excludes collection while client code
 holds an authorized managed reference.
 
@@ -416,7 +419,10 @@ as `get_unchecked`: a live initialized `T` in the supplied access's heap.
 Both run the debug/test indexed check first. `GcRef::fresh` (crate-private)
 views a value `Allocator::alloc_view` has just allocated: the allocator
 initialized it and published its allocation bit, and the view's `'m` is the
-allocator's borrow of its admitted access. `GcRef::get` then forms a
+allocator's borrow of its admitted access. `GcRef::sibling` (crate-private)
+views another live initialized value of the same heap for the same `'m`,
+copying the view's debug admission generation; its one caller, an
+ephemeron's view of its key and value, supplies that proof. `GcRef::get` then forms a
 shared reference for the rest of `'m`, which the borrow of the access
 bounds: the mutator stays admitted, so no collection reclaims the value
 before the borrow ends, and `T` permits shared access. `GcRef::edge`
@@ -1234,9 +1240,10 @@ payload has no managed edge. A genuinely external opaque owner may retain an
 exact same-heap root, accepting conservative lifetime extension. An opaque
 payload embedded merely as part of an internal managed cycle may not use a
 root as a tracing substitute. Ephemerons and weak references provide
-non-owning host associations: an ephemeron keeps its value only while some
-other path reaches its key, so a host table may associate values with
-managed keys without hiding a cycle from the collector.
+non-owning associations: an ephemeron keeps its value only while some other
+path reaches its key, so a table, managed or held through a root, may
+associate values with managed keys without hiding a cycle from the
+collector.
 
 The durable finalization batch is the current exact non-rootability authority.
 Root and debug access first recover the checked slot owner from the arena, then
@@ -1346,7 +1353,11 @@ invalid type or provenance.
 collector reclaim a reachable allocation. Implementations must synchronously
 visit every `Gc<_>` represented by the value, must not invent invalid edges or
 retain the visitor, and must not hide a managed pointer in another
-representation. Reporting a valid edge more than once is permitted.
+representation. Reporting a valid edge more than once is permitted. The
+crate's own `Ephemeron` is the one exception: its two words are not edges,
+and its trace reports the ephemeron itself through `Visitor::ephemeron`,
+which is crate-private, so no implementation outside the crate can do the
+same.
 
 Tracing is observational. An implementation may inspect immediate fields to
 select edges but may not mutate the managed graph, collector metadata, or
@@ -1361,6 +1372,9 @@ reclamation through this interface.
 - `Option<T>` reports exactly its present payload, if any.
 - `[T; N]` visits every element once in index order.
 - `(First, Second)` visits both fields in order.
+- `Ephemeron<K, V>` reports itself, not its two words, as above; marking
+  records it, and other visitors, which exist only in tests and
+  edge-transition hooks, ignore it.
 - `()`, `u32`, and `u64` report no edges. Unit remains unallocatable because
   the collector rejects zero-sized payloads; its implementation exists so the
   compile-fail fixture can instantiate the generic allocation boundary.
@@ -1383,6 +1397,12 @@ managed address but neither constructs a reference nor adds or guesses heap or
 type metadata. C5B's typed-run lookup recovers and validates those facts before
 the edge can be marked or dereferenced. The receiver may panic; no visitor or
 traversal state is stored in the traced object.
+
+The marking visitor also carries the collection's list of reached
+ephemerons. `Visitor::ephemeron` pushes the address of the reporting
+ephemeron's pair, derived from the shared reference the trace holds, which
+stays valid as long as the ephemeron does: it is a marked allocation in a
+non-moving heap, live until the collection that recorded it sweeps.
 
 `ErasedGc` is `Send + Sync` because it grants no pointer access and is created
 only from `Gc<T>` where `T: Trace` already requires `Send + Sync`. Sending or
@@ -1472,45 +1492,47 @@ collection.
 
 `MutatorAccess::ephemeron` takes views of the key and the value, which prove
 both live, allocated and of their types in this heap, as for
-`MutatorAccess::root`; `ephemeron_checked` takes bare `Gc`s and validates both
-in every build, as `root_checked` does. `weak` and `weak_checked` pass one
-value as both key and value. Either occupies a free slot of the heap's
-ephemeron table under the data mutex, while the calling mutator's admission
-keeps any collection out: it writes the key's and value's addresses, then
-sets the slot's count to one.
+`MutatorAccess::root`; `ephemeron_checked` takes bare `Gc`s and validates
+both in every build, as `root_checked` does. `weak` and `weak_checked` pass
+one value as both key and value. Either constructs the cell, the crate's
+unsafe `Ephemeron::new`, from that proof, then allocates it through the
+ordinary allocator under the same admission, which keeps any collection out
+until the view of the new cell, whose `'m` is that admission's borrow,
+exists. `Ephemeron` has no public constructor and no `Clone`, so every one
+is such an allocation, never a field of another value.
 
-A slot holds an atomic reference count and the key's and value's addresses
-as atomic pointers. Its chunk, which records its heap's
-identity, is shared through an `Arc` by the table and every handle of its
-slots, so a handle that outlives its heap frees no memory under it: it can
-then only be cloned and dropped. Clones and drops change the count as roots'
-do, Relaxed and Release, aborting past `isize::MAX` references, and invoke no
-user code. A slot returns to the free list only when the collection's rebuild,
-under exclusive authority, finds its count zero; a count never rises from
-zero, since only a live handle can be cloned.
+A cell holds the key's and value's addresses as atomic pointers, written
+when constructed and otherwise only by a collection clearing them. It has no
+`Drop`, so it never awaits finalization; like any allocation, it lives while
+a root or a traced edge reaches it, and an unreached cell is swept.
 
-`Ephemeron::get`, the one unsafe site, constructs views of the key and value
-under a matching admitted mutator, rejecting another heap's mutator in every
-build by comparing the chunk's heap identity. It loads the key with Acquire,
-and returns nothing where it is null, which a collection writes when it
-clears the slot. Otherwise both addresses still identify live allocations of
-their types: the slot was occupied from proof of both and is not reused while
-the handle references it, and every collection since either marked the key
-and then the value from it, so both survived its sweep, or left the key
-unmarked and cleared the slot before sweeping. A key that dies becomes pending
-finalization only in the collection that clears its ephemerons, so a pending
-finalizer's retention never keeps an ephemeron's value. The borrowed admission
-excludes collection while the views exist.
+Viewing a cell's key and value, `GcRef::entry` and, for a weak reference,
+`GcRef::target`, loads the key with Acquire and returns nothing where it is
+null, which a collection writes when it clears the cell. Otherwise both
+addresses still identify live allocations of their types: the cell was made
+from proof of both in the heap that the cell's view proves it in; every
+collection since reached the cell, since an unreached cell is swept and no
+longer viewable, and either marked its key and then its value from it, so
+both survived its sweep, or left the key unmarked and cleared the cell
+before sweeping. A key that dies becomes pending finalization only in the
+collection that clears, or sweeps, every cell it keys, so a pending finalizer's
+retention never keeps an ephemeron's value; `ephemeron_checked` rejects a
+pending key or value. The views of key and value come from the cell's view
+through `GcRef::sibling`, so they share its `'m`, whose borrowed admission
+excludes collection while they exist. A view proves its heap, so there is no
+cross-heap check.
 
-Exclusive marking reads the live slots, those whose count, loaded with
-Acquire, is nonzero and whose key is not null, once the roots' worklist has
-drained. Each round resolves the checked slot of each pending key and tests
+Marking records each cell it traces, at most once per collection, as the
+address of its pair. `ReachedEphemeron::pair`, unsafe, dereferences it while
+the recording collection holds exclusive authority and has swept nothing,
+so the marked cell is live and in place and nothing else writes it. Once
+the worklist drains, each round loads each recorded pair, dropping one that
+an earlier collection cleared, resolves the checked slot of its key and tests
 its mark bit, marking and enqueueing the value through ordinary checked
-discovery when the key is marked, then drains the worklist; the rounds end
-when one marks nothing new, at most one round per ephemeron. A handle dropped
-concurrently may still count as live, which conservatively keeps its value
-for that collection. Clearing stores null into the slot's key and value with
-Release, before the sweep that may reclaim them, and reports nothing.
+discovery when the key is marked, then drains the worklist, which may record
+more cells; the rounds end when one marks nothing new, at most one round per
+recorded cell. Clearing stores null into the remaining pairs' key and value
+with Release, before the sweep that may reclaim them, and reports nothing.
 
 ### `root_pool` chunks and slots
 
@@ -1749,14 +1771,15 @@ create no competing semantic rules.
   build. Tracing rejects a foreign, stale, interior, or unallocated edge before
   dispatch. Debug access and the mutation gateways validate ownership.
 - **Roots are explicit; there is no stack scan.** Only registered `Root<T>`
-  cells, the edges traced from them, ephemeron values whose keys those
-  reach, and pending-finalizer records keep an allocation alive. An
-  ephemeron keeps neither its key nor, by itself, its value. A bare `Gc<T>` is not liveness evidence and is safe only
+  cells, the edges traced from them, the values of reached ephemerons
+  whose keys those reach, and pending-finalizer records keep an allocation
+  alive. An ephemeron keeps neither its key nor, by itself, its value. A bare `Gc<T>` is not liveness evidence and is safe only
   inside its mutator region.
 - **No untraced production edge.** Reclamation relies on `Trace` reporting
   every managed edge reachable from a production root. Any other retention,
   such as an external owner's registered root, is documented and
-  conservative.
+  conservative. An ephemeron's two words are not edges, by design: marking
+  keeps its value only through its key, and clears it otherwise.
 - **Tracing is observational.** `Trace` may run while the collector holds
   managed data. It only reports edges and may not allocate, enter a heap,
   destroy values, or call host or runtime code.

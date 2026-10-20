@@ -1,6 +1,7 @@
 use std::ptr::NonNull;
 
 use crate::Gc;
+use crate::ephemeron::{EphemeronPair, ReachedEphemeron};
 
 /// Describes every managed edge stored by one managed representation.
 ///
@@ -20,6 +21,11 @@ use crate::Gc;
 /// This contract does not permit allocation, reclamation, callbacks, or
 /// destruction. Later collector phases invoke it only while mutation is
 /// excluded.
+///
+/// The crate's own [`Ephemeron`](crate::Ephemeron) is the one representation
+/// whose managed addresses are not edges: it reports itself, through a channel
+/// only the crate's marking reads, and no implementation outside the crate
+/// can do the same.
 ///
 /// # Managed `Drop`
 ///
@@ -96,11 +102,39 @@ pub unsafe trait Trace: Send + Sync + 'static {
 /// from the managed address.
 pub struct Visitor<'visit> {
     visit: &'visit mut dyn FnMut(ErasedGc),
+    /// Where marking records the ephemerons it reaches. Other visitors see
+    /// no edge in an ephemeron.
+    ephemerons: Option<&'visit mut Vec<ReachedEphemeron>>,
 }
 
 impl<'visit> Visitor<'visit> {
+    /// A visitor of edges alone, for tests and edge-transition hooks.
+    #[cfg(any(test, feature = "deterministic-test-hooks"))]
     pub(crate) fn new(visit: &'visit mut dyn FnMut(ErasedGc)) -> Self {
-        Self { visit }
+        Self {
+            visit,
+            ephemerons: None,
+        }
+    }
+
+    /// A visitor for marking, which also records each ephemeron it reaches
+    /// in `ephemerons`.
+    pub(crate) fn marking(
+        visit: &'visit mut dyn FnMut(ErasedGc),
+        ephemerons: &'visit mut Vec<ReachedEphemeron>,
+    ) -> Self {
+        Self {
+            visit,
+            ephemerons: Some(ephemerons),
+        }
+    }
+
+    /// Reports an ephemeron's pair, which is not an edge: marking records it,
+    /// and other visitors ignore it.
+    pub(crate) fn ephemeron(&mut self, pair: &EphemeronPair) {
+        if let Some(ephemerons) = self.ephemerons.as_deref_mut() {
+            ephemerons.push(ReachedEphemeron::new(pair));
+        }
     }
 
     /// Reports one managed edge without consuming or duplicating its typed

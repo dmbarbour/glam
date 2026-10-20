@@ -2,250 +2,115 @@
 //!
 //! An ephemeron pairs a key with a value and keeps the value alive only
 //! while the key is reachable by some other path. It does not keep its key
-//! alive. A collection first marks from the registered roots, then marks
-//! the value of each live ephemeron whose key it marked, tracing from those
-//! values, and repeats until a round marks nothing new: a value may reach
-//! another ephemeron's key. An ephemeron whose key stays unmarked is then
-//! cleared, before the sweep reclaims anything. Clearing is silent: an owner
-//! notices a cleared ephemeron when it next uses it, or when it next traces
-//! what holds it. A weak reference is an ephemeron whose key and value
+//! alive. It is a managed cell of two words, the key's and value's
+//! addresses, and lives as any allocation does, while a root or a traced edge
+//! reaches it. Marking marks a reached ephemeron but traces neither word: it
+//! records the ephemeron instead. Once the worklist drains, it marks the value
+//! of each recorded ephemeron whose key it marked, tracing from those values,
+//! which may reach more ephemerons, and repeats until a round marks nothing
+//! new: a value may reach another ephemeron's key. A recorded ephemeron whose
+//! key stays unmarked is then cleared, before the sweep reclaims anything.
+//! Clearing is silent: an owner notices a cleared ephemeron when it next uses
+//! it, or when it next traces what holds it. An ephemeron that nothing
+//! reaches is not recorded: it keeps nothing alive, and is swept as any
+//! allocation is. A weak reference is an ephemeron whose key and value
 //! coincide.
-//!
-//! An ephemeron is a slot in its heap's table: a reference count and the
-//! key's and value's addresses. Handles share the slot as roots share
-//! theirs, by its count. A slot is reused only once its count is zero, by the
-//! next collection's rebuild of the free list, and nothing creates
-//! ephemerons during a collection.
 
 use std::fmt;
 use std::marker::PhantomData;
 use std::ptr::NonNull;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicPtr, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicPtr, Ordering};
 
-use crate::root_pool::HeapId;
 use crate::trace::ErasedGc;
-use crate::{GcRef, MutatorAccess, Trace};
+use crate::{GcRef, Trace, Visitor};
 
-const SLOTS_PER_CHUNK: usize = 64;
-
-/// The most references one slot counts, as for roots.
-const MAX_REFERENCES: usize = isize::MAX as usize;
-
-/// One ephemeron: a reference count and the key's and value's addresses,
-/// null once cleared.
-struct EphemeronSlot {
-    references: AtomicUsize,
+/// An ephemeron's key and value addresses, null once cleared: what marking
+/// reads and clears, whatever the ephemeron's types.
+pub(crate) struct EphemeronPair {
     key: AtomicPtr<()>,
     value: AtomicPtr<()>,
 }
 
-impl EphemeronSlot {
-    const fn free() -> Self {
-        Self {
-            references: AtomicUsize::new(0),
-            key: AtomicPtr::new(std::ptr::null_mut()),
-            value: AtomicPtr::new(std::ptr::null_mut()),
-        }
-    }
-}
-
-/// A chunk of slots of one heap, shared by the table and the handles of its
-/// slots, so a handle outlives its heap safely: it can then only be dropped.
-struct EphemeronChunk {
-    heap: HeapId,
-    slots: Box<[EphemeronSlot]>,
-}
-
-/// A heap's ephemerons, under its data mutex.
-#[derive(Default)]
-pub(crate) struct EphemeronTable {
-    chunks: Vec<Arc<EphemeronChunk>>,
-    /// Slots no handle references, by chunk and index, as the last
-    /// collection found them, and the slots of chunks allocated since.
-    free: Vec<(usize, usize)>,
-}
-
-/// A live ephemeron's addresses, for marking.
-#[derive(Clone, Copy)]
-pub(crate) struct EphemeronEntry {
-    pub(crate) key: ErasedGc,
-    pub(crate) value: ErasedGc,
-    chunk: usize,
-    index: usize,
-}
-
-impl EphemeronTable {
-    /// Occupies a free slot with `key` and `value`, which the caller proved
-    /// live, allocated and of their types in `heap`, under that heap's
-    /// admission, so no collection runs meanwhile.
-    pub(crate) fn occupy<K: Trace, V: Trace>(
-        &mut self,
-        heap: HeapId,
-        key: ErasedGc,
-        value: ErasedGc,
-    ) -> Ephemeron<K, V> {
-        let (chunk, index) = self.free.pop().unwrap_or_else(|| {
-            let chunk = self.chunks.len();
-            self.chunks.push(Arc::new(EphemeronChunk {
-                heap,
-                slots: (0..SLOTS_PER_CHUNK)
-                    .map(|_| EphemeronSlot::free())
-                    .collect(),
-            }));
-            self.free
-                .extend((1..SLOTS_PER_CHUNK).rev().map(|index| (chunk, index)));
-            (chunk, 0)
-        });
-        let chunk = Arc::clone(&self.chunks[chunk]);
-        let slot = &chunk.slots[index];
-        debug_assert_eq!(slot.references.load(Ordering::Relaxed), 0);
-        // Relaxed suffices for the words: a collection or another thread reads
-        // them only after synchronizing with this admission or with the
-        // transfer of the handle.
-        slot.key.store(key.as_ptr().as_ptr(), Ordering::Relaxed);
-        slot.value.store(value.as_ptr().as_ptr(), Ordering::Relaxed);
-        slot.references.store(1, Ordering::Relaxed);
-        Ephemeron {
-            chunk,
-            index,
-            marker: PhantomData,
-        }
+impl EphemeronPair {
+    /// The key's and value's addresses, unless a collection cleared them.
+    pub(crate) fn load(&self) -> Option<(ErasedGc, ErasedGc)> {
+        let key = NonNull::new(self.key.load(Ordering::Acquire))?;
+        let value = NonNull::new(self.value.load(Ordering::Acquire))
+            .expect("an ephemeron with a key holds its value");
+        Some((ErasedGc::new(key), ErasedGc::new(value)))
     }
 
-    /// The ephemerons that handles still reference and no collection has
-    /// cleared. The caller holds exclusive collection.
-    pub(crate) fn live_entries(&self) -> Vec<EphemeronEntry> {
-        let mut entries = Vec::new();
-        for (chunk_index, chunk) in self.chunks.iter().enumerate() {
-            for (index, slot) in chunk.slots.iter().enumerate() {
-                if slot.references.load(Ordering::Acquire) == 0 {
-                    continue;
-                }
-                let (Some(key), Some(value)) = (
-                    NonNull::new(slot.key.load(Ordering::Acquire)),
-                    NonNull::new(slot.value.load(Ordering::Acquire)),
-                ) else {
-                    continue;
-                };
-                entries.push(EphemeronEntry {
-                    key: ErasedGc::new(key),
-                    value: ErasedGc::new(value),
-                    chunk: chunk_index,
-                    index,
-                });
-            }
-        }
-        entries
-    }
-
-    /// Clears `entry`, whose key the collection left unmarked. The caller
+    /// Clears the pair, whose key its collection left unmarked. The caller
     /// holds exclusive collection, before any sweep.
-    pub(crate) fn clear(&self, entry: EphemeronEntry) {
-        let slot = &self.chunks[entry.chunk].slots[entry.index];
-        slot.key.store(std::ptr::null_mut(), Ordering::Release);
-        slot.value.store(std::ptr::null_mut(), Ordering::Release);
-    }
-
-    /// Rebuilds the free list from the slots no handle references. The
-    /// caller holds exclusive collection: no handle is cloned from a slot
-    /// whose count is zero, and nothing occupies a slot meanwhile.
-    pub(crate) fn rebuild_free_list(&mut self) {
-        self.free.clear();
-        for (chunk_index, chunk) in self.chunks.iter().enumerate().rev() {
-            for (index, slot) in chunk.slots.iter().enumerate().rev() {
-                if slot.references.load(Ordering::Acquire) == 0 {
-                    slot.key.store(std::ptr::null_mut(), Ordering::Relaxed);
-                    slot.value.store(std::ptr::null_mut(), Ordering::Relaxed);
-                    self.free.push((chunk_index, index));
-                }
-            }
-        }
-    }
-
-    /// How many slots handles reference, cleared or not.
-    #[cfg(test)]
-    pub(crate) fn referenced_count(&self) -> usize {
-        self.chunks
-            .iter()
-            .flat_map(|chunk| chunk.slots.iter())
-            .filter(|slot| slot.references.load(Ordering::Acquire) != 0)
-            .count()
+    pub(crate) fn clear(&self) {
+        self.key.store(std::ptr::null_mut(), Ordering::Release);
+        self.value.store(std::ptr::null_mut(), Ordering::Release);
     }
 }
 
-/// A shareable ephemeron in a live heap: its value lives while its key is
-/// reachable by some other path, and it keeps neither alive by itself.
+/// An ephemeron that marking reached and recorded, for the rest of its
+/// collection.
+#[derive(Clone, Copy)]
+pub(crate) struct ReachedEphemeron(NonNull<EphemeronPair>);
+
+impl ReachedEphemeron {
+    pub(crate) fn new(pair: &EphemeronPair) -> Self {
+        Self(NonNull::from(pair))
+    }
+
+    /// The recorded pair.
+    ///
+    /// # Safety
+    ///
+    /// The collection that recorded it still holds exclusive authority and
+    /// has swept nothing, so the ephemeron, a marked allocation that a
+    /// non-moving heap keeps in place, is live.
+    pub(crate) unsafe fn pair<'collection>(self) -> &'collection EphemeronPair {
+        // SAFETY: the caller keeps the recording collection's exclusive
+        // authority, unswept, so the marked ephemeron holding this pair stays
+        // live and in place, and nothing else writes it meanwhile.
+        unsafe { self.0.as_ref() }
+    }
+}
+
+/// An ephemeron: a managed cell whose value lives while its key is
+/// reachable by some other path, and which keeps neither alive by itself.
 ///
-/// Once a collection finds the key unreachable, the ephemeron is cleared,
-/// silently: its owner notices when it next views it. Like a root, it may
-/// outlive its heap, and can then only be cloned and dropped.
-#[must_use = "an ephemeron keeps nothing alive"]
+/// It lives as any managed value does, while a root or a traced edge reaches
+/// it: [`crate::MutatorAccess::ephemeron`] allocates one, and a view of it
+/// views its key and value ([`GcRef::entry`]). Once a collection finds the key
+/// unreachable, it clears the ephemeron, silently: its owner notices when it
+/// next views it.
 pub struct Ephemeron<K: Trace, V: Trace> {
-    chunk: Arc<EphemeronChunk>,
-    index: usize,
+    pair: EphemeronPair,
     marker: PhantomData<fn() -> (K, V)>,
 }
 
-impl<K: Trace, V: Trace> Ephemeron<K, V> {
-    fn slot(&self) -> &EphemeronSlot {
-        &self.chunk.slots[self.index]
-    }
+/// A weak reference: an ephemeron whose key is its value, which it views
+/// while some other path reaches it ([`GcRef::target`]).
+pub type Weak<T> = Ephemeron<T, T>;
 
-    /// Views the key and value while `mutator` stays borrowed, or `None`
-    /// once a collection found the key unreachable.
+impl<K: Trace, V: Trace> Ephemeron<K, V> {
+    /// An ephemeron of `key` and `value`.
     ///
-    /// Panics if `mutator` belongs to another heap.
-    pub fn get<'m>(&self, mutator: &'m MutatorAccess<'_>) -> Option<(GcRef<'m, K>, GcRef<'m, V>)> {
-        assert!(
-            self.chunk.heap == mutator.heap().id(),
-            "ephemeron does not belong to this heap"
-        );
-        let slot = self.slot();
-        let key = NonNull::new(slot.key.load(Ordering::Acquire))?;
-        let value = NonNull::new(slot.value.load(Ordering::Acquire))
-            .expect("an ephemeron with a key holds its value");
-        // SAFETY: the slot was occupied from views proving a live `K` and a
-        // live `V` in this heap, and is not reused while this handle
-        // references it. Every collection since either marked the key, and
-        // then marked the value from it, so both survived its sweep, or left
-        // the key unmarked and cleared the slot before sweeping. The key is
-        // not cleared, so both are still live, and the borrowed admission
-        // excludes collection while the views exist.
-        unsafe {
-            Some((
-                GcRef::new(key.cast::<K>(), mutator),
-                GcRef::new(value.cast::<V>(), mutator),
-            ))
+    /// # Safety
+    ///
+    /// `key` and `value` identify a live `K` and a live `V` in the heap that
+    /// allocates the ephemeron, under the admission that allocates it.
+    pub(crate) unsafe fn new(key: ErasedGc, value: ErasedGc) -> Self {
+        Self {
+            pair: EphemeronPair {
+                key: AtomicPtr::new(key.as_ptr().as_ptr()),
+                value: AtomicPtr::new(value.as_ptr().as_ptr()),
+            },
+            marker: PhantomData,
         }
     }
 
     /// Whether a collection has found the key unreachable.
     #[must_use]
     pub fn is_cleared(&self) -> bool {
-        self.slot().key.load(Ordering::Acquire).is_null()
-    }
-}
-
-impl<K: Trace, V: Trace> Clone for Ephemeron<K, V> {
-    fn clone(&self) -> Self {
-        // Relaxed suffices, as for `Arc::clone`: the new reference comes from
-        // an existing one.
-        let prior = self.slot().references.fetch_add(1, Ordering::Relaxed);
-        if prior >= MAX_REFERENCES {
-            std::process::abort();
-        }
-        Self {
-            chunk: Arc::clone(&self.chunk),
-            index: self.index,
-            marker: PhantomData,
-        }
-    }
-}
-
-impl<K: Trace, V: Trace> Drop for Ephemeron<K, V> {
-    fn drop(&mut self) {
-        self.slot().references.fetch_sub(1, Ordering::Release);
+        self.pair.load().is_none()
     }
 }
 
@@ -258,42 +123,45 @@ impl<K: Trace, V: Trace> fmt::Debug for Ephemeron<K, V> {
     }
 }
 
-/// A weak reference: an ephemeron whose key is its value, which it views
-/// while some other path reaches it.
-#[must_use = "a weak reference keeps nothing alive"]
-pub struct Weak<T: Trace>(Ephemeron<T, T>);
-
-impl<T: Trace> Weak<T> {
-    pub(crate) fn new(ephemeron: Ephemeron<T, T>) -> Self {
-        Self(ephemeron)
+// SAFETY: an ephemeron's two words are the one managed representation that is
+// not an edge, by design. Its trace reports neither: it reports the ephemeron
+// itself, through a channel only the crate's marking reads, which marks the
+// value only once the key is marked, and clears the pair before any sweep
+// otherwise. It mutates nothing, and a panicking visitor leaves it intact.
+unsafe impl<K: Trace, V: Trace> Trace for Ephemeron<K, V> {
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        visitor.ephemeron(&self.pair);
     }
+}
 
-    /// Views the value while `mutator` stays borrowed, or `None` once a
-    /// collection found it unreachable.
-    ///
-    /// Panics if `mutator` belongs to another heap.
-    pub fn get<'m>(&self, mutator: &'m MutatorAccess<'_>) -> Option<GcRef<'m, T>> {
-        self.0.get(mutator).map(|(_, value)| value)
-    }
-
-    /// Whether a collection has found the value unreachable.
+impl<'m, K: Trace, V: Trace> GcRef<'m, Ephemeron<K, V>> {
+    /// Views the key and value for as long as this view, or `None` once a
+    /// collection found the key unreachable.
     #[must_use]
-    pub fn is_cleared(&self) -> bool {
-        self.0.is_cleared()
+    pub fn entry(self) -> Option<(GcRef<'m, K>, GcRef<'m, V>)> {
+        let (key, value) = self.get().pair.load()?;
+        // SAFETY: the ephemeron was made from proof of a live `K` and a live
+        // `V` in its heap, the heap that this view proves it in. Every
+        // collection since reached it, or it would have been swept and not
+        // viewed now, and either marked its key, and then its value from it,
+        // so both survived the sweep, or left the key unmarked and cleared it
+        // before sweeping. The key is not cleared, so both are still live,
+        // and the view's borrowed admission excludes collection for `'m`.
+        unsafe {
+            Some((
+                self.sibling(key.as_ptr().cast::<K>()),
+                self.sibling(value.as_ptr().cast::<V>()),
+            ))
+        }
     }
 }
 
-impl<T: Trace> Clone for Weak<T> {
-    fn clone(&self) -> Self {
-        Self(self.0.clone())
-    }
-}
-
-impl<T: Trace> fmt::Debug for Weak<T> {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("Weak")
-            .field("cleared", &self.is_cleared())
-            .finish_non_exhaustive()
+impl<'m, T: Trace> GcRef<'m, Weak<T>> {
+    /// Views the value for as long as this view, or `None` once a collection
+    /// found the key unreachable: for a weak reference, once nothing else
+    /// reaches its value.
+    #[must_use]
+    pub fn target(self) -> Option<GcRef<'m, T>> {
+        self.entry().map(|(_, value)| value)
     }
 }

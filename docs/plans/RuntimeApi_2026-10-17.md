@@ -436,9 +436,9 @@ handle API goes.
    `api-opaque-finalization`, whose design reshapes the record of
    promises.
 12. `api-ephemerons` — ephemerons in glam-gc, the second stage's first
-   part: a root kind whose value is traced only while its key is reachable
-   by other paths, with weak references as the case where they coincide,
-   cleared silently. Its marking iterates to a fixpoint
+   part: managed cells whose value is traced only while their key is
+   reachable by other paths, with weak references as the case where they
+   coincide, cleared silently. Its marking iterates to a fixpoint
    after the ordinary worklist drains, under the collector's exclusive
    post-mark authority, and it passes glam-gc's own gates.
 13. `api-volume-cells` — volumes as cells in the managed heap, closing the
@@ -1768,18 +1768,24 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   settlement reports it as a deadlock.
 
 `api-ephemerons` (2026-10-20), in glam-gc:
-- An ephemeron is a slot in its heap's ephemeron table: a reference count
-  and the key's and value's addresses as atomic pointers, in chunks that
-  the table and the handles share, so a handle outlives its heap safely.
-  `MutatorAccess::ephemeron` and `ephemeron_checked` make one from views or
-  from checked bare pointers; `weak` and `weak_checked` make a weak
-  reference, an ephemeron whose key is its value. A handle views its key
-  and value under a matching mutator until it is cleared.
-- Marking: once the roots' worklist drains, rounds over the live
-  ephemerons mark the value of each whose key is marked, draining the
-  worklist after each, until a round marks nothing new; then each whose key
-  stayed unmarked is cleared, before the sweep. Each collection rebuilds
-  the table's free list from the slots no handle references.
+- An ephemeron is a managed cell of two words, the key's and value's
+  addresses as atomic pointers, which lives as any allocation does, while a
+  root or a traced edge reaches it (maintainer, the same day). The first
+  build kept a table of counted slots outside the heap, which cost a mutex
+  to create one, two atomics to copy a handle, and reuse only after a
+  collection, and whose handles no managed value could hold without
+  leaking. `MutatorAccess::ephemeron` and `ephemeron_checked` allocate one
+  from views or from checked bare pointers; `weak` and `weak_checked`
+  allocate a weak reference, an ephemeron whose key is its value
+  (`Weak<T>` names `Ephemeron<T, T>`). A view of one views its key and
+  value, `GcRef::entry` and `GcRef::target`, until it is cleared.
+- Marking: a cell's trace reports the cell, not its words, through a
+  crate-private visitor channel, and marking records it. Once the worklist
+  drains, rounds over the recorded cells mark the value of each whose key
+  is marked, draining the worklist after each, which may record more, until
+  a round marks nothing new; then each recorded cell whose key stayed
+  unmarked is cleared, before the sweep. A cell nothing reaches keeps
+  nothing alive and is swept.
 - Clearing is silent (maintainer, the same day). The first build queued a
   notice token per cleared ephemeron that a handle held, until the heap's
   owner took them, which an owner that never took them would grow without
@@ -1787,8 +1793,9 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   it next traces what holds it, and cleans its container then.
 - glam does not use them yet; `api-volume-cells` will, keying each
   volume's committed values on its cell. The crate's `SAFETY.md` records
-  the one new unsafe site, view construction, and the invariants it rests
-  on, and its deferred work keeps user-visible weak keys and ephemerons
+  the unsafe sites, the cell's `Trace` impl and constructor, marking's
+  reads of recorded cells, and view construction, and the invariants they
+  rest on; its deferred work keeps user-visible weak keys and ephemerons
   under concurrent marking.
 - Tests in `heap::tests`, listed in the crate's `VERIFY.md`, which also
   records the gates: the crate's full gate, and Miri over the ephemeron

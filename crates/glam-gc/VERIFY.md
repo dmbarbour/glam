@@ -1342,3 +1342,30 @@ Miri with strict provenance passed the six ephemeron tests, before clearing
 became silent. At `4a0ad255`,
 with a nightly toolchain installed, `check-miri.sh` passed the library suite
 (237 passed, 4 ignored), and both sanitizers passed (239 passed, 2 ignored).
+
+The same day, at the maintainer's direction, ephemerons became managed
+cells: two words, the key's and value's addresses, which live while a root
+or a traced edge reaches them, in place of the table's counted slots. A
+cell's trace reports itself through the marking visitor rather than as
+edges; marking records the cells it reaches and runs its rounds over those.
+`heap::tests` now covers:
+
+- an ephemeron that a root reaches, whose key a root reaches too, keeps
+  its value through a collection, and once the key's root goes, the next
+  collection clears it and leaves its value untraced;
+- a value that reaches its own key dies with the key, both slots unmarked,
+  through the checked constructor;
+- marking to a fixpoint: only the first ephemeron's value reaches the second
+  ephemeron and its key, so marking records the second in its first round
+  and marks its value only in the next; once the first key's root goes, the
+  first clears and the second, unreached, is swept unmarked with its value
+  untraced. A single round fails this test;
+- a weak reference views its value while a root reaches it, then clears;
+- an ephemeron that nothing reaches keeps nothing alive, though its key
+  lives: neither it nor its value is marked.
+
+The table, its free list and the cross-heap check went: a view of a cell
+proves its heap. The unsafe sites are now the cell's `Trace` impl, its
+constructor, the recorded pair's dereference during marking and its two uses
+there, the views of key and value, and `GcRef::sibling`, which derives them;
+`SAFETY.md` records their arguments.

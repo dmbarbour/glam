@@ -7,8 +7,9 @@
 //!   publication prefers. A retained partial run clears its dead allocations
 //!   and publishes exact lease masks, eligible class frontiers, and one final
 //!   stale-cursor epoch.
-//! - **Ephemerons.** An ephemeron keeps its value only while its key is
-//!   reachable by another path; marking repeats over the ephemerons until a
+//! - **Ephemerons.** An ephemeron is a managed cell that keeps its value only
+//!   while its key is reachable by another path. Marking records the
+//!   ephemerons it reaches without tracing them, repeats over them until a
 //!   round marks nothing new, then silently clears those whose keys stayed
 //!   unmarked, before the sweep. A weak reference is an ephemeron whose key
 //!   is its value.

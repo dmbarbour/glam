@@ -263,21 +263,26 @@ impl<'heap> MutatorAccess<'heap> {
         self.heap.register_root(&self.cache, value, expected)
     }
 
-    /// Constructs an ephemeron of `key` and `value`: the value lives while
-    /// some other path reaches the key, and neither lives by the ephemeron
-    /// alone. Once a collection finds the key unreachable, it clears the
-    /// ephemeron, silently: its owner notices when it next views it. The
-    /// views prove both live.
+    /// Allocates an ephemeron of `key` and `value`: the value lives while
+    /// some other path reaches the key, and neither lives by the ephemeron.
+    /// The ephemeron itself lives as any value does, while a root or a traced
+    /// edge reaches it. Once a collection finds the key unreachable, it
+    /// clears the ephemeron, silently: its owner notices when it next views
+    /// it. The views prove both live.
     pub fn ephemeron<K: Trace, V: Trace>(
         &self,
         key: GcRef<'_, K>,
         value: GcRef<'_, V>,
-    ) -> Ephemeron<K, V> {
+    ) -> GcRef<'_, Ephemeron<K, V>> {
         let (key, value) = (key.pointer(), value.pointer());
         self.debug_assert_access(key);
         self.debug_assert_access(value);
-        self.heap
-            .register_ephemeron(ErasedGc::new(key.cast()), ErasedGc::new(value.cast()))
+        // SAFETY: the views prove a live `K` and a live `V` in this heap, the
+        // one heap the thread holds, under the admission that allocates the
+        // ephemeron below.
+        let ephemeron =
+            unsafe { Ephemeron::new(ErasedGc::new(key.cast()), ErasedGc::new(value.cast())) };
+        self.allocate_ephemeron(ephemeron)
     }
 
     /// As [`Self::ephemeron`], for bare managed pointers, which prove
@@ -286,28 +291,46 @@ impl<'heap> MutatorAccess<'heap> {
         &self,
         key: Gc<K>,
         value: Gc<V>,
-    ) -> Ephemeron<K, V> {
-        let expected = (
+    ) -> GcRef<'_, Ephemeron<K, V>> {
+        let (key, value) = (key.erase(), value.erase());
+        self.heap.validate_rootable(
+            key,
             self.cache
                 .cached_metadata::<K>()
                 .unwrap_or_else(metadata_for::<K>),
+        );
+        self.heap.validate_rootable(
+            value,
             self.cache
                 .cached_metadata::<V>()
                 .unwrap_or_else(metadata_for::<V>),
         );
-        self.heap.register_checked_ephemeron(key, value, expected)
+        // SAFETY: both were just checked allocated values of their types in
+        // this heap that no pending finalization holds, so live, under the
+        // admission that allocates the ephemeron below.
+        let ephemeron = unsafe { Ephemeron::new(key, value) };
+        self.allocate_ephemeron(ephemeron)
     }
 
-    /// Constructs a weak reference to `value`: an ephemeron whose key is its
+    fn allocate_ephemeron<K: Trace, V: Trace>(
+        &self,
+        ephemeron: Ephemeron<K, V>,
+    ) -> GcRef<'_, Ephemeron<K, V>> {
+        self.allocator()
+            .expect("an ephemeron's two words have a supported layout")
+            .alloc_view(ephemeron)
+    }
+
+    /// Allocates a weak reference to `value`: an ephemeron whose key is its
     /// value, which it views while some other path reaches it.
-    pub fn weak<T: Trace>(&self, value: GcRef<'_, T>) -> Weak<T> {
-        Weak::new(self.ephemeron(value, value))
+    pub fn weak<T: Trace>(&self, value: GcRef<'_, T>) -> GcRef<'_, Weak<T>> {
+        self.ephemeron(value, value)
     }
 
     /// As [`Self::weak`], for a bare managed pointer, checked as for
     /// [`Self::root_checked`].
-    pub fn weak_checked<T: Trace>(&self, value: Gc<T>) -> Weak<T> {
-        Weak::new(self.ephemeron_checked(value.duplicate_in(self), value))
+    pub fn weak_checked<T: Trace>(&self, value: Gc<T>) -> GcRef<'_, Weak<T>> {
+        self.ephemeron_checked(value.duplicate_in(self), value)
     }
 
     pub(crate) fn debug_assert_access<T: Trace>(&self, pointer: NonNull<T>) {
