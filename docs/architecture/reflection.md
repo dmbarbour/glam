@@ -96,8 +96,9 @@ effect value
 ```
 
 Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
-task-local `get`/`set`, shared `heap.get`/`heap.set`/`heap.rewrite`, and indexed
-`reset`/`shift`.
+task-local `get`/`set`, shared `heap.get`/`heap.set`/`heap.rewrite`, volume
+handles' `heap.vol` and `vol.new`/`vol.get`/`vol.set`/`vol.rewrite`,
+`promise.status`, and indexed `reset`/`shift`.
 Local user state, including the reset stack, is ordinary task state. Shared
 store state is staged separately in the runtime transaction; it is never
 projected into local state. The ordinary heap is one runtime-owned store
@@ -214,6 +215,19 @@ covering set can still make that widened dependency entirely local.
 `.heap.get` returns an unforced access value; malformed roots, updates, and
 updaters therefore remain latent evaluator errors, which `.eval` can observe
 as data.
+
+Volumes are first-class capabilities (`requests-travel-on-ports`): a handle
+is an opaque value naming one volume of one runtime, the same that machines'
+`volume_*` operations take. `.vol.new Initial` allocates a volume, within a
+cut's transaction or in a commit of its own, and returns its handle;
+`.heap.vol` returns the shared heap's. `.vol.get`, `.vol.set` and
+`.vol.rewrite` take a handle first, evaluate it, never the value, and then
+read and stage as the heap effects do on that volume.
+
+`.promise.status` reads a promised value's state, `'pending`, `'fulfilled` or
+`'broken`, without forcing it. Within a cut a pending read joins the
+transaction's read set: a blocked retry restarts once that promise has
+resolved, which validation treats as a conflict.
 
 The runtime transaction lock makes reflection-store and generic event changes
 atomic. A failed validation cannot partially edit the heap, consume admitted

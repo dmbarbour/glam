@@ -284,6 +284,11 @@ impl StoreEdit {
     }
 }
 
+/// The shared heap's volume, the same in every store.
+pub(super) fn heap_volume() -> VolumeId {
+    VolumeId::from_u64(1).expect("one is a nonzero volume ID")
+}
+
 /// Reserves the next volume ID from `next`, shared by a store and its
 /// snapshots, so a transaction reserves one without the store's lock.
 fn reserve_volume(next: &AtomicU64) -> Result<VolumeId, Arc<str>> {
@@ -746,7 +751,7 @@ impl ReflectionStore {
         values: CoreValueFactory,
         strategy: Arc<dyn ConflictAnalysisStrategy>,
     ) -> Self {
-        let heap_volume = VolumeId::from_u64(1).expect("one is a nonzero volume ID");
+        let heap_volume = heap_volume();
         let runtime_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
         let environment_volume = VolumeId::from_u64(3).expect("three is a nonzero volume ID");
         let (query_domain, query_retirements) = QueryDomain::new();

@@ -1574,6 +1574,15 @@ fn assert_request_decode_inventory(request: &RequestDecodeWork<TestRequest>) {
             let _: &RuntimeValueRoot = value;
             let _: &crate::eval::whnf::WhnfComputation = demand;
         }
+        RequestDecodeState::VolumeHandle {
+            operation,
+            rest,
+            demand,
+        } => {
+            let _: &VolumeOperation = operation;
+            let _: &Vec<RuntimeValueRoot> = rest;
+            let _: &crate::eval::whnf::WhnfComputation = demand;
+        }
         RequestDecodeState::Poisoned => {}
     }
 }
@@ -1751,13 +1760,19 @@ fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>)
         | RequestSelection::HeapGet
         | RequestSelection::HeapSet
         | RequestSelection::HeapRewrite
+        | RequestSelection::HeapVolume
         | RequestSelection::Reset
         | RequestSelection::Shift
         | RequestSelection::Resume
         | RequestSelection::ExitSuccess
-        | RequestSelection::ExitError => {}
+        | RequestSelection::ExitError
+        | RequestSelection::VolumeNew
+        | RequestSelection::PromiseStatus => {}
         RequestSelection::Volume(identity) => {
             let _: &VolumeRequestIdentity = identity;
+        }
+        RequestSelection::VolumeHandle(operation) => {
+            let _: &VolumeOperation = operation;
         }
         RequestSelection::Specialized { request, arity } => {
             let _: &TestRequest = request;
@@ -3181,7 +3196,9 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
         | Request::Fix(value)
         | Request::Get(value)
         | Request::HeapGet(value)
-        | Request::ExitError(value) => assert_request_value(value),
+        | Request::ExitError(value)
+        | Request::VolumeNew(value)
+        | Request::PromiseStatus(value) => assert_request_value(value),
         Request::Seq(left, right)
         | Request::Alt(left, right)
         | Request::Set(left, right)
@@ -3210,7 +3227,7 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
             let _: &TestRequest = request;
             let _: &Vec<V> = values;
         }
-        Request::Fail | Request::ExitSuccess => {}
+        Request::Fail | Request::HeapVolume | Request::ExitSuccess => {}
     }
 }
 
@@ -9058,5 +9075,150 @@ fn top_level_alternative_and_unmatched_shift_are_rejected() {
             .unwrap_err_without_debug()
             .to_string()
             .contains("not in reset scope")
+    );
+}
+
+/// Runs `effect` as a scheduled task on its assembler's runtime.
+fn run_volume_effect(assembler: &Assembler, effect: &PublicValue) -> Result<TaskOutcome, TaskHalt> {
+    let runtime = assembler.evaluation_runtime();
+    let lifecycle = EffectLifecycle::new(&runtime);
+    EffectRun::new(
+        &runtime,
+        effect,
+        TestEffects,
+        Arc::new(TestHost::with_values(assembler.core_values())),
+    )
+    .schedule(&lifecycle)
+    .expect("the effect should schedule")
+    .run()
+}
+
+#[test]
+fn reflection_allocates_writes_and_reads_a_volume_through_its_handle() {
+    let (assembler, effect) = compile_effect(
+        ".vol.new {count:1} >>= (\\v -> .vol.set v ['count] \"two\" =>> .vol.get v ['count])",
+    );
+    let TaskOutcome::Complete(value) = run_volume_effect(&assembler, &effect).unwrap() else {
+        panic!("the volume effect should complete")
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"two".as_slice());
+
+    let (assembler, effect) =
+        compile_effect(".cut (.vol.new \"within\" >>= (\\v -> .vol.get v []))");
+    let TaskOutcome::Complete(value) = run_volume_effect(&assembler, &effect).unwrap() else {
+        panic!("a cut reads the volume it allocated")
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"within".as_slice());
+}
+
+#[test]
+fn the_heap_volume_handle_reaches_the_shared_heap() {
+    let (assembler, effect) =
+        compile_effect(".heap.set ['x] \"heap\" =>> .heap.vol >>= (\\h -> .vol.get h ['x])");
+    let TaskOutcome::Complete(value) = run_volume_effect(&assembler, &effect).unwrap() else {
+        panic!("the heap's handle should read it")
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"heap".as_slice());
+}
+
+#[test]
+fn a_volume_effect_without_a_handle_fails() {
+    let (assembler, effect) = compile_effect(".vol.get 5 []");
+    let error = run_volume_effect(&assembler, &effect).expect_err("5 is no handle");
+    assert!(
+        error
+            .to_string()
+            .contains("handle of this runtime's volume"),
+        "{error}"
+    );
+}
+
+#[test]
+fn reflection_reads_a_promise_s_status_without_forcing_it() {
+    let (assembler, read_status) = compile_effect(
+        "\\p -> .promise.status p >>= (\\s -> .r (if s == 'pending then \"pending\" else if s == 'fulfilled then \"fulfilled\" else \"broken\"))",
+    );
+    let status = |promised: &PublicValue| {
+        let effect = assembler
+            .values()
+            .apply(&read_status, [promised.clone()])
+            .expect("the status reader applies to the promise");
+        let TaskOutcome::Complete(value) = run_volume_effect(&assembler, &effect).unwrap() else {
+            panic!("the status effect should complete")
+        };
+        assembler.to_binary(&value).unwrap().to_vec()
+    };
+
+    let (fulfilled, resolver) = assembler.promise("fulfilled fixture");
+    assert_eq!(status(&fulfilled), b"pending");
+    resolver
+        .resolve(assembler.values().integer(1))
+        .expect("the promise resolves");
+    assert_eq!(status(&fulfilled), b"fulfilled");
+
+    let (broken, resolver) = assembler.promise("broken fixture");
+    resolver
+        .fail(assembler.values().text("why"))
+        .expect("the promise breaks");
+    assert_eq!(status(&broken), b"broken");
+
+    let effect = assembler
+        .values()
+        .apply(&read_status, [assembler.values().integer(9)])
+        .expect("the status reader applies to an integer");
+    let error = run_volume_effect(&assembler, &effect).expect_err("an integer is no promise");
+    assert!(
+        error.to_string().contains("needs a promised value"),
+        "{error}"
+    );
+}
+
+#[test]
+fn a_cut_that_reads_a_pending_status_retries_when_the_promise_resolves() {
+    let (assembler, watch) = compile_effect(
+        "\\p -> .cut (.promise.status p >>= (\\s -> (s == 'fulfilled) =>> .r \"resolved\"))",
+    );
+    let (promised, resolver) = assembler.promise("watched");
+    let effect = assembler
+        .values()
+        .apply(&watch, [promised])
+        .expect("the watcher applies to the promise");
+    let host = Arc::new(TestHost::with_wake_heap(
+        assembler.core_values(),
+        assembler.values().text("woken"),
+    ));
+    let mut search = IsolatedEffectSearch::new(
+        &assembler.evaluation_runtime(),
+        &effect,
+        TestEffects,
+        host.clone(),
+    )
+    .expect("the watcher should initialize");
+    let generation = loop {
+        match search.poll(256) {
+            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::Blocked(blocked) => {
+                assert!(!blocked.waiting_on_dependency());
+                break blocked
+                    .observed_generation()
+                    .expect("the pending read is an observation");
+            }
+            IsolatedSearchPoll::Complete(_) => panic!("the promise is still pending"),
+            IsolatedSearchPoll::Failed(error) => panic!("the watcher failed: {error}"),
+            IsolatedSearchPoll::Cancelled => panic!("the watcher was cancelled"),
+        }
+    };
+
+    resolver
+        .resolve(assembler.values().integer(1))
+        .expect("the promise resolves");
+    assert!(host.wait_for_change(generation));
+    let results = poll_isolated_search(&mut search);
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        assembler
+            .to_binary(results[0].value().expect("the retry sees it resolved"))
+            .unwrap(),
+        b"resolved".as_slice()
     );
 }

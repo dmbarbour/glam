@@ -1,3 +1,4 @@
+use super::volume_handle::{handle_volume, volume_handle_in};
 use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 #[cfg(test)]
@@ -56,6 +57,12 @@ struct Tags {
     heap_get: Key,
     heap_set: Key,
     heap_rewrite: Key,
+    heap_vol: Key,
+    vol_new: Key,
+    vol_get: Key,
+    vol_set: Key,
+    vol_rewrite: Key,
+    promise_status: Key,
     reset: Key,
     shift: Key,
     resume: Key,
@@ -86,6 +93,12 @@ impl Tags {
             heap_get: tag("heap_get"),
             heap_set: tag("heap_set"),
             heap_rewrite: tag("heap_rewrite"),
+            heap_vol: tag("heap_vol"),
+            vol_new: tag("vol_new"),
+            vol_get: tag("vol_get"),
+            vol_set: tag("vol_set"),
+            vol_rewrite: tag("vol_rewrite"),
+            promise_status: tag("promise_status"),
             reset: tag("reset"),
             shift: tag("shift"),
             resume: tag("resume"),
@@ -2593,6 +2606,79 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     Vec::new(),
                 ))));
             }
+            Request::VolumeNew(initial) => {
+                let initial = PublicValue::from_runtime_root(initial);
+                let volume = if let Some(transaction) = branch.transaction.as_mut() {
+                    transaction
+                        .store
+                        .create_volume(initial)
+                        .map_err(|error| TaskHalt::new(error.as_ref()))?
+                } else {
+                    // One suspension covers the snapshot, the allocation and
+                    // the commit.
+                    let (result, volume) = context.suspend(|| {
+                        let snapshot = self.host.snapshot();
+                        let mut store = StoreJournal::new(snapshot.store().clone());
+                        let volume = store
+                            .create_volume(initial)
+                            .map_err(|error| TaskHalt::new(error.as_ref()))?;
+                        let result = self.host.commit(TaskCommit::new(
+                            store,
+                            snapshot.extra().clone(),
+                            S::Journal::default(),
+                        ));
+                        Ok::<_, TaskHalt>((result, volume))
+                    })?;
+                    match result {
+                        CommitResult::Committed => volume,
+                        CommitResult::Conflict => {
+                            return Ok(MachineStep::Continue(MachineWork::Drive {
+                                branch,
+                                scope_depth,
+                            }));
+                        }
+                        CommitResult::MissingVolume(volume) => {
+                            return Err(missing_volume_error(volume));
+                        }
+                        CommitResult::Closed => {
+                            return Ok(MachineStep::Continue(MachineWork::Outcome {
+                                outcome: BranchOutcome::Cancelled,
+                                scope_depth,
+                            }));
+                        }
+                    }
+                };
+                let handle = context.with_runtime_access(|access| {
+                    access.root_runtime_value(volume_handle_in(&access, volume))
+                });
+                MachineWork::deliver_root(handle, branch, scope_depth)
+            }
+            Request::HeapVolume => {
+                let handle = context.with_runtime_access(|access| {
+                    access
+                        .root_runtime_value(volume_handle_in(&access, super::store::heap_volume()))
+                });
+                MachineWork::deliver_root(handle, branch, scope_depth)
+            }
+            Request::PromiseStatus(value) => {
+                let status = promise_status(context, &self.eval_context, &value)
+                    .ok_or_else(|| TaskHalt::new("`.promise.status` needs a promised value"))?;
+                // Within a cut a pending read is an observation: a failure
+                // after it retries once the promise resolves.
+                if status == "pending"
+                    && let Some(transaction) = branch.transaction.as_mut()
+                {
+                    transaction.pending_promises.push(value);
+                    let generation = transaction.snapshot.generation();
+                    branch.observe(None, generation);
+                }
+                let status = context.with_runtime_access(|access| {
+                    access.root_runtime_value(Value::Atom(Atom::from_key(&Key::binary_from_text(
+                        status,
+                    ))))
+                });
+                MachineWork::deliver_root(status, branch, scope_depth)
+            }
             Request::Specialized(request, arguments) => {
                 let request = SpecializationRequest::Unstarted {
                     request,
@@ -3246,7 +3332,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_ref()
             .and_then(|retry| {
                 retry.validation.as_ref().map(|transaction| {
-                    context.suspend(|| self.host.validate(transaction.validation()))
+                    let resolved = transaction.pending_promises.iter().any(|promise| {
+                        promise_status(context, &self.eval_context, promise) != Some("pending")
+                    });
+                    if resolved {
+                        ValidationResult::Conflict
+                    } else {
+                        context.suspend(|| self.host.validate(transaction.validation()))
+                    }
                 })
             });
         match retry_validation {
@@ -4999,9 +5092,12 @@ enum Request<R, V = RuntimeValueRoot> {
     HeapGet(V),
     HeapSet(V, V),
     HeapRewrite(V, V),
+    HeapVolume,
     VolumeGet(VolumeId, V),
     VolumeSet(VolumeId, V, V),
     VolumeRewrite(VolumeId, V, V),
+    VolumeNew(V),
+    PromiseStatus(V),
     Reset(V, V),
     Shift(V, V),
     Resume(EvaluationTaskId, u64, V),
@@ -5041,29 +5137,42 @@ enum RequestSelection<R> {
     HeapGet,
     HeapSet,
     HeapRewrite,
+    HeapVolume,
     Volume(VolumeRequestIdentity),
+    /// A volume operation whose volume a handle names, the first argument,
+    /// which decoding evaluates (`requests-travel-on-ports`).
+    VolumeHandle(VolumeOperation),
+    VolumeNew,
+    PromiseStatus,
     Reset,
     Shift,
     Resume,
     ExitSuccess,
     ExitError,
-    Specialized { request: R, arity: usize },
+    Specialized {
+        request: R,
+        arity: usize,
+    },
 }
 
 impl<R> RequestSelection<R> {
     fn arity(&self) -> usize {
         match self {
-            Self::Fail | Self::ExitSuccess => 0,
+            Self::Fail | Self::HeapVolume | Self::ExitSuccess => 0,
             Self::Return
             | Self::Cut
             | Self::Fix
             | Self::Get
             | Self::HeapGet
             | Self::ExitError
+            | Self::VolumeNew
+            | Self::PromiseStatus
             | Self::Volume(VolumeRequestIdentity {
                 operation: VolumeOperation::Get,
                 ..
             }) => 1,
+            Self::VolumeHandle(VolumeOperation::Get) => 2,
+            Self::VolumeHandle(VolumeOperation::Set | VolumeOperation::Rewrite) => 3,
             Self::Seq
             | Self::Alt
             | Self::Set
@@ -5099,6 +5208,7 @@ impl<R> RequestSelection<R> {
             Self::HeapGet => Request::HeapGet(next()),
             Self::HeapSet => Request::HeapSet(next(), next()),
             Self::HeapRewrite => Request::HeapRewrite(next(), next()),
+            Self::HeapVolume => Request::HeapVolume,
             Self::Volume(VolumeRequestIdentity {
                 volume,
                 operation: VolumeOperation::Get,
@@ -5111,12 +5221,17 @@ impl<R> RequestSelection<R> {
                 volume,
                 operation: VolumeOperation::Rewrite,
             }) => Request::VolumeRewrite(volume, next(), next()),
+            Self::VolumeNew => Request::VolumeNew(next()),
+            Self::PromiseStatus => Request::PromiseStatus(next()),
             Self::Reset => Request::Reset(next(), next()),
             Self::Shift => Request::Shift(next(), next()),
             Self::ExitSuccess => Request::ExitSuccess,
             Self::ExitError => Request::ExitError(next()),
             Self::Specialized { request, .. } => Request::Specialized(request, arguments.collect()),
             Self::Resume => unreachable!("resume IDs require WHNF conversion before dispatch"),
+            Self::VolumeHandle(_) => {
+                unreachable!("volume handles require WHNF conversion before dispatch")
+            }
         }
     }
 }
@@ -5144,6 +5259,13 @@ enum RequestDecodeState<R> {
     ResumeContinuation {
         task: EvaluationTaskId,
         value: RuntimeValueRoot,
+        demand: WhnfComputation,
+    },
+    /// Evaluates a volume operation's handle, with the operation's other
+    /// arguments waiting.
+    VolumeHandle {
+        operation: VolumeOperation,
+        rest: Vec<RuntimeValueRoot>,
         demand: WhnfComputation,
     },
     Poisoned,
@@ -5282,6 +5404,43 @@ impl<R: Clone> RequestDecodeWork<R> {
                     RequestIdPoll::Failed(error) => RequestDecodePoll::Failed(error),
                 }
             }
+            RequestDecodeState::VolumeHandle {
+                operation,
+                rest,
+                demand,
+            } => {
+                let handle = match poll_whnf_computation(demand, poll_context, context, step_budget)
+                {
+                    WhnfOwnerPoll::Ready(handle) => handle,
+                    WhnfOwnerPoll::Pending(dependency) => {
+                        return RequestDecodePoll::Pending(dependency);
+                    }
+                    WhnfOwnerPoll::Yielded => return RequestDecodePoll::Yielded,
+                    WhnfOwnerPoll::Failed(failure) => {
+                        return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
+                    }
+                };
+                let volume = poll_context.evaluate(context, |evaluator| {
+                    evaluator.project_root(&handle, |access, handle| {
+                        handle_volume(access.values(), &handle)
+                    })
+                });
+                let Some(volume) = volume else {
+                    return RequestDecodePoll::Failed(TaskHalt::new(
+                        "a volume effect needs a handle of this runtime's volume",
+                    ));
+                };
+                let mut rest = std::mem::take(rest).into_iter();
+                let mut next = || {
+                    rest.next()
+                        .expect("validated request arity must retain its argument")
+                };
+                RequestDecodePoll::Ready(match operation {
+                    VolumeOperation::Get => Request::VolumeGet(volume, next()),
+                    VolumeOperation::Set => Request::VolumeSet(volume, next(), next()),
+                    VolumeOperation::Rewrite => Request::VolumeRewrite(volume, next(), next()),
+                })
+            }
             RequestDecodeState::Poisoned => {
                 panic!("request decoder was polled after consuming its terminal state")
             }
@@ -5301,6 +5460,18 @@ impl<R: Clone> RequestDecodeWork<R> {
             return RequestDecodePoll::Failed(TaskHalt::new(
                 "effect request contained the wrong number of arguments",
             ));
+        }
+        if let RequestSelection::VolumeHandle(operation) = selection {
+            let mut arguments = arguments.into_iter();
+            let handle = arguments
+                .next()
+                .expect("volume request arity was checked above");
+            self.state = RequestDecodeState::VolumeHandle {
+                operation,
+                rest: arguments.collect(),
+                demand: WhnfComputation::from_root(handle),
+            };
+            return RequestDecodePoll::Continue;
         }
         if matches!(selection, RequestSelection::Resume) {
             let [task, continuation, value]: [RuntimeValueRoot; 3] = arguments
@@ -5392,6 +5563,21 @@ fn select_request_from_whnf<R: Clone>(
     select!(&tags.heap_get, RequestSelection::HeapGet);
     select!(&tags.heap_set, RequestSelection::HeapSet);
     select!(&tags.heap_rewrite, RequestSelection::HeapRewrite);
+    select!(&tags.heap_vol, RequestSelection::HeapVolume);
+    select!(&tags.vol_new, RequestSelection::VolumeNew);
+    select!(
+        &tags.vol_get,
+        RequestSelection::VolumeHandle(VolumeOperation::Get)
+    );
+    select!(
+        &tags.vol_set,
+        RequestSelection::VolumeHandle(VolumeOperation::Set)
+    );
+    select!(
+        &tags.vol_rewrite,
+        RequestSelection::VolumeHandle(VolumeOperation::Rewrite)
+    );
+    select!(&tags.promise_status, RequestSelection::PromiseStatus);
     select!(&tags.reset, RequestSelection::Reset);
     select!(&tags.shift, RequestSelection::Shift);
     select!(&tags.exit_success, RequestSelection::ExitSuccess);
@@ -5515,12 +5701,42 @@ fn effect_api<R: Clone>(
                     "rewrite",
                     request_function_in(access, tags.heap_rewrite.clone(), 2, Vec::new(), false),
                 ),
+                entry("vol", nullary_request(access, tags.heap_vol.clone())),
             ]
             .into_iter()
             .fold(Dict::new_sync(), |dict, (key, value)| {
                 dict.insert(key, value)
             }),
         );
+        // Volumes as first-class capabilities (`requests-travel-on-ports`).
+        let volume_api = Value::Dict(
+            [
+                entry(
+                    "new",
+                    request_function_in(access, tags.vol_new.clone(), 1, Vec::new(), false),
+                ),
+                entry(
+                    "get",
+                    request_function_in(access, tags.vol_get.clone(), 2, Vec::new(), false),
+                ),
+                entry(
+                    "set",
+                    request_function_in(access, tags.vol_set.clone(), 3, Vec::new(), false),
+                ),
+                entry(
+                    "rewrite",
+                    request_function_in(access, tags.vol_rewrite.clone(), 3, Vec::new(), false),
+                ),
+            ]
+            .into_iter()
+            .fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key, value)
+            }),
+        );
+        let promise_api = Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("status"),
+            request_function_in(access, tags.promise_status.clone(), 1, Vec::new(), false),
+        ));
         let mut entries = vec![
             entry(
                 "r",
@@ -5560,8 +5776,10 @@ fn effect_api<R: Clone>(
                 request_function_in(access, tags.shift.clone(), 2, Vec::new(), false),
             ),
         ];
+        entries.push(entry("promise", promise_api));
         if expose_shared_heap {
             entries.push(entry("heap", heap_api));
+            entries.push(entry("vol", volume_api));
         }
         if expose_exit {
             entries.push(entry(
@@ -5706,6 +5924,26 @@ fn request_function_in(
         ),
         remaining,
     ))
+}
+
+/// The status of the promise that `value` stands as, without forcing it:
+/// `pending`, `fulfilled` or `broken`, or nothing where it is no promised
+/// value.
+fn promise_status(
+    context: &mut EvaluationPollContext,
+    eval_context: &EvalContext,
+    value: &RuntimeValueRoot,
+) -> Option<&'static str> {
+    context.evaluate(eval_context, |evaluator| {
+        evaluator.project_root(value, |access, value| match value {
+            Value::Promised(promise) => Some(match promise.access(access.values()).assignment() {
+                None => "pending",
+                Some(Ok(_)) => "fulfilled",
+                Some(Err(_)) => "broken",
+            }),
+            _ => None,
+        })
+    })
 }
 
 fn nullary_request(_access: &RuntimeValueAccess<'_>, tag: Key) -> Value {

@@ -373,6 +373,8 @@ foo <| .bar         # equivalent alternative without parentheses
 .heap.get Path       # dotted effect path: eff:(\api -> api.heap.get Path)
 .heap.set Path Value # blind replacement of shared heap state
 .heap.rewrite Path F # commit-ordered lazy rewrite of shared heap state
+.heap.vol >>= (\h -> .vol.get h Path)  # volume handles: .vol.new/get/set/rewrite
+.promise.status P   # 'pending, 'fulfilled or 'broken, without forcing P
 .movl 'eax 42       # applied effect: eff:(\api -> api.movl 'eax 42)
 
 my_proc = do

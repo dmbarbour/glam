@@ -66,6 +66,10 @@ and control flow.
   to the user. `.heap.get`/`.heap.set`/`.heap.rewrite` are the distinct
   shared-state effects; `[]` explicitly means the whole local state or whole
   shared heap according to the selected effect.
+- `.vol.*` take an opaque volume handle first; `.heap.vol` is an effect
+  returning the heap's handle, not a value in the API, since every dotted
+  path is effect sugar. `.promise.status` reads without forcing, and a
+  pending read in a cut is a read the retry validates.
 - Choice frames, journals, immediate sequence state, and host queues remain
   task-owned. An outer `.cut` snapshots shared heap and specialization data
   without inserting either into local state; failed alternatives discard

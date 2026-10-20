@@ -323,8 +323,8 @@ handle API goes.
      that reads it waits as one whose evaluation waited does.
    - Volumes as first-class capabilities (maintainer): an opaque volume
      handle and generic effects, `.vol.new`, `.vol.get`, `.vol.set` and
-     `.vol.rewrite`, with `.heap.vol` the shared heap's handle, so `.heap.*`
-     is shorthand; and machine operations to match, `m.volume_new`,
+     `.vol.rewrite`, with `.heap.vol` an effect returning the shared heap's
+     handle, so `.heap.*` is shorthand; and machine operations to match, `m.volume_new`,
      `m.volume_get`, `m.volume_set` and `m.volume_rewrite`, beside
      `m.heap_*`. Allocation is transactional: its ID is reserved at once and
      its root installed at commit, so an aborted transaction burns the ID.
@@ -1474,6 +1474,43 @@ maintainer's agreement):
   failing; a promise's status as it resolves, from the promised value and
   from its resolver; a cut waiting on a status woken by the resolution
   (forced).
+
+`api-requests`, reflection's volumes and promise status (2026-10-19):
+- Reflection gains `.vol.new Initial`, `.vol.get Handle Path`,
+  `.vol.set Handle Path Value` and `.vol.rewrite Handle Path Updater`,
+  `.heap.vol` and `.promise.status Promised`, with the handles turns use
+  (`reflection::volume_handle`). A volume effect evaluates its handle,
+  never the value, and fails where it names no volume of this runtime;
+  `.vol.get`, `.vol.set` and `.vol.rewrite` then act as the protected
+  volumes' effects do, observing, staging and committing alike.
+  `.vol.new` allocates within a cut's transaction, or alone in a commit
+  of its own outside one.
+- `.heap.vol` is a nullary request, as `.fail` is, not a value in the
+  effect API: a dotted path is sugar for an effect,
+  `eff:(\api -> api.heap.vol)`, so the handle comes from running it,
+  `.heap.vol >>= (\h -> .vol.get h Path)`.
+- `.promise.status` returns `'pending`, `'fulfilled` or `'broken` for a
+  promised value as it stands, never forcing it; another value is an
+  error, so a lazy value whose result would be the promise is too (forcing
+  it would wait on the promise). Reflection holds no resolvers, so it
+  reads promised values alone.
+- Within a cut, a pending read joins the transaction's read set: a failure
+  after it retries, and a blocked retry restarts once a promise it read
+  pending has resolved, which validation treats as a conflict. This is
+  finer than a turn's cut, which reruns after any change
+  (`perf-fine-grained-wakes`), since reflection's retries already validate
+  their reads; a commit does not validate the status, as a turn's does
+  not. A read outside a cut observes nothing, as a heap read outside one
+  does.
+- Effect channels from reflection stay with their consumers, as planned:
+  stderr in `api-effect-providers`, imports in `api-hosts-as-machines`.
+- Tests in `src/reflection/machine/tests.rs`: a volume allocated, written
+  and read through its handle, and within a cut; the heap's handle
+  reaching the shared heap; a volume effect without a handle failing; a
+  promise's status as it resolves or breaks, and an integer failing; a
+  cut that read a pending status retrying once the promise resolves
+  (forced: the search blocks, then the promise resolves and the host
+  wakes).
 
 ## Verification
 
