@@ -1230,6 +1230,37 @@ pub(super) enum ExactTargetStatus {
     None,
 }
 
+impl EvaluationWorkCoordinator {
+    /// The cell of the promise that `dependency` waits on, at the end of its
+    /// producer chain: the promise itself, or the one that the blocked work
+    /// producing it waits on, and so on. `None` where the chain reaches work
+    /// that runs, or ends at something other than a promise.
+    pub(crate) fn awaited_promise(&self, dependency: &WorkDependency) -> Option<PromiseId> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let mut current = dependency;
+        let mut seen = TrustedWorkIdSet::default();
+        loop {
+            if let WorkDependency::Promise(promise) = current {
+                return Some(promise.id());
+            }
+            let DependencyEdge::Producer(producer) = dependency_edge_locked(&state, current) else {
+                return None;
+            };
+            if !seen.insert(producer) {
+                return None;
+            }
+            let record = state.work.get(&producer)?;
+            if !matches!(record.state, WorkState::Blocked) {
+                return None;
+            }
+            current = work_dependency(record)?;
+        }
+    }
+}
+
 impl fmt::Debug for EvaluationWorkCoordinator {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         let state = self

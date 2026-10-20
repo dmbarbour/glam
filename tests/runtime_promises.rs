@@ -304,3 +304,61 @@ fn forks_resolving_one_promise_within_one_cut_fail_the_second_join() {
     })
     .expect("the turn should succeed");
 }
+
+#[test]
+fn a_cut_that_reads_the_value_of_a_promise_it_resolves_fails() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        m.promise();
+        m.set("resolver")?;
+        m.set("promised")?;
+        let error = m
+            .cut(|m| {
+                m.get("resolver")?;
+                m.push_int(1);
+                m.fulfill()?;
+                m.get("promised")?;
+                m.pop_int()
+            })
+            .expect_err("only the cut's commit would settle the promise");
+        assert!(
+            error.to_string().contains("a promise it resolves"),
+            "{error}"
+        );
+        m.get("resolver")?;
+        assert_eq!(
+            m.promise_status()?,
+            PromiseStatus::Pending,
+            "the failed cut resolved nothing"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_cut_that_reads_a_promise_it_resolves_through_a_lazy_value_fails() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        m.promise();
+        m.set("resolver")?;
+        m.make_dict(["value"])?;
+        m.set("record")?;
+        let error = m
+            .cut(|m| {
+                m.get("resolver")?;
+                m.push_int(1);
+                m.fulfill()?;
+                m.get("record")?;
+                m.access("value")?;
+                m.pop_int()
+            })
+            .expect_err("only the cut's commit would settle the promise");
+        assert!(
+            error.to_string().contains("a promise it resolves"),
+            "{error}"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}

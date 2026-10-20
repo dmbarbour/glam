@@ -587,6 +587,22 @@ impl StoreJournal {
         })
     }
 
+    /// Whether this transaction resolves any promise.
+    pub(crate) fn resolves_any(&self) -> bool {
+        self.edits
+            .iter()
+            .any(|edit| matches!(edit, StoreEdit::Resolve { .. }))
+    }
+
+    /// Whether this transaction resolves the promise whose cell is `cell`:
+    /// one whose value it cannot read, since only its commit settles it.
+    pub(crate) fn resolves_cell(&self, cell: crate::core::PromiseId) -> bool {
+        self.edits.iter().any(|edit| {
+            matches!(edit, StoreEdit::Resolve { promise, .. }
+                if self.snapshot.promises.cell(*promise) == Some(cell))
+        })
+    }
+
     /// Whether `branch`, a branch of this journal, resolves a promise that
     /// this journal resolved too since the fork: a second resolution, an
     /// error rather than a conflict, since running again would race again.

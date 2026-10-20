@@ -32,6 +32,11 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority, RuntimeValue
 
 use super::store::DeathNotice;
 
+/// Why a transaction cannot wait on the value of a promise it resolves: only
+/// its commit would settle it.
+pub(crate) const SELF_AWAITED: &str =
+    "the cut waits on the value of a promise it resolves, which only its commit settles";
+
 /// A promise's identity among its store's promises.
 pub(crate) type PromiseId = u64;
 
@@ -261,6 +266,15 @@ impl Promises {
                 PromiseEntry::Resolved { fulfilled: true } => PromiseStatus::Fulfilled,
                 PromiseEntry::Resolved { fulfilled: false } => PromiseStatus::Broken,
             })
+    }
+
+    /// The cell of `promise`, while it is pending: the identity that an
+    /// evaluation waiting on its value reports.
+    pub(crate) fn cell(&self, promise: PromiseId) -> Option<crate::core::PromiseId> {
+        match self.pending().entries.get(&promise)? {
+            PromiseEntry::Pending(root) => Some(root.id()),
+            PromiseEntry::Resolved { .. } => None,
+        }
     }
 
     /// How many promises the record holds, pending or resolved.

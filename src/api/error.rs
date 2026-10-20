@@ -16,6 +16,19 @@ pub struct Error {
     panic: Option<EvaluationPanic>,
     backtrack: bool,
     retry: bool,
+    /// What an evaluation that waited was waiting on.
+    awaited: Option<Awaited>,
+}
+
+/// What a waiting evaluation waited on: a promise, or work that produces
+/// what it needs.
+#[derive(Clone)]
+pub(crate) struct Awaited(crate::evaluation::WorkDependency);
+
+impl fmt::Debug for Awaited {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("Awaited(..)")
+    }
 }
 
 /// How an operation failed.
@@ -54,6 +67,7 @@ impl Error {
             panic: None,
             backtrack: false,
             retry: false,
+            awaited: None,
         }
     }
 
@@ -79,6 +93,15 @@ impl Error {
             // An evaluation that waits on what is not known yet, such as an
             // unresolved promise, is pushback.
             retry: error.permanent_failure().is_none(),
+            awaited: error
+                .unassigned_promise_root()
+                .map(|root| crate::evaluation::WorkDependency::Promise(root.clone()))
+                .or_else(|| {
+                    error
+                        .blocked_on()
+                        .map(|wait| crate::evaluation::WorkDependency::Wait(wait.0))
+                })
+                .map(Awaited),
         }
     }
 
@@ -92,6 +115,7 @@ impl Error {
             panic: Some(report),
             backtrack: false,
             retry: false,
+            awaited: None,
         }
     }
 
@@ -107,6 +131,19 @@ impl Error {
         }
     }
 
+    /// The cell of the promise that an evaluation which waited ultimately
+    /// waited on, following the work that would produce what it needed.
+    pub(crate) fn awaited_promise(
+        &self,
+        values: &CoreValueFactory,
+    ) -> Option<crate::core::PromiseId> {
+        let Awaited(dependency) = self.awaited.as_ref()?;
+        match dependency {
+            crate::evaluation::WorkDependency::Promise(promise) => Some(promise.id()),
+            _ => values.work_coordinator()?.awaited_promise(dependency),
+        }
+    }
+
     /// An explicit failure ([`ErrorKind::Backtrack`]).
     pub(crate) fn fail() -> Self {
         Self {
@@ -119,6 +156,7 @@ impl Error {
     pub(crate) fn retry(message: impl Into<Arc<str>>) -> Self {
         Self {
             retry: true,
+            awaited: None,
             ..Self::new(message)
         }
     }

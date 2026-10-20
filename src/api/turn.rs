@@ -1500,6 +1500,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         if let (Err(error), Some(cut)) = (&result, &mut self.cut)
             && error.kind() == ErrorKind::Retry
         {
+            // Only the cut's commit would settle a promise it resolves, so
+            // waiting on its value would wait forever
+            // (`promise-resolution-commits-with-its-cut`).
+            if cut.journal.resolves_any()
+                && error
+                    .awaited_promise(self.runtime.assembler.values().core())
+                    .is_some_and(|cell| cut.journal.resolves_cell(cell))
+            {
+                return Err(Error::new(crate::reflection::SELF_AWAITED));
+            }
             cut.observed = true;
             cut.awaits_evaluation = true;
         }
@@ -1738,7 +1748,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// when the outermost cut commits, and a failed cut resolves nothing.
     /// The cut sees its own resolution in [`Self::promise_status`], but not
     /// the promised value, which waits for the commit, so a cut that reads
-    /// the value of a promise it resolves waits forever. Where another
+    /// the value of a promise it resolves fails, as soon as its evaluation
+    /// would wait on it, directly or through lazy values. Where another
     /// resolution commits first, the cut's commit conflicts, and running
     /// again it finds the promise resolved.
     pub fn fulfill(&mut self) -> Result<(), Error> {

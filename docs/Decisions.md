@@ -2379,7 +2379,11 @@ maps the short names used here to file names.
   the value it resolves, which would need transactional promise cells and
   waits until the heaps are fast enough.
 - **Consequences:** a cut that waits on the value of a promise it
-  resolves waits forever, a known limitation. Amends
+  resolves could only wait forever. A turn's cut fails instead, once its
+  evaluation would wait on the promise, directly or through the work that
+  produces what it needs, which the coordinator follows to the promise
+  (maintainer, 2026-10-20: a wait can know its promise); a reflection cut
+  still waits, a known limitation. Amends
   `requests-travel-on-ports`, whose resolution within a cut was an
   asynchronous send. Publishing after the store's lock leaves a moment
   when a promise's status says resolved and its value still waits, which

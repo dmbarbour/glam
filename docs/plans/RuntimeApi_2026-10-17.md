@@ -1727,6 +1727,19 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   then delivers the wakes. An ordering test forces the check: a hook just
   before a commit's epoch advance finds the value already assigned, and it
   fails when the hook moves ahead of publication.
+- A cut that waits on a promise it resolves (maintainer: a wait can know
+  its promise). A turn's pushback keeps what its evaluation waited on, in
+  `Error`: a promise, or the work producing what it needed. Where its cut
+  resolves any promise, `EvaluationWorkCoordinator::awaited_promise`
+  follows the blocked producers to the promise at the end, and a promise
+  the cut resolves (`StoreJournal::resolves_cell`) fails the cut instead
+  of waiting forever. Tests in `tests/runtime_promises.rs`: the value read
+  directly, and through a lazy access, which waits on a lazy route the
+  coordinator follows. Reflection does not check yet: where its effect
+  blocks, `install_blocked` sees no transaction on the active branch, even
+  for `.eval` within a cut, so the check needs to find where a cut's
+  blocked evaluation is suspended. Until then such a cut waits, and
+  settlement reports it as a deadlock.
 
 ## Verification
 
@@ -1745,9 +1758,10 @@ the public API, in `tests/`.
   Doing better would need evaluation itself under the transaction that
   fulfills the promise. *Settled in part (2026-10-20,
   `api-transactional-promises`):* a resolution commits with its cut, and a
-  failed cut resolves nothing; what remains is a cut reading the value of
-  a promise it resolves, which waits forever until evaluation runs within
-  the transaction.
+  failed cut resolves nothing. A cut reading the value of a promise it
+  resolves fails in turns; in reflection it waits, which settlement reports
+  as a deadlock, until reflection checks its waits too. Reading that value
+  would need evaluation within the transaction.
 
 - Names, per step (above).
 - Hook errors, settled at `api-machine-errors` (maintainer, 2026-10-19):
