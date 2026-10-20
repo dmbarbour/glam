@@ -1372,3 +1372,22 @@ there, the views of key and value, and `GcRef::sibling`, which derives them;
 gate passed: its full gate, Miri over the library suite (236 passed, 4
 ignored), and both sanitizers (238 passed, 2 ignored); Glam's
 `scripts/check.sh` passed beside it.
+
+Later the same day, at the maintainer's direction, `Weak<T>` became a cell
+type of its own holding its ephemeron, in place of an alias for
+`Ephemeron<T, T>`, so a one-word weak cell can replace it without changing
+its API; and marking resolves an ephemeron whose key is already marked as it
+records it, leaving only the others to the rounds, which the collection
+report now counts (`CollectionReport::ephemeron_rounds`). In `heap::tests`:
+
+- the first test, whose key a root reaches, now also checks that its
+  collection ran no round; it fails if marking leaves every ephemeron to the
+  rounds;
+- the fixpoint test now reaches each ephemeron beside a chain of two nodes
+  to its key, so whichever order marking traces them, the key is unmarked
+  when the ephemeron is recorded. The first needs a round, and the second,
+  which only the first's value reaches, the next: two rounds. It fails if
+  marking stops after one.
+
+`Weak<T>`'s `Trace` impl joined the unsafe inventory; the views of key and
+value now share one site, a private function over either cell type.

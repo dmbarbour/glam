@@ -1776,16 +1776,27 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   collection, and whose handles no managed value could hold without
   leaking. `MutatorAccess::ephemeron` and `ephemeron_checked` allocate one
   from views or from checked bare pointers; `weak` and `weak_checked`
-  allocate a weak reference, an ephemeron whose key is its value
-  (`Weak<T>` names `Ephemeron<T, T>`). A view of one views its key and
-  value, `GcRef::entry` and `GcRef::target`, until it is cleared.
+  allocate a weak reference, a `Weak<T>` cell holding an ephemeron whose
+  key is its value. It was first an alias for `Ephemeron<T, T>`; a type of
+  its own (maintainer, the same day) polices the API and lets a one-word
+  weak cell replace it unseen. A view of one views its key and value,
+  `GcRef::entry` and `GcRef::target`, until it is cleared.
+- Each `Ephemeron<K, V>` instantiation is a class of its own, with its
+  own runs (maintainer, the same day): validation stays exact, where a
+  stale `Gc` whose slot another instantiation reused would otherwise pass
+  and view its key and value at the wrong types. Shared runs for no-drop
+  types of one size are a tentative performance step,
+  `perf-shared-no-drop-runs`.
 - Marking: a cell's trace reports the cell, not its words, through a
   crate-private visitor channel, and marking records it. Once the worklist
   drains, rounds over the recorded cells mark the value of each whose key
   is marked, draining the worklist after each, which may record more, until
   a round marks nothing new; then each recorded cell whose key stayed
   unmarked is cleared, before the sweep. A cell nothing reaches keeps
-  nothing alive and is swept.
+  nothing alive and is swept. A cell whose key is already marked when
+  marking reaches it keeps its value at once, without a round (maintainer,
+  the same day); `CollectionReport::ephemeron_rounds` counts the rounds
+  that marked.
 - Clearing is silent (maintainer, the same day). The first build queued a
   notice token per cleared ephemeron that a handle held, until the heap's
   owner took them, which an owner that never took them would grow without

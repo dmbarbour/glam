@@ -125,12 +125,13 @@ Ephemerons and weak references (`api-ephemerons`, 2026-10-20,
 `opaque-resources-reclaimed-when-unreachable`) are managed cells of two
 words, the key's and value's addresses, which live as any allocation does.
 Marking marks a reached ephemeron but traces neither word: it records the
-ephemeron. Once the worklist drains, marking repeats a round over the
-recorded ephemerons, marking the value of each whose key it marked and
-tracing from those values, which may record more, until a round marks
-nothing new; it then clears each recorded ephemeron whose key stayed
-unmarked, before any sweep. Clearing is silent: an owner notices a cleared
-ephemeron when it next views it. A weak reference is an ephemeron whose key
+ephemeron, and marks its value at once if its key is already marked. Once the
+worklist drains, marking repeats a round over the ephemerons still recorded,
+marking the value of each whose key it marked and tracing from those values,
+which may record more, until a round marks nothing new; it then clears each
+recorded ephemeron whose key stayed unmarked, before any sweep. Clearing is
+silent: an owner notices a cleared ephemeron when it next views it. A weak
+reference is a cell of its own type, `Weak<T>`, holding an ephemeron whose key
 is its value.
 
 The current collector is therefore a non-moving, stop-the-world full
@@ -1374,7 +1375,8 @@ reclamation through this interface.
 - `(First, Second)` visits both fields in order.
 - `Ephemeron<K, V>` reports itself, not its two words, as above; marking
   records it, and other visitors, which exist only in tests and
-  edge-transition hooks, ignore it.
+  edge-transition hooks, ignore it. `Weak<T>` reports its one field, its
+  ephemeron.
 - `()`, `u32`, and `u64` report no edges. Unit remains unallocatable because
   the collector rejects zero-sized payloads; its implementation exists so the
   compile-fail fixture can instantiate the generic allocation boundary.
@@ -1494,12 +1496,13 @@ collection.
 both live, allocated and of their types in this heap, as for
 `MutatorAccess::root`; `ephemeron_checked` takes bare `Gc`s and validates
 both in every build, as `root_checked` does. `weak` and `weak_checked` pass
-one value as both key and value. Either constructs the cell, the crate's
-unsafe `Ephemeron::new`, from that proof, then allocates it through the
-ordinary allocator under the same admission, which keeps any collection out
-until the view of the new cell, whose `'m` is that admission's borrow,
-exists. `Ephemeron` has no public constructor and no `Clone`, so every one
-is such an allocation, never a field of another value.
+one value as both key and value, and wrap the ephemeron in a `Weak<T>`.
+Each constructs the ephemeron, the crate's unsafe `Ephemeron::new`, from
+that proof, then allocates it, or its `Weak<T>`, through the ordinary
+allocator under the same admission, which keeps any collection out until
+the view of the new cell, whose `'m` is that admission's borrow, exists.
+Neither type has a public constructor or `Clone`, so every ephemeron is such
+an allocation, or the one field of a `Weak<T>` that is.
 
 A cell holds the key's and value's addresses as atomic pointers, written
 when constructed and otherwise only by a collection clearing them. It has no
@@ -1507,8 +1510,9 @@ when constructed and otherwise only by a collection clearing them. It has no
 a root or a traced edge reaches it, and an unreached cell is swept.
 
 Viewing a cell's key and value, `GcRef::entry` and, for a weak reference,
-`GcRef::target`, loads the key with Acquire and returns nothing where it is
-null, which a collection writes when it clears the cell. Otherwise both
+`GcRef::target`, goes through one private function over the cell's
+ephemeron, which is the cell or its one field. It loads the key with Acquire
+and returns nothing where it is null, which a collection writes when it clears the cell. Otherwise both
 addresses still identify live allocations of their types: the cell was made
 from proof of both in the heap that the cell's view proves it in; every
 collection since reached the cell, since an unreached cell is swept and no
@@ -1523,15 +1527,19 @@ excludes collection while they exist. A view proves its heap, so there is no
 cross-heap check.
 
 Marking records each cell it traces, at most once per collection, as the
-address of its pair. `ReachedEphemeron::pair`, unsafe, dereferences it while
-the recording collection holds exclusive authority and has swept nothing,
-so the marked cell is live and in place and nothing else writes it. Once
-the worklist drains, each round loads each recorded pair, dropping one that
-an earlier collection cleared, resolves the checked slot of its key and tests
-its mark bit, marking and enqueueing the value through ordinary checked
-discovery when the key is marked, then drains the worklist, which may record
-more cells; the rounds end when one marks nothing new, at most one round per
-recorded cell. Clearing stores null into the remaining pairs' key and value
+address of its ephemeron's pair. `ReachedEphemeron::pair`, unsafe,
+dereferences it while the recording collection holds exclusive authority and
+has swept nothing, so the marked cell is live and in place and nothing else
+writes it. Resolving a recorded pair loads it, drops it if an earlier
+collection cleared it, resolves the checked slot of its key and tests its
+mark bit, and, when the key is marked, marks and enqueues the value through
+ordinary checked discovery and drops the pair. Marking resolves the pairs
+each traced object recorded right after tracing it, so a value whose key is
+already marked joins the same drain. Once the worklist drains, each round
+resolves every pair still recorded, then drains the worklist, which may
+record more cells; the rounds end when one marks nothing new, at most one
+round per recorded cell, and the collection's report counts the rounds that
+marked. Clearing stores null into the remaining pairs' key and value
 with Release, before the sweep that may reclaim them, and reports nothing.
 
 ### `root_pool` chunks and slots

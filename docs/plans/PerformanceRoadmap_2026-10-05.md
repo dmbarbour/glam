@@ -290,6 +290,19 @@ Their sections hold their earlier evidence.
   might skip more, even registration. Root registration was 3% of a
   `.r ()` step on 2026-10-15, but its share should rise as the
   representation steps shrink the rest; measure then.
+- **Shared runs for no-drop types** (`perf-shared-no-drop-runs`), a
+  tentative idea, not planned (maintainer, 2026-10-20). Each managed Rust
+  type is an allocation class of its own, with its own 64 KiB runs, so
+  each type in use holds at least one partly filled run on every thread
+  that allocates it, and costs a class discovery and one of the 64 hot
+  class slots in each thread's cache. Ephemerons raised it: each
+  `Ephemeron<K, V>` instantiation is a class (`api-ephemerons`). No-drop
+  types of one slot size could share runs, with a type per slot, in a word
+  or a side table, for tracing's dispatch and for validation, which must
+  stay exact: checked roots and debug access compare a slot's type with
+  the type asked for, and safe code may keep a stale `Gc` whose slot
+  another type reuses. Measure first: glam allocates about fifteen managed
+  types, and fragmentation has shown in no profile yet.
 - **A module's fixed cost** (`perf-module-fixed-cost`), after the
   representation steps (maintainer, 2026-10-18), and not ahead of the
   runtime API plan unless it gets in the way. Compiling a module costs

@@ -9,10 +9,11 @@
 //!   stale-cursor epoch.
 //! - **Ephemerons.** An ephemeron is a managed cell that keeps its value only
 //!   while its key is reachable by another path. Marking records the
-//!   ephemerons it reaches without tracing them, repeats over them until a
-//!   round marks nothing new, then silently clears those whose keys stayed
-//!   unmarked, before the sweep. A weak reference is an ephemeron whose key
-//!   is its value.
+//!   ephemerons it reaches without tracing them, marking at once the values
+//!   of those whose keys are already marked. It repeats over the rest until
+//!   a round marks nothing new, then silently clears those whose keys stayed
+//!   unmarked, before the sweep. A weak reference is a cell holding an
+//!   ephemeron whose key is its value.
 //! - **Finalization.** Dead identities that need `Drop` move into a durable,
 //!   non-rootable finalization batch. It drains outside collector locks under
 //!   the installed finalizer mutator, and completed regions return allocator

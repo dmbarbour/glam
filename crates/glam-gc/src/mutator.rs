@@ -274,15 +274,7 @@ impl<'heap> MutatorAccess<'heap> {
         key: GcRef<'_, K>,
         value: GcRef<'_, V>,
     ) -> GcRef<'_, Ephemeron<K, V>> {
-        let (key, value) = (key.pointer(), value.pointer());
-        self.debug_assert_access(key);
-        self.debug_assert_access(value);
-        // SAFETY: the views prove a live `K` and a live `V` in this heap, the
-        // one heap the thread holds, under the admission that allocates the
-        // ephemeron below.
-        let ephemeron =
-            unsafe { Ephemeron::new(ErasedGc::new(key.cast()), ErasedGc::new(value.cast())) };
-        self.allocate_ephemeron(ephemeron)
+        self.allocate_cell(self.proven_ephemeron(key, value))
     }
 
     /// As [`Self::ephemeron`], for bare managed pointers, which prove
@@ -292,6 +284,41 @@ impl<'heap> MutatorAccess<'heap> {
         key: Gc<K>,
         value: Gc<V>,
     ) -> GcRef<'_, Ephemeron<K, V>> {
+        self.allocate_cell(self.checked_ephemeron(key, value))
+    }
+
+    /// Allocates a weak reference to `value`, which it views while some
+    /// other path reaches it. The view proves it live.
+    pub fn weak<T: Trace>(&self, value: GcRef<'_, T>) -> GcRef<'_, Weak<T>> {
+        self.allocate_cell(Weak::new(self.proven_ephemeron(value, value)))
+    }
+
+    /// As [`Self::weak`], for a bare managed pointer, checked as for
+    /// [`Self::root_checked`].
+    pub fn weak_checked<T: Trace>(&self, value: Gc<T>) -> GcRef<'_, Weak<T>> {
+        self.allocate_cell(Weak::new(
+            self.checked_ephemeron(value.duplicate_in(self), value),
+        ))
+    }
+
+    /// An ephemeron of views, for the caller to allocate under this access.
+    fn proven_ephemeron<K: Trace, V: Trace>(
+        &self,
+        key: GcRef<'_, K>,
+        value: GcRef<'_, V>,
+    ) -> Ephemeron<K, V> {
+        let (key, value) = (key.pointer(), value.pointer());
+        self.debug_assert_access(key);
+        self.debug_assert_access(value);
+        // SAFETY: the views prove a live `K` and a live `V` in this heap, the
+        // one heap the thread holds, and the caller allocates the ephemeron
+        // under this admission.
+        unsafe { Ephemeron::new(ErasedGc::new(key.cast()), ErasedGc::new(value.cast())) }
+    }
+
+    /// An ephemeron of checked bare pointers, for the caller to allocate
+    /// under this access.
+    fn checked_ephemeron<K: Trace, V: Trace>(&self, key: Gc<K>, value: Gc<V>) -> Ephemeron<K, V> {
         let (key, value) = (key.erase(), value.erase());
         self.heap.validate_rootable(
             key,
@@ -306,31 +333,17 @@ impl<'heap> MutatorAccess<'heap> {
                 .unwrap_or_else(metadata_for::<V>),
         );
         // SAFETY: both were just checked allocated values of their types in
-        // this heap that no pending finalization holds, so live, under the
-        // admission that allocates the ephemeron below.
-        let ephemeron = unsafe { Ephemeron::new(key, value) };
-        self.allocate_ephemeron(ephemeron)
+        // this heap that no pending finalization holds, so live, and the
+        // caller allocates the ephemeron under this admission.
+        unsafe { Ephemeron::new(key, value) }
     }
 
-    fn allocate_ephemeron<K: Trace, V: Trace>(
-        &self,
-        ephemeron: Ephemeron<K, V>,
-    ) -> GcRef<'_, Ephemeron<K, V>> {
+    /// Allocates a cell of the crate's own, whose two words always have a
+    /// supported layout.
+    fn allocate_cell<T: Trace>(&self, cell: T) -> GcRef<'_, T> {
         self.allocator()
             .expect("an ephemeron's two words have a supported layout")
-            .alloc_view(ephemeron)
-    }
-
-    /// Allocates a weak reference to `value`: an ephemeron whose key is its
-    /// value, which it views while some other path reaches it.
-    pub fn weak<T: Trace>(&self, value: GcRef<'_, T>) -> GcRef<'_, Weak<T>> {
-        self.ephemeron(value, value)
-    }
-
-    /// As [`Self::weak`], for a bare managed pointer, checked as for
-    /// [`Self::root_checked`].
-    pub fn weak_checked<T: Trace>(&self, value: Gc<T>) -> GcRef<'_, Weak<T>> {
-        self.ephemeron_checked(value.duplicate_in(self), value)
+            .alloc_view(cell)
     }
 
     pub(crate) fn debug_assert_access<T: Trace>(&self, pointer: NonNull<T>) {

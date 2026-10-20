@@ -13,8 +13,10 @@
 //! Clearing is silent: an owner notices a cleared ephemeron when it next uses
 //! it, or when it next traces what holds it. An ephemeron that nothing
 //! reaches is not recorded: it keeps nothing alive, and is swept as any
-//! allocation is. A weak reference is an ephemeron whose key and value
-//! coincide.
+//! allocation is. Marking resolves an ephemeron at once where it reaches one
+//! whose key is already marked, so only those reached first wait for the
+//! rounds. A weak reference is a cell of its own type holding an ephemeron
+//! whose key and value coincide.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -86,9 +88,14 @@ pub struct Ephemeron<K: Trace, V: Trace> {
     marker: PhantomData<fn() -> (K, V)>,
 }
 
-/// A weak reference: an ephemeron whose key is its value, which it views
-/// while some other path reaches it ([`GcRef::target`]).
-pub type Weak<T> = Ephemeron<T, T>;
+/// A weak reference: a managed cell that views its value while some other
+/// path reaches it, and keeps it alive by no means of its own.
+///
+/// It lives as any managed value does: [`crate::MutatorAccess::weak`]
+/// allocates one, and a view of it views its value ([`GcRef::target`]). Once
+/// a collection finds the value unreachable, it clears the weak reference,
+/// silently.
+pub struct Weak<T: Trace>(Ephemeron<T, T>);
 
 impl<K: Trace, V: Trace> Ephemeron<K, V> {
     /// An ephemeron of `key` and `value`.
@@ -114,10 +121,31 @@ impl<K: Trace, V: Trace> Ephemeron<K, V> {
     }
 }
 
+impl<T: Trace> Weak<T> {
+    pub(crate) fn new(ephemeron: Ephemeron<T, T>) -> Self {
+        Self(ephemeron)
+    }
+
+    /// Whether a collection has found the value unreachable.
+    #[must_use]
+    pub fn is_cleared(&self) -> bool {
+        self.0.is_cleared()
+    }
+}
+
 impl<K: Trace, V: Trace> fmt::Debug for Ephemeron<K, V> {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
             .debug_struct("Ephemeron")
+            .field("cleared", &self.is_cleared())
+            .finish_non_exhaustive()
+    }
+}
+
+impl<T: Trace> fmt::Debug for Weak<T> {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter
+            .debug_struct("Weak")
             .field("cleared", &self.is_cleared())
             .finish_non_exhaustive()
     }
@@ -134,34 +162,79 @@ unsafe impl<K: Trace, V: Trace> Trace for Ephemeron<K, V> {
     }
 }
 
+// SAFETY: a weak reference's one field is its ephemeron, which it reports as
+// that ephemeron reports itself.
+unsafe impl<T: Trace> Trace for Weak<T> {
+    fn trace(&self, visitor: &mut Visitor<'_>) {
+        self.0.trace(visitor);
+    }
+}
+
+/// A managed cell that is, or holds, one ephemeron.
+trait EphemeronCell: Trace {
+    type Key: Trace;
+    type Value: Trace;
+
+    fn ephemeron(&self) -> &Ephemeron<Self::Key, Self::Value>;
+}
+
+impl<K: Trace, V: Trace> EphemeronCell for Ephemeron<K, V> {
+    type Key = K;
+    type Value = V;
+
+    fn ephemeron(&self) -> &Self {
+        self
+    }
+}
+
+impl<T: Trace> EphemeronCell for Weak<T> {
+    type Key = T;
+    type Value = T;
+
+    fn ephemeron(&self) -> &Ephemeron<T, T> {
+        &self.0
+    }
+}
+
+/// Views of an ephemeron cell's key and value.
+type EntryViews<'m, C> = (
+    GcRef<'m, <C as EphemeronCell>::Key>,
+    GcRef<'m, <C as EphemeronCell>::Value>,
+);
+
+/// Views the key and value of the ephemeron that `cell` views or holds, for
+/// as long as that view, unless a collection cleared it.
+fn view_entry<C: EphemeronCell>(cell: GcRef<'_, C>) -> Option<EntryViews<'_, C>> {
+    let (key, value) = cell.get().ephemeron().pair.load()?;
+    // SAFETY: the ephemeron was made from proof of a live key and value of
+    // its types in its heap, the heap this view proves the cell in. Every
+    // collection since reached the cell, or it would have been swept and not
+    // viewed now, and either marked its key, and then its value from it, so
+    // both survived the sweep, or left the key unmarked and cleared it before
+    // sweeping. The key is not cleared, so both are still live, and the
+    // view's borrowed admission excludes collection while the views exist.
+    unsafe {
+        Some((
+            cell.sibling(key.as_ptr().cast::<C::Key>()),
+            cell.sibling(value.as_ptr().cast::<C::Value>()),
+        ))
+    }
+}
+
 impl<'m, K: Trace, V: Trace> GcRef<'m, Ephemeron<K, V>> {
     /// Views the key and value for as long as this view, or `None` once a
     /// collection found the key unreachable.
     #[must_use]
     pub fn entry(self) -> Option<(GcRef<'m, K>, GcRef<'m, V>)> {
-        let (key, value) = self.get().pair.load()?;
-        // SAFETY: the ephemeron was made from proof of a live `K` and a live
-        // `V` in its heap, the heap that this view proves it in. Every
-        // collection since reached it, or it would have been swept and not
-        // viewed now, and either marked its key, and then its value from it,
-        // so both survived the sweep, or left the key unmarked and cleared it
-        // before sweeping. The key is not cleared, so both are still live,
-        // and the view's borrowed admission excludes collection for `'m`.
-        unsafe {
-            Some((
-                self.sibling(key.as_ptr().cast::<K>()),
-                self.sibling(value.as_ptr().cast::<V>()),
-            ))
-        }
+        view_entry(self)
     }
 }
 
 impl<'m, T: Trace> GcRef<'m, Weak<T>> {
     /// Views the value for as long as this view, or `None` once a collection
-    /// found the key unreachable: for a weak reference, once nothing else
-    /// reaches its value.
+    /// found it unreachable.
     #[must_use]
     pub fn target(self) -> Option<GcRef<'m, T>> {
-        self.entry().map(|(_, value)| value)
+        view_entry(self).map(|(_, value)| value)
     }
 }

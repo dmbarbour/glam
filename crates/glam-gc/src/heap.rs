@@ -68,6 +68,7 @@ pub struct CollectionReport {
     eagerly_swept_slots: usize,
     peak_object_worklist_len: usize,
     peak_object_worklist_capacity: usize,
+    ephemeron_rounds: usize,
     pause_duration: Duration,
     trace_duration: Duration,
     sweep_duration: Duration,
@@ -101,6 +102,16 @@ impl CollectionReport {
     #[must_use]
     pub const fn marked_slots(self) -> usize {
         self.marked_slots
+    }
+
+    /// Returns how many rounds over the reached ephemerons marked a value,
+    /// each followed by tracing again.
+    ///
+    /// An ephemeron whose key is already marked when marking reaches it
+    /// keeps its value at once, without a round.
+    #[must_use]
+    pub const fn ephemeron_rounds(self) -> usize {
+        self.ephemeron_rounds
     }
 
     /// Returns slots retained without dispatching their `Trace` implementation.
@@ -1632,6 +1643,7 @@ struct MarkSummary {
     conservatively_retained_slots: usize,
     peak_object_worklist_len: usize,
     peak_object_worklist_capacity: usize,
+    ephemeron_rounds: usize,
 }
 
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -2391,6 +2403,7 @@ struct MarkAttempt {
     /// The ephemerons marking has reached whose values it has not yet
     /// marked through them.
     ephemerons: Vec<ReachedEphemeron>,
+    ephemeron_round_count: usize,
 }
 
 impl MarkAttempt {
@@ -2524,6 +2537,7 @@ impl MarkAttempt {
     fn trace_worklist(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
         let mut ephemerons = std::mem::take(&mut self.ephemerons);
         while let Some(work) = self.worklist.pop() {
+            let recorded = ephemerons.len();
             let mut visit = |edge| {
                 self.discover(data, edge)
                     .unwrap_or_else(|error| error.raise_traced_edge(work, edge));
@@ -2540,47 +2554,71 @@ impl MarkAttempt {
                 .traced_object_count
                 .checked_add(1)
                 .expect("traced-object count exhausted");
+            // An ephemeron whose key is already marked keeps its value at
+            // once, which joins this drain; the others wait for the rounds.
+            self.resolve_ephemerons(data, &mut ephemerons, recorded)?;
         }
         self.ephemerons = ephemerons;
         Ok(())
     }
 
-    /// Marks the value of each reached ephemeron whose key is marked,
-    /// tracing from it, until a round marks nothing new, since a value may
-    /// reach another ephemeron or its key; then clears, silently, the
-    /// ephemerons whose keys stayed unmarked. Runs once the roots' worklist
+    /// Marks the value of each ephemeron of `ephemerons[from..]` whose key
+    /// is marked, removing it, and any that an earlier collection cleared,
+    /// from the list; returns whether it marked anything new.
+    fn resolve_ephemerons(
+        &mut self,
+        data: &mut ManagedData,
+        ephemerons: &mut Vec<ReachedEphemeron>,
+        from: usize,
+    ) -> Result<bool, CollectorLookupError> {
+        let mut marked = false;
+        let mut index = from;
+        while index < ephemerons.len() {
+            // SAFETY: this collection recorded the ephemeron, holds exclusive
+            // authority, and has swept nothing.
+            let pair = unsafe { ephemerons[index].pair() };
+            let Some((key, value)) = pair.load() else {
+                // An earlier collection cleared it: it holds nothing.
+                ephemerons.swap_remove(index);
+                continue;
+            };
+            let key = collector_slot_in(&data.arena, &data.classes, key)?;
+            if data.arena.owner_slot_is_marked(key.owner) {
+                marked |= self.discover(data, value)?;
+                ephemerons.swap_remove(index);
+            } else {
+                index += 1;
+            }
+        }
+        Ok(marked)
+    }
+
+    /// Marks the value of each recorded ephemeron whose key is now marked,
+    /// one whose key marking had not reached when it recorded it, tracing
+    /// from it, until a round marks nothing new, since a value may reach
+    /// another ephemeron or its key; then clears, silently, the ephemerons
+    /// whose keys stayed unmarked. Runs once the roots' worklist
     /// has drained, before anything is swept
     /// (`opaque-resources-reclaimed-when-unreachable`).
     fn trace_ephemerons(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
         loop {
-            let mut marked = false;
-            let mut index = 0;
-            while index < self.ephemerons.len() {
-                // SAFETY: this collection recorded the ephemeron, holds
-                // exclusive authority, and has swept nothing.
-                let pair = unsafe { self.ephemerons[index].pair() };
-                let Some((key, value)) = pair.load() else {
-                    // An earlier collection cleared it: it holds nothing.
-                    self.ephemerons.swap_remove(index);
-                    continue;
-                };
-                let key = collector_slot_in(&data.arena, &data.classes, key)?;
-                if data.arena.owner_slot_is_marked(key.owner) {
-                    marked |= self.discover(data, value)?;
-                    self.ephemerons.swap_remove(index);
-                } else {
-                    index += 1;
-                }
-            }
+            let mut ephemerons = std::mem::take(&mut self.ephemerons);
+            let marked = self.resolve_ephemerons(data, &mut ephemerons, 0)?;
+            self.ephemerons = ephemerons;
             if !marked {
                 break;
             }
+            self.ephemeron_round_count = self
+                .ephemeron_round_count
+                .checked_add(1)
+                .expect("ephemeron round count exhausted");
             // Tracing the newly marked values may record more ephemerons.
             self.trace_worklist(data)?;
         }
         // Every key still recorded stayed unmarked through the last round.
         for reached in self.ephemerons.drain(..) {
-            // SAFETY: as above.
+            // SAFETY: this collection recorded the ephemeron, holds exclusive
+            // authority, and has swept nothing.
             unsafe { reached.pair() }.clear();
         }
         Ok(())
@@ -2598,6 +2636,7 @@ impl MarkAttempt {
             conservatively_retained_slots: self.conservatively_retained_slot_count,
             peak_object_worklist_len: self.peak_object_worklist_len,
             peak_object_worklist_capacity: self.peak_object_worklist_capacity,
+            ephemeron_rounds: self.ephemeron_round_count,
         }
     }
 }
@@ -4158,6 +4197,7 @@ impl<'heap> CollectionAttempt<'heap> {
                 eagerly_swept_slots: summary.eagerly_swept_slots,
                 peak_object_worklist_len: summary.mark.peak_object_worklist_len,
                 peak_object_worklist_capacity: summary.mark.peak_object_worklist_capacity,
+                ephemeron_rounds: summary.mark.ephemeron_rounds,
                 pause_duration: summary.pause_duration,
                 trace_duration: summary.trace_duration,
                 sweep_duration: summary.sweep_duration,
@@ -11983,8 +12023,13 @@ mod tests {
             (mutator.root(key), mutator.root(ephemeron), value_traces)
         });
 
-        heap.collect_full().unwrap();
+        let report = heap.collect_full().unwrap();
         assert_eq!(value_traces.load(Ordering::Relaxed), 1, "the key keeps it");
+        assert_eq!(
+            report.ephemeron_rounds(),
+            0,
+            "its key was marked when marking reached it, so it needed no round"
+        );
         heap.mutate(|mutator| {
             let (key, _) = ephemeron.as_gc(mutator).entry().expect("the key lives");
             assert!(key.same_allocation(key_root.as_gc(mutator)));
@@ -12024,54 +12069,64 @@ mod tests {
         assert!(!slot_is_marked(&heap, value_slot));
     }
 
-    /// A value holding a key and the ephemeron keyed on it.
-    type KeyAndEphemeron = (
+    /// The head of a chain to a key, then an ephemeron keyed on it.
+    type ChainAndEphemeron<V> = (
         crate::Gc<GraphNode>,
-        crate::Gc<crate::Ephemeron<GraphNode, GraphNode>>,
+        crate::Gc<crate::Ephemeron<GraphNode, V>>,
     );
+
+    /// Allocates a chain of two nodes to `key` and views its head. Traced
+    /// beside an ephemeron keyed on `key`, it leaves the key unmarked when
+    /// marking reaches the ephemeron, whichever order marking traces them.
+    fn chain_to<'m>(
+        mutator: &'m crate::MutatorAccess<'_>,
+        key: crate::GcRef<'m, GraphNode>,
+    ) -> crate::GcRef<'m, GraphNode> {
+        let nodes = mutator.allocator::<GraphNode>().unwrap();
+        let near = nodes.alloc_view(graph_node_with_edge(
+            Arc::new(AtomicUsize::new(0)),
+            key.edge(),
+        ));
+        nodes.alloc_view(graph_node_with_edge(
+            Arc::new(AtomicUsize::new(0)),
+            near.edge(),
+        ))
+    }
 
     #[test]
     fn ephemerons_mark_to_a_fixpoint_through_one_another() {
         let heap = Heap::new();
-        let (key_root, first, second_value_traces, second_slot) = heap.mutate(|mutator| {
+        let (root, second_value_traces) = heap.mutate(|mutator| {
             let (first_key, _) = ephemeron_node(mutator);
             let (second_key, _) = ephemeron_node(mutator);
             let (second_value, second_value_traces) = ephemeron_node(mutator);
-            // Only the first's value reaches the second ephemeron and its
-            // key, so marking records the second only in its first round,
-            // and marks its value only in the next.
             let second = mutator.ephemeron(second_key, second_value);
-            let second_slot = collector_slot(&heap, &second.edge());
+            // Only the first's value reaches the second ephemeron and, by a
+            // chain, its key.
             let first_value = mutator
-                .allocator::<KeyAndEphemeron>()
+                .allocator::<ChainAndEphemeron<GraphNode>>()
                 .unwrap()
-                .alloc_view((second_key.edge(), second.edge()));
+                .alloc_view((chain_to(mutator, second_key).edge(), second.edge()));
             let first = mutator.ephemeron(first_key, first_value);
-            (
-                mutator.root(first_key),
-                mutator.root(first),
-                second_value_traces,
-                second_slot,
-            )
+            let root = mutator
+                .allocator::<ChainAndEphemeron<ChainAndEphemeron<GraphNode>>>()
+                .unwrap()
+                .alloc_view((chain_to(mutator, first_key).edge(), first.edge()));
+            (mutator.root(root), second_value_traces)
         });
 
-        heap.collect_full().unwrap();
+        let report = heap.collect_full().unwrap();
         assert_eq!(
             second_value_traces.load(Ordering::Relaxed),
             1,
             "the first value reached the second ephemeron and its key"
         );
-        heap.mutate(|mutator| assert!(first.as_gc(mutator).entry().is_some()));
-
-        drop(key_root);
-        heap.collect_full().unwrap();
-        heap.mutate(|mutator| assert!(first.get(mutator).is_cleared()));
         assert_eq!(
-            second_value_traces.load(Ordering::Relaxed),
-            1,
-            "nothing reached the second ephemeron to keep its value"
+            report.ephemeron_rounds(),
+            2,
+            "each was reached before its key; the second only once the first's round marked its value"
         );
-        assert!(!slot_is_marked(&heap, second_slot), "nor the second itself");
+        drop(root);
     }
 
     #[test]
