@@ -994,9 +994,10 @@ mutation admission are released and its wake is delivered. A public resolver
 uses the same idempotent retirement rule and becomes inert if its runtime value
 domain has already retired. The store's promises, which machines and
 reflection resolve, settle with the commit that resolves them, under the
-store's lock; the committer then publishes each value under the admission it
-still holds, advances the observation epoch, and only then delivers the wakes,
-so every wake on such a promise follows its publication
+store's lock, and the commit advances the observation epoch. Fulfillment then
+follows as a logically asynchronous event: the committer publishes each value,
+waking what waits on the promise, and advances the epoch again, so a waiter
+that the commit's advance woke before the value was there wakes once more
 (`promise-resolution-commits-with-its-cut`).
 
 A task-owned promise has an active wait record only while its assignment is

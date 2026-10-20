@@ -2359,13 +2359,15 @@ maps the short names used here to file names.
     outside one it commits on its own.
   - The commit settles the promise's record under the store's lock, and
     writes the promise's place, so readers of its status conflict and
-    wake. Having released the store, the committer publishes the value
-    under the runtime-mutation admission it still holds, then advances the
-    observation epoch, and only then delivers wakes: every wake on the
-    promise follows its publication, or a cut woken by the epoch could
-    find the value missing and wait again, past the publication. The
-    commit decides atomically; publishing after it is safe while the gap
-    is brief (maintainer, 2026-10-20).
+    wake; it advances the observation epoch as any commit does, and the
+    promise is claimed, so it cannot resolve twice. Fulfillment is
+    logically asynchronous, after it (maintainer, 2026-10-20): the
+    committer publishes the value, waking what waits on the promise
+    itself, then advances the epoch again. A cut that the first advance
+    woke before the value was there, and that waited again, wakes once
+    more; a single advance before the publication would lose that wake.
+    The commit decides atomically, and publishing after it is safe while
+    the gap is brief.
   - A resolution that another commits first makes its transaction
     conflict; running again, the transaction finds the promise resolved,
     and resolving it fails unless it checked. Forks of one cut that

@@ -211,8 +211,8 @@ pub(crate) struct RuntimeSharedResources {
     /// they bind, as they do once a `Runtime` holds the runtime
     /// (`machines-inherit-an-environment`).
     machine_environment: AtomicBool,
-    /// Runs once, at the next commit, just before it advances the
-    /// observation epoch, for ordering tests.
+    /// Runs once, at the next fulfillment, just before its epoch advance,
+    /// for ordering tests.
     #[cfg(test)]
     before_epoch_advance: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
@@ -409,20 +409,12 @@ impl RuntimeSharedResources {
                 state.reflection.take_settled(),
             )
         };
-        // The promised values publish before the epoch advances, and every
-        // wake follows both.
-        let publications =
-            crate::reflection::publish_settled(self.values.core(), &mutation, settled);
-        #[cfg(test)]
-        self.run_before_epoch_advance();
         if changed {
             self.publish_observation(mutation);
         } else {
             drop(mutation);
         }
-        for publication in publications {
-            publication.notify();
-        }
+        self.fulfill_settled(settled);
         result
     }
 
@@ -480,20 +472,12 @@ impl RuntimeSharedResources {
                 std::panic::resume_unwind(payload)
             }
         };
-        // The promised values publish before the epoch advances, and every
-        // wake follows both.
-        let publications =
-            crate::reflection::publish_settled(self.values.core(), &mutation, settled);
-        #[cfg(test)]
-        self.run_before_epoch_advance();
         if changed {
             self.publish_observation(mutation);
         } else {
             drop(mutation);
         }
-        for publication in publications {
-            publication.notify();
-        }
+        self.fulfill_settled(settled);
         result
     }
 
@@ -605,8 +589,21 @@ impl RuntimeSharedResources {
         broken || reclaimed
     }
 
-    /// Runs `hook` at the next commit, just before it advances the
-    /// observation epoch.
+    /// Fulfills what a commit settled, as a logically asynchronous event
+    /// after the commit (`promise-resolution-commits-with-its-cut`): the
+    /// commit claimed the promises and advanced the observation epoch; their
+    /// values now publish, waking what waits on them, and the epoch advances
+    /// again, so a waiter that the first advance woke before the values were
+    /// there wakes once more.
+    fn fulfill_settled(&self, settled: Vec<crate::reflection::Settled>) {
+        if crate::reflection::publish_settled(self.values.core(), settled) {
+            #[cfg(test)]
+            self.run_before_epoch_advance();
+            self.publish_observation(self.mutation_guard());
+        }
+    }
+
+    /// Runs `hook` at the next fulfillment, just before its epoch advance.
     #[cfg(test)]
     pub(crate) fn before_epoch_advance_for_test(&self, hook: impl FnOnce() + Send + 'static) {
         *self.before_epoch_advance.lock().unwrap() = Some(Box::new(hook));

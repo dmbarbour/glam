@@ -430,7 +430,7 @@ fn settlement_collects_and_acts_on_death_notices_first() {
 }
 
 #[test]
-fn a_resolution_publishes_its_value_before_its_commit_advances_the_epoch() {
+fn a_resolution_publishes_its_value_before_the_epoch_advances_again() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     rt.run("m", |m| {
         m.promise();
@@ -439,9 +439,10 @@ fn a_resolution_publishes_its_value_before_its_commit_advances_the_epoch() {
         let values = m.runtime.assembler.values();
         let seen = Arc::new(Mutex::new(None));
         let hook_seen = Arc::clone(&seen);
-        // A cut waiting on the promised value wakes as the epoch advances,
-        // so the value must be there by then, or the cut would wait again and
-        // miss it (`promise-resolution-commits-with-its-cut`).
+        // A cut waiting on the promised value wakes as the epoch advances.
+        // The commit's own advance may come before the value; the one after
+        // fulfillment must not, or a cut that woke early and waited again
+        // would miss it (`promise-resolution-commits-with-its-cut`).
         m.resources().before_epoch_advance_for_test(move || {
             let assigned = values.with_access(|scoped| {
                 match scoped
@@ -463,7 +464,7 @@ fn a_resolution_publishes_its_value_before_its_commit_advances_the_epoch() {
         assert_eq!(
             *seen.lock().unwrap(),
             Some(true),
-            "the commit published the value before advancing the epoch"
+            "the value published before the epoch advanced again"
         );
         Ok(())
     })

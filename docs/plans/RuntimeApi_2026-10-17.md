@@ -1720,12 +1720,17 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
 - Publication order, after the maintainer's review the same day: the
   first build advanced the observation epoch before publishing the
   values, so a cut waiting on a promised value could wake to the epoch,
-  find the value missing, and wait again past its publication. The
-  committer now publishes under the mutation admission it still holds
-  (`ManagedPromiseRoot::publish_admitted`, over
-  `CompletionSubscriptions::publish_admitted`), then advances the epoch,
-  then delivers the wakes. An ordering test forces the check: a hook just
-  before a commit's epoch advance finds the value already assigned, and it
+  find the value missing, and wait again past its publication. A second
+  build published under the mutation admission the committer still held,
+  before the epoch advance, through new admitted variants of promise
+  publication. The maintainer preferred two epochs, cheaper to maintain
+  (2026-10-20): the commit claims the promises and advances the epoch;
+  fulfillment, logically asynchronous, publishes the values through the
+  ordinary path, waking what waits on the promises, and advances the
+  epoch again (`RuntimeSharedResources::fulfill_settled`). The admitted
+  variants went. It costs one extra advance per commit that resolves a
+  promise. An ordering test forces the check: a hook just before
+  fulfillment's epoch advance finds the value already assigned, and it
   fails when the hook moves ahead of publication.
 - A cut that waits on a promise it resolves (maintainer: a wait can know
   its promise). A turn's pushback keeps what its evaluation waited on, in
