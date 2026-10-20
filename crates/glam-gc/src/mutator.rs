@@ -7,7 +7,7 @@ use std::sync::Arc;
 use crate::class::{ObjectMetadata, metadata_for};
 use crate::run::{AllocationClassId, RunGeometry};
 use crate::thread_cache::{ThreadCacheHandle, ThreadHeapEntry};
-use crate::{Gc, GcRef, Root, Trace, UnsupportedLayout, heap::HeapInner};
+use crate::{Ephemeron, Gc, GcRef, Root, Trace, UnsupportedLayout, Weak, heap::HeapInner};
 
 use crate::trace::ErasedGc;
 
@@ -261,6 +261,60 @@ impl<'heap> MutatorAccess<'heap> {
             .cached_metadata::<T>()
             .unwrap_or_else(metadata_for::<T>);
         self.heap.register_root(&self.cache, value, expected)
+    }
+
+    /// Constructs an ephemeron of `key` and `value`: the value lives while
+    /// some other path reaches the key, and neither lives by the ephemeron
+    /// alone. Once a collection finds the key unreachable, it clears the
+    /// ephemeron and queues `notice` for
+    /// [`Heap::take_ephemeron_notices`](crate::Heap::take_ephemeron_notices).
+    /// The views prove both live.
+    pub fn ephemeron<K: Trace, V: Trace>(
+        &self,
+        key: GcRef<'_, K>,
+        value: GcRef<'_, V>,
+        notice: u64,
+    ) -> Ephemeron<K, V> {
+        let (key, value) = (key.pointer(), value.pointer());
+        self.debug_assert_access(key);
+        self.debug_assert_access(value);
+        self.heap.register_ephemeron(
+            ErasedGc::new(key.cast()),
+            ErasedGc::new(value.cast()),
+            notice,
+        )
+    }
+
+    /// As [`Self::ephemeron`], for bare managed pointers, which prove
+    /// nothing: every build checks both as for [`Self::root_checked`].
+    pub fn ephemeron_checked<K: Trace, V: Trace>(
+        &self,
+        key: Gc<K>,
+        value: Gc<V>,
+        notice: u64,
+    ) -> Ephemeron<K, V> {
+        let expected = (
+            self.cache
+                .cached_metadata::<K>()
+                .unwrap_or_else(metadata_for::<K>),
+            self.cache
+                .cached_metadata::<V>()
+                .unwrap_or_else(metadata_for::<V>),
+        );
+        self.heap
+            .register_checked_ephemeron(key, value, notice, expected)
+    }
+
+    /// Constructs a weak reference to `value`: an ephemeron whose key is its
+    /// value, which it views while some other path reaches it.
+    pub fn weak<T: Trace>(&self, value: GcRef<'_, T>, notice: u64) -> Weak<T> {
+        Weak::new(self.ephemeron(value, value, notice))
+    }
+
+    /// As [`Self::weak`], for a bare managed pointer, checked as for
+    /// [`Self::root_checked`].
+    pub fn weak_checked<T: Trace>(&self, value: Gc<T>, notice: u64) -> Weak<T> {
+        Weak::new(self.ephemeron_checked(value.duplicate_in(self), value, notice))
     }
 
     pub(crate) fn debug_assert_access<T: Trace>(&self, pointer: NonNull<T>) {

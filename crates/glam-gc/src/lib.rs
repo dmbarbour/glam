@@ -7,6 +7,11 @@
 //!   publication prefers. A retained partial run clears its dead allocations
 //!   and publishes exact lease masks, eligible class frontiers, and one final
 //!   stale-cursor epoch.
+//! - **Ephemerons.** An ephemeron keeps its value only while its key is
+//!   reachable by another path; marking repeats over the ephemerons until a
+//!   round marks nothing new, then clears those whose keys stayed unmarked
+//!   before the sweep and queues their notices. A weak reference is an
+//!   ephemeron whose key is its value.
 //! - **Finalization.** Dead identities that need `Drop` move into a durable,
 //!   non-rootable finalization batch. It drains outside collector locks under
 //!   the installed finalizer mutator, and completed regions return allocator
@@ -33,6 +38,8 @@ mod admission;
 mod arena;
 #[expect(unsafe_code, reason = "reviewed canonical metadata dispatch")]
 mod class;
+#[expect(unsafe_code, reason = "reviewed ephemeron access boundary")]
+mod ephemeron;
 #[expect(unsafe_code, reason = "reviewed trace, sweep, and drop dispatch")]
 mod heap;
 #[expect(unsafe_code, reason = "reviewed mutation boundary")]
@@ -64,6 +71,7 @@ pub use deterministic::{
 };
 
 pub use class::UnsupportedLayout;
+pub use ephemeron::{Ephemeron, Weak};
 pub use heap::{
     CollectionError, CollectionPolicy, CollectionReport, Heap, HeapActivity,
     HeapMaintenanceSnapshot, HeapMetrics, HeapStatistics,

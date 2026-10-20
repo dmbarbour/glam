@@ -452,7 +452,8 @@ impl Arena {
         cleared
     }
 
-    #[cfg(test)]
+    /// Whether the slot is marked. The caller holds exclusive collection,
+    /// within one mark attempt.
     pub(crate) fn owner_slot_is_marked(&self, owner: RunOwner) -> bool {
         let (chunk, run) = self.resolved_owner_run(owner);
         chunk.slot_is_marked(run, owner.geometry, owner.slot_index)
@@ -1002,7 +1003,6 @@ impl ArenaChunk {
         word & (1_u64 << bit_index) != 0
     }
 
-    #[cfg(test)]
     fn slot_is_marked(&self, run: RunAddress, geometry: RunGeometry, slot_index: usize) -> bool {
         let (word_index, bit) = bitmap_bit(geometry.mark_bitmap, slot_index);
         let pointer = mark_word_pointer(run, geometry, word_index);

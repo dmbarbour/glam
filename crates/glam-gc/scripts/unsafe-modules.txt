@@ -3,6 +3,7 @@ crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed allocation bo
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed arena and run topology")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed boundary verification")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed canonical metadata dispatch")]
+crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed ephemeron access boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed mutation boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed pointer boundary")]
 crates/glam-gc/src/lib.rs:#[expect(unsafe_code, reason = "reviewed root access boundary")]

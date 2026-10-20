@@ -64,6 +64,7 @@ crates/glam-gc/src/class.rs:type ErasedDrop = unsafe fn(NonNull<()>);
 crates/glam-gc/src/class.rs:type ErasedTrace = for<'visit> unsafe fn(NonNull<()>, &mut Visitor<'visit>);
 crates/glam-gc/src/class.rs:unsafe fn drop_erased<T: Trace>(pointer: NonNull<()>) {
 crates/glam-gc/src/class.rs:unsafe fn trace_erased<T: Trace>(pointer: NonNull<()>, visitor: &mut Visitor<'_>) {
+crates/glam-gc/src/ephemeron.rs:        unsafe {
 crates/glam-gc/src/heap.rs:                    catch_unwind(AssertUnwindSafe(|| unsafe {
 crates/glam-gc/src/heap.rs:                    unsafe { *value.get_unchecked(mutator) }
 crates/glam-gc/src/heap.rs:                    unsafe { *value.get_unchecked(mutator) }
