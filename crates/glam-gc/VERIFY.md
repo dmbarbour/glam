@@ -1368,4 +1368,7 @@ The table, its free list and the cross-heap check went: a view of a cell
 proves its heap. The unsafe sites are now the cell's `Trace` impl, its
 constructor, the recorded pair's dereference during marking and its two uses
 there, the views of key and value, and `GcRef::sibling`, which derives them;
-`SAFETY.md` records their arguments.
+`SAFETY.md` records their arguments. At `7ed3daee`, the crate's `dynamic`
+gate passed: its full gate, Miri over the library suite (236 passed, 4
+ignored), and both sanitizers (238 passed, 2 ignored); Glam's
+`scripts/check.sh` passed beside it.
