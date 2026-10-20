@@ -1674,7 +1674,8 @@ ephemerons and volumes as cells in the managed heap. It amends
   writes, since nothing can read them. The store tells reclaimed volumes
   from revoked ones, whose late writes stay an error. Conflict entries stay
   as they are, since pruning them could hide a conflict from a transaction
-  still running; a watermark could prune them later.
+  still running; `perf-change-log` (reflection performance plan) prunes
+  the log as a whole.
 - `drain_retired` used to run only within host calls, and two collection
   tests asserted that; they now assert that the runtime drains once the
   collection is done.

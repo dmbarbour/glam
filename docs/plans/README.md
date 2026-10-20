@@ -78,8 +78,9 @@ flags a step for discussion when work reaches it, not a decision.
 - [`ReflectionPerformance_2026-10-15.md`](ReflectionPerformance_2026-10-15.md):
   `perf-reflection-effects`, split from the structural overheads plan on
   2026-10-15. Reflection effect steps (`perf-reflection-step-cost`, 376 K
-  instructions a `.r ()` step) and the compiler's scanner
-  (`perf-reflection-scanner`). Waits for the parser work and the
+  instructions a `.r ()` step), the compiler's scanner
+  (`perf-reflection-scanner`), and the store's unpruned change log
+  (`perf-change-log`, 2026-10-20). Waits for the parser work and the
   representations (maintainer, 2026-10-15).
 - [`UserInputPanicSafety_2026-10-04.md`](UserInputPanicSafety_2026-10-04.md)
   keeps code that observes user input from panicking, and keeps a caught panic

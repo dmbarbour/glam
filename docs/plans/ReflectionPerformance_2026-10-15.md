@@ -137,7 +137,7 @@ Next, from the 2026-10-15 breakdown:
 - Lazy routes: each small lazy a step forces still runs as a route, with
   claims, checkpoints and releases (coordinator, pump and routes 18% of a
   step).
-- Measure R1 and R6 with a long chain.
+- Measure R6 with a long chain; R1 has its own step, `perf-change-log`.
 - Much of the rest is representation: net node storage
   (`perf-net-representation`) and allocation volume
   (`perf-value-representation`).
@@ -170,6 +170,46 @@ The scanner's once-only check (a `scanned` mark), first deferred under
 5.1 M of `minimal`'s instructions: a heap read about 1.0 M, a write 1.1 M,
 and the `Equal`, `alt` and `cut` around them about 3 M. Cheaper effect
 steps reduce it directly.
+
+### The store's change log (`perf-change-log`)
+
+Split from `perf-reflection-step-cost` on 2026-10-20, when the runtime API
+began adding to the log (maintainer: "It probably hasn't been measured
+properly"). Holistic R1, still open and unmeasured: the reflection store's
+change log, `ReflectionStore::latest_changes`, maps each address ever
+written to the revision that last wrote it, and nothing prunes it. Every
+validation, a commit's or a blocked retry's, scans the whole map under the
+runtime's transaction lock, locking the journal's observation index once
+per entry, though only entries newer than the journal's snapshot can
+conflict. Commit cost grows with the runtime's history, and total cost
+roughly with its square.
+
+The log gains an entry per distinct address: heap and volume paths, a
+task's query (`queries/<id>`), virtual resources, and, since the runtime
+API, each resolved promise's place, each reclaimed volume's root
+(`api-death-notices`), and each machine's environment share. A
+long-running runtime, such as `--interactive` or an IDE, accumulates them
+without end. Ports keep their own conflict state, bounded by the ports.
+
+- **Measure first.** Workloads whose history grows while their working set
+  stays small: many short tasks, many resolved promises, many volumes
+  allocated and dropped. Count instructions per commit against the log's
+  size, with glam-prof counters (`scripts/profile.sh`).
+- **Candidates** (holistic R1's recommendation):
+  - A revision-ordered log, walked back only to the journal's snapshot
+    revision, so a validation costs what changed since its snapshot.
+  - Pruning by the low-water mark of live snapshots: entries at or below
+    it cannot conflict with any live journal. That needs live snapshots
+    counted, including blocked retries' and cuts' journals.
+  - Or a cap: prune entries older than a horizon, and treat a journal
+    whose snapshot predates it as conflicting, which retries it.
+  - Lock the observation index once per validation, not once per entry.
+- **Test:** commit cost independent of retired tasks, resolved promises
+  and reclaimed volumes.
+
+`api-death-notices` relies on this step: it keeps a reclaimed volume's
+entries, since pruning them alone could hide a conflict from a journal
+still running, which a low-water mark accounts for.
 
 ## Open questions (2026-10-15)
 
