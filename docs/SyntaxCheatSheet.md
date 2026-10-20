@@ -374,7 +374,8 @@ foo <| .bar         # equivalent alternative without parentheses
 .heap.set Path Value # blind replacement of shared heap state
 .heap.rewrite Path F # commit-ordered lazy rewrite of shared heap state
 .heap.vol >>= (\h -> .vol.get h Path)  # volume handles: .vol.new/get/set/rewrite
-.promise.status P   # 'pending, 'fulfilled or 'broken, without forcing P
+.promise.new >>= (\p -> .promise.fulfill p.resolver 7)  # {promise, resolver}
+.promise.status R   # 'pending, 'fulfilled or 'broken, from resolver R
 .movl 'eax 42       # applied effect: eff:(\api -> api.movl 'eax 42)
 
 my_proc = do

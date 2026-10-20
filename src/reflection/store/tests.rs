@@ -65,8 +65,9 @@ fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<Eva
 }
 
 /// Compile-exhaustive ownership latch for the durable reflection-store
-/// state. Public values are compatibility roots; query identity, conflict
-/// metadata, and revision state are edge-free companions.
+/// state. Public values are compatibility roots; the promises hold each
+/// pending promise's rooted owner until it resolves; query identity,
+/// conflict metadata, and revision state are edge-free companions.
 fn assert_store_root_boundary_inventory(
     snapshot: &StoreSnapshot,
     edit: &StoreEdit,
@@ -80,6 +81,7 @@ fn assert_store_root_boundary_inventory(
         runtime_volume,
         environment_volume,
         next_volume,
+        promises,
         query_domain,
         roots,
         strategy,
@@ -91,6 +93,7 @@ fn assert_store_root_boundary_inventory(
     let _: &VolumeId = runtime_volume;
     let _: &VolumeId = environment_volume;
     let _: &Arc<AtomicU64> = next_volume;
+    let _: &Arc<Promises> = promises;
     let _: &Arc<QueryDomain> = query_domain;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
     let _: &Arc<dyn ConflictAnalysisStrategy> = strategy;
@@ -135,6 +138,7 @@ fn assert_store_root_boundary_inventory(
         query_domain,
         query_retirements,
         next_volume,
+        promises,
         roots,
         revision,
         latest_changes,
@@ -148,6 +152,7 @@ fn assert_store_root_boundary_inventory(
     let _: &Arc<QueryDomain> = query_domain;
     let _: &Receiver<EvaluationQueryId> = query_retirements;
     let _: &Arc<AtomicU64> = next_volume;
+    let _: &Arc<Promises> = promises;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
     let _: &u64 = revision;
     let _: &BTreeMap<ConflictAddress, u64> = latest_changes;

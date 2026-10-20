@@ -98,7 +98,8 @@ effect value
 Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
 task-local `get`/`set`, shared `heap.get`/`heap.set`/`heap.rewrite`, volume
 handles' `heap.vol` and `vol.new`/`vol.get`/`vol.set`/`vol.rewrite`,
-`promise.status`, and indexed `reset`/`shift`.
+`promise.new`/`promise.status`/`promise.fulfill`/`promise.break`, and indexed
+`reset`/`shift`.
 Local user state, including the reset stack, is ordinary task state. Shared
 store state is staged separately in the runtime transaction; it is never
 projected into local state. The ordinary heap is one runtime-owned store
@@ -224,10 +225,16 @@ cut's transaction or in a commit of its own, and returns its handle;
 `.vol.rewrite` take a handle first, evaluate it, never the value, and then
 read and stage as the heap effects do on that volume.
 
-`.promise.status` reads a promised value's state, `'pending`, `'fulfilled` or
-`'broken`, without forcing it. Within a cut a pending read joins the
-transaction's read set: a blocked retry restarts once that promise has
-resolved, which validation treats as a conflict.
+Promises are shared with machines through the store, which records each one
+(`reflection/promises.rs`). `.promise.new` returns `{promise, resolver}`;
+`.promise.status`, `.promise.fulfill` and `.promise.break` take the resolver,
+which decoding evaluates and identifies as it does a volume handle. A status
+is `'pending`, `'fulfilled` or `'broken`; a promised value has none, since it
+stands for whatever it evaluates to. Within a cut a status read observes the
+promise's place in the runtime's volume, which a resolution writes once it
+has published the value, so the read conflicts and wakes precisely. A
+resolution within a cut is staged in the transaction and sent once the cut
+commits; outside one it is immediate.
 
 The runtime transaction lock makes reflection-store and generic event changes
 atomic. A failed validation cannot partially edit the heap, consume admitted

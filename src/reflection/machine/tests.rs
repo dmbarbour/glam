@@ -648,6 +648,58 @@ impl TestHost {
         assert!(replaced.is_none(), "validation write hook is single-use");
     }
 
+    /// Allocates a promise in the host's store, as a machine would, giving
+    /// its identity and its resolver.
+    fn promise(&self) -> (PromiseId, PublicValue) {
+        let (values, promises) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.store.values().clone(),
+                state.store.snapshot().promises().clone(),
+            )
+        };
+        let mut promise = None;
+        let resolver = public_value_with(&values, |access| {
+            let (id, _, resolver) = promises.allocate(access);
+            promise = Some(id);
+            resolver
+        });
+        (promise.expect("allocation names the promise"), resolver)
+    }
+
+    /// Fulfills `promise` as a resolver outside this host would: the
+    /// promised value, then its place in the store.
+    fn fulfill(&self, promise: PromiseId, value: PublicValue) {
+        let (values, promises) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.store.values().clone(),
+                state.store.snapshot().promises().clone(),
+            )
+        };
+        values
+            .with_boundary_access(|access| {
+                promises.resolve(
+                    &access,
+                    promise,
+                    Resolution::Fulfill(value.into_runtime_root()),
+                )
+            })
+            .expect("the promise is pending")
+            .notify();
+        {
+            let mut state = self.state.lock().unwrap();
+            let mut journal = StoreJournal::new(state.store.snapshot());
+            journal.write_promise(promise);
+            assert_eq!(
+                state.store.try_commit(&journal),
+                StoreCommitResult::Committed
+            );
+            state.generation += 1;
+        }
+        self.publish_runtime_observation();
+    }
+
     fn replace_volume(&self, volume: VolumeId, value: PublicValue) {
         {
             let mut state = self.state.lock().unwrap();
@@ -1574,12 +1626,12 @@ fn assert_request_decode_inventory(request: &RequestDecodeWork<TestRequest>) {
             let _: &RuntimeValueRoot = value;
             let _: &crate::eval::whnf::WhnfComputation = demand;
         }
-        RequestDecodeState::VolumeHandle {
+        RequestDecodeState::Handle {
             operation,
             rest,
             demand,
         } => {
-            let _: &VolumeOperation = operation;
+            let _: &HandleOperation = operation;
             let _: &Vec<RuntimeValueRoot> = rest;
             let _: &crate::eval::whnf::WhnfComputation = demand;
         }
@@ -1767,12 +1819,12 @@ fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>)
         | RequestSelection::ExitSuccess
         | RequestSelection::ExitError
         | RequestSelection::VolumeNew
-        | RequestSelection::PromiseStatus => {}
+        | RequestSelection::PromiseNew => {}
         RequestSelection::Volume(identity) => {
             let _: &VolumeRequestIdentity = identity;
         }
-        RequestSelection::VolumeHandle(operation) => {
-            let _: &VolumeOperation = operation;
+        RequestSelection::Handle(operation) => {
+            let _: &HandleOperation = operation;
         }
         RequestSelection::Specialized { request, arity } => {
             let _: &TestRequest = request;
@@ -3197,8 +3249,14 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
         | Request::Get(value)
         | Request::HeapGet(value)
         | Request::ExitError(value)
-        | Request::VolumeNew(value)
-        | Request::PromiseStatus(value) => assert_request_value(value),
+        | Request::VolumeNew(value) => assert_request_value(value),
+        Request::PromiseStatus(promise) => {
+            let _: &PromiseId = promise;
+        }
+        Request::PromiseFulfill(promise, value) | Request::PromiseBreak(promise, value) => {
+            let _: &PromiseId = promise;
+            assert_request_value(value);
+        }
         Request::Seq(left, right)
         | Request::Alt(left, right)
         | Request::Set(left, right)
@@ -3227,7 +3285,7 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
             let _: &TestRequest = request;
             let _: &Vec<V> = values;
         }
-        Request::Fail | Request::HeapVolume | Request::ExitSuccess => {}
+        Request::Fail | Request::HeapVolume | Request::PromiseNew | Request::ExitSuccess => {}
     }
 }
 
@@ -9133,60 +9191,77 @@ fn a_volume_effect_without_a_handle_fails() {
     );
 }
 
-#[test]
-fn reflection_reads_a_promise_s_status_without_forcing_it() {
-    let (assembler, read_status) = compile_effect(
-        "\\p -> .promise.status p >>= (\\s -> .r (if s == 'pending then \"pending\" else if s == 'fulfilled then \"fulfilled\" else \"broken\"))",
-    );
-    let status = |promised: &PublicValue| {
-        let effect = assembler
-            .values()
-            .apply(&read_status, [promised.clone()])
-            .expect("the status reader applies to the promise");
-        let TaskOutcome::Complete(value) = run_volume_effect(&assembler, &effect).unwrap() else {
-            panic!("the status effect should complete")
-        };
-        assembler.to_binary(&value).unwrap().to_vec()
+/// Runs `effect` to its result's text.
+fn effect_text(assembler: &Assembler, effect: &PublicValue) -> Result<Vec<u8>, TaskHalt> {
+    let TaskOutcome::Complete(value) = run_volume_effect(assembler, effect)? else {
+        panic!("the effect should complete")
     };
+    Ok(assembler.to_binary(&value).unwrap().to_vec())
+}
 
-    let (fulfilled, resolver) = assembler.promise("fulfilled fixture");
-    assert_eq!(status(&fulfilled), b"pending");
-    resolver
-        .resolve(assembler.values().integer(1))
-        .expect("the promise resolves");
-    assert_eq!(status(&fulfilled), b"fulfilled");
+#[test]
+fn reflection_allocates_and_resolves_a_promise_through_its_resolver() {
+    let (assembler, effect) = compile_effect(
+        ".promise.new >>= (\\p -> .promise.status p.resolver >>= (\\before -> .promise.fulfill p.resolver \"kept\" =>> .promise.status p.resolver >>= (\\after -> .r (if before == 'pending then (if after == 'fulfilled then p.promise else \"after\") else \"before\"))))",
+    );
+    assert_eq!(effect_text(&assembler, &effect).unwrap(), b"kept");
 
-    let (broken, resolver) = assembler.promise("broken fixture");
-    resolver
-        .fail(assembler.values().text("why"))
-        .expect("the promise breaks");
-    assert_eq!(status(&broken), b"broken");
+    let (assembler, effect) = compile_effect(
+        ".promise.new >>= (\\p -> .promise.break p.resolver \"why\" =>> .promise.status p.resolver >>= (\\s -> .r (if s == 'broken then \"broken\" else \"other\")))",
+    );
+    assert_eq!(effect_text(&assembler, &effect).unwrap(), b"broken");
+}
 
-    let effect = assembler
-        .values()
-        .apply(&read_status, [assembler.values().integer(9)])
-        .expect("the status reader applies to an integer");
-    let error = run_volume_effect(&assembler, &effect).expect_err("an integer is no promise");
+#[test]
+fn a_promise_effect_needs_a_resolver_and_resolves_once() {
+    let (assembler, effect) = compile_effect(".promise.status 9");
+    let error = effect_text(&assembler, &effect).expect_err("9 is no resolver");
+    assert!(error.to_string().contains("needs a resolver"), "{error}");
+
+    let (assembler, effect) = compile_effect(
+        ".promise.new >>= (\\p -> .promise.fulfill p.resolver 1 =>> .promise.fulfill p.resolver 2)",
+    );
+    let error = effect_text(&assembler, &effect).expect_err("it resolved already");
+    assert!(error.to_string().contains("already resolved"), "{error}");
+
+    let (assembler, effect) = compile_effect(
+        ".promise.new >>= (\\p -> .cut (.promise.fulfill p.resolver 1 =>> .promise.fulfill p.resolver 2))",
+    );
+    let error = effect_text(&assembler, &effect).expect_err("the cut resolves it already");
     assert!(
-        error.to_string().contains("needs a promised value"),
+        error.to_string().contains("resolves the promise already"),
         "{error}"
     );
 }
 
 #[test]
-fn a_cut_that_reads_a_pending_status_retries_when_the_promise_resolves() {
-    let (assembler, watch) = compile_effect(
-        "\\p -> .cut (.promise.status p >>= (\\s -> (s == 'fulfilled) =>> .r \"resolved\"))",
+fn a_cut_sends_its_resolution_once_it_commits() {
+    let (assembler, effect) = compile_effect(
+        ".promise.new >>= (\\p -> .cut (.promise.fulfill p.resolver \"sent\" =>> .promise.status p.resolver) >>= (\\inside -> .promise.status p.resolver >>= (\\after -> .r (if inside == 'pending then (if after == 'fulfilled then p.promise else \"unsent\") else \"early\"))))",
     );
-    let (promised, resolver) = assembler.promise("watched");
+    assert_eq!(effect_text(&assembler, &effect).unwrap(), b"sent");
+
+    let (assembler, effect) = compile_effect(
+        ".promise.new >>= (\\p -> .cut (.alt (.promise.fulfill p.resolver \"lost\" =>> .fail) (.r ())) =>> .promise.status p.resolver >>= (\\s -> .r (if s == 'pending then \"unsent\" else \"sent\")))",
+    );
+    assert_eq!(
+        effect_text(&assembler, &effect).unwrap(),
+        b"unsent",
+        "the failed alternative's resolution is undone with it"
+    );
+}
+
+#[test]
+fn a_cut_that_read_a_promise_pending_retries_once_it_resolves() {
+    let (assembler, watch) = compile_effect(
+        "\\r -> .cut (.promise.status r >>= (\\s -> (s == 'fulfilled) =>> .r \"resolved\"))",
+    );
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let (promise, resolver) = host.promise();
     let effect = assembler
         .values()
-        .apply(&watch, [promised])
-        .expect("the watcher applies to the promise");
-    let host = Arc::new(TestHost::with_wake_heap(
-        assembler.core_values(),
-        assembler.values().text("woken"),
-    ));
+        .apply(&watch, [resolver])
+        .expect("the watcher applies to the resolver");
     let mut search = IsolatedEffectSearch::new(
         &assembler.evaluation_runtime(),
         &effect,
@@ -9209,9 +9284,7 @@ fn a_cut_that_reads_a_pending_status_retries_when_the_promise_resolves() {
         }
     };
 
-    resolver
-        .resolve(assembler.values().integer(1))
-        .expect("the promise resolves");
+    host.fulfill(promise, assembler.values().integer(1));
     assert!(host.wait_for_change(generation));
     let results = poll_isolated_search(&mut search);
     assert_eq!(results.len(), 1);

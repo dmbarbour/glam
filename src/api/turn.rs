@@ -40,7 +40,10 @@ use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
 use crate::core::Key;
-use crate::reflection::{ConflictAnalysisStrategy, StoreCommitResult, StoreJournal};
+use crate::reflection::{
+    ConflictAnalysisStrategy, Promises, Resolution, StoreCommitResult, StoreJournal,
+    resolver_promise,
+};
 
 /// What opening a runtime takes. It configures the runtime alone:
 /// compilation's settings travel with what is compiled.
@@ -147,7 +150,6 @@ pub struct Runtime {
 /// What a turn's machines share, on every thread of its forks.
 struct Shared {
     assembler: Assembler,
-    promises: promises::Promises,
 }
 
 /// A machine's place in the tree of machines: the keys from the root, which
@@ -478,10 +480,7 @@ impl Runtime {
         }
         Ok(Self {
             root: MachineState::default(),
-            shared: Shared {
-                assembler,
-                promises: promises::Promises::default(),
-            },
+            shared: Shared { assembler },
             _affine: PhantomData,
         })
     }
@@ -1657,50 +1656,52 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// resolver: an opaque glam value that [`Self::fulfill`] or
     /// [`Self::break_promise`] resolves, once.
     pub fn promise(&mut self) {
-        let (promised, resolver) = self
-            .runtime
-            .promises
-            .allocate(&self.runtime.assembler.values());
+        let promises = self.promises();
+        let (promised, resolver) = self.runtime.assembler.values().with_access(|scoped| {
+            let (_, promised, resolver) = promises.allocate(scoped.runtime_access());
+            (scoped.wrap(promised), scoped.wrap(resolver))
+        });
         self.push(promised);
         self.push(resolver);
     }
 
-    /// The status of the promise that the top value stands for, which stays:
-    /// a promised value, read as it stands, without forcing it, or a
-    /// promise's resolver, which is evaluated. Within a cut, the read counts
-    /// as an observation, so a cut that fails after it runs again once
-    /// anything has changed, as one whose evaluation waited does.
+    /// The status of the promise that the resolver on top, which stays and
+    /// is evaluated, resolves. A promised value has no status of its own: it
+    /// stands for whatever it evaluates to. Within a cut, the read joins the
+    /// cut's transaction, so the promise's resolution, committed first,
+    /// conflicts with the cut, and wakes it once it has failed.
     pub fn promise_status(&mut self) -> Result<PromiseStatus, Error> {
         let top = self.peek()?.clone();
-        let values = self.runtime.assembler.values();
-        let promised = values.with_access(|scoped| {
-            Ok::<_, Error>(match scoped.clone_core(&top)? {
-                crate::core::Value::Promised(promise) => {
-                    Some(match promise.access(scoped.runtime_access()).assignment() {
-                        None => PromiseStatus::Pending,
-                        Some(Ok(_)) => PromiseStatus::Fulfilled,
-                        Some(Err(_)) => PromiseStatus::Broken,
-                    })
-                }
-                _ => None,
-            })
-        })?;
-        let status = match promised {
-            Some(status) => status,
-            None => {
-                let evaluated = self.runtime.assembler.evaluator().eval(&top);
-                let resolver = self.note_evaluation(evaluated)?.into_value();
-                self.runtime
-                    .promises
-                    .status(&values, &resolver)?
-                    .ok_or_else(|| Error::new("the value is neither a promise nor its resolver"))?
-            }
-        };
+        let evaluated = self.runtime.assembler.evaluator().eval(&top);
+        let resolver = self.note_evaluation(evaluated)?.into_value();
+        let promise = self.resolver_promise(&resolver)?;
+        let status = self
+            .promises()
+            .status(promise)
+            .ok_or_else(|| Error::new("the runtime has no such promise"))?;
         if let Some(cut) = &mut self.cut {
-            cut.observed = true;
-            cut.awaits_evaluation = true;
+            cut.observed |= cut.journal.observe_promise_read(promise);
         }
         Ok(status)
+    }
+
+    /// The promise that `resolver`, evaluated, resolves.
+    fn resolver_promise(&self, resolver: &Value) -> Result<u64, Error> {
+        self.runtime
+            .assembler
+            .values()
+            .with_access(|scoped| {
+                Ok::<_, Error>(resolver_promise(
+                    scoped.runtime_access(),
+                    &scoped.clone_core(resolver)?,
+                ))
+            })?
+            .ok_or_else(|| Error::new("the value is not a resolver of this runtime's promise"))
+    }
+
+    /// The runtime's promises, which its store holds.
+    fn promises(&self) -> Arc<Promises> {
+        self.resources().reflection_snapshot().1.promises().clone()
     }
 
     /// Pops a value, then a resolver, and fulfills the resolver's promise
@@ -1713,7 +1714,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// ([`Self::on_commit`]). Promises whose resolution a failed cut undoes
     /// are worth revisiting once the heaps are fast enough.
     pub fn fulfill(&mut self) -> Result<(), Error> {
-        self.resolve_promise(promises::Resolution::Fulfill)
+        self.resolve_promise(Resolution::Fulfill)
     }
 
     /// Pops a value, then a resolver, and breaks the resolver's promise with
@@ -1721,14 +1722,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// value fails with it. As [`Self::fulfill`], it evaluates the resolver,
     /// resolves once, and is an error within a cut.
     pub fn break_promise(&mut self) -> Result<(), Error> {
-        self.resolve_promise(promises::Resolution::Break)
+        self.resolve_promise(Resolution::Break)
     }
 
     /// Resolves the promise of the resolver below the top value, with that
     /// value, popping both once it has.
     fn resolve_promise(
         &mut self,
-        resolution: impl FnOnce(Value) -> promises::Resolution,
+        resolution: impl FnOnce(crate::runtime::RuntimeValueRoot) -> Resolution,
     ) -> Result<(), Error> {
         if self.cut.is_some() {
             return Err(Error::new(
@@ -1738,14 +1739,20 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let depth = self.require(2)?;
         let resolver = self.state.stack[depth - 2].clone();
         let value = self.state.stack[depth - 1].clone();
-        self.runtime.assembler.values().require(&value)?;
+        let values = self.runtime.assembler.values();
+        values.require(&value)?;
         let resolver = self.runtime.assembler.evaluator().eval(&resolver)?;
-        self.runtime.promises.resolve(
-            &self.runtime.assembler.values(),
-            &self.resources(),
-            &resolver.into_value(),
-            resolution(value),
-        )?;
+        let promise = self.resolver_promise(&resolver.into_value())?;
+        let promises = self.promises();
+        let publication = values
+            .core()
+            .with_boundary_access(|access| {
+                promises.resolve(&access, promise, resolution(value.into_runtime_root()))
+            })
+            .map_err(|error| Error::new(error.as_ref()))?;
+        publication.notify();
+        // What read the promise pending sees it change.
+        self.store_edit(|journal| journal.write_promise(promise))?;
         self.state.stack.truncate(depth - 2);
         Ok(())
     }
@@ -1941,12 +1948,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let value = self.peek()?.clone();
         let values = self.runtime.assembler.values();
         values.require(&value)?;
-        let (promised, resolver) = self.runtime.promises.allocate(&values);
+        let promises = self.promises();
+        let (promise, promised, resolver) = values.with_access(|scoped| {
+            let (promise, promised, resolver) = promises.allocate(scoped.runtime_access());
+            (promise, scoped.wrap(promised), scoped.wrap(resolver))
+        });
         let sent = values
-            .record([("request", value), ("reply", resolver.clone())])
+            .record([("request", value), ("reply", resolver)])
             .and_then(|request| self.send(port.into(), &[request]));
         if let Err(error) = sent {
-            self.runtime.promises.forget(&values, &resolver);
+            promises.forget(promise);
             return Err(error);
         }
         self.pop()?;
@@ -2670,9 +2681,8 @@ fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
 }
 
 pub(in crate::api) mod environment;
-mod promises;
 
-pub use promises::PromiseStatus;
+pub use crate::reflection::PromiseStatus;
 
 #[cfg(test)]
 mod tests;

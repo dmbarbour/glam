@@ -21,6 +21,7 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
+use super::promises::{PromiseId, Promises};
 use crate::api::{Value as PublicValue, Values};
 use crate::core::{
     Builtin, CoreValueFactory, Dict, Key, LazyValue, List, RuntimeValueAccess, Value,
@@ -181,6 +182,7 @@ pub struct StoreSnapshot {
     environment_volume: VolumeId,
     /// The store's next volume ID, which a transaction reserves from.
     next_volume: Arc<AtomicU64>,
+    promises: Arc<Promises>,
     query_domain: Arc<QueryDomain>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -188,6 +190,12 @@ pub struct StoreSnapshot {
 }
 
 impl StoreSnapshot {
+    /// The store's promises, which its snapshots share
+    /// (`requests-travel-on-ports`).
+    pub(crate) fn promises(&self) -> &Arc<Promises> {
+        &self.promises
+    }
+
     /// The shared heap's volume.
     pub(crate) fn heap_volume(&self) -> VolumeId {
         self.heap_volume
@@ -491,6 +499,25 @@ impl StoreJournal {
         true
     }
 
+    /// Records a read of `promise`'s status, which its resolution writes.
+    /// Returns whether the read observed the snapshot.
+    pub(crate) fn observe_promise_read(&mut self, promise: PromiseId) -> bool {
+        self.observe_volume_read(self.snapshot.runtime_volume, &promise_path(promise))
+    }
+
+    /// Records `promise`'s resolution, which changes no data: once
+    /// committed, it conflicts with the transactions that read the
+    /// promise's status and wakes those waiting on it.
+    pub(crate) fn write_promise(&mut self, promise: PromiseId) {
+        self.edits.push(StoreEdit::Set {
+            address: ConflictAddress::reflection(
+                self.snapshot.runtime_volume,
+                ConflictPath::from_keys(promise_path(promise)),
+            ),
+            value: None,
+        });
+    }
+
     /// Records a read of the virtual resource at `path`: a proxy for host
     /// state that the store does not hold. Virtual resources follow the
     /// heap's rules: a set covers a later read, which then records nothing,
@@ -739,6 +766,7 @@ pub struct ReflectionStore {
     query_domain: Arc<QueryDomain>,
     query_retirements: Receiver<EvaluationQueryId>,
     next_volume: Arc<AtomicU64>,
+    promises: Arc<Promises>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     revision: u64,
     latest_changes: BTreeMap<ConflictAddress, u64>,
@@ -764,6 +792,7 @@ impl ReflectionStore {
             query_domain,
             query_retirements,
             next_volume: Arc::new(AtomicU64::new(4)),
+            promises: Arc::default(),
             roots: RedBlackTreeMapSync::new_sync()
                 .insert(heap_volume, public_values.empty_dict())
                 .insert(runtime_volume, public_values.empty_dict())
@@ -784,6 +813,7 @@ impl ReflectionStore {
             runtime_volume: self.runtime_volume,
             environment_volume: self.environment_volume,
             next_volume: self.next_volume.clone(),
+            promises: self.promises.clone(),
             query_domain: self.query_domain.clone(),
             roots: self.roots.clone(),
             strategy: self.strategy.clone(),
@@ -1023,6 +1053,7 @@ static QUERY_PRESENT: LazyLock<Key> = LazyLock::new(|| {
 });
 static QUERY_NAMESPACE: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("queries"));
 static VIRTUAL_NAMESPACE: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("virtual"));
+static PROMISE_NAMESPACE: LazyLock<Key> = LazyLock::new(|| Key::atom_from_text("promises"));
 
 pub(crate) enum EvaluationQueryState {
     Pending,
@@ -1066,6 +1097,15 @@ fn virtual_keys(path: &[Key]) -> Vec<Key> {
     std::iter::once(VIRTUAL_NAMESPACE.clone())
         .chain(path.iter().cloned())
         .collect()
+}
+
+/// A promise's place in the runtime's volume, apart from virtual
+/// resources, which users name.
+fn promise_path(promise: PromiseId) -> Vec<Key> {
+    vec![
+        PROMISE_NAMESPACE.clone(),
+        Key::Number(Number::from_u64(promise)),
+    ]
 }
 
 fn query_path(id: EvaluationQueryId) -> Vec<Key> {

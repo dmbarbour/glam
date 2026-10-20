@@ -6,6 +6,7 @@
 
 mod lifecycle;
 mod machine;
+mod promises;
 mod protocol;
 mod requests;
 mod search;
@@ -18,6 +19,8 @@ pub use lifecycle::{
 };
 pub(crate) use machine::ContinuationKey;
 pub(crate) use machine::volume_effects;
+pub use promises::PromiseStatus;
+pub(crate) use promises::{Promises, Resolution, resolver_promise};
 pub(crate) use volume_handle::{handle_volume, volume_handle_in};
 
 pub use protocol::{

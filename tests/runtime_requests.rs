@@ -165,28 +165,36 @@ fn duplicate_servers_race_and_the_first_resolution_wins() {
 }
 
 #[test]
-fn a_promise_s_status_follows_its_resolution_without_forcing_it() {
+fn a_resolver_reads_its_promise_s_status() {
     let mut rt = runtime();
     rt.run("m", |m| {
         m.promise();
         m.set("resolver")?;
-        assert_eq!(
-            m.promise_status()?,
-            PromiseStatus::Pending,
-            "the promised value"
-        );
+        let error = m
+            .promise_status()
+            .expect_err("a promised value stands for its value, which waits");
+        assert_eq!(error.kind(), ErrorKind::Retry, "{error}");
+
         m.get("resolver")?;
-        assert_eq!(m.promise_status()?, PromiseStatus::Pending, "its resolver");
+        assert_eq!(m.promise_status()?, PromiseStatus::Pending);
+        m.push_int(7);
+        m.fulfill()?;
+        m.get("resolver")?;
+        assert_eq!(m.promise_status()?, PromiseStatus::Fulfilled);
+        m.discard(1)?;
+        let error = m
+            .promise_status()
+            .expect_err("the promised value now stands for 7, which has no status");
+        assert!(error.to_string().contains("not a resolver"), "{error}");
+        m.discard(1)?;
+
+        m.promise();
+        m.set("broken")?;
+        m.get("broken")?;
         m.push_text("why");
         m.break_promise()?;
+        m.get("broken")?;
         assert_eq!(m.promise_status()?, PromiseStatus::Broken);
-        m.get("resolver")?;
-        assert_eq!(m.promise_status()?, PromiseStatus::Broken);
-        m.discard(2)?;
-
-        m.push_int(9);
-        let error = m.promise_status().expect_err("an integer is no promise");
-        assert!(error.to_string().contains("neither"), "{error}");
         Ok(())
     })
     .expect("the turn should succeed");
@@ -200,6 +208,8 @@ fn a_cut_waiting_on_a_status_wakes_when_the_promise_resolves() {
         .run("p", |p| {
             p.promise();
             p.set("resolver")?;
+            p.discard(1)?;
+            p.get("resolver")?;
             p.give("watcher", 1)?;
             let fork = p.fork("watcher", move |w| {
                 let mut attempts = 0;
@@ -226,4 +236,51 @@ fn a_cut_waiting_on_a_status_wakes_when_the_promise_resolves() {
         })
         .expect("the turn should succeed");
     assert_eq!(status, PromiseStatus::Fulfilled);
+}
+
+#[test]
+fn a_cut_that_read_a_promise_pending_conflicts_with_its_resolution() {
+    let mut rt = runtime();
+    let (read, resolving) = mpsc::channel();
+    let (resolved, awaiting) = mpsc::channel();
+    let attempts = rt
+        .run("p", |p| {
+            p.promise();
+            p.set("resolver")?;
+            p.discard(1)?;
+            p.get("resolver")?;
+            p.give("watcher", 1)?;
+            let fork = p.fork("watcher", move |w| {
+                let mut attempts = 0;
+                let status = w.cut(|w| {
+                    attempts += 1;
+                    let status = w.promise_status()?;
+                    if attempts == 1 {
+                        read.send(()).expect("the resolver waits for the read");
+                        awaiting.recv().expect("the resolution arrives");
+                    }
+                    Ok(status)
+                })?;
+                assert_eq!(status, PromiseStatus::Fulfilled, "the rerun sees it");
+                w.push_int(attempts);
+                Ok(())
+            })?;
+            resolving
+                .recv()
+                .expect("the watcher reads the promise pending");
+            p.get("resolver")?;
+            p.push_int(1);
+            p.fulfill()?;
+            resolved
+                .send(())
+                .expect("the watcher awaits the resolution");
+            p.join(fork)?;
+            p.take("watcher", 1)?;
+            p.pop_int()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(
+        attempts, 2,
+        "the first commit conflicted with the resolution"
+    );
 }

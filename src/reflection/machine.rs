@@ -1,3 +1,4 @@
+use super::promises::{PromiseId, PromiseStatus, Promises, Resolution, resolver_promise};
 use super::volume_handle::{handle_volume, volume_handle_in};
 use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
@@ -62,7 +63,10 @@ struct Tags {
     vol_get: Key,
     vol_set: Key,
     vol_rewrite: Key,
+    promise_new: Key,
     promise_status: Key,
+    promise_fulfill: Key,
+    promise_break: Key,
     reset: Key,
     shift: Key,
     resume: Key,
@@ -98,7 +102,10 @@ impl Tags {
             vol_get: tag("vol_get"),
             vol_set: tag("vol_set"),
             vol_rewrite: tag("vol_rewrite"),
+            promise_new: tag("promise_new"),
             promise_status: tag("promise_status"),
+            promise_fulfill: tag("promise_fulfill"),
+            promise_break: tag("promise_break"),
             reset: tag("reset"),
             shift: tag("shift"),
             resume: tag("resume"),
@@ -2406,6 +2413,101 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.interpret_request(context, Request::Return(value), branch, scope_depth)
     }
 
+    /// The store's promises: the transaction's snapshot's within a cut, or
+    /// the host's.
+    fn promises(&self, context: &mut EvaluationPollContext, branch: &Branch<S>) -> Arc<Promises> {
+        match &branch.transaction {
+            Some(transaction) => transaction.snapshot.store().promises().clone(),
+            None => context.suspend(|| self.host.snapshot().store().promises().clone()),
+        }
+    }
+
+    /// Resolves `promise`: within a cut, once the outermost cut commits, as
+    /// a send is (`requests-travel-on-ports`); outside one, at once. A
+    /// promise already resolved, or resolved within this cut already, is an
+    /// error.
+    fn resolve_promise(
+        &self,
+        context: &mut EvaluationPollContext,
+        branch: &mut Branch<S>,
+        promise: PromiseId,
+        resolution: Resolution,
+    ) -> Result<(), TaskHalt> {
+        let promises = self.promises(context, branch);
+        match promises.status(promise) {
+            Some(PromiseStatus::Pending) => {}
+            Some(_) => return Err(TaskHalt::new("the promise was already resolved")),
+            None => return Err(TaskHalt::new("the runtime has no such promise")),
+        }
+        if let Some(transaction) = branch.transaction.as_mut() {
+            if transaction
+                .resolutions
+                .iter()
+                .any(|(staged, _)| *staged == promise)
+            {
+                return Err(TaskHalt::new("the cut resolves the promise already"));
+            }
+            transaction.resolutions.push((promise, resolution));
+            return Ok(());
+        }
+        let published = context
+            .with_runtime_access(|access| promises.resolve(&access, promise, resolution))
+            .map_err(|error| TaskHalt::new(error.as_ref()))?;
+        published.notify();
+        self.write_promises(context, &[promise]);
+        Ok(())
+    }
+
+    /// Sends a committed cut's resolutions, in order. Where another
+    /// resolution came first, since the cut's, it stands, and the cut's is
+    /// lost, as a duplicate server's is.
+    fn send_resolutions(
+        &self,
+        context: &mut EvaluationPollContext,
+        promises: &Arc<Promises>,
+        resolutions: Vec<(PromiseId, Resolution)>,
+    ) {
+        let mut resolved = Vec::new();
+        for (promise, resolution) in resolutions {
+            if let Ok(published) =
+                context.with_runtime_access(|access| promises.resolve(&access, promise, resolution))
+            {
+                published.notify();
+                resolved.push(promise);
+            }
+        }
+        self.write_promises(context, &resolved);
+    }
+
+    /// Writes resolved promises' places in the store, so the transactions
+    /// that read them see the change.
+    fn write_promises(&self, context: &mut EvaluationPollContext, promises: &[PromiseId]) {
+        if promises.is_empty() {
+            return;
+        }
+        context.suspend(|| {
+            loop {
+                let snapshot = self.host.snapshot();
+                let mut store = StoreJournal::new(snapshot.store().clone());
+                for promise in promises {
+                    store.write_promise(*promise);
+                }
+                match self.host.commit(TaskCommit::new(
+                    store,
+                    snapshot.extra().clone(),
+                    S::Journal::default(),
+                )) {
+                    // A write that reads nothing conflicts with nothing, but
+                    // a conflict analysis may be coarse: write again, afresh.
+                    CommitResult::Conflict => continue,
+                    CommitResult::Committed
+                    | CommitResult::Closed
+                    | CommitResult::MissingVolume(_) => break,
+                }
+            }
+        });
+    }
+
     fn interpret_request(
         &mut self,
         context: &mut EvaluationPollContext,
@@ -2660,24 +2762,50 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 });
                 MachineWork::deliver_root(handle, branch, scope_depth)
             }
-            Request::PromiseStatus(value) => {
-                let status = promise_status(context, &self.eval_context, &value)
-                    .ok_or_else(|| TaskHalt::new("`.promise.status` needs a promised value"))?;
-                // Within a cut a pending read is an observation: a failure
-                // after it retries once the promise resolves.
-                if status == "pending"
-                    && let Some(transaction) = branch.transaction.as_mut()
-                {
-                    transaction.pending_promises.push(value);
+            Request::PromiseNew => {
+                let promises = self.promises(context, &branch);
+                let pair = context.with_runtime_access(|access| {
+                    let (_, promised, resolver) = promises.allocate(&access);
+                    access.root_runtime_value(Value::Dict(
+                        Dict::new_sync()
+                            .insert(Key::atom_from_text("promise"), promised)
+                            .insert(Key::atom_from_text("resolver"), resolver),
+                    ))
+                });
+                MachineWork::deliver_root(pair, branch, scope_depth)
+            }
+            Request::PromiseStatus(promise) => {
+                let checkpoint = branch.retry_candidate();
+                let status = self
+                    .promises(context, &branch)
+                    .status(promise)
+                    .ok_or_else(|| TaskHalt::new("the runtime has no such promise"))?;
+                // Within a cut the read joins the transaction, which the
+                // promise's resolution then conflicts with.
+                if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
-                    branch.observe(None, generation);
+                    if transaction.store.observe_promise_read(promise) {
+                        branch.observe(checkpoint, generation);
+                    }
                 }
                 let status = context.with_runtime_access(|access| {
                     access.root_runtime_value(Value::Atom(Atom::from_key(&Key::binary_from_text(
-                        status,
+                        status.name(),
                     ))))
                 });
                 MachineWork::deliver_root(status, branch, scope_depth)
+            }
+            Request::PromiseFulfill(promise, value) => {
+                self.resolve_promise(context, &mut branch, promise, Resolution::Fulfill(value))?;
+                context.with_runtime_access(|access| {
+                    MachineWork::deliver_unit(&access, branch, scope_depth)
+                })
+            }
+            Request::PromiseBreak(promise, message) => {
+                self.resolve_promise(context, &mut branch, promise, Resolution::Break(message))?;
+                context.with_runtime_access(|access| {
+                    MachineWork::deliver_unit(&access, branch, scope_depth)
+                })
             }
             Request::Specialized(request, arguments) => {
                 let request = SpecializationRequest::Unstarted {
@@ -2958,7 +3086,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     );
                     match context.suspend(|| self.host.commit(commit)) {
                         CommitResult::Committed => {
-                            completed.transaction = None;
+                            let transaction = completed
+                                .transaction
+                                .take()
+                                .expect("a committed cut held its transaction");
+                            self.send_resolutions(
+                                context,
+                                transaction.snapshot.store().promises(),
+                                transaction.resolutions,
+                            );
                         }
                         CommitResult::Conflict => {
                             let frame = self
@@ -3332,14 +3468,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_ref()
             .and_then(|retry| {
                 retry.validation.as_ref().map(|transaction| {
-                    let resolved = transaction.pending_promises.iter().any(|promise| {
-                        promise_status(context, &self.eval_context, promise) != Some("pending")
-                    });
-                    if resolved {
-                        ValidationResult::Conflict
-                    } else {
-                        context.suspend(|| self.host.validate(transaction.validation()))
-                    }
+                    context.suspend(|| self.host.validate(transaction.validation()))
                 })
             });
         match retry_validation {
@@ -5097,7 +5226,10 @@ enum Request<R, V = RuntimeValueRoot> {
     VolumeSet(VolumeId, V, V),
     VolumeRewrite(VolumeId, V, V),
     VolumeNew(V),
-    PromiseStatus(V),
+    PromiseNew,
+    PromiseStatus(PromiseId),
+    PromiseFulfill(PromiseId, V),
+    PromiseBreak(PromiseId, V),
     Reset(V, V),
     Shift(V, V),
     Resume(EvaluationTaskId, u64, V),
@@ -5120,6 +5252,21 @@ enum VolumeOperation {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PromiseOperation {
+    Status,
+    Fulfill,
+    Break,
+}
+
+/// An operation whose first argument is a handle, which decoding evaluates
+/// (`requests-travel-on-ports`): a volume's, or a promise's resolver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum HandleOperation {
+    Volume(VolumeOperation),
+    Promise(PromiseOperation),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct VolumeRequestIdentity {
     volume: VolumeId,
     operation: VolumeOperation,
@@ -5139,26 +5286,21 @@ enum RequestSelection<R> {
     HeapRewrite,
     HeapVolume,
     Volume(VolumeRequestIdentity),
-    /// A volume operation whose volume a handle names, the first argument,
-    /// which decoding evaluates (`requests-travel-on-ports`).
-    VolumeHandle(VolumeOperation),
+    Handle(HandleOperation),
     VolumeNew,
-    PromiseStatus,
+    PromiseNew,
     Reset,
     Shift,
     Resume,
     ExitSuccess,
     ExitError,
-    Specialized {
-        request: R,
-        arity: usize,
-    },
+    Specialized { request: R, arity: usize },
 }
 
 impl<R> RequestSelection<R> {
     fn arity(&self) -> usize {
         match self {
-            Self::Fail | Self::HeapVolume | Self::ExitSuccess => 0,
+            Self::Fail | Self::HeapVolume | Self::PromiseNew | Self::ExitSuccess => 0,
             Self::Return
             | Self::Cut
             | Self::Fix
@@ -5166,13 +5308,18 @@ impl<R> RequestSelection<R> {
             | Self::HeapGet
             | Self::ExitError
             | Self::VolumeNew
-            | Self::PromiseStatus
+            | Self::Handle(HandleOperation::Promise(PromiseOperation::Status))
             | Self::Volume(VolumeRequestIdentity {
                 operation: VolumeOperation::Get,
                 ..
             }) => 1,
-            Self::VolumeHandle(VolumeOperation::Get) => 2,
-            Self::VolumeHandle(VolumeOperation::Set | VolumeOperation::Rewrite) => 3,
+            Self::Handle(
+                HandleOperation::Volume(VolumeOperation::Get)
+                | HandleOperation::Promise(PromiseOperation::Fulfill | PromiseOperation::Break),
+            ) => 2,
+            Self::Handle(HandleOperation::Volume(
+                VolumeOperation::Set | VolumeOperation::Rewrite,
+            )) => 3,
             Self::Seq
             | Self::Alt
             | Self::Set
@@ -5222,15 +5369,15 @@ impl<R> RequestSelection<R> {
                 operation: VolumeOperation::Rewrite,
             }) => Request::VolumeRewrite(volume, next(), next()),
             Self::VolumeNew => Request::VolumeNew(next()),
-            Self::PromiseStatus => Request::PromiseStatus(next()),
+            Self::PromiseNew => Request::PromiseNew,
             Self::Reset => Request::Reset(next(), next()),
             Self::Shift => Request::Shift(next(), next()),
             Self::ExitSuccess => Request::ExitSuccess,
             Self::ExitError => Request::ExitError(next()),
             Self::Specialized { request, .. } => Request::Specialized(request, arguments.collect()),
             Self::Resume => unreachable!("resume IDs require WHNF conversion before dispatch"),
-            Self::VolumeHandle(_) => {
-                unreachable!("volume handles require WHNF conversion before dispatch")
+            Self::Handle(_) => {
+                unreachable!("handles require WHNF conversion before dispatch")
             }
         }
     }
@@ -5261,10 +5408,10 @@ enum RequestDecodeState<R> {
         value: RuntimeValueRoot,
         demand: WhnfComputation,
     },
-    /// Evaluates a volume operation's handle, with the operation's other
+    /// Evaluates an operation's handle, with the operation's other
     /// arguments waiting.
-    VolumeHandle {
-        operation: VolumeOperation,
+    Handle {
+        operation: HandleOperation,
         rest: Vec<RuntimeValueRoot>,
         demand: WhnfComputation,
     },
@@ -5404,7 +5551,7 @@ impl<R: Clone> RequestDecodeWork<R> {
                     RequestIdPoll::Failed(error) => RequestDecodePoll::Failed(error),
                 }
             }
-            RequestDecodeState::VolumeHandle {
+            RequestDecodeState::Handle {
                 operation,
                 rest,
                 demand,
@@ -5420,26 +5567,49 @@ impl<R: Clone> RequestDecodeWork<R> {
                         return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
                     }
                 };
-                let volume = poll_context.evaluate(context, |evaluator| {
-                    evaluator.project_root(&handle, |access, handle| {
-                        handle_volume(access.values(), &handle)
-                    })
-                });
-                let Some(volume) = volume else {
-                    return RequestDecodePoll::Failed(TaskHalt::new(
-                        "a volume effect needs a handle of this runtime's volume",
-                    ));
-                };
                 let mut rest = std::mem::take(rest).into_iter();
                 let mut next = || {
                     rest.next()
                         .expect("validated request arity must retain its argument")
                 };
-                RequestDecodePoll::Ready(match operation {
-                    VolumeOperation::Get => Request::VolumeGet(volume, next()),
-                    VolumeOperation::Set => Request::VolumeSet(volume, next(), next()),
-                    VolumeOperation::Rewrite => Request::VolumeRewrite(volume, next(), next()),
-                })
+                match *operation {
+                    HandleOperation::Volume(operation) => {
+                        let volume = poll_context.evaluate(context, |evaluator| {
+                            evaluator.project_root(&handle, |access, handle| {
+                                handle_volume(access.values(), &handle)
+                            })
+                        });
+                        let Some(volume) = volume else {
+                            return RequestDecodePoll::Failed(TaskHalt::new(
+                                "a volume effect needs a handle of this runtime's volume",
+                            ));
+                        };
+                        RequestDecodePoll::Ready(match operation {
+                            VolumeOperation::Get => Request::VolumeGet(volume, next()),
+                            VolumeOperation::Set => Request::VolumeSet(volume, next(), next()),
+                            VolumeOperation::Rewrite => {
+                                Request::VolumeRewrite(volume, next(), next())
+                            }
+                        })
+                    }
+                    HandleOperation::Promise(operation) => {
+                        let promise = poll_context.evaluate(context, |evaluator| {
+                            evaluator.project_root(&handle, |access, resolver| {
+                                resolver_promise(access.values(), &resolver)
+                            })
+                        });
+                        let Some(promise) = promise else {
+                            return RequestDecodePoll::Failed(TaskHalt::new(
+                                "a promise effect needs a resolver of this runtime's promise",
+                            ));
+                        };
+                        RequestDecodePoll::Ready(match operation {
+                            PromiseOperation::Status => Request::PromiseStatus(promise),
+                            PromiseOperation::Fulfill => Request::PromiseFulfill(promise, next()),
+                            PromiseOperation::Break => Request::PromiseBreak(promise, next()),
+                        })
+                    }
+                }
             }
             RequestDecodeState::Poisoned => {
                 panic!("request decoder was polled after consuming its terminal state")
@@ -5461,12 +5631,12 @@ impl<R: Clone> RequestDecodeWork<R> {
                 "effect request contained the wrong number of arguments",
             ));
         }
-        if let RequestSelection::VolumeHandle(operation) = selection {
+        if let RequestSelection::Handle(operation) = selection {
             let mut arguments = arguments.into_iter();
             let handle = arguments
                 .next()
-                .expect("volume request arity was checked above");
-            self.state = RequestDecodeState::VolumeHandle {
+                .expect("handle request arity was checked above");
+            self.state = RequestDecodeState::Handle {
                 operation,
                 rest: arguments.collect(),
                 demand: WhnfComputation::from_root(handle),
@@ -5567,17 +5737,29 @@ fn select_request_from_whnf<R: Clone>(
     select!(&tags.vol_new, RequestSelection::VolumeNew);
     select!(
         &tags.vol_get,
-        RequestSelection::VolumeHandle(VolumeOperation::Get)
+        RequestSelection::Handle(HandleOperation::Volume(VolumeOperation::Get))
     );
     select!(
         &tags.vol_set,
-        RequestSelection::VolumeHandle(VolumeOperation::Set)
+        RequestSelection::Handle(HandleOperation::Volume(VolumeOperation::Set))
     );
     select!(
         &tags.vol_rewrite,
-        RequestSelection::VolumeHandle(VolumeOperation::Rewrite)
+        RequestSelection::Handle(HandleOperation::Volume(VolumeOperation::Rewrite))
     );
-    select!(&tags.promise_status, RequestSelection::PromiseStatus);
+    select!(&tags.promise_new, RequestSelection::PromiseNew);
+    select!(
+        &tags.promise_status,
+        RequestSelection::Handle(HandleOperation::Promise(PromiseOperation::Status))
+    );
+    select!(
+        &tags.promise_fulfill,
+        RequestSelection::Handle(HandleOperation::Promise(PromiseOperation::Fulfill))
+    );
+    select!(
+        &tags.promise_break,
+        RequestSelection::Handle(HandleOperation::Promise(PromiseOperation::Break))
+    );
     select!(&tags.reset, RequestSelection::Reset);
     select!(&tags.shift, RequestSelection::Shift);
     select!(&tags.exit_success, RequestSelection::ExitSuccess);
@@ -5733,10 +5915,28 @@ fn effect_api<R: Clone>(
                 dict.insert(key, value)
             }),
         );
-        let promise_api = Value::Dict(Dict::new_sync().insert(
-            Key::atom_from_text("status"),
-            request_function_in(access, tags.promise_status.clone(), 1, Vec::new(), false),
-        ));
+        // Promises, through their resolvers (`requests-travel-on-ports`).
+        let promise_api = Value::Dict(
+            [
+                entry("new", nullary_request(access, tags.promise_new.clone())),
+                entry(
+                    "status",
+                    request_function_in(access, tags.promise_status.clone(), 1, Vec::new(), false),
+                ),
+                entry(
+                    "fulfill",
+                    request_function_in(access, tags.promise_fulfill.clone(), 2, Vec::new(), false),
+                ),
+                entry(
+                    "break",
+                    request_function_in(access, tags.promise_break.clone(), 2, Vec::new(), false),
+                ),
+            ]
+            .into_iter()
+            .fold(Dict::new_sync(), |dict, (key, value)| {
+                dict.insert(key, value)
+            }),
+        );
         let mut entries = vec![
             entry(
                 "r",
@@ -5924,26 +6124,6 @@ fn request_function_in(
         ),
         remaining,
     ))
-}
-
-/// The status of the promise that `value` stands as, without forcing it:
-/// `pending`, `fulfilled` or `broken`, or nothing where it is no promised
-/// value.
-fn promise_status(
-    context: &mut EvaluationPollContext,
-    eval_context: &EvalContext,
-    value: &RuntimeValueRoot,
-) -> Option<&'static str> {
-    context.evaluate(eval_context, |evaluator| {
-        evaluator.project_root(value, |access, value| match value {
-            Value::Promised(promise) => Some(match promise.access(access.values()).assignment() {
-                None => "pending",
-                Some(Ok(_)) => "fulfilled",
-                Some(Err(_)) => "broken",
-            }),
-            _ => None,
-        })
-    })
 }
 
 fn nullary_request(_access: &RuntimeValueAccess<'_>, tag: Key) -> Value {

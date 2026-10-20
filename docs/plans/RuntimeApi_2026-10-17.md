@@ -318,9 +318,16 @@ handle API goes.
    - Duplicate wires duplicate a request, and its servers race: the first
      resolution wins, and a later one fails (maintainer). A server may read
      a promise's status to avoid duplicate work.
-   - A promise's status, pending, fulfilled or broken, read without
-     forcing it, by a machine operation and a reflection effect. A cut
-     that reads it waits as one whose evaluation waited does.
+   - A promise's status, pending, fulfilled or broken, read from its
+     resolver, by a machine operation and a reflection effect (maintainer):
+     a promised value stands for whatever it evaluates to, so has no status
+     of its own. Within a cut the read is a read of the store, which the
+     resolution writes, so it conflicts and wakes precisely.
+   - Reflection's promise family (maintainer): `.promise.new`,
+     `.promise.status`, `.promise.fulfill` and `.promise.break`, with the
+     resolvers turns use. Within a cut a resolution is an asynchronous
+     send: it goes once the cut commits, as a turn's in a commit hook does
+     (maintainer).
    - Volumes as first-class capabilities (maintainer): an opaque volume
      handle and generic effects, `.vol.new`, `.vol.get`, `.vol.set` and
      `.vol.rewrite`, with `.heap.vol` an effect returning the shared heap's
@@ -1466,6 +1473,8 @@ maintainer's agreement):
   from the runtime's record, which keeps how each promise resolved, a
   marker without its value. Within a cut the read counts as an
   observation, waking on any change, as an evaluation that waited does.
+  (Superseded: status reads the resolver alone, a read of the store;
+  see "status by resolver" below.)
 - Tests in `tests/runtime_requests.rs`: a server answering what a
   requester asks; a requester waiting in a cut for its answer (forced
   through a channel after the first attempt waits); a failed cut sending
@@ -1489,19 +1498,10 @@ maintainer's agreement):
   effect API: a dotted path is sugar for an effect,
   `eff:(\api -> api.heap.vol)`, so the handle comes from running it,
   `.heap.vol >>= (\h -> .vol.get h Path)`.
-- `.promise.status` returns `'pending`, `'fulfilled` or `'broken` for a
-  promised value as it stands, never forcing it; another value is an
-  error, so a lazy value whose result would be the promise is too (forcing
-  it would wait on the promise). Reflection holds no resolvers, so it
-  reads promised values alone.
-- Within a cut, a pending read joins the transaction's read set: a failure
-  after it retries, and a blocked retry restarts once a promise it read
-  pending has resolved, which validation treats as a conflict. This is
-  finer than a turn's cut, which reruns after any change
-  (`perf-fine-grained-wakes`), since reflection's retries already validate
-  their reads; a commit does not validate the status, as a turn's does
-  not. A read outside a cut observes nothing, as a heap read outside one
-  does.
+- `.promise.status` returned `'pending`, `'fulfilled` or `'broken` for a
+  promised value as it stands, and a blocked retry restarted once a
+  promise it read pending had resolved. (Superseded: status reads the
+  resolver; see "status by resolver" below.)
 - Effect channels from reflection stay with their consumers, as planned:
   stderr in `api-effect-providers`, imports in `api-hosts-as-machines`.
 - Tests in `src/reflection/machine/tests.rs`: a volume allocated, written
@@ -1511,6 +1511,50 @@ maintainer's agreement):
   cut that read a pending status retrying once the promise resolves
   (forced: the search blocks, then the promise resolves and the host
   wakes).
+
+`api-requests`, status by resolver and reflection's promise family
+(2026-10-20):
+- A promise's status is read from its resolver alone (maintainer): a
+  promised value stands for whatever it evaluates to, and one fulfilled
+  with another promised value would have no clear referent. In a turn,
+  `m.promise_status()` evaluates the top value as a resolver, so a
+  pending promised value is pushback, as evaluating it is, and a
+  fulfilled one evaluates to its value, which is no resolver.
+- The record of promises moves from the turn `Runtime` to the store
+  (`reflection::promises`), shared by its snapshots as the volume counter
+  is, so turns, reflection hosts and the test host reach one record.
+- A promise's status is a resource of the store: it has a place in the
+  runtime's private volume, apart from users' virtual resources. Within a
+  cut a status read observes that place, and a resolution, once it has
+  published the promised value, commits a write there. A cut that read a
+  promise pending conflicts with a resolution that commits first, and a
+  failed one wakes to it, precisely, in turns and reflection alike;
+  turns' rerun after any change stays for evaluations that waited. The
+  write's commit advances the observation epoch, as
+  `RuntimeSharedResources::publish_change` did, which goes.
+- Reflection gains `.promise.new`, returning `{promise:P, resolver:R}`,
+  `.promise.status R`, `.promise.fulfill R V` and `.promise.break R M`,
+  the last two alike, `M` a message or diagnostic. A resolver argument is
+  evaluated and identified as a volume handle is (decoding's `Handle`
+  state now serves both). Outside a cut a resolution is at once; within
+  one it is staged in the transaction and sent once the outermost cut
+  commits, as a turn's commit hook would, an asynchronous send. A
+  resolution the cut stages for a promise already resolved, or resolved
+  in the cut already, is an error; where another resolution comes first
+  between the cut's staging and its commit, it stands and the cut's is
+  lost, as a duplicate server's would fail. A failed or abandoned
+  alternative's resolutions go with it; an isolated search never commits,
+  so sends none.
+- Tests: in `tests/runtime_requests.rs`, a resolver reading its promise's
+  status, a pending promised value being pushback and a fulfilled one no
+  resolver; a cut that read a promise pending conflicting with its
+  resolution and rerunning (forced: the resolution commits between the
+  cut's read and its commit). In `src/reflection/machine/tests.rs`, a
+  promise allocated, fulfilled and broken through its resolver; a promise
+  effect without a resolver failing, and resolving twice failing, within
+  a cut too; a cut's resolution sent only once it commits, and a failed
+  alternative's not at all; a cut that read a promise pending retrying
+  once it resolves (forced).
 
 ## Verification
 
@@ -1523,7 +1567,11 @@ the public API, in `tests/`.
 
 - A promise resolves only outside a cut, since a resolution cannot be
   undone: a known limitation (maintainer, 2026-10-19). Revisit promises
-  whose resolution a failed cut undoes once the heaps are fast enough.
+  whose resolution a failed cut undoes once the heaps are fast enough. A
+  cut defers a resolution to its commit: a turn's in a commit hook,
+  reflection's by itself, an asynchronous send (maintainer, 2026-10-20).
+  Doing better would need evaluation itself under the transaction that
+  fulfills the promise.
 
 - Names, per step (above).
 - Hook errors, settled at `api-machine-errors` (maintainer, 2026-10-19):

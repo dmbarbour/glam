@@ -2314,8 +2314,12 @@ maps the short names used here to file names.
     merging that ports give.
   - A request on duplicate wires reaches each server, and they race: the
     first resolution wins and a later one fails. A server may read a
-    promise's status, pending, fulfilled or broken, read without forcing
-    it, to avoid duplicate work.
+    promise's status, pending, fulfilled or broken, from its resolver, to
+    avoid duplicate work. A promised value has no status of its own: it
+    stands for whatever it evaluates to.
+  - Machines and reflection share one family of promises: allocating,
+    reading a status, fulfilling, breaking. A resolution within a cut is
+    an asynchronous send, once the cut commits.
   - Ports offer no first-class channel capabilities: authority over a
     channel is the wiring. First-class capabilities are volumes: an opaque
     handle and generic effects (`.vol.new`, `.vol.get`, `.vol.set`,
