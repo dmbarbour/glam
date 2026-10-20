@@ -20,6 +20,8 @@ pub use lifecycle::{
 pub(crate) use machine::ContinuationKey;
 pub(crate) use machine::volume_effects;
 pub use promises::PromiseStatus;
+#[cfg(test)]
+pub(crate) use promises::publish_settled_unadmitted;
 pub(crate) use promises::{Promises, Resolution, publish_settled, resolver_promise};
 pub(crate) use store::DeathNotice;
 pub(crate) use volume_handle::handle_volume;

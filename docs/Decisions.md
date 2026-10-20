@@ -2359,8 +2359,13 @@ maps the short names used here to file names.
     outside one it commits on its own.
   - The commit settles the promise's record under the store's lock, and
     writes the promise's place, so readers of its status conflict and
-    wake. The committer publishes the value, and wakes what waits on it,
-    once it has released the store.
+    wake. Having released the store, the committer publishes the value
+    under the runtime-mutation admission it still holds, then advances the
+    observation epoch, and only then delivers wakes: every wake on the
+    promise follows its publication, or a cut woken by the epoch could
+    find the value missing and wait again, past the publication. The
+    commit decides atomically; publishing after it is safe while the gap
+    is brief (maintainer, 2026-10-20).
   - A resolution that another commits first makes its transaction
     conflict; running again, the transaction finds the promise resolved,
     and resolving it fails unless it checked. Forks of one cut that
@@ -2378,7 +2383,9 @@ maps the short names used here to file names.
   `requests-travel-on-ports`, whose resolution within a cut was an
   asynchronous send. Publishing after the store's lock leaves a moment
   when a promise's status says resolved and its value still waits, which
-  ends as the committer publishes.
+  ends as the committer publishes; nothing promised that a resolved
+  promise's value is at once observable, since it may resolve to a lazy
+  value or another promise (maintainer, 2026-10-20).
 - **Recorded in:** runtime API plan, `api-transactional-promises`.
 
 ### Quiescence is every machine waiting; settlement reports what remains unresolved

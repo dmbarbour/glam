@@ -1700,8 +1700,7 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   Validation conflicts where the record no longer holds the promise
   pending, and the commit settles the record under the store's lock
   (`Promises::settle`), leaving the promised value for the committer to
-  publish once it has released the store and the mutation gate
-  (`publish_settled`), since publication takes the gate itself.
+  publish once it has released the store (`publish_settled`).
 - Turns resolve within cuts, through `transact`, instead of refusing, and
   read their own resolution in `promise_status`. A fork's join reports a
   promise resolved by both the fork and its cut since the fork as an
@@ -1718,6 +1717,16 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   second join. In `src/reflection/store/tests.rs`, of two journals
   resolving one promise, the second conflicting. The reflection cut test
   now expects a cut to see its own resolution.
+- Publication order, after the maintainer's review the same day: the
+  first build advanced the observation epoch before publishing the
+  values, so a cut waiting on a promised value could wake to the epoch,
+  find the value missing, and wait again past its publication. The
+  committer now publishes under the mutation admission it still holds
+  (`ManagedPromiseRoot::publish_admitted`, over
+  `CompletionSubscriptions::publish_admitted`), then advances the epoch,
+  then delivers the wakes. An ordering test forces the check: a hook just
+  before a commit's epoch advance finds the value already assigned, and it
+  fails when the hook moves ahead of publication.
 
 ## Verification
 

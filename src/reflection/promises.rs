@@ -26,9 +26,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::core::{
     EvaluationFailure, ManagedPromisePublication, ManagedPromiseRoot, OpaquePayloadFamily,
-    OpaquePayloadRecord, OpaqueValue, PromisedValue, RuntimeValueAccess, Value,
+    OpaquePayloadRecord, OpaqueValue, PromiseAssignment, PromisedValue, RuntimeValueAccess, Value,
 };
-use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
+use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority, RuntimeValueRoot};
 
 use super::store::DeathNotice;
 
@@ -113,37 +113,59 @@ impl Settled {
         Self { root, resolution }
     }
 
-    /// Publishes the resolution into the promised value, returning what to
-    /// notify once the caller has left `access`.
-    pub(crate) fn publish(
-        self,
-        access: &RuntimeValueAccess<'_>,
-    ) -> Option<ManagedPromisePublication> {
-        self.root
-            .publish(
+    fn assignment(&self, access: &RuntimeValueAccess<'_>) -> PromiseAssignment {
+        match &self.resolution {
+            Resolution::Fulfill(value) => Ok(value.clone_core_with(access)),
+            Resolution::Break(failure) => Err(Arc::new(EvaluationFailure::emission_in(
                 access,
-                match self.resolution {
-                    Resolution::Fulfill(value) => Ok(value.clone_core_with(access)),
-                    Resolution::Break(failure) => Err(Arc::new(EvaluationFailure::emission_in(
-                        access,
-                        failure.clone_core_with(access),
-                    ))),
-                },
-            )
-            .ok()
+                failure.clone_core_with(access),
+            ))),
+        }
     }
 }
 
-/// Publishes what a commit settled, outside the store's lock and every
-/// access region, then wakes what waits on it.
-pub(crate) fn publish_settled(values: &crate::core::CoreValueFactory, settled: Vec<Settled>) {
+/// Publishes what a commit settled into the promised values, under the
+/// runtime-mutation admission that the committer still holds, returning the
+/// wakes to deliver once it has advanced the observation epoch and released
+/// that admission: every wake on a resolved promise follows its publication
+/// (`promise-resolution-commits-with-its-cut`). The committer has released
+/// the store's lock, and holds no access region.
+pub(crate) fn publish_settled(
+    values: &crate::core::CoreValueFactory,
+    mutation: &dyn RuntimeMutationAuthority,
+    settled: Vec<Settled>,
+) -> Vec<ManagedPromisePublication> {
     if settled.is_empty() {
-        return;
+        return Vec::new();
     }
+    values.with_boundary_access(|access| {
+        settled
+            .into_iter()
+            .filter_map(|settled| {
+                let assignment = settled.assignment(&access);
+                settled
+                    .root
+                    .publish_admitted(&access, mutation, assignment)
+                    .ok()
+            })
+            .collect()
+    })
+}
+
+/// As [`publish_settled`], for a store outside a runtime's admission, such
+/// as a test host's, delivering the wakes at once.
+#[cfg(test)]
+pub(crate) fn publish_settled_unadmitted(
+    values: &crate::core::CoreValueFactory,
+    settled: Vec<Settled>,
+) {
     let publications = values.with_boundary_access(|access| {
         settled
             .into_iter()
-            .filter_map(|settled| settled.publish(&access))
+            .filter_map(|settled| {
+                let assignment = settled.assignment(&access);
+                settled.root.publish(&access, assignment).ok()
+            })
             .collect::<Vec<_>>()
     });
     for publication in publications {

@@ -211,6 +211,10 @@ pub(crate) struct RuntimeSharedResources {
     /// they bind, as they do once a `Runtime` holds the runtime
     /// (`machines-inherit-an-environment`).
     machine_environment: AtomicBool,
+    /// Runs once, at the next commit, just before it advances the
+    /// observation epoch, for ordering tests.
+    #[cfg(test)]
+    before_epoch_advance: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 pub(super) struct RuntimeTransactionState {
@@ -405,14 +409,20 @@ impl RuntimeSharedResources {
                 state.reflection.take_settled(),
             )
         };
+        // The promised values publish before the epoch advances, and every
+        // wake follows both.
+        let publications =
+            crate::reflection::publish_settled(self.values.core(), &mutation, settled);
+        #[cfg(test)]
+        self.run_before_epoch_advance();
         if changed {
             self.publish_observation(mutation);
         } else {
             drop(mutation);
         }
-        // Publication takes the mutation gate itself, so it waits until the
-        // commit has released it.
-        crate::reflection::publish_settled(self.values.core(), settled);
+        for publication in publications {
+            publication.notify();
+        }
         result
     }
 
@@ -470,14 +480,20 @@ impl RuntimeSharedResources {
                 std::panic::resume_unwind(payload)
             }
         };
+        // The promised values publish before the epoch advances, and every
+        // wake follows both.
+        let publications =
+            crate::reflection::publish_settled(self.values.core(), &mutation, settled);
+        #[cfg(test)]
+        self.run_before_epoch_advance();
         if changed {
             self.publish_observation(mutation);
         } else {
             drop(mutation);
         }
-        // Publication takes the mutation gate itself, so it waits until the
-        // commit has released it.
-        crate::reflection::publish_settled(self.values.core(), settled);
+        for publication in publications {
+            publication.notify();
+        }
         result
     }
 
@@ -587,6 +603,21 @@ impl RuntimeSharedResources {
             }
         }
         broken || reclaimed
+    }
+
+    /// Runs `hook` at the next commit, just before it advances the
+    /// observation epoch.
+    #[cfg(test)]
+    pub(crate) fn before_epoch_advance_for_test(&self, hook: impl FnOnce() + Send + 'static) {
+        *self.before_epoch_advance.lock().unwrap() = Some(Box::new(hook));
+    }
+
+    #[cfg(test)]
+    fn run_before_epoch_advance(&self) {
+        let hook = self.before_epoch_advance.lock().unwrap().take();
+        if let Some(hook) = hook {
+            hook();
+        }
     }
 
     pub(super) fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
@@ -814,6 +845,8 @@ impl EvaluationRuntime {
             mutation_admission,
             work: Arc::downgrade(&work),
             machine_environment: AtomicBool::new(false),
+            #[cfg(test)]
+            before_epoch_advance: Mutex::new(None),
         });
         shared_resources.register_runtime_core();
         let default_reflection_profile = Arc::new(ReflectionTaskProfile::unsealed());
@@ -1915,6 +1948,8 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
             mutation_admission,
             work: Arc::downgrade(&work),
             machine_environment: AtomicBool::new(false),
+            #[cfg(test)]
+            before_epoch_advance: Mutex::new(None),
         });
         shared_resources.register_runtime_core();
         EvaluationRuntime {

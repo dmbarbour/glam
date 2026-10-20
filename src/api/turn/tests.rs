@@ -428,3 +428,44 @@ fn settlement_collects_and_acts_on_death_notices_first() {
     })
     .expect("the turn should succeed");
 }
+
+#[test]
+fn a_resolution_publishes_its_value_before_its_commit_advances_the_epoch() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        m.promise();
+        m.set("resolver")?;
+        let promised = m.peek()?.clone();
+        let values = m.runtime.assembler.values();
+        let seen = Arc::new(Mutex::new(None));
+        let hook_seen = Arc::clone(&seen);
+        // A cut waiting on the promised value wakes as the epoch advances,
+        // so the value must be there by then, or the cut would wait again and
+        // miss it (`promise-resolution-commits-with-its-cut`).
+        m.resources().before_epoch_advance_for_test(move || {
+            let assigned = values.with_access(|scoped| {
+                match scoped
+                    .clone_core(&promised)
+                    .expect("the value is this runtime's")
+                {
+                    crate::core::Value::Promised(promise) => promise
+                        .access(scoped.runtime_access())
+                        .assignment()
+                        .is_some(),
+                    _ => false,
+                }
+            });
+            *hook_seen.lock().unwrap() = Some(assigned);
+        });
+        m.get("resolver")?;
+        m.push_int(1);
+        m.fulfill()?;
+        assert_eq!(
+            *seen.lock().unwrap(),
+            Some(true),
+            "the commit published the value before advancing the epoch"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}

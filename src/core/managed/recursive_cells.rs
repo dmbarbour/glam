@@ -619,6 +619,21 @@ impl ManagedPromiseRoot {
             .publish_notifying(assignment)
     }
 
+    /// As [`Self::publish`], under runtime-mutation admission the caller
+    /// already holds, so that it can make other changes visible after the
+    /// assignment and before any wake. The returned notification must be
+    /// delivered after the caller releases that admission.
+    pub(crate) fn publish_admitted(
+        &self,
+        authority: &RuntimeValueAccess<'_>,
+        mutation: &dyn RuntimeMutationAuthority,
+        assignment: ManagedPromiseAssignment,
+    ) -> Result<ManagedPromisePublication, ManagedPromiseAssignment> {
+        self.access(authority)
+            .expect("promise root and publication access must share one value domain")
+            .publish_admitted(mutation, assignment)
+    }
+
     pub(crate) fn install_producer(
         &self,
         authority: &RuntimeValueAccess<'_>,
@@ -1224,6 +1239,43 @@ impl<'access, 'scope> ManagedPromiseAccess<'access, 'scope> {
         Ok(ManagedPromisePublication {
             producer,
             completion: None,
+        })
+    }
+
+    /// As [`Self::publish_notifying`], under runtime-mutation admission the
+    /// caller already holds.
+    fn publish_admitted(
+        &self,
+        mutation: &dyn RuntimeMutationAuthority,
+        assignment: ManagedPromiseAssignment,
+    ) -> Result<ManagedPromisePublication, ManagedPromiseAssignment> {
+        if let Some(producer) = self.producer()
+            && let Some(coordinator) = producer.coordinator()
+        {
+            let (producer, completion) =
+                self.publish_guarded(&coordinator, mutation, assignment, |assignment| {
+                    producer.publish_assignment_guarded(
+                        self.authority,
+                        &coordinator,
+                        mutation,
+                        assignment,
+                    )
+                })?;
+            return Ok(ManagedPromisePublication {
+                producer: Some(producer),
+                completion: Some(completion),
+            });
+        }
+        let (producer, completion) = self.cell.completion.publish_admitted(mutation, || {
+            self.publish_assignment(assignment, |assignment| {
+                self.producer().map(|producer| {
+                    producer.publish_assignment_detached(self.authority, assignment)
+                })
+            })
+        })?;
+        Ok(ManagedPromisePublication {
+            producer,
+            completion,
         })
     }
 

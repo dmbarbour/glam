@@ -23,7 +23,7 @@ use crate::reflection::{
     ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
     ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionStore,
     ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment, TaskValidation,
-    ValidationResult, publish_settled, reflection_request_specs,
+    ValidationResult, publish_settled_unadmitted, reflection_request_specs,
 };
 use crate::test_support::ResultTestExt as _;
 
@@ -683,7 +683,7 @@ impl TestHost {
             state.generation += 1;
             (state.store.values().clone(), state.store.take_settled())
         };
-        publish_settled(&values, settled);
+        publish_settled_unadmitted(&values, settled);
         self.publish_runtime_observation();
     }
 
@@ -931,7 +931,7 @@ impl TaskHost<TestEffects> for TestHost {
             state.generation += 1;
             (state.store.values().clone(), state.store.take_settled())
         };
-        publish_settled(&settled.0, settled.1);
+        publish_settled_unadmitted(&settled.0, settled.1);
         journal.reflection.commit_updates();
         self.publish_runtime_observation();
         CommitResult::Committed
@@ -979,7 +979,7 @@ impl TaskHost<StandardEffects> for TestHost {
             state.generation += 1;
             (state.store.values().clone(), state.store.take_settled())
         };
-        publish_settled(&settled.0, settled.1);
+        publish_settled_unadmitted(&settled.0, settled.1);
         self.publish_runtime_observation();
         CommitResult::Committed
     }

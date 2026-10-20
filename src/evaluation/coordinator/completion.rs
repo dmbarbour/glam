@@ -142,6 +142,27 @@ impl CompletionSubscriptions {
         Ok(result)
     }
 
+    /// As [`Self::publish`], under mutation admission the caller already
+    /// holds, so that the caller decides what becomes visible between the
+    /// terminal and any wake. The returned wake, where there is one, must be
+    /// delivered only after the caller releases that admission.
+    pub(crate) fn publish_admitted<T, E>(
+        &self,
+        mutation: &dyn RuntimeMutationAuthority,
+        publish_terminal: impl FnOnce() -> Result<T, E>,
+    ) -> Result<(T, Option<CompletionWake>), E> {
+        let Some(coordinator) = self.coordinator() else {
+            let result = publish_terminal()?;
+            self.registrations
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
+            return Ok((result, None));
+        };
+        let (result, wake) = self.publish_guarded(&coordinator, mutation, publish_terminal)?;
+        Ok((result, Some(wake)))
+    }
+
     /// Publishes a terminal using mutation admission already held by the
     /// caller.
     ///
