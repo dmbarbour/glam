@@ -1416,4 +1416,6 @@ which trace a million objects and no ephemeron:
 | the sink | 835.53 M | 836.57 M |
 
 Resolving after each trace cost about 30 instructions per traced object;
-the sink costs about one.
+the sink costs about one. At `3854dd03`, the crate's `dynamic` gate passed
+(Miri 236 passed, 4 ignored; both sanitizers 238 passed, 2 ignored), as did
+Glam's `scripts/check.sh`.
