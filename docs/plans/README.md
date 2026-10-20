@@ -53,12 +53,14 @@ flags a step for discussion when work reaches it, not a decision.
 - [`RuntimeApi_2026-10-17.md`](RuntimeApi_2026-10-17.md): `api-` steps
   from the runtime API review: `Runtime`, turns on keyed machines, a
   bridge for the CLI, data operations, cuts, a tree of machines with
-  forks, machine errors, ports, request queues, settlement, hosts as machines, effect
-  providers, the handle API's retirement, then the runtime's retirement
-  protocol. The CLI moves piecemeal, a slice in each step. Drafted
-  2026-10-17; `api-runtime-turns`, `api-cli-bridge`, `api-machine-data`,
-  `api-cuts`, `api-virtual-resources`, `api-machine-tree`,
-  `api-forks-in-cuts` and `api-machine-errors` are built,
+  forks, machine errors, ports, environments, requests, opaque
+  finalization, settlement, hosts as machines, effect providers, the
+  handle API's retirement, then the runtime's retirement protocol. The CLI
+  moves piecemeal, a slice in each step. Drafted 2026-10-17;
+  `api-runtime-turns`, `api-cli-bridge`, `api-machine-data`, `api-cuts`,
+  `api-virtual-resources`, `api-machine-tree`, `api-forks-in-cuts`,
+  `api-machine-errors`, `api-ports`, `api-machine-environment` and
+  `api-requests` are built,
   `api-machine-tree` superseding `api-scoped-threads`, and the `api-cli-prelude` trial was kept; the
   plan goes ahead of performance work unless a cost gets in the way
   (maintainer, 2026-10-18). On
@@ -109,6 +111,11 @@ flags a step for discussion when work reaches it, not a decision.
   messages through request queues. Its decisions are settled, and
   [`RuntimeOwnership_2026-10-17.md`](RuntimeOwnership_2026-10-17.md) holds
   the remediation.
+- [`OpaqueFinalization_2026-10-20.md`](../reviews/OpaqueFinalization_2026-10-20.md)
+  investigates how what opaque values stand for, volumes and promises, is
+  reclaimed once unreachable: weak references for glam-gc, their
+  mechanisms' pros and cons, and a recommendation, for the design step
+  `api-opaque-finalization`.
 - [`RuntimeApi_2026-10-17.md`](../reviews/RuntimeApi_2026-10-17.md)
   re-envisions the public API from user stories (maintainer, 2026-10-17): a
   thread-affine runtime in which Rust threads run turns on keyed machines
