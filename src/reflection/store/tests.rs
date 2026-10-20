@@ -65,11 +65,14 @@ fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<Eva
 }
 
 /// Compile-exhaustive ownership latch for the durable reflection-store
-/// state. Public values are compatibility roots; the promises hold each
-/// pending promise's rooted owner until it resolves or its resolver dies,
-/// and the settled resolutions hold them until their committer publishes;
-/// death notices, the heap's handle payload, query identity, conflict
-/// metadata, and revision state are edge-free companions.
+/// state. Public values are compatibility roots; committed versions are
+/// rooted ephemerons, which keep their values only while their volumes'
+/// cells are reachable otherwise, and kept cells are roots that keep their
+/// volumes (`api-volume-cells`); the promises hold each pending promise's
+/// rooted owner until it resolves or its resolver dies, and the settled
+/// resolutions hold them until their committer publishes; death notices,
+/// query identity, conflict metadata, and revision state are edge-free
+/// companions.
 fn assert_store_root_boundary_inventory(
     snapshot: &StoreSnapshot,
     edit: &StoreEdit,
@@ -84,10 +87,9 @@ fn assert_store_root_boundary_inventory(
         environment_volume,
         next_volume,
         promises,
-        death_notices,
-        heap_handle,
+        kept,
         query_domain,
-        roots,
+        versions,
         strategy,
         values,
     } = snapshot;
@@ -98,10 +100,9 @@ fn assert_store_root_boundary_inventory(
     let _: &VolumeId = environment_volume;
     let _: &Arc<AtomicU64> = next_volume;
     let _: &Arc<Promises> = promises;
-    let _: &Sender<DeathNotice> = death_notices;
-    let _: &Arc<VolumeHandle> = heap_handle;
+    let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot> = kept;
     let _: &Arc<QueryDomain> = query_domain;
-    let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
+    let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeVersion> = versions;
     let _: &Arc<dyn ConflictAnalysisStrategy> = strategy;
     let _: &CoreValueFactory = values;
 
@@ -114,9 +115,14 @@ fn assert_store_root_boundary_inventory(
             let _: &ConflictAddress = address;
             let _: &Option<PublicValue> = updater;
         }
-        StoreEdit::Create { address, initial } => {
+        StoreEdit::Create {
+            address,
+            initial,
+            volume,
+        } => {
             let _: &ConflictAddress = address;
             let _: &PublicValue = initial;
+            let _: &ManagedVolumeRoot = volume;
         }
         StoreEdit::Resolve {
             address,
@@ -132,12 +138,14 @@ fn assert_store_root_boundary_inventory(
     let StoreJournal {
         snapshot,
         views,
+        cells,
         observations,
         edits,
         branch,
     } = journal;
     let _: &StoreSnapshot = snapshot;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = views;
+    let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot> = cells;
     let _: &Arc<Mutex<Box<dyn ConflictObservationIndex>>> = observations;
     let _: &Vec<StoreEdit> = edits;
     if let Some(Branch { base, reads }) = branch {
@@ -154,12 +162,12 @@ fn assert_store_root_boundary_inventory(
         query_retirements,
         next_volume,
         promises,
-        death_notices,
         death_notice_receiver,
-        heap_handle,
+        kept,
         revoked,
         settled,
-        roots,
+        versions,
+        pruned_at,
         revision,
         latest_changes,
         strategy,
@@ -173,12 +181,12 @@ fn assert_store_root_boundary_inventory(
     let _: &Receiver<EvaluationQueryId> = query_retirements;
     let _: &Arc<AtomicU64> = next_volume;
     let _: &Arc<Promises> = promises;
-    let _: &Sender<DeathNotice> = death_notices;
     let _: &Receiver<DeathNotice> = death_notice_receiver;
-    let _: &Arc<VolumeHandle> = heap_handle;
+    let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot> = kept;
     let _: &BTreeSet<VolumeId> = revoked;
     let _: &Vec<Settled> = settled;
-    let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
+    let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeVersion> = versions;
+    let _: &u64 = pruned_at;
     let _: &u64 = revision;
     let _: &BTreeMap<ConflictAddress, u64> = latest_changes;
     let _: &Arc<dyn ConflictAnalysisStrategy> = strategy;
@@ -393,7 +401,7 @@ fn query_state_is_transactional_and_retired_after_the_last_handle() {
     drop(handle);
     let maintenance = StoreJournal::new(store.snapshot());
     assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
-    let root = store.roots.get(&store.runtime_volume).unwrap();
+    let root = store.volume_root(store.runtime_volume).unwrap();
     let retired =
         crate::api::Value::from_runtime_root(store.values.construct_runtime_value_root(|access| {
             lazy_core_value_path(access, root.clone_core_in(access), &query_path(id))
@@ -413,7 +421,7 @@ fn runtime_coordination_volume_is_not_client_revocable() {
     assert!(store.revoke_volume(store.runtime_volume).is_none());
 
     let snapshot = store.snapshot();
-    assert!(snapshot.volume(store.runtime_volume).is_some());
+    assert!(snapshot.committed(store.runtime_volume).is_some());
 }
 
 #[test]
@@ -425,7 +433,7 @@ fn journal_caches_its_view_and_uncontended_commit_installs_it() {
     let cached_view = journal.view();
     assert!(same_representation(&store, &journal.view(), &cached_view));
     assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
-    assert!(same_representation(&store, store.root(), &cached_view));
+    assert!(same_representation(&store, &store.root(), &cached_view));
 }
 
 #[test]
@@ -442,7 +450,7 @@ fn concurrent_commit_rebases_instead_of_installing_cached_view() {
     assert_eq!(store.try_commit(&second), StoreCommitResult::Committed);
     assert!(!same_representation(
         &store,
-        store.root(),
+        &store.root(),
         &stale_cached_view
     ));
 }
@@ -460,12 +468,12 @@ fn one_journal_updates_multiple_volumes_atomically() {
     assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
     assert!(same_representation(
         &store,
-        store.volume_root(first).unwrap(),
+        &store.volume_root(first).unwrap(),
         journal.volume_view(first).as_ref().unwrap()
     ));
     assert!(same_representation(
         &store,
-        store.volume_root(second).unwrap(),
+        &store.volume_root(second).unwrap(),
         journal.volume_view(second).as_ref().unwrap()
     ));
 }
@@ -476,7 +484,7 @@ fn revoked_volume_rejects_staged_blind_edits_without_partial_commit() {
     let initial = empty(&store);
     let revoked = store.create_volume(initial.clone()).unwrap();
     let surviving = store.create_volume(initial).unwrap();
-    let original_surviving = store.volume_root(surviving).cloned().unwrap();
+    let original_surviving = store.volume_root(surviving).unwrap();
     let mut journal = StoreJournal::new(store.snapshot());
     journal.write_volume(revoked, Vec::new(), integer(&store, 1));
     journal.write_volume(surviving, Vec::new(), integer(&store, 2));
@@ -488,7 +496,7 @@ fn revoked_volume_rejects_staged_blind_edits_without_partial_commit() {
     );
     assert!(same_representation(
         &store,
-        store.volume_root(surviving).unwrap(),
+        &store.volume_root(surviving).unwrap(),
         &original_surviving
     ));
     assert!(store.volume_root(revoked).is_none());
@@ -621,7 +629,7 @@ fn rebased_rewrites_apply_in_commit_order() {
         second_edit.rewrite(Vec::new(), second);
         assert_eq!(store.try_commit(&first_edit), StoreCommitResult::Committed);
         assert_eq!(store.try_commit(&second_edit), StoreCommitResult::Committed);
-        assembler.evaluate(store.root()).unwrap()
+        assembler.evaluate(&store.root()).unwrap()
     };
 
     assert_list_values(
@@ -711,8 +719,8 @@ fn virtual_writes_change_no_volume_but_conflict_with_their_readers() {
         );
     }
     let runtime_volume = store.volume_root(store.runtime_volume).unwrap();
-    assert!(same_representation(&store, runtime_volume, &runtime_root));
-    assert!(same_representation(&store, store.root(), &heap_root));
+    assert!(same_representation(&store, &runtime_volume, &runtime_root));
+    assert!(same_representation(&store, &store.root(), &heap_root));
     assert_eq!(store.try_commit(&heap_reader), StoreCommitResult::Committed);
     assert_eq!(store.try_commit(&reader), StoreCommitResult::Conflict);
 }
@@ -844,31 +852,179 @@ fn writes_do_not_erase_earlier_read_dependencies() {
     assert_eq!(store.try_commit(&local), StoreCommitResult::Conflict);
 }
 
-#[test]
-fn a_reclaimed_volume_drops_late_writes_and_conflicts_its_readers() {
-    let mut store = store();
-    let volume = store
-        .create_volume(text(&store, "first"))
+/// A store whose value domain is its own, which tests may collect.
+fn collectable_store() -> ReflectionStore {
+    store_with(crate::core::private_test_value_factory())
+}
+
+fn collect(store: &ReflectionStore) {
+    store
+        .values
+        .collect_managed_for_test()
+        .expect("the store's heap collects");
+}
+
+/// Creates a volume through a committed journal, returning its ID and
+/// handle (`api-volume-cells`).
+fn glam_volume(store: &mut ReflectionStore, initial: &str) -> (VolumeId, PublicValue) {
+    let mut creator = StoreJournal::new(store.snapshot());
+    let (volume, handle) = creator
+        .create_volume(text(store, initial))
         .expect("a volume allocates");
+    assert_eq!(store.try_commit(&creator), StoreCommitResult::Committed);
+    (volume, handle)
+}
+
+fn reads(store: &ReflectionStore, volume: VolumeId) -> bool {
+    store.snapshot().volume_value(volume, &[]).is_some()
+}
+
+#[test]
+fn a_volume_reaching_its_own_handle_is_collected() {
+    let mut store = collectable_store();
+    let (volume, handle) = glam_volume(&mut store, "first");
     let mut writer = StoreJournal::new(store.snapshot());
-    writer.write_volume(volume, Vec::new(), text(&store, "late"));
-    let mut reader = StoreJournal::new(store.snapshot());
-    assert!(reader.observe_volume_read(volume, &[]));
+    writer.write_volume(volume, path(&["self"]), handle.clone());
+    assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
+    drop(writer);
 
-    assert!(store.reclaim_volume(volume));
-    assert!(!store.reclaim_volume(volume), "it is reclaimed once");
-    assert_eq!(
-        store.try_commit(&writer),
-        StoreCommitResult::Committed,
-        "nothing can read a reclaimed volume, so its late writes go"
+    collect(&store);
+    assert!(reads(&store, volume), "its handle keeps it");
+    drop(handle);
+    collect(&store);
+    assert!(
+        !reads(&store, volume),
+        "its contents reach its handle only through its version"
     );
-    assert!(store.snapshot().volume_value(volume, &[]).is_none());
+}
+
+#[test]
+fn volumes_reaching_each_other_s_handles_are_collected_together() {
+    let mut store = collectable_store();
+    let (first, first_handle) = glam_volume(&mut store, "first");
+    let (second, second_handle) = glam_volume(&mut store, "second");
+    let mut writer = StoreJournal::new(store.snapshot());
+    writer.write_volume(first, path(&["other"]), second_handle.clone());
+    writer.write_volume(second, path(&["other"]), first_handle.clone());
+    assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
+    drop(writer);
+
+    drop(first_handle);
+    collect(&store);
+    assert!(
+        reads(&store, first) && reads(&store, second),
+        "the second's handle reaches the second, whose contents reach the first"
+    );
+    drop(second_handle);
+    collect(&store);
+    assert!(!reads(&store, first) && !reads(&store, second));
+}
+
+#[test]
+fn a_transaction_writing_a_volume_keeps_it_until_it_commits() {
+    let mut store = collectable_store();
+    let (volume, handle) = glam_volume(&mut store, "first");
+    let mut writer = StoreJournal::new(store.snapshot());
+    writer.write_volume(volume, Vec::new(), text(&store, "second"));
+    drop(handle);
+
+    collect(&store);
+    assert!(reads(&store, volume), "the writer keeps the volume's cell");
+    assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
+    let snapshot = store.snapshot();
+    assert!(snapshot.volume_value(volume, &[]).is_some());
+    drop(writer);
+    drop(snapshot);
+    collect(&store);
+    assert!(!reads(&store, volume), "nothing keeps it once committed");
+}
+
+#[test]
+fn a_snapshot_keeps_the_version_it_began_from() {
+    let assembler = Assembler::default();
+    let mut store = store_with(assembler.core_values());
+    let (volume, handle) = glam_volume(&mut store, "first");
+    let before = store.snapshot();
+    let mut writer = StoreJournal::new(store.snapshot());
+    writer.write_volume(volume, Vec::new(), text(&store, "second"));
+    assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
+    drop(writer);
+
+    collect(&store);
+    let read = |snapshot: &StoreSnapshot| {
+        let value = snapshot.volume_value(volume, &[]).unwrap();
+        assembler
+            .evaluator()
+            .eval(&value)
+            .unwrap()
+            .as_bytes()
+            .unwrap()
+    };
+    assert_eq!(read(&before).as_deref(), Some(b"first".as_slice()));
     assert_eq!(
-        store.try_commit(&reader),
-        StoreCommitResult::Conflict,
-        "what read the volume conflicts with its reclamation"
+        read(&store.snapshot()).as_deref(),
+        Some(b"second".as_slice())
+    );
+    drop(handle);
+}
+
+#[test]
+fn the_store_keeps_its_own_volumes_and_a_host_s() {
+    let mut store = collectable_store();
+    let hosted = store
+        .create_volume(text(&store, "hosted"))
+        .expect("a volume allocates");
+    collect(&store);
+    for volume in [
+        store.heap_volume,
+        store.runtime_volume,
+        store.environment_volume,
+        hosted,
+    ] {
+        assert!(reads(&store, volume));
+    }
+    assert!(store.revoke_volume(hosted).is_some());
+    assert!(!reads(&store, hosted));
+}
+
+#[test]
+fn collected_volumes_are_pruned_as_a_volume_is_created_after_a_collection() {
+    let mut store = collectable_store();
+    let kept = store.volume_count();
+    let (first, handle) = glam_volume(&mut store, "first");
+    drop(handle);
+    let (_, handle) = glam_volume(&mut store, "second");
+    assert_eq!(
+        store.volume_count(),
+        kept + 2,
+        "nothing collected, nothing pruned"
     );
 
+    collect(&store);
+    assert!(!reads(&store, first));
+    assert_eq!(
+        store.volume_count(),
+        kept + 2,
+        "a collection clears, and prunes nothing itself"
+    );
+    let (_, third) = glam_volume(&mut store, "third");
+    assert_eq!(
+        store.volume_count(),
+        kept + 2,
+        "creating the third pruned the first"
+    );
+    let (_, fourth) = glam_volume(&mut store, "fourth");
+    assert_eq!(
+        store.volume_count(),
+        kept + 3,
+        "no collection since the last prune, so none again"
+    );
+    drop((handle, third, fourth));
+}
+
+#[test]
+fn a_revoked_volume_s_late_writes_stay_an_error() {
+    let mut store = store();
     let revoked = store
         .create_volume(text(&store, "owned"))
         .expect("a volume allocates");
@@ -879,10 +1035,6 @@ fn a_reclaimed_volume_drops_late_writes_and_conflicts_its_readers() {
         store.try_commit(&late),
         StoreCommitResult::MissingVolume(revoked),
         "a revoked volume's late writes stay an error"
-    );
-    assert!(
-        !store.reclaim_volume(heap_volume()),
-        "the shared heap is never reclaimed"
     );
 }
 

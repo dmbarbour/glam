@@ -270,7 +270,7 @@ fn production_collection_preserves_each_serial_boundary() {
         .expect("a root-preserving collection must not invalidate an earlier settlement snapshot");
     let retained_reflection = access_path(
         &assembler,
-        after_quiescent_collection.reflection().root(),
+        &after_quiescent_collection.reflection().root(),
         "i11b_result",
     )
     .expect("committed reflection data should survive collection");
@@ -375,7 +375,7 @@ fn production_collection_preserves_each_serial_boundary() {
     runtime
         .collect_managed_for_maintenance()
         .expect("retained settlement report should survive later collection");
-    let reported_result = access_path(&assembler, report.reflection().root(), "i11b_result")
+    let reported_result = access_path(&assembler, &report.reflection().root(), "i11b_result")
         .expect("settled reflection data should remain retained");
     assert_eq!(
         assembler

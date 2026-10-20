@@ -35,9 +35,10 @@ pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry, LazyProducerView,
     ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedDropRecord, ManagedFamily,
     ManagedLazyAccess, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromisePublication,
-    ManagedPromiseRoot, OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot,
-    RuntimeValueAccess, RuntimeValueMutator, RuntimeValueObserver, assert_outside_mutator,
-    managed_slot_extent, trace_compatibility_value_managed_edges,
+    ManagedPromiseRoot, ManagedVolumeRoot, ManagedVolumeVersion, OpaquePayloadFamily,
+    OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueMutator,
+    RuntimeValueObserver, assert_outside_mutator, managed_slot_extent,
+    trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
@@ -53,6 +54,22 @@ impl LazyId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PromiseId(NonZeroU64);
+
+/// One shared-state partition within an evaluation runtime's reflection store.
+///
+/// IDs are allocated monotonically by the store and are never reused.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct VolumeId(NonZeroU64);
+
+impl VolumeId {
+    pub fn get(self) -> u64 {
+        self.0.get()
+    }
+
+    pub(crate) fn from_u64(id: u64) -> Option<Self> {
+        NonZeroU64::new(id).map(Self)
+    }
+}
 
 impl PromiseId {
     pub(crate) fn get(self) -> u64 {
@@ -290,14 +307,22 @@ pub(crate) struct PromisedValue {
     edge: managed::ManagedPromiseEdge,
 }
 
+/// A volume's handle: one edge to the volume's managed cell
+/// (`api-volume-cells`). Handles compare by the volume they name.
+pub(crate) struct VolumeValue {
+    edge: managed::ManagedVolumeEdge,
+}
+
 // Target-specific representation latches: each handle is one managed edge
 // with no drop glue. They are not a language-level value-size policy.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
 const _: () = {
     assert!(std::mem::size_of::<LazyValue>() == 8);
     assert!(std::mem::size_of::<PromisedValue>() == 8);
+    assert!(std::mem::size_of::<VolumeValue>() == 8);
     assert!(!std::mem::needs_drop::<LazyValue>());
     assert!(!std::mem::needs_drop::<PromisedValue>());
+    assert!(!std::mem::needs_drop::<VolumeValue>());
 };
 
 /// Runtime-selected construction authority for values which allocate stable
@@ -1019,6 +1044,33 @@ impl LazyValue {
     }
 }
 
+impl VolumeValue {
+    pub(in crate::core) fn from_edge(edge: managed::ManagedVolumeEdge) -> Self {
+        Self { edge }
+    }
+
+    pub(crate) fn trace_managed_edge(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.edge.trace(visitor);
+    }
+
+    #[inline(always)]
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self {
+            edge: self.edge.duplicate_in(access),
+        }
+    }
+
+    /// Whether two handles name the same volume.
+    pub(crate) fn same_volume_in(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        self.edge.same_allocation_in(&other.edge, access)
+    }
+
+    /// The volume this handle names.
+    pub(crate) fn id_in(&self, access: &RuntimeValueAccess<'_>) -> VolumeId {
+        self.edge.id(access)
+    }
+}
+
 impl PromisedValue {
     pub(crate) fn from_root(
         root: &managed::ManagedPromiseRoot,
@@ -1253,6 +1305,9 @@ pub enum Value {
     /// Host-owned identity whose representation is deliberately unavailable to
     /// Glam programs. Clones retain the payload and compare by identity.
     Opaque(OpaqueValue),
+    /// A volume's handle, which Glam programs see as opaque: one edge to the
+    /// volume's managed cell, compared by the volume it names.
+    Volume(VolumeValue),
 }
 
 /// A sealed unit carrier with reflection-only associated Glam metadata.
@@ -2461,6 +2516,7 @@ impl fmt::Debug for DiagnosticValueDebug<'_, '_> {
             Value::Promised(_) => formatter.write_str("Promised(..)"),
             Value::Metadata(_) => formatter.write_str("Sealed(..)"),
             Value::Opaque(_) => formatter.write_str("Opaque(..)"),
+            Value::Volume(_) => formatter.write_str("Volume(..)"),
         }
     }
 }
@@ -2579,6 +2635,7 @@ impl RuntimeValueAccess<'_> {
             Value::Opaque(value) => Value::Opaque(OpaqueValue {
                 handle: value.handle.clone(),
             }),
+            Value::Volume(value) => Value::Volume(value.duplicate_in(self)),
         }
     }
 
@@ -2597,7 +2654,7 @@ impl RuntimeValueAccess<'_> {
             Value::Net(_) => "Net",
             Value::Lazy(_) | Value::Promised(_) => "Lazy",
             Value::Metadata(_) => "Sealed",
-            Value::Opaque(_) => "Opaque",
+            Value::Opaque(_) | Value::Volume(_) => "Opaque",
         }
     }
 
@@ -2656,7 +2713,8 @@ impl RuntimeValueAccess<'_> {
             | Value::Lazy(_)
             | Value::Promised(_)
             | Value::Metadata(_)
-            | Value::Opaque(_) => None,
+            | Value::Opaque(_)
+            | Value::Volume(_) => None,
         }
     }
 
@@ -2800,6 +2858,12 @@ impl RuntimeValueAccess<'_> {
                     unreachable!("equal value discriminants must select the same variant")
                 };
                 left.handle.same_owner(&right.handle)
+            }
+            Value::Volume(left) => {
+                let Value::Volume(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.same_volume_in(right, self)
             }
         }
     }
@@ -3155,7 +3219,8 @@ impl Value {
                 | Value::Lazy(_)
                 | Value::Promised(_)
                 | Value::Metadata(_)
-                | Value::Opaque(_) => None,
+                | Value::Opaque(_)
+                | Value::Volume(_) => None,
             },
         }
     }

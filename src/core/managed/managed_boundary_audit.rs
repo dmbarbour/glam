@@ -568,6 +568,7 @@ pub(super) fn compatibility_variant_name(value: &Value) -> &'static str {
         Value::Promised(_) => "promised",
         Value::Metadata(_) => "metadata",
         Value::Opaque(_) => "opaque",
+        Value::Volume(_) => "volume",
     }
 }
 
@@ -635,6 +636,11 @@ pub(super) fn closed_compatibility_variants(
         Value::Promised(PromisedValue::new(values)),
         values.with_boundary_access(|access| access.initial_metadata()),
         Value::Opaque(OpaqueValue::new(values, opaque_probe)),
+        values.with_boundary_access(|access| {
+            access
+                .new_volume(crate::core::VolumeId::from_u64(1).expect("one is a volume ID"))
+                .handle_in(&access)
+        }),
     ]
 }
 
@@ -691,6 +697,7 @@ fn every_real_value_variant_has_passive_managed_destruction() {
                 "promised",
                 "metadata",
                 "opaque",
+                "volume",
             ]
         );
     });
@@ -699,8 +706,8 @@ fn every_real_value_variant_has_passive_managed_destruction() {
     let dead = values
         .collect_managed_for_test()
         .expect("unrooted closed compatibility values should be reclaimed");
-    assert_eq!(dead.finalized_slots(), 13);
-    assert_eq!(managed_drops.load(Ordering::Relaxed), 13);
+    assert_eq!(dead.finalized_slots(), 14);
+    assert_eq!(managed_drops.load(Ordering::Relaxed), 14);
     assert_eq!(
         active_drops.load(Ordering::Relaxed),
         0,

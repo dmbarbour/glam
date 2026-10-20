@@ -840,8 +840,8 @@ fn readiness_stamp_tracks_heap_query_and_event_observations() {
     assert!(after_heap.stamp().observation_epoch() > initial.stamp().observation_epoch());
     assert!(!same_representation(
         &runtime,
-        after_heap.reflection().root(),
-        initial.reflection().root()
+        &after_heap.reflection().root(),
+        &initial.reflection().root()
     ));
 
     let input = runtime
@@ -854,8 +854,8 @@ fn readiness_stamp_tracks_heap_query_and_event_observations() {
     assert!(after_input.stamp().observation_epoch() > after_heap.stamp().observation_epoch());
     assert!(same_representation(
         &runtime,
-        after_input.reflection().root(),
-        after_heap.reflection().root()
+        &after_input.reflection().root(),
+        &after_heap.reflection().root()
     ));
 
     let (_, query_snapshot) = runtime.reflection_snapshot();

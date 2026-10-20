@@ -366,6 +366,7 @@ mod tests {
                     "promised",
                     "metadata",
                     "opaque",
+                    "volume",
                 ]
             );
         });
@@ -376,15 +377,16 @@ mod tests {
         assert_eq!(live.root_entries(), baseline.root_entries() + roots.len());
         assert_eq!(
             live.marked_slots(),
-            baseline.marked_slots() + roots.len() + 3,
-            "the function/net pair shares one net identity beside one lazy and one promise"
+            baseline.marked_slots() + roots.len() + 4,
+            "the function/net pair shares one net identity beside one lazy, one promise \
+             and one volume cell"
         );
 
         drop(roots);
         let dead = values
             .collect_managed_for_test()
             .expect("unrooted production nodes should reclaim every shell");
-        assert_eq!(dead.finalized_slots(), 16);
+        assert_eq!(dead.finalized_slots(), 17);
         assert_eq!(
             active_drops.load(std::sync::atomic::Ordering::Relaxed),
             0,

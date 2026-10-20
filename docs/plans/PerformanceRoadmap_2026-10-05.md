@@ -303,6 +303,13 @@ Their sections hold their earlier evidence.
   the type asked for, and safe code may keep a stale `Gc` whose slot
   another type reuses. Measure first: glam allocates about fifteen managed
   types, and fragmentation has shown in no profile yet.
+- **The volume table as a managed map** (`perf-managed-volume-table`), to
+  revisit after the representation steps (maintainer, 2026-10-20). The
+  reflection store maps each volume to a root on an ephemeron per
+  committed version (`api-volume-cells`), in a Rust persistent map. Once
+  `perf-value-representation` provides managed persistent maps, the table
+  could be one, behind one root per snapshot, or the store's state a
+  value. Not hot: one entry per volume, and a commit touches few.
 - **A module's fixed cost** (`perf-module-fixed-cost`), after the
   representation steps (maintainer, 2026-10-18), and not ahead of the
   runtime API plan unless it gets in the way. Compiling a module costs

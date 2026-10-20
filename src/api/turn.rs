@@ -1862,22 +1862,18 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// the volume. Allocation is transactional: outside a cut, the volume
     /// exists at once; within one, from the outermost cut's commit, and a
     /// failed cut allocates nothing. A volume lives while its handle does:
-    /// once every copy is gone, the runtime reclaims it after a collection
-    /// (`opaque-resources-reclaimed-when-unreachable`), though a volume
-    /// reaching its own handle lives until the runtime retires, for now.
+    /// once no copy is reachable, a collection collects it with its
+    /// contents, even where they reach its handle (`api-volume-cells`).
     pub fn volume_new(&mut self) -> Result<(), Error> {
         let initial = self.peek()?.clone();
         let values = self.runtime.assembler.values();
         values.require(&initial)?;
-        let (volume, store) = self.transact(|store, _| {
-            let volume = store
+        let handle = self.transact(|store, _| {
+            let (_, handle) = store
                 .create_volume(initial.clone())
                 .map_err(|error| Error::new(error.as_ref()))?;
-            Ok((volume, store.snapshot().clone()))
+            Ok(handle)
         })?;
-        let handle = values.with_access(|scoped| {
-            scoped.wrap(store.new_volume_handle(scoped.runtime_access(), volume))
-        });
         self.pop()?;
         self.push(handle);
         Ok(())

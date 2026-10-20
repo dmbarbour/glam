@@ -211,6 +211,30 @@ without end. Ports keep their own conflict state, bounded by the ports.
 entries, since pruning them alone could hide a conflict from a journal
 still running, which a low-water mark accounts for.
 
+### Per-volume histories (`perf-volume-histories`)
+
+An idea from the maintainer (2026-10-20), not scheduled, as volumes became
+cells (`api-volume-cells`). Each committed version of a volume is a managed
+`Contents` cell, held through an ephemeron keyed on the volume's cell. It
+holds only the committed value at first; it could also keep a short history
+of the volume's recent commits: their writes and rewrites, with updaters,
+and their reads.
+
+- **Conflict data that lives with its volume.** Validation would consult
+  only the volumes a transaction read, and a volume's history dies with
+  it, which retires this part of `perf-change-log`.
+- **Serializing before the present.** A transaction that read from
+  snapshot r could commit as if at a point p between r and the present
+  when no change in (r, p] overlaps its reads, no commit after p read what
+  it writes, and later writes to its addresses compose over its own: a
+  blind set supersedes it, and a rewrite is applied again over it. A
+  transaction that read X, which another then overwrote blindly, and wrote
+  Y, which nobody since has read, then commits before the overwrite rather
+  than running again.
+- **A horizon.** A history need reach back only to the oldest snapshot in
+  flight; beyond what it keeps, validation conflicts, as now. A bound on
+  length or age needs no registry of snapshots.
+
 ## Open questions (2026-10-15)
 
 - **Order.** *Answered (maintainer, 2026-10-15):* after the parser work

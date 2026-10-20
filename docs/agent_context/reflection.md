@@ -85,8 +85,10 @@ and control flow.
   widened dependency local. Earlier observations remain. The conflict-analysis
   strategy may only conservatively summarize reads and must never redefine
   edit semantics.
-- The heap is an ordinary volume whose ID and root are retained by the
-  runtime reflection store. Protected client volumes use the same journal and
+- The heap is an ordinary volume, whose cell the runtime reflection store
+  keeps. Each volume's committed versions are ephemerons keyed on its cell,
+  so a Glam volume lives while its handles, or a transaction writing it, do
+  (`api-volume-cells`). Protected client volumes use the same journal and
   atomic commit, but `.heap.*` can never address them. Exact and fingerprint
   conflict analysis includes `VolumeId`; the coarse strategy may conflict
   across volumes.

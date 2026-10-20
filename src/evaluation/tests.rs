@@ -8016,7 +8016,7 @@ fn runtime_readiness_is_ready_when_no_work_is_retained() {
         fixture
             .runtime
             .values()
-            .same_representation_for_test(first.reflection().root(), second.reflection().root())
+            .same_representation_for_test(&first.reflection().root(), &second.reflection().root())
             .expect("both readiness snapshots should belong to the fixture runtime")
     );
     assert_eq!(first.runtime_id(), fixture.runtime.id());

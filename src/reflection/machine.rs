@@ -2028,7 +2028,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let heap = if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
                     let observed = transaction.store.observe_read(&path);
-                    let heap = transaction.store.view();
+                    let heap =
+                        context.with_runtime_access(|access| transaction.store.view_in(&access));
                     if observed {
                         branch.observe(checkpoint, generation);
                     }
@@ -2102,13 +2103,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let root = if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
                     let observed = transaction.store.observe_volume_read(volume, &path);
-                    let root = transaction.store.volume_view(volume);
+                    let root = context.with_runtime_access(|access| {
+                        transaction.store.volume_view_in(&access, volume)
+                    });
                     if observed {
                         branch.observe(checkpoint, generation);
                     }
                     root
                 } else {
-                    context.suspend(|| self.host.snapshot().store().volume(volume).cloned())
+                    context.suspend(|| self.host.snapshot().store().committed(volume))
                 };
                 let value = match root {
                     Some(root) => context.with_runtime_access(|access| {
@@ -2675,19 +2678,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::VolumeNew(initial) => {
                 let initial = PublicValue::from_runtime_root(initial);
-                let store = self.store_snapshot(context, &branch);
-                let volume = if let Some(transaction) = branch.transaction.as_mut() {
-                    transaction
-                        .store
-                        .create_volume(initial)
+                let handle = if let Some(transaction) = branch.transaction.as_mut() {
+                    context
+                        .with_runtime_access(|access| {
+                            transaction.store.create_volume_in(&access, initial)
+                        })
                         .map_err(|error| TaskHalt::new(error.as_ref()))?
+                        .1
                 } else {
                     // One suspension covers the snapshot, the allocation and
                     // the commit.
-                    let (result, volume) = context.suspend(|| {
+                    let (result, handle) = context.suspend(|| {
                         let snapshot = self.host.snapshot();
                         let mut store = StoreJournal::new(snapshot.store().clone());
-                        let volume = store
+                        let (_, handle) = store
                             .create_volume(initial)
                             .map_err(|error| TaskHalt::new(error.as_ref()))?;
                         let result = self.host.commit(TaskCommit::new(
@@ -2695,10 +2699,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             snapshot.extra().clone(),
                             S::Journal::default(),
                         ));
-                        Ok::<_, TaskHalt>((result, volume))
+                        Ok::<_, TaskHalt>((result, handle))
                     })?;
                     match result {
-                        CommitResult::Committed => volume,
+                        CommitResult::Committed => handle,
                         CommitResult::Conflict => {
                             return Ok(MachineStep::Continue(MachineWork::Drive {
                                 branch,
@@ -2716,10 +2720,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         }
                     }
                 };
-                let handle = context.with_runtime_access(|access| {
-                    access.root_runtime_value(store.new_volume_handle(&access, volume))
-                });
-                MachineWork::deliver_root(handle, branch, scope_depth)
+                MachineWork::deliver_root(handle.into_runtime_root(), branch, scope_depth)
             }
             Request::HeapVolume => {
                 let store = self.store_snapshot(context, &branch);

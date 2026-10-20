@@ -996,7 +996,8 @@ fn classify_key_value(
             | CoreValue::Lazy(_)
             | CoreValue::Promised(_)
             | CoreValue::Metadata(_)
-            | CoreValue::Opaque(_) => ClassifiedRequestKey::Invalid,
+            | CoreValue::Opaque(_)
+            | CoreValue::Volume(_) => ClassifiedRequestKey::Invalid,
         })
         .map_err(TaskHalt::from)
 }

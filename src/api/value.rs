@@ -898,7 +898,7 @@ impl ValueKind {
             CoreValue::Net(_) => ValueKind::Net,
             CoreValue::Lazy(_) | CoreValue::Promised(_) => ValueKind::Lazy,
             CoreValue::Metadata(_) => ValueKind::Sealed,
-            CoreValue::Opaque(_) => ValueKind::Opaque,
+            CoreValue::Opaque(_) | CoreValue::Volume(_) => ValueKind::Opaque,
         }
     }
 }

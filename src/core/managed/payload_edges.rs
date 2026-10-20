@@ -61,7 +61,8 @@ impl CompatibilityValueEdges for Value {
             | Self::Net(_)
             | Self::Lazy(_)
             | Self::Promised(_)
-            | Self::Opaque(_) => {}
+            | Self::Opaque(_)
+            | Self::Volume(_) => {}
         }
     }
 
@@ -79,7 +80,8 @@ impl CompatibilityValueEdges for Value {
             | Self::Lazy(_)
             | Self::Promised(_)
             | Self::Metadata(_)
-            | Self::Opaque(_) => {}
+            | Self::Opaque(_)
+            | Self::Volume(_) => {}
         }
     }
 }

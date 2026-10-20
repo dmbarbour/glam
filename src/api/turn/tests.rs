@@ -394,6 +394,26 @@ fn a_volume_lives_while_any_copy_of_its_handle_does() {
 }
 
 #[test]
+fn a_volume_reaching_its_own_handle_is_collected() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        m.push_int(7);
+        m.volume_new()?;
+        let volume = m.volume_at(1)?;
+        m.dup()?;
+        m.volume_set(["self"])?;
+        assert_eq!(m.depth(), 0, "only the volume holds its handle");
+        collect(m);
+        assert!(
+            !holds(m, volume),
+            "its value reaches its cell only through its version (`api-volume-cells`)"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
 fn settlement_collects_and_acts_on_death_notices_first() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     let volume = rt

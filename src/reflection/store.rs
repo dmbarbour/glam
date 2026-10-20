@@ -22,29 +22,14 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use super::promises::{PromiseId, PromiseStatus, Promises, Resolution, Settled};
-use super::volume_handle::{VolumeHandle, handle_value};
 use crate::api::{Value as PublicValue, Values};
+pub use crate::core::VolumeId;
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, Key, LazyValue, List, RuntimeValueAccess, Value,
+    Builtin, CoreValueFactory, Dict, Key, LazyValue, List, ManagedVolumeRoot, ManagedVolumeVersion,
+    RuntimeValueAccess, Value,
 };
 use crate::core_net::CoreDataKey;
 use crate::number::Number;
-
-/// One shared-state partition within an evaluation runtime's reflection store.
-///
-/// IDs are allocated monotonically by the store and are never reused.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct VolumeId(NonZeroU64);
-
-impl VolumeId {
-    pub fn get(self) -> u64 {
-        self.0.get()
-    }
-
-    pub(crate) fn from_u64(id: u64) -> Option<Self> {
-        NonZeroU64::new(id).map(Self)
-    }
-}
 
 /// Runtime-local identity of one admitted-input endpoint.
 ///
@@ -184,12 +169,13 @@ pub struct StoreSnapshot {
     /// The store's next volume ID, which a transaction reserves from.
     next_volume: Arc<AtomicU64>,
     promises: Arc<Promises>,
-    /// Where dying volume handles and resolvers report to the store.
-    death_notices: Sender<DeathNotice>,
-    /// The shared heap's handle, which lives as long as the store.
-    heap_handle: Arc<VolumeHandle>,
+    /// The cells of the volumes the store kept, which the snapshot keeps
+    /// too.
+    kept: RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot>,
     query_domain: Arc<QueryDomain>,
-    roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
+    /// Each volume's committed version, which keeps its value only while
+    /// the volume's cell is reachable (`api-volume-cells`).
+    versions: RedBlackTreeMapSync<VolumeId, ManagedVolumeVersion>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
     values: CoreValueFactory,
 }
@@ -197,25 +183,10 @@ pub struct StoreSnapshot {
 impl StoreSnapshot {
     /// The shared heap's handle, as `.heap.vol` gives it.
     pub(crate) fn heap_handle(&self, access: &RuntimeValueAccess<'_>) -> Value {
-        handle_value(access, &self.heap_handle)
-    }
-
-    /// The handle of `volume`, which this store just allocated: its one
-    /// payload, which every copy of the handle shares, reports to the store
-    /// when the last copy is gone.
-    pub(crate) fn new_volume_handle(
-        &self,
-        access: &RuntimeValueAccess<'_>,
-        volume: VolumeId,
-    ) -> Value {
-        handle_value(
-            access,
-            &VolumeHandle::new(
-                self.values.runtime_id(),
-                volume,
-                Some(self.death_notices.clone()),
-            ),
-        )
+        self.kept
+            .get(&self.heap_volume)
+            .expect("the store keeps the user heap volume")
+            .handle_in(access)
     }
 
     /// The store's promises, which its snapshots share
@@ -224,39 +195,41 @@ impl StoreSnapshot {
         &self.promises
     }
 
-    /// The shared heap's volume.
     /// The value at `path` in `volume`, as a lazy access, or `None` where
     /// the volume does not exist.
     pub(crate) fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
-        let root = self.roots.get(&volume)?;
-        Some(value_at_path(&self.values, root, path))
+        version_value_at_path(&self.values, self.versions.get(&volume)?, path)
     }
 
+    /// The shared heap's committed value.
     #[doc(hidden)]
-    pub fn root(&self) -> &PublicValue {
-        self.roots
-            .get(&self.heap_volume)
+    pub fn root(&self) -> PublicValue {
+        self.committed(self.heap_volume)
             .expect("the user heap volume must always exist")
     }
 
     /// The value at `path` in the user heap, as a lazy access, so nothing is
     /// evaluated: a missing key reads `{}`.
     pub(crate) fn heap_value(&self, path: &[Key]) -> PublicValue {
-        value_at_path(&self.values, self.root(), path)
+        self.volume_value(self.heap_volume, path)
+            .expect("the user heap volume must always exist")
     }
 
     /// The value at `path` in the machines' environment volume, as a lazy
     /// access: a missing key reads `{}`.
     pub(crate) fn environment_value(&self, path: &[Key]) -> PublicValue {
-        let root = self
-            .roots
-            .get(&self.environment_volume)
-            .expect("the environment volume must always exist");
-        value_at_path(&self.values, root, path)
+        self.volume_value(self.environment_volume, path)
+            .expect("the environment volume must always exist")
     }
 
-    pub(crate) fn volume(&self, volume: VolumeId) -> Option<&PublicValue> {
-        self.roots.get(&volume)
+    /// The committed value of `volume`, or `None` where it does not exist.
+    pub(crate) fn committed(&self, volume: VolumeId) -> Option<PublicValue> {
+        version_value_at_path(&self.values, self.versions.get(&volume)?, &[])
+    }
+
+    /// Whether `volume` exists in this snapshot.
+    fn has_volume(&self, volume: VolumeId) -> bool {
+        self.versions.contains_key(&volume)
     }
 
     pub(crate) fn poll_query(&self, handle: &Arc<EvaluationQueryHandle>) -> EvaluationQueryPoll {
@@ -264,22 +237,11 @@ impl StoreSnapshot {
             return EvaluationQueryPoll::ForeignQueryDomain;
         }
         let values = Values::from_core_factory(self.values.clone());
-        let Some(root) = self.volume(self.runtime_volume) else {
-            return EvaluationQueryPoll::State {
-                value: values.empty_dict(),
-                observed: true,
-            };
-        };
+        let value = self
+            .volume_value(self.runtime_volume, &query_path(handle.id))
+            .unwrap_or_else(|| values.empty_dict());
         EvaluationQueryPoll::State {
-            value: PublicValue::from_runtime_root(self.values.construct_runtime_value_root(
-                |access| {
-                    lazy_core_value_path(
-                        access,
-                        root.runtime_root().clone_core_with(access),
-                        &query_path(handle.id),
-                    )
-                },
-            )),
+            value,
             observed: true,
         }
     }
@@ -299,10 +261,12 @@ enum StoreEdit {
         updater: Option<PublicValue>,
     },
     /// Allocates a volume whose ID the transaction reserved, with its
-    /// initial root, at the volume's root address.
+    /// initial root, at the volume's root address. The edit holds the
+    /// volume's cell until the commit keys its first version on it.
     Create {
         address: ConflictAddress,
         initial: PublicValue,
+        volume: ManagedVolumeRoot,
     },
     /// Resolves a promise, at its place in the runtime's volume, which it
     /// writes without changing data (`promise-resolution-commits-with-its-cut`).
@@ -347,7 +311,12 @@ fn reserve_volume(next: &AtomicU64) -> Result<VolumeId, Arc<str>> {
 #[derive(Clone)]
 pub struct StoreJournal {
     snapshot: StoreSnapshot,
+    /// The volumes this journal has written, with its writes: the others
+    /// read from the snapshot.
     views: RedBlackTreeMapSync<VolumeId, PublicValue>,
+    /// The cells of the volumes this journal writes, which it keeps until it
+    /// commits, keying their new versions on them.
+    cells: RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot>,
     observations: Arc<Mutex<Box<dyn ConflictObservationIndex>>>,
     edits: Vec<StoreEdit>,
     branch: Option<Branch>,
@@ -367,18 +336,13 @@ struct Branch {
 }
 
 impl StoreJournal {
-    /// The snapshot the journal began from.
-    pub(crate) fn snapshot(&self) -> &StoreSnapshot {
-        &self.snapshot
-    }
-
     #[doc(hidden)]
     pub fn new(snapshot: StoreSnapshot) -> Self {
         let observations = Arc::new(Mutex::new(snapshot.strategy.begin()));
-        let views = snapshot.roots.clone();
         Self {
             snapshot,
-            views,
+            views: RedBlackTreeMapSync::new_sync(),
+            cells: RedBlackTreeMapSync::new_sync(),
             observations,
             edits: Vec::new(),
             branch: None,
@@ -433,13 +397,19 @@ impl StoreJournal {
             });
             own_reads.lock().unwrap().extend(inherited);
         }
-        for edit in branch.edits[base..].iter().cloned() {
-            self.replay(edit);
+        for (volume, cell) in branch.cells.iter() {
+            self.cells.insert_mut(*volume, cell.clone());
         }
+        let values = self.snapshot.values.clone();
+        values.with_boundary_access(|access| {
+            for edit in branch.edits[base..].iter().cloned() {
+                self.replay(&access, edit);
+            }
+        });
         true
     }
 
-    fn replay(&mut self, edit: StoreEdit) {
+    fn replay(&mut self, access: &RuntimeValueAccess<'_>, edit: StoreEdit) {
         match &edit {
             StoreEdit::Set { value: None, .. }
             | StoreEdit::Rewrite { updater: None, .. }
@@ -448,31 +418,53 @@ impl StoreJournal {
             }
             StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {
                 let volume = edit.address().reflection_parts().0;
-                let values = self.snapshot.values.clone();
-                self.push_edit(volume, edit, |view, edit| {
-                    values.with_boundary_access(|access| apply_edit(&access, view, edit))
-                });
+                self.push_edit(access, volume, edit);
             }
-            StoreEdit::Create { initial, .. } => {
+            StoreEdit::Create {
+                initial,
+                volume: cell,
+                ..
+            } => {
                 let volume = edit.address().reflection_parts().0;
                 self.views.insert_mut(volume, initial.clone());
+                self.cells.insert_mut(volume, cell.clone());
                 self.edits.push(edit);
             }
         }
     }
 
-    /// Allocates a volume with `initial` as its root: its ID is reserved at
-    /// once, and the volume exists from the commit on, so an aborted
-    /// transaction burns the ID. This journal reads and writes it as any
-    /// other volume.
-    pub(crate) fn create_volume(&mut self, initial: PublicValue) -> Result<VolumeId, Arc<str>> {
+    /// Allocates a volume with `initial` as its root, returning its ID and
+    /// a handle to it: its ID is reserved at once, and the volume exists
+    /// from the commit on, so an aborted transaction burns the ID. This
+    /// journal reads and writes it as any other volume.
+    pub(crate) fn create_volume(
+        &mut self,
+        initial: PublicValue,
+    ) -> Result<(VolumeId, PublicValue), Arc<str>> {
+        let values = self.snapshot.values.clone();
+        values.with_boundary_access(|access| self.create_volume_in(&access, initial))
+    }
+
+    /// As [`Self::create_volume`], for a caller that holds `access`.
+    pub(crate) fn create_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        initial: PublicValue,
+    ) -> Result<(VolumeId, PublicValue), Arc<str>> {
         debug_assert_eq!(initial.runtime_id(), self.snapshot.values.runtime_id());
         let volume = reserve_volume(&self.snapshot.next_volume)?;
-        self.replay(StoreEdit::Create {
-            address: ConflictAddress::reflection_root(volume),
-            initial,
-        });
-        Ok(volume)
+        let cell = access.new_volume(volume);
+        let handle =
+            PublicValue::from_runtime_root(access.root_runtime_value(cell.handle_in(access)));
+        self.replay(
+            access,
+            StoreEdit::Create {
+                address: ConflictAddress::reflection_root(volume),
+                initial,
+                volume: cell,
+            },
+        );
+        Ok((volume, handle))
     }
 
     /// The value at `path` in `volume`, with this journal's writes, as a
@@ -521,7 +513,7 @@ impl StoreJournal {
                 .unwrap()
                 .push(ConflictAddress::reflection(volume, read));
         }
-        if self.snapshot.volume(volume).is_none() {
+        if !self.snapshot.has_volume(volume) {
             self.observations
                 .lock()
                 .unwrap()
@@ -677,8 +669,34 @@ impl StoreJournal {
         value_at_path(&self.snapshot.values, &self.view(), path)
     }
 
+    /// The value of `volume`, with this journal's writes, or `None` where
+    /// the volume does not exist.
     pub(crate) fn volume_view(&self, volume: VolumeId) -> Option<PublicValue> {
-        self.views.get(&volume).cloned()
+        self.views
+            .get(&volume)
+            .cloned()
+            .or_else(|| self.snapshot.committed(volume))
+    }
+
+    /// As [`Self::view`], for a caller that holds `access`.
+    pub(crate) fn view_in(&self, access: &RuntimeValueAccess<'_>) -> PublicValue {
+        self.volume_view_in(access, self.snapshot.heap_volume)
+            .expect("the user heap volume must always exist")
+    }
+
+    /// As [`Self::volume_view`], for a caller that holds `access`.
+    pub(crate) fn volume_view_in(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+    ) -> Option<PublicValue> {
+        if let Some(view) = self.views.get(&volume) {
+            return Some(view.clone());
+        }
+        let value = self.snapshot.versions.get(&volume)?.value_in(access)?;
+        Some(PublicValue::from_runtime_root(
+            access.root_runtime_value(value),
+        ))
     }
 
     #[cfg(test)]
@@ -769,9 +787,7 @@ impl StoreJournal {
     pub(crate) fn write_volume(&mut self, volume: VolumeId, path: Vec<Key>, value: PublicValue) {
         let edit = self.set_edit(volume, path, value);
         let values = self.snapshot.values.clone();
-        self.push_edit(volume, edit, |view, edit| {
-            values.with_boundary_access(|access| apply_edit(&access, view, edit))
-        });
+        values.with_boundary_access(|access| self.push_edit(&access, volume, edit));
     }
 
     /// As [`Self::write_volume`], for a caller that holds `access`.
@@ -783,7 +799,7 @@ impl StoreJournal {
         value: PublicValue,
     ) {
         let edit = self.set_edit(volume, path, value);
-        self.push_edit(volume, edit, |view, edit| apply_edit(access, view, edit));
+        self.push_edit(access, volume, edit);
     }
 
     pub(crate) fn rewrite(&mut self, path: Vec<Key>, updater: PublicValue) {
@@ -808,9 +824,7 @@ impl StoreJournal {
     ) {
         let edit = self.rewrite_edit(volume, path, updater);
         let values = self.snapshot.values.clone();
-        self.push_edit(volume, edit, |view, edit| {
-            values.with_boundary_access(|access| apply_edit(&access, view, edit))
-        });
+        values.with_boundary_access(|access| self.push_edit(&access, volume, edit));
     }
 
     /// As [`Self::rewrite_volume`], for a caller that holds `access`.
@@ -822,7 +836,7 @@ impl StoreJournal {
         updater: PublicValue,
     ) {
         let edit = self.rewrite_edit(volume, path, updater);
-        self.push_edit(volume, edit, |view, edit| apply_edit(access, view, edit));
+        self.push_edit(access, volume, edit);
     }
 
     fn set_edit(&self, volume: VolumeId, path: Vec<Key>, value: PublicValue) -> StoreEdit {
@@ -841,27 +855,31 @@ impl StoreJournal {
         }
     }
 
-    /// Records `edit`, applying it to the volume's view when the journal keeps
-    /// one.
-    fn push_edit(
-        &mut self,
-        volume: VolumeId,
-        edit: StoreEdit,
-        apply: impl FnOnce(PublicValue, &StoreEdit) -> PublicValue,
-    ) {
-        if let Some(view) = self.views.get(&volume).cloned() {
-            self.views.insert_mut(volume, apply(view, &edit));
+    /// Records `edit`, applying it to the volume's view where the volume
+    /// exists, and keeping the volume's cell until the commit.
+    fn push_edit(&mut self, access: &RuntimeValueAccess<'_>, volume: VolumeId, edit: StoreEdit) {
+        if let Some(view) = self.volume_view_in(access, volume) {
+            if !self.cells.contains_key(&volume)
+                && let Some(cell) = self
+                    .snapshot
+                    .versions
+                    .get(&volume)
+                    .and_then(|version| version.volume_in(access))
+            {
+                self.cells.insert_mut(volume, cell);
+            }
+            self.views
+                .insert_mut(volume, apply_edit(access, view, &edit));
         }
         self.edits.push(edit);
     }
 }
 
 /// What a dying payload reports to its store
-/// (`opaque-resources-reclaimed-when-unreachable`).
+/// (`opaque-resources-reclaimed-when-unreachable`). A volume reports
+/// nothing: its committed versions clear when it dies (`api-volume-cells`).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum DeathNotice {
-    /// A volume's handles are all gone.
-    Volume(VolumeId),
     /// A promise's resolver is gone.
     Resolver(PromiseId),
 }
@@ -886,15 +904,21 @@ pub struct ReflectionStore {
     query_retirements: Receiver<EvaluationQueryId>,
     next_volume: Arc<AtomicU64>,
     promises: Arc<Promises>,
-    death_notices: Sender<DeathNotice>,
     death_notice_receiver: Receiver<DeathNotice>,
-    heap_handle: Arc<VolumeHandle>,
+    /// The cells of the volumes the store keeps: its own, which live as
+    /// long as it does, and those a host created, until revoked. Glam's
+    /// volumes live while their handles do.
+    kept: RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot>,
     /// The volumes revoked through their owners, whose late edits are errors;
-    /// a reclaimed volume's are dropped, since nothing can read it.
+    /// a collected volume's are dropped, since nothing can read it.
     revoked: BTreeSet<VolumeId>,
     /// What the last commit settled, for its committer to publish.
     settled: Vec<Settled>,
-    roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
+    /// Each volume's committed version (`api-volume-cells`).
+    versions: RedBlackTreeMapSync<VolumeId, ManagedVolumeVersion>,
+    /// The heap's collection epoch when the store last pruned the versions
+    /// of collected volumes.
+    pruned_at: u64,
     revision: u64,
     latest_changes: BTreeMap<ConflictAddress, u64>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -911,8 +935,18 @@ impl ReflectionStore {
         let environment_volume = VolumeId::from_u64(3).expect("three is a nonzero volume ID");
         let (query_domain, query_retirements) = QueryDomain::new();
         let (death_notices, death_notice_receiver) = mpsc::channel();
-        let heap_handle = VolumeHandle::new(values.runtime_id(), heap_volume, None);
-        let public_values = Values::from_core_factory(values.clone());
+        let mut kept = RedBlackTreeMapSync::new_sync();
+        let mut versions = RedBlackTreeMapSync::new_sync();
+        values.with_boundary_access(|access| {
+            for volume in [heap_volume, runtime_volume, environment_volume] {
+                let cell = access.new_volume(volume);
+                versions.insert_mut(
+                    volume,
+                    access.volume_version(&cell, Value::Dict(Dict::new_sync())),
+                );
+                kept.insert_mut(volume, cell);
+            }
+        });
         Self {
             identity: Arc::new(()),
             heap_volume,
@@ -921,16 +955,13 @@ impl ReflectionStore {
             query_domain,
             query_retirements,
             next_volume: Arc::new(AtomicU64::new(4)),
-            promises: Arc::new(Promises::new(death_notices.clone())),
-            death_notices,
+            promises: Arc::new(Promises::new(death_notices)),
             death_notice_receiver,
-            heap_handle,
+            kept,
             revoked: BTreeSet::new(),
             settled: Vec::new(),
-            roots: RedBlackTreeMapSync::new_sync()
-                .insert(heap_volume, public_values.empty_dict())
-                .insert(runtime_volume, public_values.empty_dict())
-                .insert(environment_volume, public_values.empty_dict()),
+            versions,
+            pruned_at: 0,
             revision: 0,
             latest_changes: BTreeMap::new(),
             strategy,
@@ -948,20 +979,30 @@ impl ReflectionStore {
             environment_volume: self.environment_volume,
             next_volume: self.next_volume.clone(),
             promises: self.promises.clone(),
-            death_notices: self.death_notices.clone(),
-            heap_handle: self.heap_handle.clone(),
+            kept: self.kept.clone(),
             query_domain: self.query_domain.clone(),
-            roots: self.roots.clone(),
+            versions: self.versions.clone(),
             strategy: self.strategy.clone(),
             values: self.values.clone(),
         }
     }
 
+    /// The shared heap's committed value.
     #[cfg(test)]
-    pub(crate) fn root(&self) -> &PublicValue {
-        self.roots
-            .get(&self.heap_volume)
+    pub(crate) fn root(&self) -> PublicValue {
+        self.committed(self.heap_volume)
             .expect("the user heap volume must always exist")
+    }
+
+    /// The committed value of `volume`, or `None` where it does not exist.
+    fn committed(&self, volume: VolumeId) -> Option<PublicValue> {
+        version_value_at_path(&self.values, self.versions.get(&volume)?, &[])
+    }
+
+    /// How many volumes the store holds versions of, collected or not.
+    #[cfg(test)]
+    pub(crate) fn volume_count(&self) -> usize {
+        self.versions.size()
     }
 
     #[cfg(test)]
@@ -970,8 +1011,8 @@ impl ReflectionStore {
     }
 
     #[cfg(test)]
-    fn volume_root(&self, volume: VolumeId) -> Option<&PublicValue> {
-        self.roots.get(&volume)
+    fn volume_root(&self, volume: VolumeId) -> Option<PublicValue> {
+        self.committed(volume)
     }
 
     #[doc(hidden)]
@@ -982,7 +1023,15 @@ impl ReflectionStore {
     #[doc(hidden)]
     pub fn replace_root(&mut self, root: PublicValue) {
         debug_assert_eq!(root.runtime_id(), self.values.runtime_id());
-        self.roots.insert_mut(self.heap_volume, root);
+        let version = self.values.with_boundary_access(|access| {
+            access.volume_version(
+                self.kept
+                    .get(&self.heap_volume)
+                    .expect("the store keeps the user heap volume"),
+                root.runtime_root().clone_core_with(&access),
+            )
+        });
+        self.versions.insert_mut(self.heap_volume, version);
         self.revision = self.revision.wrapping_add(1);
         self.latest_changes.insert(
             ConflictAddress::reflection_root(self.heap_volume),
@@ -990,10 +1039,21 @@ impl ReflectionStore {
         );
     }
 
+    /// Allocates a volume for a host, which names it by its ID: the store
+    /// keeps it until the host revokes it.
     pub(crate) fn create_volume(&mut self, initial: PublicValue) -> Result<VolumeId, Arc<str>> {
         debug_assert_eq!(initial.runtime_id(), self.values.runtime_id());
         let volume = reserve_volume(&self.next_volume)?;
-        self.roots.insert_mut(volume, initial);
+        let values = self.values.clone();
+        values.with_boundary_access(|access| {
+            self.prune_collected(&access);
+            let cell = access.new_volume(volume);
+            self.versions.insert_mut(
+                volume,
+                access.volume_version(&cell, initial.runtime_root().clone_core_with(&access)),
+            );
+            self.kept.insert_mut(volume, cell);
+        });
         self.revision = self.revision.wrapping_add(1);
         self.latest_changes
             .insert(ConflictAddress::reflection_root(volume), self.revision);
@@ -1007,33 +1067,36 @@ impl ReflectionStore {
         {
             return None;
         }
-        let root = self.roots.get(&volume).cloned()?;
-        self.remove_volume(volume);
+        let root = self.committed(volume)?;
+        self.versions.remove_mut(&volume);
+        self.kept.remove_mut(&volume);
+        self.revision = self.revision.wrapping_add(1);
+        self.latest_changes
+            .insert(ConflictAddress::reflection_root(volume), self.revision);
         self.revoked.insert(volume);
         Some(root)
     }
 
-    /// Reclaims `volume`, whose handles are all gone
-    /// (`opaque-resources-reclaimed-when-unreachable`): a transaction that
-    /// read it conflicts, and one that only wrote it commits without those
-    /// edits, which nothing could read. Returns whether the store changed.
-    pub(crate) fn reclaim_volume(&mut self, volume: VolumeId) -> bool {
-        if volume == self.heap_volume
-            || volume == self.runtime_volume
-            || volume == self.environment_volume
-            || self.roots.get(&volume).is_none()
-        {
-            return false;
+    /// Prunes the versions of the volumes that a collection found
+    /// unreachable, if one has completed since the store last pruned: they
+    /// hold nothing, and nothing can name them (`api-volume-cells`). The
+    /// store prunes as it creates a volume, the only change that grows its
+    /// map. It records no change, since nothing can read a collected volume.
+    fn prune_collected(&mut self, access: &RuntimeValueAccess<'_>) {
+        let epoch = self.values.completed_collection_epoch();
+        if epoch == self.pruned_at {
+            return;
         }
-        self.remove_volume(volume);
-        true
-    }
-
-    fn remove_volume(&mut self, volume: VolumeId) {
-        self.roots.remove_mut(&volume);
-        self.revision = self.revision.wrapping_add(1);
-        self.latest_changes
-            .insert(ConflictAddress::reflection_root(volume), self.revision);
+        self.pruned_at = epoch;
+        let collected = self
+            .versions
+            .iter()
+            .filter(|(_, version)| version.is_cleared_in(access))
+            .map(|(volume, _)| *volume)
+            .collect::<Vec<_>>();
+        for volume in collected {
+            self.versions.remove_mut(&volume);
+        }
     }
 
     /// The store's promises (`requests-travel-on-ports`).
@@ -1063,7 +1126,7 @@ impl ReflectionStore {
         if !query_belongs_to(&self.query_domain, handle) {
             return false;
         }
-        if self.roots.get(&self.runtime_volume).is_none() {
+        if !self.versions.contains_key(&self.runtime_volume) {
             return false;
         }
         let mut journal = StoreJournal::new(self.snapshot());
@@ -1112,7 +1175,7 @@ impl ReflectionStore {
             .iter()
             .map(|edit| edit.address().reflection_parts().0)
             .find(|volume| {
-                self.roots.get(volume).is_none()
+                !self.versions.contains_key(volume)
                     && !created.contains(volume)
                     && self.revoked.contains(volume)
             })
@@ -1140,15 +1203,39 @@ impl ReflectionStore {
             return self.retire_queries();
         }
 
-        self.roots = if Arc::ptr_eq(&self.identity, &journal.snapshot.identity)
-            && self.revision == journal.snapshot.revision
-        {
-            journal.views.clone()
-        } else {
-            self.values.with_boundary_access(|access| {
-                apply_edits(&access, self.roots.clone(), &journal.edits)
-            })
-        };
+        let current = Arc::ptr_eq(&self.identity, &journal.snapshot.identity)
+            && self.revision == journal.snapshot.revision;
+        let values = self.values.clone();
+        values.with_boundary_access(|access| {
+            if journal
+                .edits
+                .iter()
+                .any(|edit| matches!(edit, StoreEdit::Create { .. }))
+            {
+                self.prune_collected(&access);
+            }
+            // A journal that began from the current revision already holds
+            // each written volume's new value; another applies its edits to
+            // the volumes as they stand now.
+            let written = if current {
+                written_volumes(&journal.edits)
+                    .into_iter()
+                    .filter_map(|volume| Some((volume, journal.views.get(&volume)?.clone())))
+                    .collect()
+            } else {
+                rebase_edits(&access, &self.versions, &journal.edits)
+            };
+            for (volume, value) in written {
+                // A volume without a cell here was collected: nothing can
+                // read its edits.
+                let Some(cell) = journal.cells.get(&volume) else {
+                    continue;
+                };
+                let version =
+                    access.volume_version(cell, value.runtime_root().clone_core_with(&access));
+                self.versions.insert_mut(volume, version);
+            }
+        });
         self.revision = self.revision.wrapping_add(1);
         for path in normalized_edit_paths(&journal.edits) {
             self.latest_changes.insert(path, self.revision);
@@ -1173,7 +1260,7 @@ impl ReflectionStore {
         if retired.is_empty() {
             return false;
         }
-        let Some(mut root) = self.roots.get(&self.runtime_volume).cloned() else {
+        let Some(mut root) = self.committed(self.runtime_volume) else {
             return false;
         };
         self.revision = self.revision.wrapping_add(1);
@@ -1189,7 +1276,15 @@ impl ReflectionStore {
                 self.revision,
             );
         }
-        self.roots.insert_mut(self.runtime_volume, root);
+        let version = self.values.with_boundary_access(|access| {
+            access.volume_version(
+                self.kept
+                    .get(&self.runtime_volume)
+                    .expect("the store keeps its runtime volume"),
+                root.runtime_root().clone_core_with(&access),
+            )
+        });
+        self.versions.insert_mut(self.runtime_volume, version);
         true
     }
 
@@ -1217,25 +1312,59 @@ fn normalized_edit_paths(edits: &[StoreEdit]) -> Vec<ConflictAddress> {
     addresses.into_iter().collect()
 }
 
-fn apply_edits(
+/// The volumes whose data `edits` change, which creating one does.
+fn written_volumes(edits: &[StoreEdit]) -> BTreeSet<VolumeId> {
+    edits
+        .iter()
+        .filter(|edit| {
+            matches!(
+                edit,
+                StoreEdit::Set { value: Some(_), .. }
+                    | StoreEdit::Rewrite {
+                        updater: Some(_),
+                        ..
+                    }
+                    | StoreEdit::Create { .. }
+            )
+        })
+        .map(|edit| edit.address().reflection_parts().0)
+        .collect()
+}
+
+/// The new value of each volume that `edits` write, applied in order to the
+/// volume as `versions` hold it.
+fn rebase_edits(
     access: &RuntimeValueAccess<'_>,
-    mut roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
+    versions: &RedBlackTreeMapSync<VolumeId, ManagedVolumeVersion>,
     edits: &[StoreEdit],
-) -> RedBlackTreeMapSync<VolumeId, PublicValue> {
+) -> BTreeMap<VolumeId, PublicValue> {
+    let mut written = BTreeMap::new();
     for edit in edits {
         let volume = edit.address().reflection_parts().0;
         if let StoreEdit::Create { initial, .. } = edit {
-            roots.insert_mut(volume, initial.clone());
+            written.insert(volume, initial.clone());
+            continue;
+        }
+        if !written_volumes(std::slice::from_ref(edit)).contains(&volume) {
             continue;
         }
         // Validation refuses edits to revoked volumes, so a volume missing
-        // here was reclaimed, and nothing can read its edits.
-        let Some(root) = roots.get(&volume).cloned() else {
-            continue;
+        // here was collected, and nothing can read its edits.
+        let current = match written.get(&volume) {
+            Some(current) => current.clone(),
+            None => {
+                let Some(value) = versions
+                    .get(&volume)
+                    .and_then(|version| version.value_in(access))
+                else {
+                    continue;
+                };
+                PublicValue::from_runtime_root(access.root_runtime_value(value))
+            }
         };
-        roots.insert_mut(volume, apply_edit(access, root, edit));
+        written.insert(volume, apply_edit(access, current, edit));
     }
-    roots
+    written
 }
 
 static QUERY_PENDING: LazyLock<Key> = LazyLock::new(|| {
@@ -1437,6 +1566,22 @@ fn value_at_path(values: &CoreValueFactory, root: &PublicValue, path: &[Key]) ->
     PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
         lazy_core_value_path(access, root.runtime_root().clone_core_with(access), path)
     }))
+}
+
+/// The value at `path` in `version`, as a lazy access, or `None` once a
+/// collection found the volume unreachable.
+fn version_value_at_path(
+    values: &CoreValueFactory,
+    version: &ManagedVolumeVersion,
+    path: &[Key],
+) -> Option<PublicValue> {
+    values
+        .try_construct_runtime_value_root(|access| {
+            let value = version.value_in(access).ok_or(())?;
+            Ok::<_, ()>(lazy_core_value_path(access, value, path))
+        })
+        .ok()
+        .map(PublicValue::from_runtime_root)
 }
 
 fn lazy_core_value_path(

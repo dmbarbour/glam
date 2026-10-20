@@ -1,6 +1,6 @@
 //! Transitive compatibility walk to the first managed identity boundary.
 //!
-//! Lazy, promise, and core-net handles are exact managed stop points. The
+//! Lazy, promise, core-net and volume handles are exact managed stop points. The
 //! compatibility walk traverses legacy aggregate shells only until it reaches
 //! one of those identities, then reports the managed edge to the collector.
 
@@ -22,6 +22,7 @@ impl ManagedIdentityStops for ManagedIdentityEdges {
         match value {
             Value::Lazy(lazy) => lazy.trace_managed_edge(visitor),
             Value::Promised(promise) => promise.trace_managed_edge(visitor),
+            Value::Volume(volume) => volume.trace_managed_edge(visitor),
             Value::Function(function) => function.stage().runtime().trace_managed_edge(visitor),
             Value::Net(net) => net.runtime().trace_managed_edge(visitor),
             _ => return false,

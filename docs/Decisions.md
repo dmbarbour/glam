@@ -3022,7 +3022,10 @@ maps the short names used here to file names.
     its conflict analysis by path stay as they are.
   - Staged: notices first, which finish resolvers and reclaim acyclic
     volumes; cycles through volumes leak until volumes are cells, accepted
-    while temporary.
+    while temporary. Volumes became cells the same day (`api-volume-cells`),
+    closing the leak: a volume queues no notice, and its versions clear,
+    silently, when it dies; the store prunes them as it next creates a
+    volume after a collection.
   - Settlement always collects, and acts on the notices, before it reports,
     so a wait on a lost promise is not reported as unresolved, and later
     weak references or finalizers add no special cases.

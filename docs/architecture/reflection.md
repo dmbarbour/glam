@@ -193,7 +193,7 @@ boundaries because they publish control, transaction, promise, or host
 obligations. Tests can force the general path, but it shares the decoder, so
 it is not an independent oracle.
 
-`reflection/store.rs` owns the persistent shared-volume roots, query lifetime,
+`reflection/store.rs` owns the volumes' committed versions, query lifetime,
 transaction snapshots, ordered edit overlays, rebasing, and commit. Its private
 `reflection/store/conflict.rs` child owns volume-qualified hierarchical conflict
 paths and the pluggable observation strategy/index contract. The store retains
@@ -223,11 +223,26 @@ is an opaque value naming one volume of one runtime, the same that machines'
 cut's transaction or in a commit of its own, and returns its handle;
 `.heap.vol` returns the shared heap's. `.vol.get`, `.vol.set` and
 `.vol.rewrite` take a handle first, evaluate it, never the value, and then
-read and stage as the heap effects do on that volume. A volume has one
-payload, which every copy of its handle shares; once the last copy is gone,
-the runtime reclaims the volume after a collection. A transaction that read
-it then conflicts, and one that only wrote it commits without those writes,
-which nothing could read (`opaque-resources-reclaimed-when-unreachable`).
+read and stage as the heap effects do on that volume.
+
+A volume is a managed cell holding its ID, and a handle is a value of its
+own kind, `Volume`, one edge to the cell, which Glam sees as opaque
+(`api-volume-cells`, `opaque-resources-reclaimed-when-unreachable`). The
+store maps each volume to its committed version: a root on an ephemeron
+keyed on the cell, whose value is a `Contents` cell holding the volume's
+value, one per commit, since snapshots keep the versions they began from.
+The store's root holds the ephemeron, never the cell or the value, so a
+volume lives while some other path reaches its cell: a handle, the store
+for its own volumes and a host's until revoked (`kept`, which snapshots
+share), or a transaction that writes or creates it, until it commits, which
+keys the new version on the cell it holds. Contents reach the cell only
+through their ephemeron, so a volume reaching its own handle, or volumes
+reaching each other's, are collected. A collected volume's versions clear
+silently: nothing can name it again, so no transaction conflicts. The store
+prunes cleared versions as it creates a volume, the only change that grows
+its map, if a collection has completed since it last pruned. Reading a
+version roots its value afresh, under an access region; a machine's poll,
+which holds one, uses the journal's `_in` forms.
 
 Promises are shared with machines through the store, which records each one
 (`reflection/promises.rs`). `.promise.new` returns `{promise, resolver}`;

@@ -1,5 +1,6 @@
 use glam_gc::{
-    Allocator, Gc, GcRef, Mutator, MutatorAccess, Root, Trace, UnsupportedLayout, Visitor,
+    Allocator, Ephemeron, Gc, GcRef, Mutator, MutatorAccess, Root, Trace, UnsupportedLayout,
+    Visitor,
 };
 use std::any::Any;
 #[cfg(test)]
@@ -440,6 +441,8 @@ mod external_owners;
 pub(crate) use external_owners::{ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry};
 mod value_node;
 pub(crate) use value_node::PreparedRuntimeValueRoot;
+mod volume_cells;
+pub(crate) use volume_cells::{ManagedVolumeEdge, ManagedVolumeRoot, ManagedVolumeVersion};
 mod recursive_cells;
 pub(crate) use recursive_cells::{
     LazyProducerView, ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot,
@@ -789,6 +792,18 @@ impl CoreValueFactory {
         self.domain.heap.root_registrations_for_verification()
     }
 
+    /// The heap's latest completed collection epoch, which the reflection
+    /// store compares to prune what collections cleared.
+    pub(crate) fn completed_collection_epoch(&self) -> u64 {
+        match self.domain.heap.maintenance_snapshot() {
+            glam_gc::HeapMaintenanceSnapshot::Usable(statistics) => {
+                statistics.completed_collection_epoch()
+            }
+            // A poisoned heap collects no more.
+            glam_gc::HeapMaintenanceSnapshot::Poisoned => 0,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn completed_collection_epoch_for_test(&self) -> u64 {
         self.domain
@@ -1006,6 +1021,26 @@ impl RuntimeValueAccess<'_> {
         self.scope.root_checked(value)
     }
 
+    /// Allocates an ephemeron of the rooted `key` and a fresh `value`, and
+    /// roots it: the value lives while some other path reaches the key
+    /// (`opaque-resources-reclaimed-when-unreachable`).
+    pub(crate) fn root_ephemeron<K: ManagedFamily, V: ManagedFamily>(
+        &self,
+        key: &Root<K>,
+        value: V,
+    ) -> Root<Ephemeron<K, V>> {
+        self.scope.root_ephemeron(key, value)
+    }
+
+    /// Views a rooted ephemeron's key and value, or `None` once a collection
+    /// found its key unreachable.
+    pub(crate) fn ephemeron_entry<'access, K: ManagedFamily, V: ManagedFamily>(
+        &'access self,
+        ephemeron: &Root<Ephemeron<K, V>>,
+    ) -> Option<(GcRef<'access, K>, GcRef<'access, V>)> {
+        self.scope.ephemeron_entry(ephemeron)
+    }
+
     /// Views a detached edge without validation, under the provenance claim
     /// `because` names (`root-evidence`).
     pub(crate) fn view_edge<T: ManagedFamily>(
@@ -1182,6 +1217,31 @@ impl CoreValueAllocationScope<'_> {
     #[cfg(test)]
     pub(crate) fn root_checked<T: ManagedFamily>(&self, value: Gc<T>) -> Root<T> {
         self.mutator.root_checked(value)
+    }
+
+    /// Allocates an ephemeron of the rooted `key` and a fresh `value`, and
+    /// roots it. The ephemeron is glam-gc's own cell, with no drop glue,
+    /// whose key and value are admitted families.
+    fn root_ephemeron<K: ManagedFamily, V: ManagedFamily>(
+        &self,
+        key: &Root<K>,
+        value: V,
+    ) -> Root<Ephemeron<K, V>> {
+        let value = self
+            .allocator::<V>()
+            .expect("an ephemeron's value fits one collector slot")
+            .alloc_view(value);
+        let ephemeron = self.mutator.ephemeron(key.as_gc(self.mutator), value);
+        self.mutator.root(ephemeron)
+    }
+
+    /// Views a rooted ephemeron's key and value while this region supplies
+    /// access authority.
+    fn ephemeron_entry<'access, K: ManagedFamily, V: ManagedFamily>(
+        &'access self,
+        ephemeron: &Root<Ephemeron<K, V>>,
+    ) -> Option<(GcRef<'access, K>, GcRef<'access, V>)> {
+        ephemeron.as_gc(self.mutator).entry()
     }
 
     /// Borrows one same-domain root while this region supplies access

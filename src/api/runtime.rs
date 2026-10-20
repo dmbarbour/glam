@@ -515,9 +515,10 @@ impl RuntimeSharedResources {
     /// Destroys the external owners whose last copy is gone, then acts on
     /// the death notices their payloads queued
     /// (`opaque-resources-reclaimed-when-unreachable`): a lost resolver's
-    /// promise breaks with "resolver lost" and its record goes, and a volume
-    /// whose handles are all gone is reclaimed. Returns whether a notice
-    /// changed anything. The caller holds no mutator, as after a collection.
+    /// promise breaks with "resolver lost" and its record goes. A volume
+    /// queues none: its versions clear when it dies (`api-volume-cells`).
+    /// Returns whether a notice changed anything. The caller holds no
+    /// mutator, as after a collection.
     pub(crate) fn process_death_notices(&self) -> bool {
         let values = self.values.core();
         values.drain_retired_external_owners();
@@ -532,14 +533,12 @@ impl RuntimeSharedResources {
                 state.reflection.promises().clone(),
             )
         };
-        let mut volumes = Vec::new();
-        let mut resolvers = Vec::new();
-        for notice in notices {
-            match notice {
-                DeathNotice::Volume(volume) => volumes.push(volume),
-                DeathNotice::Resolver(promise) => resolvers.push(promise),
-            }
-        }
+        let resolvers = notices
+            .into_iter()
+            .map(|notice| match notice {
+                DeathNotice::Resolver(promise) => promise,
+            })
+            .collect::<Vec<_>>();
         // A lost resolver's promise breaks as any resolution does, with a
         // commit, and its record goes either way.
         let mut broken = false;
@@ -569,24 +568,7 @@ impl RuntimeSharedResources {
                 promises.forget(promise);
             }
         }
-        let mut reclaimed = false;
-        if !volumes.is_empty() {
-            let mutation = self.mutation_guard();
-            {
-                let mut state = self
-                    .transactions
-                    .state
-                    .lock()
-                    .expect("runtime transaction mutex should not be poisoned");
-                for volume in volumes {
-                    reclaimed |= state.reflection.reclaim_volume(volume);
-                }
-            }
-            if reclaimed {
-                self.publish_observation(mutation);
-            }
-        }
-        broken || reclaimed
+        broken
     }
 
     /// Fulfills what a commit settled, as a logically asynchronous event

@@ -8883,8 +8883,7 @@ fn child_tasks_inherit_same_session_volume_capabilities() {
         .unwrap()
         .store
         .snapshot()
-        .volume(volume)
-        .cloned()
+        .committed(volume)
         .expect("child write must not remove the volume");
     assert_eq!(
         assembler.to_binary(&final_value).unwrap(),

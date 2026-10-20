@@ -35,7 +35,7 @@ api::Value ─ RuntimeValueRoot ─ observer (runtime ID, Weak<domain>)
                                + InlineInteger(i64) | Root<ManagedValueNode>
 core::Value: Atom Number Binary Builtin          leaves in the shell
              List Dict PartialBuiltin Metadata   compatibility shells
-             Lazy Promised Function Net          one Gc edge each
+             Lazy Promised Function Net Volume   one Gc edge each
              Opaque                              ExternalOwnerHandle
 ```
 
@@ -121,6 +121,7 @@ it hides the cycle.
 | --- | --- |
 | `ManagedValueNode` | `core/managed/value_node.rs` |
 | lazy, promise and core-net cells | `core/managed/recursive_cells.rs` |
+| volume cells and contents | `core/managed/volume_cells.rs` |
 | `ManagedLazyCheckpointCell` (WHNF state) | `eval/whnf/managed_state.rs` |
 | six typed lazy-producer checkpoints | `eval/lazy_checkpoint.rs` |
 | list-front and key-conversion checkpoints | `eval/list_machine.rs`, `eval/access_machine.rs` |
@@ -147,7 +148,9 @@ they close cycles; functions do so through their net. Each semantic facade
 owners hold `Managed{Lazy,Promise,CoreNet}Root`, which copy only the IDs
 and edge-free promise sidecars read without access. Lazies and promises carry
 no labels: a failure's location comes from the context annotations it passes
-through.
+through. A volume's cell holds only its ID and never changes; volumes close
+cycles only through the reflection store, whose ephemerons the collector
+resolves (`api-volume-cells`).
 
 - A lazy cell holds a producer slot (source, checkpoint or panic report) under
   a mutex and a one-write result, published before the producer is released.
@@ -159,7 +162,8 @@ through.
   barrier is a no-op under stop-the-world; the site awaits a concurrent
   collector.
 - `ReflectionComputation` keeps effect, target and completion promise as
-  edges. The collector has no weak pointers.
+  edges. The collector's only weak associations are ephemerons, which only
+  the store's volume versions use.
 
 Handoffs and `PromiseResolver`: [`evaluation.md`](evaluation.md) "WHNF
 Submachine Flow".
@@ -211,7 +215,7 @@ lives in the domain's `ExternalOwnerRegistry`.
 
 - `OpaquePayloadFamily` records each family as `edge_free` (compilation
   origins, net construction tokens) or `external` (effect tokens, task
-  handles, volume handles, promise resolvers). No payload directly holds a
+  handles, promise resolvers). No payload directly holds a
   `Gc`, raw value or root.
 - `downcast` checks runtime, lease and family and returns an owning `Arc<T>`,
   sound only because payloads are external. Glam equality compares owners.
@@ -220,13 +224,17 @@ lives in the domain's `ExternalOwnerRegistry`.
   panics. Production drains in `HostCallProducer::invoke` and after each
   runtime collection, else at teardown.
 - The collector never retires an external owner; the runtime drains the
-  registry once a collection is done. A volume handle's or resolver's
-  destructor queues a death notice, which the runtime then acts on: a lost
-  resolver's promise breaks with "resolver lost", and a volume whose handles
-  are all gone is reclaimed (`opaque-resources-reclaimed-when-unreachable`).
-  A task result holding its own handle survives until runtime teardown
-  (accepted), as does a volume reaching its own handle, until volumes are
-  cells in the managed heap (`api-volume-cells`).
+  registry once a collection is done. A resolver's destructor queues a
+  death notice, which the runtime then acts on: a lost resolver's promise
+  breaks with "resolver lost"
+  (`opaque-resources-reclaimed-when-unreachable`). A task result holding its
+  own handle survives until runtime teardown (accepted).
+- A volume's handle is not opaque in representation: it is the `Volume`
+  value kind, one edge to the volume's managed cell (`api-volume-cells`),
+  which Glam sees as opaque and compares by volume. The reflection store
+  holds each committed version through a rooted ephemeron keyed on the
+  cell, so volumes are collected with their contents, even where those
+  reach their handles; see [`reflection.md`](reflection.md).
 
 `HostCallProducer` traces its Glam captures and keeps its closure in the
 registry. Invocation roots the captures into a `HostCallRootBundle`, closes the

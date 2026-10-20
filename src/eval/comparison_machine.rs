@@ -443,7 +443,10 @@ fn classify_ordering(
         | (_, Value::Net(_)) => {
             failure_message(format!("{name} builtin cannot compare function values"))
         }
-        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => {
+        (Value::Opaque(_), _)
+        | (_, Value::Opaque(_))
+        | (Value::Volume(_), _)
+        | (_, Value::Volume(_)) => {
             failure_message(format!("{name} builtin cannot compare opaque values"))
         }
         (Value::Metadata(_), _) | (_, Value::Metadata(_)) => {
@@ -526,9 +529,13 @@ fn classify_equality(
         (Value::Opaque(left), Value::Opaque(right)) => {
             FrameAction::Complete(ComparisonResult::Equality(left == right))
         }
-        (Value::Opaque(_), _) | (_, Value::Opaque(_)) => {
-            FrameAction::Complete(ComparisonResult::Equality(false))
-        }
+        (Value::Volume(left), Value::Volume(right)) => FrameAction::Complete(
+            ComparisonResult::Equality(left.same_volume_in(&right, access.values())),
+        ),
+        (Value::Opaque(_), _)
+        | (_, Value::Opaque(_))
+        | (Value::Volume(_), _)
+        | (_, Value::Volume(_)) => FrameAction::Complete(ComparisonResult::Equality(false)),
         (Value::Metadata(_), _) | (_, Value::Metadata(_)) => {
             failure_message(format!("{name} builtin cannot compare sealed values"))
         }

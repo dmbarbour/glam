@@ -445,7 +445,27 @@ handle API goes.
    first stage's leak: a volume's identity is a managed cell, a value kind
    to which handles are edges, and the store holds its committed values
    through ephemerons keyed on it. Cycles through volumes are then
-   collected.
+   collected. Decided with the maintainer, 2026-10-20:
+   - The store's map stays a Rust persistent map, from `VolumeId` to a root
+     on an ephemeron of the volume's cell and a `Contents` cell, one per
+     committed version, since snapshots keep older versions and an
+     ephemeron is immutable. A managed map behind one root waits for
+     managed persistent maps (`perf-managed-volume-table`). The store's
+     root holds the ephemeron, never the cell or the value, so it hides no
+     cycle.
+   - A handle is a value kind of its own, `Volume`, one edge to the cell,
+     which suits the maintainer's data representation plans.
+   - `Contents` holds just the committed value at first. It is the
+     per-version record, which may grow a short history of reads, writes
+     and rewrites for finer conflict analysis (`perf-volume-histories`).
+   - Death is silent. The store prunes entries whose ephemerons a
+     collection cleared when it next creates a volume, the only operation
+     that grows its map, if a collection has completed since it last
+     pruned.
+   - The store holds the cells of its own volumes (heap, runtime,
+     environment), a host's protected volume capability holds its cell,
+     and a transaction holds the cell of each volume it writes or creates
+     until it commits, keying the new version on it.
 14. `api-reflection-model` — a design step, without code, ahead of the
    settlement it shapes (maintainer, 2026-10-19): how the reflection API, as
    `refl.*` and `anno refl:(…)` present it, maps to machines. Spawned tasks
@@ -1813,6 +1833,39 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
 - Tests in `heap::tests`, listed in the crate's `VERIFY.md`, which also
   records the gates: the crate's full gate, and Miri over the ephemeron
   tests.
+
+`api-volume-cells` (2026-10-20):
+- A volume is a managed cell holding its `VolumeId`, which moved to
+  `core` (still `glam::reflection::VolumeId`), and a handle is the `Volume`
+  value kind, one edge to it, in place of an opaque payload
+  (`core/managed/volume_cells.rs`). Glam sees a handle as opaque: its kind
+  reads `Opaque`, it is no key and no function, ordering refuses it, and
+  equality compares the volumes named. `Contents` holds the committed value.
+- The store maps each volume to a root on an ephemeron of its cell and a
+  fresh `Contents`, per commit. It keeps the cells of its own volumes and of
+  hosts' volumes in `kept`, which snapshots share, so a snapshot outliving
+  its store still reads them. A journal holds the cell of each volume it
+  writes, taken from the snapshot's version at the first write, and a
+  creation's edit holds the new cell; a commit keys each written volume's
+  new version on that cell, from the journal's views when it began from the
+  current revision, else from its edits rebased onto the current versions.
+- Journals keep views only of what they wrote; reading another volume roots
+  the snapshot version's value afresh, which opens an access region, so a
+  machine's poll, which holds one, uses `view_in`, `volume_view_in` and
+  `create_volume_in`. Representation identity of a committed value
+  survives, since the contents keep the value's own structure.
+- A volume's death is silent: its versions clear, it queues no notice, and
+  the store records no change, since nothing can name it again. Before
+  creating a volume, the store prunes cleared versions once a collection
+  has completed since it last pruned, by the heap's collection epoch.
+  `DeathNotice::Volume`, the handle payload and `reclaim_volume` went.
+- Tests: in `reflection::store::tests`, a volume reaching its own handle,
+  two reaching each other's, a writer keeping its volume through a
+  collection until it commits, a snapshot keeping its version, the store
+  keeping its own and a host's volumes until revoked, pruning only at a
+  creation after a collection, and a revoked volume's late writes; in
+  `api::turn::tests`, a turn's volume reaching its own handle, which fails
+  at `53da9d01`. The managed boundary audit's fixtures gained the variant.
 
 ## Verification
 

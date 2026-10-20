@@ -1436,7 +1436,8 @@ fn classify_core_callable_in(
         | Value::Binary(_)
         | Value::List(_)
         | Value::Metadata(_)
-        | Value::Opaque(_)) => Err(non_callable_error(access.values(), &value)),
+        | Value::Opaque(_)
+        | Value::Volume(_)) => Err(non_callable_error(access.values(), &value)),
         Value::Lazy(_) | Value::Promised(_) => {
             unreachable!("callable classification requires WHNF")
         }

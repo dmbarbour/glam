@@ -2872,7 +2872,7 @@ fn retained_reflection_profile_keeps_only_shared_resources_alive() {
     assert!(
         retained
             .values()
-            .same_representation_for_test(snapshot.root(), &retained.values().empty_dict())
+            .same_representation_for_test(&snapshot.root(), &retained.values().empty_dict())
             .unwrap()
     );
     let initial = retained.values().empty_dict();

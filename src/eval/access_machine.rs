@@ -1030,7 +1030,8 @@ fn classify_regional_key_value(
         | Value::Lazy(_)
         | Value::Promised(_)
         | Value::Metadata(_)
-        | Value::Opaque(_) => RegionalClassifiedKeyValue::Invalid,
+        | Value::Opaque(_)
+        | Value::Volume(_) => RegionalClassifiedKeyValue::Invalid,
     }
 }
 
