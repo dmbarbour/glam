@@ -1391,3 +1391,29 @@ report now counts (`CollectionReport::ephemeron_rounds`). In `heap::tests`:
 
 `Weak<T>`'s `Trace` impl joined the unsafe inventory; the views of key and
 value now share one site, a private function over either cell type.
+At `d6e3a39a`, the crate's `dynamic` gate passed (Miri 236 passed, 4
+ignored; both sanitizers 238 passed, 2 ignored), as did Glam's
+`scripts/check.sh`.
+
+Next, at the maintainer's suggestion, the visitor sends what a trace reports
+to a crate-private sink, edges and ephemeron pairs alike, and marking's sink
+tests an ephemeron's key as the trace reports it, marking the value at once
+as an edge or recording the pair. The first build recorded every reached
+ephemeron and resolved the pairs each traced object recorded after its
+trace, which cost every traced object a check and each resolved ephemeron a
+push and a removal. The tests stand unchanged; with this path, the first
+test still fails if a marked key's ephemeron is recorded instead, and the
+fixpoint test if marking stops after one round.
+
+Instructions (`perf stat -e instructions:u`, five runs each, no variance)
+of the release, all-features test binary running each million-scale proof,
+which trace a million objects and no ephemeron:
+
+| Build | Deep chain | Flat array |
+|---|---|---|
+| `7ed3daee`, before the fast mark | 834.53 M | 835.57 M |
+| `d6e3a39a`, resolved after each trace | 864.53 M | 865.57 M |
+| the sink | 835.53 M | 836.57 M |
+
+Resolving after each trace cost about 30 instructions per traced object;
+the sink costs about one.

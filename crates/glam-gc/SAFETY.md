@@ -1374,7 +1374,7 @@ reclamation through this interface.
 - `[T; N]` visits every element once in index order.
 - `(First, Second)` visits both fields in order.
 - `Ephemeron<K, V>` reports itself, not its two words, as above; marking
-  records it, and other visitors, which exist only in tests and
+  acts on it, and other visitors, which exist only in tests and
   edge-transition hooks, ignore it. `Weak<T>` reports its one field, its
   ephemeron.
 - `()`, `u32`, and `u64` report no edges. Unit remains unallocatable because
@@ -1400,11 +1400,18 @@ type metadata. C5B's typed-run lookup recovers and validates those facts before
 the edge can be marked or dereferenced. The receiver may panic; no visitor or
 traversal state is stored in the traced object.
 
-The marking visitor also carries the collection's list of reached
-ephemerons. `Visitor::ephemeron` pushes the address of the reporting
-ephemeron's pair, derived from the shared reference the trace holds, which
-stays valid as long as the ephemeron does: it is a marked allocation in a
-non-moving heap, live until the collection that recorded it sweeps.
+A visitor sends what a trace reports to a crate-private sink with two
+operations: an edge, and an ephemeron's pair, which is not an edge. A sink
+that receives edges alone, a closure in tests and edge-transition hooks,
+ignores pairs. Marking's sink holds the attempt, the managed data and the
+object being traced. Given an edge, it discovers it. Given a pair, it loads
+it, ignores it if an earlier collection cleared it, resolves the checked
+slot of its key and tests its mark bit; it discovers the value as it would
+an edge if the key is marked, and otherwise records the pair's address,
+derived from the shared reference the trace holds. That address stays valid
+as long as the ephemeron does: it is a marked allocation in a non-moving
+heap, live until the collection that recorded it sweeps. Each edge costs one
+dynamic call, as the closure it replaced did.
 
 `ErasedGc` is `Send + Sync` because it grants no pointer access and is created
 only from `Gc<T>` where `T: Trace` already requires `Send + Sync`. Sending or
@@ -1526,20 +1533,20 @@ through `GcRef::sibling`, so they share its `'m`, whose borrowed admission
 excludes collection while they exist. A view proves its heap, so there is no
 cross-heap check.
 
-Marking records each cell it traces, at most once per collection, as the
-address of its ephemeron's pair. `ReachedEphemeron::pair`, unsafe,
-dereferences it while the recording collection holds exclusive authority and
-has swept nothing, so the marked cell is live and in place and nothing else
-writes it. Resolving a recorded pair loads it, drops it if an earlier
-collection cleared it, resolves the checked slot of its key and tests its
-mark bit, and, when the key is marked, marks and enqueues the value through
-ordinary checked discovery and drops the pair. Marking resolves the pairs
-each traced object recorded right after tracing it, so a value whose key is
-already marked joins the same drain. Once the worklist drains, each round
-resolves every pair still recorded, then drains the worklist, which may
-record more cells; the rounds end when one marks nothing new, at most one
-round per recorded cell, and the collection's report counts the rounds that
-marked. Clearing stores null into the remaining pairs' key and value
+Marking reaches each cell at most once per collection, when it traces it,
+and the trace reports the pair of the cell's ephemeron to marking's sink,
+above. Where the key is already marked, the sink marks and enqueues the
+value through ordinary checked discovery, in the same drain, and records
+nothing; otherwise it records the pair's address. `ReachedEphemeron::pair`,
+unsafe, dereferences a recorded address while the recording collection holds
+exclusive authority and has swept nothing, so the marked cell is live and in
+place and nothing else writes it; a recorded pair is never cleared before
+the end of its collection's marking. Once the worklist drains, each round
+tests the key of every pair still recorded, through the same checked lookup,
+marking and enqueueing the value of each whose key is now marked and
+dropping it, then drains the worklist, which may record more; the rounds end
+when one marks nothing new, at most one round per recorded cell, and the
+collection's report counts the rounds that marked. Clearing stores null into the remaining pairs' key and value
 with Release, before the sweep that may reclaim them, and reports nothing.
 
 ### `root_pool` chunks and slots

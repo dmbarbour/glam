@@ -1,7 +1,7 @@
 use std::ptr::NonNull;
 
 use crate::Gc;
-use crate::ephemeron::{EphemeronPair, ReachedEphemeron};
+use crate::ephemeron::EphemeronPair;
 
 /// Describes every managed edge stored by one managed representation.
 ///
@@ -101,46 +101,41 @@ pub unsafe trait Trace: Send + Sync + 'static {
 /// or allocation metadata to the pointer; later typed runs recover those facts
 /// from the managed address.
 pub struct Visitor<'visit> {
-    visit: &'visit mut dyn FnMut(ErasedGc),
-    /// Where marking records the ephemerons it reaches. Other visitors see
-    /// no edge in an ephemeron.
-    ephemerons: Option<&'visit mut Vec<ReachedEphemeron>>,
+    sink: &'visit mut dyn VisitSink,
+}
+
+/// Where a visitor sends what a trace reports.
+pub(crate) trait VisitSink {
+    /// Receives one managed edge.
+    fn edge(&mut self, edge: ErasedGc);
+
+    /// Receives an ephemeron's pair, which is not an edge: only marking acts
+    /// on one.
+    fn ephemeron(&mut self, _pair: &EphemeronPair) {}
+}
+
+/// A closure receives edges alone, as tests and edge-transition hooks do.
+impl<F: FnMut(ErasedGc)> VisitSink for F {
+    fn edge(&mut self, edge: ErasedGc) {
+        self(edge);
+    }
 }
 
 impl<'visit> Visitor<'visit> {
-    /// A visitor of edges alone, for tests and edge-transition hooks.
-    #[cfg(any(test, feature = "deterministic-test-hooks"))]
-    pub(crate) fn new(visit: &'visit mut dyn FnMut(ErasedGc)) -> Self {
-        Self {
-            visit,
-            ephemerons: None,
-        }
+    pub(crate) fn new(sink: &'visit mut impl VisitSink) -> Self {
+        Self { sink }
     }
 
-    /// A visitor for marking, which also records each ephemeron it reaches
-    /// in `ephemerons`.
-    pub(crate) fn marking(
-        visit: &'visit mut dyn FnMut(ErasedGc),
-        ephemerons: &'visit mut Vec<ReachedEphemeron>,
-    ) -> Self {
-        Self {
-            visit,
-            ephemerons: Some(ephemerons),
-        }
-    }
-
-    /// Reports an ephemeron's pair, which is not an edge: marking records it,
-    /// and other visitors ignore it.
+    /// Reports an ephemeron's pair, which is not an edge: only marking acts
+    /// on it.
     pub(crate) fn ephemeron(&mut self, pair: &EphemeronPair) {
-        if let Some(ephemerons) = self.ephemerons.as_deref_mut() {
-            ephemerons.push(ReachedEphemeron::new(pair));
-        }
+        self.sink.ephemeron(pair);
     }
 
     /// Reports one managed edge without consuming or duplicating its typed
     /// persistent handle.
     pub fn visit<T: Trace>(&mut self, edge: &Gc<T>) {
-        (self.visit)(edge.erase());
+        self.sink.edge(edge.erase());
     }
 }
 

@@ -8,11 +8,11 @@
 //!   and publishes exact lease masks, eligible class frontiers, and one final
 //!   stale-cursor epoch.
 //! - **Ephemerons.** An ephemeron is a managed cell that keeps its value only
-//!   while its key is reachable by another path. Marking records the
-//!   ephemerons it reaches without tracing them, marking at once the values
-//!   of those whose keys are already marked. It repeats over the rest until
-//!   a round marks nothing new, then silently clears those whose keys stayed
-//!   unmarked, before the sweep. A weak reference is a cell holding an
+//!   while its key is reachable by another path. Marking traces neither of
+//!   a reached ephemeron's words: it marks the value at once if the key is
+//!   already marked, and otherwise records the ephemeron. It repeats over
+//!   those recorded until a round marks nothing new, then silently clears
+//!   those whose keys stayed unmarked, before the sweep. A weak reference is a cell holding an
 //!   ephemeron whose key is its value.
 //! - **Finalization.** Dead identities that need `Drop` move into a durable,
 //!   non-rootable finalization batch. It drains outside collector locks under

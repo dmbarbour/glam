@@ -4,19 +4,18 @@
 //! while the key is reachable by some other path. It does not keep its key
 //! alive. It is a managed cell of two words, the key's and value's
 //! addresses, and lives as any allocation does, while a root or a traced edge
-//! reaches it. Marking marks a reached ephemeron but traces neither word: it
-//! records the ephemeron instead. Once the worklist drains, it marks the value
-//! of each recorded ephemeron whose key it marked, tracing from those values,
-//! which may reach more ephemerons, and repeats until a round marks nothing
-//! new: a value may reach another ephemeron's key. A recorded ephemeron whose
-//! key stays unmarked is then cleared, before the sweep reclaims anything.
-//! Clearing is silent: an owner notices a cleared ephemeron when it next uses
-//! it, or when it next traces what holds it. An ephemeron that nothing
-//! reaches is not recorded: it keeps nothing alive, and is swept as any
-//! allocation is. Marking resolves an ephemeron at once where it reaches one
-//! whose key is already marked, so only those reached first wait for the
-//! rounds. A weak reference is a cell of its own type holding an ephemeron
-//! whose key and value coincide.
+//! reaches it. Marking marks a reached ephemeron but traces neither word. If
+//! the key is already marked, it marks the value at once, as an edge;
+//! otherwise it records the ephemeron. Once the worklist drains, it marks the
+//! value of each recorded ephemeron whose key it has since marked, tracing
+//! from those values, which may reach more ephemerons, and repeats until a
+//! round marks nothing new: a value may reach another ephemeron's key. A
+//! recorded ephemeron whose key stays unmarked is then cleared, before the
+//! sweep reclaims anything. Clearing is silent: an owner notices a cleared
+//! ephemeron when it next uses it, or when it next traces what holds it. An
+//! ephemeron that nothing reaches keeps nothing alive, and is swept as any
+//! allocation is. A weak reference is a cell of its own type holding an
+//! ephemeron whose key and value coincide.
 
 use std::fmt;
 use std::marker::PhantomData;

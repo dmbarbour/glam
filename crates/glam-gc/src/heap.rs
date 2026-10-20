@@ -14,7 +14,7 @@ use crate::{
     class::{
         AllocationClass, AllocationClassEntry, MetadataIdentity, ObjectMetadata, metadata_for,
     },
-    ephemeron::ReachedEphemeron,
+    ephemeron::{EphemeronPair, ReachedEphemeron},
     root_pool::{HeapId, RootPool},
     run::{AllocationClassId, RunGeometry},
     thread_cache::{
@@ -22,7 +22,7 @@ use crate::{
         ThreadHeapEntry, ThreadRegionCounters, ThreadRegionMetrics, remove_inactive_thread_cache,
         thread_has_any_active_mutator,
     },
-    trace::ErasedGc,
+    trace::{ErasedGc, VisitSink},
 };
 
 #[cfg(feature = "deterministic-test-hooks")]
@@ -2400,8 +2400,8 @@ struct MarkAttempt {
     completed_worklist_pushes: usize,
     peak_object_worklist_len: usize,
     peak_object_worklist_capacity: usize,
-    /// The ephemerons marking has reached whose values it has not yet
-    /// marked through them.
+    /// The ephemerons marking has reached before their keys, whose values
+    /// it has not yet marked through them.
     ephemerons: Vec<ReachedEphemeron>,
     ephemeron_round_count: usize,
 }
@@ -2535,14 +2535,13 @@ impl MarkAttempt {
     }
 
     fn trace_worklist(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
-        let mut ephemerons = std::mem::take(&mut self.ephemerons);
         while let Some(work) = self.worklist.pop() {
-            let recorded = ephemerons.len();
-            let mut visit = |edge| {
-                self.discover(data, edge)
-                    .unwrap_or_else(|error| error.raise_traced_edge(work, edge));
+            let mut sink = MarkingSink {
+                attempt: self,
+                data,
+                work,
             };
-            let mut visitor = Visitor::marking(&mut visit, &mut ephemerons);
+            let mut visitor = Visitor::new(&mut sink);
             // SAFETY: `TraceWork` is constructed only after checked discovery
             // proves that `work.value` identifies one live initialized
             // allocation with this canonical metadata. The attempt retains
@@ -2554,57 +2553,35 @@ impl MarkAttempt {
                 .traced_object_count
                 .checked_add(1)
                 .expect("traced-object count exhausted");
-            // An ephemeron whose key is already marked keeps its value at
-            // once, which joins this drain; the others wait for the rounds.
-            self.resolve_ephemerons(data, &mut ephemerons, recorded)?;
         }
-        self.ephemerons = ephemerons;
         Ok(())
     }
 
-    /// Marks the value of each ephemeron of `ephemerons[from..]` whose key
-    /// is marked, removing it, and any that an earlier collection cleared,
-    /// from the list; returns whether it marked anything new.
-    fn resolve_ephemerons(
-        &mut self,
-        data: &mut ManagedData,
-        ephemerons: &mut Vec<ReachedEphemeron>,
-        from: usize,
-    ) -> Result<bool, CollectorLookupError> {
-        let mut marked = false;
-        let mut index = from;
-        while index < ephemerons.len() {
-            // SAFETY: this collection recorded the ephemeron, holds exclusive
-            // authority, and has swept nothing.
-            let pair = unsafe { ephemerons[index].pair() };
-            let Some((key, value)) = pair.load() else {
-                // An earlier collection cleared it: it holds nothing.
-                ephemerons.swap_remove(index);
-                continue;
-            };
-            let key = collector_slot_in(&data.arena, &data.classes, key)?;
-            if data.arena.owner_slot_is_marked(key.owner) {
-                marked |= self.discover(data, value)?;
-                ephemerons.swap_remove(index);
-            } else {
-                index += 1;
-            }
-        }
-        Ok(marked)
-    }
-
     /// Marks the value of each recorded ephemeron whose key is now marked,
-    /// one whose key marking had not reached when it recorded it, tracing
-    /// from it, until a round marks nothing new, since a value may reach
-    /// another ephemeron or its key; then clears, silently, the ephemerons
-    /// whose keys stayed unmarked. Runs once the roots' worklist
+    /// one whose key marking had not reached when it reached the ephemeron,
+    /// tracing from it, until a round marks nothing new, since a value may
+    /// reach another ephemeron or its key; then clears, silently, the
+    /// ephemerons whose keys stayed unmarked. Runs once the roots' worklist
     /// has drained, before anything is swept
     /// (`opaque-resources-reclaimed-when-unreachable`).
     fn trace_ephemerons(&mut self, data: &mut ManagedData) -> Result<(), CollectorLookupError> {
         loop {
-            let mut ephemerons = std::mem::take(&mut self.ephemerons);
-            let marked = self.resolve_ephemerons(data, &mut ephemerons, 0)?;
-            self.ephemerons = ephemerons;
+            let mut marked = false;
+            let mut index = 0;
+            while index < self.ephemerons.len() {
+                // SAFETY: this collection recorded the ephemeron, holds
+                // exclusive authority, and has swept nothing.
+                let pair = unsafe { self.ephemerons[index].pair() };
+                let (key, value) = pair
+                    .load()
+                    .expect("marking records only ephemerons it has not cleared");
+                if key_is_marked(data, key)? {
+                    marked |= self.discover(data, value)?;
+                    self.ephemerons.swap_remove(index);
+                } else {
+                    index += 1;
+                }
+            }
             if !marked {
                 break;
             }
@@ -2617,8 +2594,7 @@ impl MarkAttempt {
         }
         // Every key still recorded stayed unmarked through the last round.
         for reached in self.ephemerons.drain(..) {
-            // SAFETY: this collection recorded the ephemeron, holds exclusive
-            // authority, and has swept nothing.
+            // SAFETY: as above.
             unsafe { reached.pair() }.clear();
         }
         Ok(())
@@ -2639,6 +2615,41 @@ impl MarkAttempt {
             ephemeron_rounds: self.ephemeron_round_count,
         }
     }
+}
+
+/// What marking does with what one object's trace reports.
+struct MarkingSink<'attempt> {
+    attempt: &'attempt mut MarkAttempt,
+    data: &'attempt mut ManagedData,
+    work: TraceWork,
+}
+
+impl VisitSink for MarkingSink<'_> {
+    fn edge(&mut self, edge: ErasedGc) {
+        self.attempt
+            .discover(self.data, edge)
+            .unwrap_or_else(|error| error.raise_traced_edge(self.work, edge));
+    }
+
+    /// An ephemeron whose key is already marked keeps its value at once, as
+    /// an edge, which joins this drain; the others wait for the rounds, and
+    /// one that an earlier collection cleared holds nothing.
+    fn ephemeron(&mut self, pair: &EphemeronPair) {
+        let Some((key, value)) = pair.load() else {
+            return;
+        };
+        match key_is_marked(self.data, key) {
+            Ok(true) => self.edge(value),
+            Ok(false) => self.attempt.ephemerons.push(ReachedEphemeron::new(pair)),
+            Err(error) => error.raise_traced_edge(self.work, key),
+        }
+    }
+}
+
+/// Whether marking has marked an ephemeron's key.
+fn key_is_marked(data: &ManagedData, key: ErasedGc) -> Result<bool, CollectorLookupError> {
+    let key = collector_slot_in(&data.arena, &data.classes, key)?;
+    Ok(data.arena.owner_slot_is_marked(key.owner))
 }
 
 impl HeapInner {

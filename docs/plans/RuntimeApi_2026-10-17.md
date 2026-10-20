@@ -1795,8 +1795,10 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   unmarked is cleared, before the sweep. A cell nothing reaches keeps
   nothing alive and is swept. A cell whose key is already marked when
   marking reaches it keeps its value at once, without a round (maintainer,
-  the same day); `CollectionReport::ephemeron_rounds` counts the rounds
-  that marked.
+  the same day): the visitor sends what a trace reports to a sink, and
+  marking's sink tests the key as the cell reports itself, marking the value
+  as an edge or recording the cell. `CollectionReport::ephemeron_rounds`
+  counts the rounds that marked.
 - Clearing is silent (maintainer, the same day). The first build queued a
   notice token per cleared ephemeron that a handle held, until the heap's
   owner took them, which an owner that never took them would grow without
