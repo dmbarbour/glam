@@ -1866,6 +1866,12 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   creation after a collection, and a revoked volume's late writes; in
   `api::turn::tests`, a turn's volume reaching its own handle, which fails
   at `53da9d01`. The managed boundary audit's fixtures gained the variant.
+- Cost, by `scripts/profile.sh` against `53da9d01` (user-space
+  instructions): `minimal` 45.7 M to 45.9 M, `hello_elf` 648.6 M to
+  649.6 M, `chain_refl_800` 534.4 M to 534.7 M, with about 50 more roots
+  and allocations a run, from the store's versions and fresh reads. None
+  of these workloads writes volumes in quantity; one that does is
+  unmeasured.
 
 ## Verification
 
