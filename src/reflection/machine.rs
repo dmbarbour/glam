@@ -1,5 +1,5 @@
 use super::promises::{PromiseId, PromiseStatus, Promises, Resolution, resolver_promise};
-use super::volume_handle::{handle_volume, volume_handle_in};
+use super::volume_handle::handle_volume;
 use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 #[cfg(test)]
@@ -12,7 +12,7 @@ use super::protocol::{
     request_value,
 };
 use super::search::{IsolatedSearchBranch, SearchPolicy};
-use super::store::{StoreJournal, VolumeId};
+use super::store::{StoreJournal, StoreSnapshot, VolumeId};
 use crate::api::{EvaluatedValue, Value as PublicValue, Values};
 use crate::core::{
     Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, FunctionValue, Key, LazyValue, List,
@@ -2413,13 +2413,22 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.interpret_request(context, Request::Return(value), branch, scope_depth)
     }
 
-    /// The store's promises: the transaction's snapshot's within a cut, or
-    /// the host's.
-    fn promises(&self, context: &mut EvaluationPollContext, branch: &Branch<S>) -> Arc<Promises> {
+    /// The store as the branch sees it: the transaction's snapshot within a
+    /// cut, or the host's.
+    fn store_snapshot(
+        &self,
+        context: &mut EvaluationPollContext,
+        branch: &Branch<S>,
+    ) -> StoreSnapshot {
         match &branch.transaction {
-            Some(transaction) => transaction.snapshot.store().promises().clone(),
-            None => context.suspend(|| self.host.snapshot().store().promises().clone()),
+            Some(transaction) => transaction.snapshot.store().clone(),
+            None => context.suspend(|| self.host.snapshot().store().clone()),
         }
+    }
+
+    /// The store's promises.
+    fn promises(&self, context: &mut EvaluationPollContext, branch: &Branch<S>) -> Arc<Promises> {
+        self.store_snapshot(context, branch).promises().clone()
     }
 
     /// Resolves `promise`: within a cut, once the outermost cut commits, as
@@ -2710,6 +2719,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             Request::VolumeNew(initial) => {
                 let initial = PublicValue::from_runtime_root(initial);
+                let store = self.store_snapshot(context, &branch);
                 let volume = if let Some(transaction) = branch.transaction.as_mut() {
                     transaction
                         .store
@@ -2751,14 +2761,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }
                 };
                 let handle = context.with_runtime_access(|access| {
-                    access.root_runtime_value(volume_handle_in(&access, volume))
+                    access.root_runtime_value(store.new_volume_handle(&access, volume))
                 });
                 MachineWork::deliver_root(handle, branch, scope_depth)
             }
             Request::HeapVolume => {
+                let store = self.store_snapshot(context, &branch);
                 let handle = context.with_runtime_access(|access| {
-                    access
-                        .root_runtime_value(volume_handle_in(&access, super::store::heap_volume()))
+                    access.root_runtime_value(store.heap_handle(&access))
                 });
                 MachineWork::deliver_root(handle, branch, scope_depth)
             }

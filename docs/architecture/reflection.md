@@ -223,7 +223,11 @@ is an opaque value naming one volume of one runtime, the same that machines'
 cut's transaction or in a commit of its own, and returns its handle;
 `.heap.vol` returns the shared heap's. `.vol.get`, `.vol.set` and
 `.vol.rewrite` take a handle first, evaluate it, never the value, and then
-read and stage as the heap effects do on that volume.
+read and stage as the heap effects do on that volume. A volume has one
+payload, which every copy of its handle shares; once the last copy is gone,
+the runtime reclaims the volume after a collection. A transaction that read
+it then conflicts, and one that only wrote it commits without those writes,
+which nothing could read (`opaque-resources-reclaimed-when-unreachable`).
 
 Promises are shared with machines through the store, which records each one
 (`reflection/promises.rs`). `.promise.new` returns `{promise, resolver}`;

@@ -21,7 +21,8 @@ pub(crate) use machine::ContinuationKey;
 pub(crate) use machine::volume_effects;
 pub use promises::PromiseStatus;
 pub(crate) use promises::{Promises, Resolution, resolver_promise};
-pub(crate) use volume_handle::{handle_volume, volume_handle_in};
+pub(crate) use store::DeathNotice;
+pub(crate) use volume_handle::handle_volume;
 
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,

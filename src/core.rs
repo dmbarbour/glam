@@ -1774,6 +1774,14 @@ impl HostCallProducer {
     }
 }
 
+impl CoreValueFactory {
+    /// Destroys the external owners whose last lease is gone, outside every
+    /// lock and access region, returning how many.
+    pub(crate) fn drain_retired_external_owners(&self) -> usize {
+        self.domain.external_owners.drain_retired()
+    }
+}
+
 #[cfg(test)]
 impl CoreValueFactory {
     pub(crate) fn drain_external_owners_for_test(&self) -> usize {

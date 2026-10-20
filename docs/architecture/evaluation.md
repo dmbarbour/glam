@@ -498,13 +498,15 @@ managed edge; immediately before invocation those captures become a typed
 same-runtime `HostCallRootBundle`, and the callback runs after managed access
 has ended. The callback environment itself is an external conservative owner
 held in the runtime registry. `OpaqueValue` similarly stores only a passive
-`ExternalOwnerHandle`; its four admitted production families are source-
+`ExternalOwnerHandle`; its six admitted production families are source-
 inventoried as either edge-free data or explicit external capabilities. No
 managed node can reach a strong value-domain/runtime authority or a registered
 root through those handles. Opaque access returns an owning `Arc<T>`, sound
-only because every opaque payload is an external owner. Collection never
-retires an external owner; an explicit drain destroys retired owners outside
-the registry lock, catching a panicking destructor and continuing. Destructor
+only because every opaque payload is an external owner. The collector never
+retires an external owner; the runtime drains the registry after each
+collection, destroying retired owners outside the registry lock, catching a
+panicking destructor and continuing, and then acts on the death notices that
+volume handles and resolvers queued. Destructor
 order across concurrent drains is not semantic. [`values.md`](values.md)
 "Opaque Values and Host Calls" owns the details.
 

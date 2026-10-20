@@ -2939,6 +2939,55 @@ maps the short names used here to file names.
 - **Rule lives in:** `architecture/evaluation.md` "WHNF Submachine Flow"
   (the outcome only).
 - **Recorded in:** opaque-representation review.
+- **Amended by:** `opaque-resources-reclaimed-when-unreachable`, for
+  volume identities.
+
+### What opaque values stand for is reclaimed once unreachable
+`opaque-resources-reclaimed-when-unreachable` · 2026-10-20 · maintainer · accepted
+- **Context:** the volumes and promises that machines and reflection
+  allocate lived until the runtime retired. Their handles and resolvers are
+  opaque payloads outside the managed heap, glam-gc's, and nothing told the
+  runtime that one was gone: the external-owner registry destroyed dead
+  payloads only when a host call drained it. Even told, a volume reaching
+  its own handle could never die, since the store holds each volume's
+  value as a root the collector cannot see through.
+- **Decision:**
+  - A resolver collected unresolved breaks its promise with "resolver
+    lost", and a volume whose handles are all unreachable is reclaimed.
+  - Resolvers stay opaque payloads: a resolver may keep its promise alive,
+    never the reverse, and a pending promise reaches nothing, so a
+    resolver's liveness is exact. A dying payload's destructor queues a
+    notice; the runtime drains the registry after each collection and acts
+    on the notices there, a safe point.
+  - Volumes become cells in the managed heap, a value kind to which
+    handles are edges, and the store holds their committed values through
+    ephemerons keyed on the cell: a glam-gc root kind whose value is traced
+    only while its key is reachable by other paths, with weak references
+    as the case where key and value coincide. The store's snapshots and
+    its conflict analysis by path stay as they are.
+  - Staged: notices first, which finish resolvers and reclaim acyclic
+    volumes; cycles through volumes leak until volumes are cells, accepted
+    while temporary.
+  - Settlement always collects, and acts on the notices, before it reports,
+    so a wait on a lost promise is not reported as unresolved, and later
+    weak references or finalizers add no special cases.
+- **Alternatives rejected:** volume cells holding their committed values, a
+  transaction recording each volume's snapshot when it first reads it,
+  which costs either conflicts coarser than by path or per-cell version
+  histories; guardians, which resurrect what died; active managed
+  finalizers, which overturn passive destruction
+  (`passive-managed-destruction-with-drop-records`); collecting before
+  settlement only when promises are pending.
+- **Consequences:**
+  - Amends `external-only-opaque-storage` for volume identities, the
+    concrete recursive edge it asked for: a volume reaching its own handle.
+  - glam-gc's deferred work loses ephemerons and weak references. They also
+    serve the design's scope-unique dictionary keys, `anno 'scope_unique`.
+  - Collection's timing stays out of results: a lost resolver's promise
+    can never be fulfilled, so its outcome is decided, and only when its
+    waiters learn of it depends on collection.
+- **Recorded in:** opaque finalization review; runtime API plan,
+  `api-opaque-finalization`.
 
 ### Moving collection waits for parallel-root retirement
 `moving-gc-retirement-gate` · 2026-09-09 to 2026-09-11 · agent · accepted
@@ -3577,6 +3626,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | I5 review | `reviews/GarbageCollectorIntegrationI5_2026-09-07.md` |
 | I8 review | `reviews/GarbageCollectorIntegrationI8_2026-09-10.md` |
 | opaque-representation review | `reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md` |
+| opaque finalization review | `reviews/OpaqueFinalization_2026-10-20.md` |
 | D2h review | `reviews/GarbageCollectorAggressiveD2h_2026-10-01.md` |
 | GCI11R002 holistic review | `reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md` |
 | I13 cleanup inventory | `reviews/GarbageCollectorI13CleanupInventory_2026-10-02.md` |

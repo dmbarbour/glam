@@ -306,7 +306,22 @@ impl RuntimeMutationAdmission {
         // Collection waits for every mutator, so the caller holds none.
         crate::core::assert_outside_mutator();
         let lease = self.begin_gc_activity();
-        let _ = collect_under_lease(lease, values, || {});
+        if let RuntimeCollectionAttempt::Collected(..) = collect_under_lease(lease, values, || {}) {
+            self.after_collection();
+        }
+    }
+
+    /// Lets each runtime core act on what a collection found dead, with no
+    /// mutator held.
+    pub(crate) fn after_collection(&self) {
+        let cores = self
+            .cores
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .clone();
+        for core in cores.iter().filter_map(Weak::upgrade) {
+            core.after_collection();
+        }
     }
 
     /// Whether [`Self::gc_pressure_requested`] might hold, without its
@@ -409,6 +424,9 @@ pub(crate) trait RuntimeCoreState: Send + Sync {
     fn core_poisoned(&self) -> bool;
     /// Wakes every thread parked on this state, so it observes the fault.
     fn wake_parked(&self);
+    /// Runs after each successful collection, with no mutator held: a safe
+    /// point to act on what the collection found dead.
+    fn after_collection(&self) {}
 }
 
 /// Runtime-owned disposition of managed-heap maintenance.

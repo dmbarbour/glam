@@ -468,7 +468,7 @@ fn production_runtime_reclaims_compatibility_aggregate_cycles() {
 }
 
 #[test]
-fn production_runtime_preserves_external_owners_until_explicit_retirement() {
+fn production_runtime_retires_dead_external_owners_after_collections() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())
@@ -497,26 +497,24 @@ fn production_runtime_preserves_external_owners_until_explicit_retirement() {
         "collection must not reinterpret the token's external root as garbage"
     );
 
+    // The runtime drains the external owners after each collection
+    // (`opaque-resources-reclaimed-when-unreachable`): the dead token's owner
+    // retires, releasing the payload's root, and the payload's shell goes at
+    // the next collection, its owner retiring after it.
     drop(token);
     runtime
         .collect_managed_for_maintenance()
         .expect("the retired token shell should collect");
     assert_eq!(drops.load(Ordering::Relaxed), 0);
-    assert_eq!(
-        core_values.drain_external_owners_for_test(),
-        1,
-        "explicit retirement should release the token owner's payload root"
-    );
     runtime
         .collect_managed_for_maintenance()
         .expect("the payload shell should collect after its external root retires");
-    assert_eq!(drops.load(Ordering::Relaxed), 0);
     assert_eq!(
-        core_values.drain_external_owners_for_test(),
+        drops.load(Ordering::Relaxed),
         1,
         "the collected opaque shell should retire its external payload owner"
     );
-    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(core_values.drain_external_owners_for_test(), 0);
 }
 
 #[test]
@@ -809,7 +807,10 @@ fn passive_finalization_produces_no_runtime_work() {
     assert_eq!(report.finalized_slots(), 1);
     #[cfg(feature = "aggressive-gc-verification")]
     let _ = report;
-    assert_eq!(drops.load(Ordering::Relaxed), 0);
+    // The external-owner registry, never the collector's finalization,
+    // retires the payload: the runtime drains it once the collection is done
+    // (`opaque-resources-reclaimed-when-unreachable`).
+    assert_eq!(drops.load(Ordering::Relaxed), 1);
     assert_eq!(bus.counts(), diagnostic_counts);
     assert_eq!(runtime.transaction_snapshot().0, observation_epoch);
     assert_eq!(
@@ -829,13 +830,7 @@ fn passive_finalization_produces_no_runtime_work() {
     assert!(managed_after.assigned_runs() <= managed_before.assigned_runs());
     assert_eq!(managed_after.pending_finalizers(), 0);
     assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
-
-    assert_eq!(
-        core_values.drain_external_owners_for_test(),
-        1,
-        "active opaque payload retirement remains an explicit external-registry operation"
-    );
-    assert_eq!(drops.load(Ordering::Relaxed), 1);
+    assert_eq!(core_values.drain_external_owners_for_test(), 0);
 
     let (_, store, events) = runtime.transaction_snapshot();
     let mut events = RuntimeEventJournal::new(events);

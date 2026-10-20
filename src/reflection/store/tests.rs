@@ -66,8 +66,9 @@ fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<Eva
 
 /// Compile-exhaustive ownership latch for the durable reflection-store
 /// state. Public values are compatibility roots; the promises hold each
-/// pending promise's rooted owner until it resolves; query identity,
-/// conflict metadata, and revision state are edge-free companions.
+/// pending promise's rooted owner until it resolves or its resolver dies;
+/// death notices, the heap's handle payload, query identity, conflict
+/// metadata, and revision state are edge-free companions.
 fn assert_store_root_boundary_inventory(
     snapshot: &StoreSnapshot,
     edit: &StoreEdit,
@@ -82,6 +83,8 @@ fn assert_store_root_boundary_inventory(
         environment_volume,
         next_volume,
         promises,
+        death_notices,
+        heap_handle,
         query_domain,
         roots,
         strategy,
@@ -94,6 +97,8 @@ fn assert_store_root_boundary_inventory(
     let _: &VolumeId = environment_volume;
     let _: &Arc<AtomicU64> = next_volume;
     let _: &Arc<Promises> = promises;
+    let _: &Sender<DeathNotice> = death_notices;
+    let _: &Arc<VolumeHandle> = heap_handle;
     let _: &Arc<QueryDomain> = query_domain;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
     let _: &Arc<dyn ConflictAnalysisStrategy> = strategy;
@@ -139,6 +144,10 @@ fn assert_store_root_boundary_inventory(
         query_retirements,
         next_volume,
         promises,
+        death_notices,
+        death_notice_receiver,
+        heap_handle,
+        revoked,
         roots,
         revision,
         latest_changes,
@@ -153,6 +162,10 @@ fn assert_store_root_boundary_inventory(
     let _: &Receiver<EvaluationQueryId> = query_retirements;
     let _: &Arc<AtomicU64> = next_volume;
     let _: &Arc<Promises> = promises;
+    let _: &Sender<DeathNotice> = death_notices;
+    let _: &Receiver<DeathNotice> = death_notice_receiver;
+    let _: &Arc<VolumeHandle> = heap_handle;
+    let _: &BTreeSet<VolumeId> = revoked;
     let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = roots;
     let _: &u64 = revision;
     let _: &BTreeMap<ConflictAddress, u64> = latest_changes;
@@ -817,4 +830,46 @@ fn writes_do_not_erase_earlier_read_dependencies() {
     concurrent.write(path(&["value"]), integer(&store, 2));
     assert_eq!(store.try_commit(&concurrent), StoreCommitResult::Committed);
     assert_eq!(store.try_commit(&local), StoreCommitResult::Conflict);
+}
+
+#[test]
+fn a_reclaimed_volume_drops_late_writes_and_conflicts_its_readers() {
+    let mut store = store();
+    let volume = store
+        .create_volume(text(&store, "first"))
+        .expect("a volume allocates");
+    let mut writer = StoreJournal::new(store.snapshot());
+    writer.write_volume(volume, Vec::new(), text(&store, "late"));
+    let mut reader = StoreJournal::new(store.snapshot());
+    assert!(reader.observe_volume_read(volume, &[]));
+
+    assert!(store.reclaim_volume(volume));
+    assert!(!store.reclaim_volume(volume), "it is reclaimed once");
+    assert_eq!(
+        store.try_commit(&writer),
+        StoreCommitResult::Committed,
+        "nothing can read a reclaimed volume, so its late writes go"
+    );
+    assert!(store.snapshot().volume_value(volume, &[]).is_none());
+    assert_eq!(
+        store.try_commit(&reader),
+        StoreCommitResult::Conflict,
+        "what read the volume conflicts with its reclamation"
+    );
+
+    let revoked = store
+        .create_volume(text(&store, "owned"))
+        .expect("a volume allocates");
+    let mut late = StoreJournal::new(store.snapshot());
+    late.write_volume(revoked, Vec::new(), text(&store, "late"));
+    assert!(store.revoke_volume(revoked).is_some());
+    assert_eq!(
+        store.try_commit(&late),
+        StoreCommitResult::MissingVolume(revoked),
+        "a revoked volume's late writes stay an error"
+    );
+    assert!(
+        !store.reclaim_volume(heap_volume()),
+        "the shared heap is never reclaimed"
+    );
 }

@@ -264,4 +264,5 @@ Planned steps: `api-death-notices` (stage 1), then `api-ephemerons` and
    promises are pending, so later weak references, ephemerons or
    finalizers that make noise add no special cases.
 
-Open: stage 2's mechanism, M3 (recommended) or M6.
+4. Stage 2 uses M3, ephemerons (agreed the same day). The ADR is
+   `opaque-resources-reclaimed-when-unreachable`.

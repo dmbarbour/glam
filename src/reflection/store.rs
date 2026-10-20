@@ -22,6 +22,7 @@ use std::sync::{Arc, LazyLock, Mutex, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use super::promises::{PromiseId, Promises};
+use super::volume_handle::{VolumeHandle, handle_value};
 use crate::api::{Value as PublicValue, Values};
 use crate::core::{
     Builtin, CoreValueFactory, Dict, Key, LazyValue, List, RuntimeValueAccess, Value,
@@ -183,6 +184,10 @@ pub struct StoreSnapshot {
     /// The store's next volume ID, which a transaction reserves from.
     next_volume: Arc<AtomicU64>,
     promises: Arc<Promises>,
+    /// Where dying volume handles and resolvers report to the store.
+    death_notices: Sender<DeathNotice>,
+    /// The shared heap's handle, which lives as long as the store.
+    heap_handle: Arc<VolumeHandle>,
     query_domain: Arc<QueryDomain>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     strategy: Arc<dyn ConflictAnalysisStrategy>,
@@ -190,6 +195,29 @@ pub struct StoreSnapshot {
 }
 
 impl StoreSnapshot {
+    /// The shared heap's handle, as `.heap.vol` gives it.
+    pub(crate) fn heap_handle(&self, access: &RuntimeValueAccess<'_>) -> Value {
+        handle_value(access, &self.heap_handle)
+    }
+
+    /// The handle of `volume`, which this store just allocated: its one
+    /// payload, which every copy of the handle shares, reports to the store
+    /// when the last copy is gone.
+    pub(crate) fn new_volume_handle(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+    ) -> Value {
+        handle_value(
+            access,
+            &VolumeHandle::new(
+                self.values.runtime_id(),
+                volume,
+                Some(self.death_notices.clone()),
+            ),
+        )
+    }
+
     /// The store's promises, which its snapshots share
     /// (`requests-travel-on-ports`).
     pub(crate) fn promises(&self) -> &Arc<Promises> {
@@ -197,10 +225,6 @@ impl StoreSnapshot {
     }
 
     /// The shared heap's volume.
-    pub(crate) fn heap_volume(&self) -> VolumeId {
-        self.heap_volume
-    }
-
     /// The value at `path` in `volume`, as a lazy access, or `None` where
     /// the volume does not exist.
     pub(crate) fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
@@ -335,6 +359,11 @@ struct Branch {
 }
 
 impl StoreJournal {
+    /// The snapshot the journal began from.
+    pub(crate) fn snapshot(&self) -> &StoreSnapshot {
+        &self.snapshot
+    }
+
     #[doc(hidden)]
     pub fn new(snapshot: StoreSnapshot) -> Self {
         let observations = Arc::new(Mutex::new(snapshot.strategy.begin()));
@@ -747,6 +776,16 @@ impl StoreJournal {
     }
 }
 
+/// What a dying payload reports to its store
+/// (`opaque-resources-reclaimed-when-unreachable`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum DeathNotice {
+    /// A volume's handles are all gone.
+    Volume(VolumeId),
+    /// A promise's resolver is gone.
+    Resolver(PromiseId),
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreCommitResult {
     Committed,
@@ -767,6 +806,12 @@ pub struct ReflectionStore {
     query_retirements: Receiver<EvaluationQueryId>,
     next_volume: Arc<AtomicU64>,
     promises: Arc<Promises>,
+    death_notices: Sender<DeathNotice>,
+    death_notice_receiver: Receiver<DeathNotice>,
+    heap_handle: Arc<VolumeHandle>,
+    /// The volumes revoked through their owners, whose late edits are errors;
+    /// a reclaimed volume's are dropped, since nothing can read it.
+    revoked: BTreeSet<VolumeId>,
     roots: RedBlackTreeMapSync<VolumeId, PublicValue>,
     revision: u64,
     latest_changes: BTreeMap<ConflictAddress, u64>,
@@ -783,6 +828,8 @@ impl ReflectionStore {
         let runtime_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
         let environment_volume = VolumeId::from_u64(3).expect("three is a nonzero volume ID");
         let (query_domain, query_retirements) = QueryDomain::new();
+        let (death_notices, death_notice_receiver) = mpsc::channel();
+        let heap_handle = VolumeHandle::new(values.runtime_id(), heap_volume, None);
         let public_values = Values::from_core_factory(values.clone());
         Self {
             identity: Arc::new(()),
@@ -792,7 +839,11 @@ impl ReflectionStore {
             query_domain,
             query_retirements,
             next_volume: Arc::new(AtomicU64::new(4)),
-            promises: Arc::default(),
+            promises: Arc::new(Promises::new(death_notices.clone())),
+            death_notices,
+            death_notice_receiver,
+            heap_handle,
+            revoked: BTreeSet::new(),
             roots: RedBlackTreeMapSync::new_sync()
                 .insert(heap_volume, public_values.empty_dict())
                 .insert(runtime_volume, public_values.empty_dict())
@@ -814,6 +865,8 @@ impl ReflectionStore {
             environment_volume: self.environment_volume,
             next_volume: self.next_volume.clone(),
             promises: self.promises.clone(),
+            death_notices: self.death_notices.clone(),
+            heap_handle: self.heap_handle.clone(),
             query_domain: self.query_domain.clone(),
             roots: self.roots.clone(),
             strategy: self.strategy.clone(),
@@ -872,11 +925,43 @@ impl ReflectionStore {
             return None;
         }
         let root = self.roots.get(&volume).cloned()?;
+        self.remove_volume(volume);
+        self.revoked.insert(volume);
+        Some(root)
+    }
+
+    /// Reclaims `volume`, whose handles are all gone
+    /// (`opaque-resources-reclaimed-when-unreachable`): a transaction that
+    /// read it conflicts, and one that only wrote it commits without those
+    /// edits, which nothing could read. Returns whether the store changed.
+    pub(crate) fn reclaim_volume(&mut self, volume: VolumeId) -> bool {
+        if volume == self.heap_volume
+            || volume == self.runtime_volume
+            || volume == self.environment_volume
+            || self.roots.get(&volume).is_none()
+        {
+            return false;
+        }
+        self.remove_volume(volume);
+        true
+    }
+
+    fn remove_volume(&mut self, volume: VolumeId) {
         self.roots.remove_mut(&volume);
         self.revision = self.revision.wrapping_add(1);
         self.latest_changes
             .insert(ConflictAddress::reflection_root(volume), self.revision);
-        Some(root)
+    }
+
+    /// The store's promises (`requests-travel-on-ports`).
+    pub(crate) fn promises(&self) -> &Arc<Promises> {
+        &self.promises
+    }
+
+    /// The death notices that dying volume handles and resolvers have
+    /// queued since the last call.
+    pub(crate) fn take_death_notices(&self) -> Vec<DeathNotice> {
+        self.death_notice_receiver.try_iter().collect()
     }
 
     #[doc(hidden)]
@@ -936,7 +1021,11 @@ impl ReflectionStore {
             .edits
             .iter()
             .map(|edit| edit.address().reflection_parts().0)
-            .find(|volume| self.roots.get(volume).is_none() && !created.contains(volume))
+            .find(|volume| {
+                self.roots.get(volume).is_none()
+                    && !created.contains(volume)
+                    && self.revoked.contains(volume)
+            })
         {
             return StoreCommitResult::MissingVolume(volume);
         }
@@ -1030,10 +1119,11 @@ fn apply_edits(
             roots.insert_mut(volume, initial.clone());
             continue;
         }
-        let root = roots
-            .get(&volume)
-            .cloned()
-            .expect("commit validates every edited volume before replay");
+        // Validation refuses edits to revoked volumes, so a volume missing
+        // here was reclaimed, and nothing can read its edits.
+        let Some(root) = roots.get(&volume).cloned() else {
+            continue;
+        };
         roots.insert_mut(volume, apply_edit(access, root, edit));
     }
     roots

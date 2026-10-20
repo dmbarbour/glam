@@ -403,20 +403,22 @@ handle API goes.
    - Maintainer decisions (2026-10-20): the first stage's leak of cycles
      through volumes is acceptable while temporary, and the plan returns
      to it; a lost resolver breaks its promise with "resolver lost";
-     settlement always collects before it reports. Open: whether volumes'
-     committed values stay in the store, held through ephemerons keyed on
-     the volume's cell (recommended), or move into the cell, a transaction
-     recording each volume's snapshot when it first reads it, as the
-     maintainer first envisioned.
+     settlement always collects before it reports. Volumes' committed
+     values stay in the store, held through ephemerons keyed on the
+     volume's cell, rather than moving into the cell with a snapshot
+     recorded at a transaction's first read, as the maintainer first
+     envisioned; agreed the same day, which settles the design
+     (`opaque-resources-reclaimed-when-unreachable`).
 10. `api-death-notices` — the first stage of `api-opaque-finalization`.
    Each volume has one payload, which its handles share and the store
    caches weakly; a volume handle's or resolver's payload queues a notice
    when it dies; the runtime drains its external owners after each
    collection and processes the notices there: a lost resolver's promise
    breaks with "resolver lost" and its record goes, and a dead volume's
-   root and conflict entries go. A transaction keeps the volumes it
-   touches alive, and settlement collects before it reports. Cycles
-   through volumes leak until `api-volume-cells`, a known limitation.
+   root goes. A transaction that read a reclaimed volume conflicts, and
+   one that only wrote it commits without those writes, and settlement
+   collects before it reports. Cycles through volumes leak until
+   `api-volume-cells`, a known limitation.
 11. `api-transactional-promises` — promise resolution within cuts, with
    specialized attention, more than a commit hook for the public
    reflection API (maintainer, 2026-10-20). A resolution cannot be
@@ -441,8 +443,8 @@ handle API goes.
 13. `api-volume-cells` — volumes as cells in the managed heap, closing the
    first stage's leak: a volume's identity is a managed cell, a value kind
    to which handles are edges, and the store holds its committed values
-   through ephemerons keyed on it, unless the design step settles on the
-   cell holding them. Cycles through volumes are then collected.
+   through ephemerons keyed on it. Cycles through volumes are then
+   collected.
 14. `api-reflection-model` — a design step, without code, ahead of the
    settlement it shapes (maintainer, 2026-10-19): how the reflection API, as
    `refl.*` and `anno refl:(…)` present it, maps to machines. Spawned tasks
@@ -1640,6 +1642,50 @@ maintainer's agreement):
   a cut too; a cut's resolution sent only once it commits, and a failed
   alternative's not at all; a cut that read a promise pending retrying
   once it resolves (forced).
+
+`api-opaque-finalization`, the design (2026-10-20): the inventory and the
+[opaque finalization review](../reviews/OpaqueFinalization_2026-10-20.md),
+which compared death notices, weak references, ephemerons, guardians,
+active managed finalizers and volume cells owning their values. Settled in
+`opaque-resources-reclaimed-when-unreachable`: notices first, then
+ephemerons and volumes as cells in the managed heap. It amends
+`external-only-opaque-storage` for volume identities.
+
+`api-death-notices` (2026-10-20), the first stage:
+- The store owns a channel of death notices, shared by its snapshots.
+  Each volume has one payload, made when the volume is allocated
+  (`StoreSnapshot::new_volume_handle`), which every copy of its handle
+  shares, and the shared heap's handle is one payload the store holds, so
+  it never dies. A volume handle's and a resolver's payload send a notice
+  from `Drop`; both payload families are now `external`.
+- `RuntimeSharedResources::process_death_notices` drains the external-owner
+  registry, then breaks each lost resolver's still pending promise with
+  "resolver lost" (`Promises::lose`), drops its record either way, writes
+  the broken promises' places in the store so their readers wake, and
+  reclaims dead volumes (`ReflectionStore::reclaim_volume`). It runs after
+  each collection: a driver's, through a new
+  `RuntimeCoreState::after_collection`, and an explicit service's.
+  Settlement collects first (`collect_for_settlement`), and a notice that
+  changes anything fails the settlement's validation, so its caller pumps
+  again.
+- A transaction keeps no volume alive, unlike the review's proposal (F6):
+  reclamation records a change to the volume's root, so a transaction that
+  read it conflicts, while one that only wrote it commits without those
+  writes, since nothing can read them. The store tells reclaimed volumes
+  from revoked ones, whose late writes stay an error. Conflict entries stay
+  as they are, since pruning them could hide a conflict from a transaction
+  still running; a watermark could prune them later.
+- `drain_retired` used to run only within host calls, and two collection
+  tests asserted that; they now assert that the runtime drains once the
+  collection is done.
+- Tests: in `src/reflection/store/tests.rs`, a reclaimed volume dropping a
+  late write and conflicting its reader, a revoked one's late write staying
+  an error, and the shared heap never reclaimed; in `src/api/turn/tests.rs`,
+  a lost resolver breaking its promise and waking its reader (forced: the
+  reader's first attempt waits, then the resolver goes and the runtime
+  collects), a resolved promise's record going with its resolver, a volume
+  living while any copy of its handle does, and settlement reclaiming a
+  volume by itself.
 
 ## Verification
 

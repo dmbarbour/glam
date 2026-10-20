@@ -83,7 +83,9 @@ fn outside_a_cut_an_unresolved_promise_is_pushback_that_pops_nothing() {
     let mut rt = runtime();
     rt.run("m", |m| {
         m.promise();
-        m.discard(1)?;
+        // Kept, for a resolver lost would break the promise once the
+        // runtime collects (`opaque-resources-reclaimed-when-unreachable`).
+        m.set("resolver")?;
         let error = m.pop_int().expect_err("nothing resolved it");
         assert_eq!(error.kind(), ErrorKind::Retry);
         assert_eq!(m.depth(), 1, "the promised value stays");

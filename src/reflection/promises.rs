@@ -8,8 +8,15 @@
 //! within a transaction a read observes the promise's place in the runtime's
 //! volume, which its resolution writes, so a transaction that read it pending
 //! conflicts with the resolution, and one that failed wakes to it.
+//!
+//! A resolver's payload reports its death to the store, and the runtime then
+//! breaks its promise, if still pending, with "resolver lost", and drops its
+//! record (`opaque-resources-reclaimed-when-unreachable`). A resolver keeps
+//! its promise alive through the record, never the reverse: a pending
+//! promise reaches nothing.
 
 use std::collections::BTreeMap;
+use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use crate::core::{
@@ -18,15 +25,18 @@ use crate::core::{
 };
 use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
 
+use super::store::DeathNotice;
+
 /// A promise's identity among its store's promises.
 pub(crate) type PromiseId = u64;
 
 /// The promises a store's machines and reflection allocated, by their
 /// resolvers' identities.
-#[derive(Default)]
 pub(crate) struct Promises {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     pending: Mutex<PendingPromises>,
+    /// Where each resolver reports its death.
+    notices: Sender<DeathNotice>,
 }
 
 #[derive(Default)]
@@ -36,8 +46,7 @@ struct PendingPromises {
 }
 
 /// A promise, until it resolves, then how it resolved: a bounded record
-/// that keeps no value, until collecting a resolver can drop it
-/// (`api-opaque-finalization`).
+/// that keeps no value, until its resolver dies.
 enum PromiseEntry {
     Pending(ManagedPromiseRoot),
     Resolved { fulfilled: bool },
@@ -73,18 +82,29 @@ pub(crate) enum Resolution {
     Break(RuntimeValueRoot),
 }
 
-/// A resolver's payload: which promise of which runtime it resolves.
+/// A resolver's payload: which promise of which runtime it resolves, and
+/// where to report its death.
 struct PromiseCapability {
     runtime: EvaluationRuntimeId,
     id: PromiseId,
+    notices: Sender<DeathNotice>,
 }
 
-// SAFETY: the payload holds a runtime's identity and a number. It contains
-// no Glam value, runtime root, managed pointer, or active runtime capability:
-// the promise's root stays in the store's `Promises`.
+impl Drop for PromiseCapability {
+    fn drop(&mut self) {
+        // A store already gone has no record left to settle.
+        let _ = self.notices.send(DeathNotice::Resolver(self.id));
+    }
+}
+
+// SAFETY: the payload holds a runtime's identity, a number, and a channel's
+// sending end. It contains no Glam value, runtime root, managed pointer, or
+// active runtime capability: the promise's root stays in the store's
+// `Promises`, and its `Drop` only queues a notice for the store, which acts
+// on it later, at a safe point.
 unsafe impl OpaquePayloadFamily for PromiseCapability {
     const PAYLOAD_RECORD: OpaquePayloadRecord =
-        OpaquePayloadRecord::edge_free("promise resolver identity", "src/reflection/promises.rs");
+        OpaquePayloadRecord::external("promise resolver", "src/reflection/promises.rs");
 }
 
 /// The promise that `resolver`, evaluated, resolves, where it is a resolver
@@ -104,6 +124,13 @@ pub(crate) fn resolver_promise(
 }
 
 impl Promises {
+    pub(super) fn new(notices: Sender<DeathNotice>) -> Self {
+        Self {
+            pending: Mutex::default(),
+            notices,
+        }
+    }
+
     fn pending(&self) -> std::sync::MutexGuard<'_, PendingPromises> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
@@ -126,6 +153,7 @@ impl Promises {
         let capability = PromiseCapability {
             runtime: values.runtime_id(),
             id,
+            notices: self.notices.clone(),
         };
         let resolver = Value::Opaque(OpaqueValue::new(values, Arc::new(capability)));
         (id, promised, resolver)
@@ -144,10 +172,37 @@ impl Promises {
             })
     }
 
+    /// How many promises the record holds, pending or resolved.
+    #[cfg(test)]
+    pub(crate) fn len_for_test(&self) -> usize {
+        self.pending().entries.len()
+    }
+
     /// Forgets `promise`, which nothing can have read, as an operation that
     /// allocated it and then failed does.
     pub(crate) fn forget(&self, promise: PromiseId) {
         self.pending().entries.remove(&promise);
+    }
+
+    /// Settles `promise`, whose resolver is gone: its record goes, and where
+    /// it was pending it breaks with "resolver lost", returning the
+    /// publication to notify once the caller has left `access`.
+    pub(crate) fn lose(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        promise: PromiseId,
+    ) -> Option<ManagedPromisePublication> {
+        let PromiseEntry::Pending(root) = self.pending().entries.remove(&promise)? else {
+            return None;
+        };
+        root.publish(
+            access,
+            Err(Arc::new(EvaluationFailure::emission_in(
+                access,
+                Value::binary_from_text("resolver lost"),
+            ))),
+        )
+        .ok()
     }
 
     /// Resolves `promise`: once, so a second resolution fails. The caller

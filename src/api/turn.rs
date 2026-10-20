@@ -1806,26 +1806,38 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// it, so the volume operations reach the heap too
     /// (`requests-travel-on-ports`).
     pub fn heap_volume(&mut self) {
-        let volume = self.resources().reflection_snapshot().1.heap_volume();
-        self.push_volume_handle(volume);
+        let store = self.resources().reflection_snapshot().1;
+        let handle = self
+            .runtime
+            .assembler
+            .values()
+            .with_access(|scoped| scoped.wrap(store.heap_handle(scoped.runtime_access())));
+        self.push(handle);
     }
 
     /// Allocates a volume whose root is the top value, replacing it with the
     /// volume's handle: an opaque glam value whose holder reads and writes
     /// the volume. Allocation is transactional: outside a cut, the volume
     /// exists at once; within one, from the outermost cut's commit, and a
-    /// failed cut allocates nothing. A volume lives until the runtime
-    /// retires, for now.
+    /// failed cut allocates nothing. A volume lives while its handle does:
+    /// once every copy is gone, the runtime reclaims it after a collection
+    /// (`opaque-resources-reclaimed-when-unreachable`), though a volume
+    /// reaching its own handle lives until the runtime retires, for now.
     pub fn volume_new(&mut self) -> Result<(), Error> {
         let initial = self.peek()?.clone();
-        self.runtime.assembler.values().require(&initial)?;
-        let volume = self.transact(|store, _| {
-            store
+        let values = self.runtime.assembler.values();
+        values.require(&initial)?;
+        let (volume, store) = self.transact(|store, _| {
+            let volume = store
                 .create_volume(initial.clone())
-                .map_err(|error| Error::new(error.as_ref()))
+                .map_err(|error| Error::new(error.as_ref()))?;
+            Ok((volume, store.snapshot().clone()))
         })?;
+        let handle = values.with_access(|scoped| {
+            scoped.wrap(store.new_volume_handle(scoped.runtime_access(), volume))
+        });
         self.pop()?;
-        self.push_volume_handle(volume);
+        self.push(handle);
         Ok(())
     }
 
@@ -1910,17 +1922,6 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 ))
             })?
             .ok_or_else(|| Error::new("the value is not a handle of this runtime's volume"))
-    }
-
-    fn push_volume_handle(&mut self, volume: crate::reflection::VolumeId) {
-        let values = self.runtime.assembler.values();
-        let handle = values.with_access(|scoped| {
-            scoped.wrap(crate::reflection::volume_handle_in(
-                scoped.runtime_access(),
-                volume,
-            ))
-        });
-        self.push(handle);
     }
 
     /// Pops `n` values and writes them, in order, to this machine's output

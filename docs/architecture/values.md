@@ -211,15 +211,22 @@ lives in the domain's `ExternalOwnerRegistry`.
 
 - `OpaquePayloadFamily` records each family as `edge_free` (compilation
   origins, net construction tokens) or `external` (effect tokens, task
-  handles). No payload directly holds a `Gc`, raw value or root.
+  handles, volume handles, promise resolvers). No payload directly holds a
+  `Gc`, raw value or root.
 - `downcast` checks runtime, lease and family and returns an owning `Arc<T>`,
   sound only because payloads are external. Glam equality compares owners.
 - A dropped last lease retires the entry. `drain_retired` detaches retired
   entries under the lock and drops them after unlocking, catching destructor
-  panics. Production drains only in `HostCallProducer::invoke`, else at
-  teardown.
-- Collection never retires an external owner, so a task result holding its
-  own handle survives until runtime teardown (accepted).
+  panics. Production drains in `HostCallProducer::invoke` and after each
+  runtime collection, else at teardown.
+- The collector never retires an external owner; the runtime drains the
+  registry once a collection is done. A volume handle's or resolver's
+  destructor queues a death notice, which the runtime then acts on: a lost
+  resolver's promise breaks with "resolver lost", and a volume whose handles
+  are all gone is reclaimed (`opaque-resources-reclaimed-when-unreachable`).
+  A task result holding its own handle survives until runtime teardown
+  (accepted), as does a volume reaching its own handle, until volumes are
+  cells in the managed heap (`api-volume-cells`).
 
 `HostCallProducer` traces its Glam captures and keeps its closure in the
 registry. Invocation roots the captures into a `HostCallRootBundle`, closes the

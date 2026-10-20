@@ -16,8 +16,9 @@ use crate::evaluation::{
     ValidatedRuntimeSettlementPlan,
 };
 use crate::reflection::{
-    ConflictAnalysisStrategy, ExactConflictAnalysis, ReasoningSessionId, ReflectionQueryMutation,
-    ReflectionQueryWriter, ReflectionStore, RuntimeInputEndpointId, VolumeId,
+    ConflictAnalysisStrategy, DeathNotice, ExactConflictAnalysis, ReasoningSessionId,
+    ReflectionQueryMutation, ReflectionQueryWriter, ReflectionStore, RuntimeInputEndpointId,
+    StoreCommitResult, VolumeId,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeCoreState, RuntimeGcLeaseOutcome, RuntimeGcMaintenanceDisposition,
@@ -185,6 +186,10 @@ impl RuntimeCoreState for RuntimeSharedResources {
 
     // Nothing parks on the transaction state.
     fn wake_parked(&self) {}
+
+    fn after_collection(&self) {
+        self.process_death_notices();
+    }
 }
 
 impl RuntimeSharedResources {
@@ -493,6 +498,87 @@ impl RuntimeSharedResources {
             .reflection
             .create_volume(initial)
             .map_err(|error| Error::new(error.as_ref()))
+    }
+
+    /// Destroys the external owners whose last copy is gone, then acts on
+    /// the death notices their payloads queued
+    /// (`opaque-resources-reclaimed-when-unreachable`): a lost resolver's
+    /// promise breaks with "resolver lost" and its record goes, and a volume
+    /// whose handles are all gone is reclaimed. Returns whether a notice
+    /// changed anything. The caller holds no mutator, as after a collection.
+    pub(crate) fn process_death_notices(&self) -> bool {
+        let values = self.values.core();
+        values.drain_retired_external_owners();
+        let (notices, promises) = {
+            let state = self
+                .transactions
+                .state
+                .lock()
+                .expect("runtime transaction mutex should not be poisoned");
+            (
+                state.reflection.take_death_notices(),
+                state.reflection.promises().clone(),
+            )
+        };
+        let mut volumes = Vec::new();
+        let mut resolvers = Vec::new();
+        for notice in notices {
+            match notice {
+                DeathNotice::Volume(volume) => volumes.push(volume),
+                DeathNotice::Resolver(promise) => resolvers.push(promise),
+            }
+        }
+        let broken = if resolvers.is_empty() {
+            Vec::new()
+        } else {
+            values.with_boundary_access(|access| {
+                resolvers
+                    .iter()
+                    .filter_map(|&promise| Some((promise, promises.lose(&access, promise)?)))
+                    .collect::<Vec<_>>()
+            })
+        };
+        let broken = broken
+            .into_iter()
+            .map(|(promise, publication)| {
+                publication.notify();
+                promise
+            })
+            .collect::<Vec<_>>();
+        // What read a broken promise pending sees it change, as after any
+        // resolution.
+        if !broken.is_empty() {
+            loop {
+                let mut journal =
+                    crate::reflection::StoreJournal::new(self.reflection_snapshot().1);
+                for &promise in &broken {
+                    journal.write_promise(promise);
+                }
+                // A write that reads nothing conflicts with nothing, but a
+                // conflict analysis may be coarse: write again, afresh.
+                if self.commit_reflection(&journal) != StoreCommitResult::Conflict {
+                    break;
+                }
+            }
+        }
+        let mut reclaimed = false;
+        if !volumes.is_empty() {
+            let mutation = self.mutation_guard();
+            {
+                let mut state = self
+                    .transactions
+                    .state
+                    .lock()
+                    .expect("runtime transaction mutex should not be poisoned");
+                for volume in volumes {
+                    reclaimed |= state.reflection.reclaim_volume(volume);
+                }
+            }
+            if reclaimed {
+                self.publish_observation(mutation);
+            }
+        }
+        !broken.is_empty() || reclaimed
     }
 
     pub(super) fn revoke_volume(&self, volume: VolumeId) -> Result<Value, Error> {
@@ -885,6 +971,26 @@ impl EvaluationRuntime {
         self.service_managed_collection_with_lease(lease)
     }
 
+    /// Collects, acting on the death notices, before settlement reports
+    /// (`opaque-resources-reclaimed-when-unreachable`), so a wait on a lost
+    /// promise is not reported unresolved: a notice that changes anything
+    /// changes the runtime, and the settlement's validation sends its caller
+    /// back to pump. A failed collection stays in maintenance state, which
+    /// validation and readiness report.
+    fn collect_for_settlement(&self) {
+        #[cfg(test)]
+        if self
+            .state
+            .shared_resources
+            .values
+            .core()
+            .is_shared_test_domain()
+        {
+            return;
+        }
+        let _ = self.service_managed_collection();
+    }
+
     fn service_managed_collection_with_lease(
         &self,
         lease: crate::runtime::RuntimeGcActivityLease,
@@ -899,6 +1005,7 @@ impl EvaluationRuntime {
         );
         match attempt {
             crate::runtime::RuntimeCollectionAttempt::Collected(report, statistics) => {
+                self.state.shared_resources.process_death_notices();
                 Ok(RuntimeMaintenanceReport::new(report, statistics))
             }
             crate::runtime::RuntimeCollectionAttempt::ActiveMutator => {
@@ -1480,6 +1587,7 @@ impl EvaluationRuntime {
         snapshot: &QuiescenceSnapshot,
         previously_validated: Option<&ValidatedRuntimeSettlementPlan>,
     ) -> Result<QuiescenceReport, RuntimeSettlementError> {
+        self.collect_for_settlement();
         let settlement = self.settlement_guard();
         let Some(current) = self.validate_quiescence_guarded(snapshot, &settlement) else {
             drop(settlement);

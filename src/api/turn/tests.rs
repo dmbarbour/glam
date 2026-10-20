@@ -264,3 +264,167 @@ fn a_broken_promise_fails_its_readers_with_its_message() {
         Some(b"the reason it broke".as_slice())
     );
 }
+
+/// Collects as runtime maintenance does, acting on the death notices
+/// (`opaque-resources-reclaimed-when-unreachable`).
+fn collect(m: &Machine<'_, '_>) {
+    m.runtime
+        .assembler
+        .evaluation_runtime()
+        .service_managed_collection()
+        .expect("the runtime collects");
+}
+
+/// Whether the store holds `volume`.
+fn holds(m: &Machine<'_, '_>, volume: crate::reflection::VolumeId) -> bool {
+    m.resources()
+        .reflection_snapshot()
+        .1
+        .volume_value(volume, &[])
+        .is_some()
+}
+
+#[test]
+fn a_lost_resolver_breaks_its_promise_and_wakes_its_reader() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let (waiting, waited) = std::sync::mpsc::channel();
+    let error = rt
+        .run("p", |p| {
+            p.promise();
+            p.swap()?;
+            p.give("reader", 1)?;
+            let fork = p.fork("reader", move |r| {
+                let mut attempts = 0;
+                let read = r.cut(|r| {
+                    r.dup()?;
+                    let read = r.pop_int();
+                    if read
+                        .as_ref()
+                        .is_err_and(|error| error.kind() == ErrorKind::Retry)
+                    {
+                        attempts += 1;
+                        if attempts == 1 {
+                            waiting
+                                .send(())
+                                .expect("the main turn waits for the attempt");
+                        }
+                    }
+                    read
+                });
+                let error = read.expect_err("the promise broke");
+                assert_eq!(error.kind(), ErrorKind::Failure, "{error}");
+                Ok(())
+            })?;
+            waited.recv().expect("the reader's first attempt waits");
+            p.discard(1)?;
+            collect(p);
+            p.join(fork)?;
+            p.take("reader", 1)?;
+            Ok(p.pop_int().expect_err("the promise was broken"))
+        })
+        .expect("the turn should succeed");
+    let values = rt.assembler().values();
+    let diagnostic = error
+        .diagnostic(&values)
+        .expect("a failure has a diagnostic");
+    let text = values
+        .access_names(diagnostic.emission(), ["msg", "text"])
+        .expect("the path composes");
+    let text = rt
+        .assembler()
+        .evaluator()
+        .eval(&text)
+        .expect("the message evaluates");
+    assert_eq!(
+        text.as_bytes().unwrap().as_deref(),
+        Some(b"resolver lost".as_slice())
+    );
+}
+
+#[test]
+fn a_resolved_promise_s_record_goes_with_its_resolver() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        let records = |m: &Machine<'_, '_>| {
+            m.resources()
+                .reflection_snapshot()
+                .1
+                .promises()
+                .len_for_test()
+        };
+        m.promise();
+        m.push_int(1);
+        m.fulfill()?;
+        assert_eq!(records(m), 1, "the record keeps how it resolved");
+        collect(m);
+        assert_eq!(records(m), 0, "nothing can ask it any more");
+        assert_eq!(m.pop_int()?, 1, "the promised value stands");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_volume_lives_while_any_copy_of_its_handle_does() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        m.push_int(7);
+        m.volume_new()?;
+        let volume = m.volume_at(1)?;
+        m.dup()?;
+        m.set("copy")?;
+        m.discard(1)?;
+        collect(m);
+        assert!(holds(m, volume), "a copy of its handle remains");
+        m.push_unit();
+        m.set("copy")?;
+        collect(m);
+        assert!(!holds(m, volume), "its last handle is gone");
+
+        m.push_int(3);
+        m.heap_set(["x"])?;
+        m.heap_volume();
+        m.discard(1)?;
+        collect(m);
+        m.heap_get(["x"]);
+        assert_eq!(m.pop_int()?, 3, "the shared heap outlives its handles");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn settlement_collects_and_acts_on_death_notices_first() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let volume = rt
+        .run("m", |m| {
+            m.push_int(7);
+            m.volume_new()?;
+            let volume = m.volume_at(1)?;
+            m.discard(1)?;
+            assert!(holds(m, volume), "nothing has collected yet");
+            Ok(volume)
+        })
+        .expect("the turn should succeed");
+    let runtime = rt.assembler().evaluation_runtime();
+    loop {
+        runtime.pump_until_stable();
+        match runtime.readiness() {
+            crate::api::RuntimeReadiness::Ready(snapshot) => {
+                if snapshot.settle().is_ok() {
+                    break;
+                }
+            }
+            crate::api::RuntimeReadiness::Busy => {}
+            crate::api::RuntimeReadiness::MaintenanceRequired(maintenance) => {
+                let _ = maintenance.service();
+            }
+            _ => panic!("the runtime should settle"),
+        }
+    }
+    rt.run("m", |m| {
+        assert!(!holds(m, volume), "settlement reclaimed it");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
