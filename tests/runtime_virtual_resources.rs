@@ -34,7 +34,7 @@ fn attempts_around(
                 }
                 Ok(())
             })?;
-            m.push_int(attempts.get());
+            m.int_push(attempts.get());
             Ok(())
         })?;
         read_receiver.recv().expect("the reader reads first");
@@ -45,7 +45,7 @@ fn attempts_around(
         done_sender.send(()).expect("the reader waits");
         root.join(reader)?;
         root.take("reader", 1)?;
-        root.pop_int()
+        root.int_pop()
     })
     .expect("the cut should commit")
 }
@@ -94,7 +94,7 @@ fn a_write_conflicts_with_cuts_that_read_the_resource_or_a_path_around_it() {
         "an unrelated write does not conflict"
     );
     let heap_write = |w: &mut Machine<'_, '_>| {
-        w.push_int(1);
+        w.int_push(1);
         w.heap_set(["fs"]).expect("the write should commit");
     };
     assert_eq!(
@@ -188,7 +188,7 @@ fn a_failed_cut_waits_until_a_virtual_resource_it_read_is_written() {
                     m.on_abort(0, move |_| waiting.send(()).expect("the watcher listens"))?;
                     Err(m.fail())
                 })?;
-                m.push_int(attempts.get());
+                m.int_push(attempts.get());
                 Ok(())
             })?;
             blocked.recv().expect("the reader should fail first");
@@ -196,7 +196,7 @@ fn a_failed_cut_waits_until_a_virtual_resource_it_read_is_written() {
             root.virtual_set(["host", "ready"])?;
             root.join(reader)?;
             root.take("reader", 1)?;
-            root.pop_int()
+            root.int_pop()
         })
         .expect("the cut should commit once the host is ready");
     assert_eq!(

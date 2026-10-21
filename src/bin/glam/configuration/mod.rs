@@ -38,7 +38,7 @@ impl PreparedAssembly {
     pub(super) fn configuration(&mut self) -> Value {
         self.runtime
             .run(CLI, |m| {
-                m.get("configuration")?;
+                m.local_get("configuration");
                 glam::transition::pop_value(m)
             })
             .expect("a prepared assembly's machine holds its configuration")
@@ -61,9 +61,9 @@ impl PreparedAssembly {
         }
         let _ = self.runtime.run((), |root| {
             for resolver in ["args_resolver", "refl_args_resolver"] {
-                root.get(resolver)?;
-                root.push_text(message);
-                root.break_promise()?;
+                root.local_get(resolver);
+                root.text_push(message);
+                root.promise_break()?;
             }
             Ok(())
         });
@@ -124,9 +124,9 @@ fn environment_variables(values: &Values) -> Value {
 /// Pushes `arguments` as a list of byte strings.
 fn push_arguments(m: &mut Machine<'_, '_>, arguments: &[std::ffi::OsString]) -> Result<(), Error> {
     for argument in arguments {
-        m.push_bytes(argument.as_encoded_bytes().to_vec());
+        m.bytes_push(argument.as_encoded_bytes().to_vec());
     }
-    m.make_list(arguments.len())
+    m.list_pack(arguments.len())
 }
 
 /// Binds the root's share of the environment, which reflection reads:
@@ -139,22 +139,22 @@ fn bind_process(
     values: &Values,
     cli_arguments: &CliArguments,
 ) -> Result<(), Error> {
-    root.promise();
-    root.set("args_resolver")?;
+    root.promise_new();
+    root.local_set("args_resolver")?;
     glam::transition::push_value(root, environment_variables(values))?;
-    root.promise();
-    root.set("refl_args_resolver")?;
+    root.promise_new();
+    root.local_set("refl_args_resolver")?;
     push_arguments(root, cli_arguments.args())?;
-    root.make_dict(["args"])?;
-    root.make_dict(["args", "env", "refl_args", "cli"])?;
+    root.dict_pack(["args"])?;
+    root.dict_pack(["args", "env", "refl_args", "cli"])?;
     root.run(CLI, |m| {
-        m.get("prelude")?;
-        m.access("process_share")
+        m.local_get("prelude");
+        m.dict_get("process_share")
     })?;
     root.take(CLI, 1)?;
     root.swap()?;
     root.apply(1)?;
-    root.set_env_mixin()
+    root.env_mixin_set()
 }
 
 /// Fulfills the root's promises of `process.args` and `process.refl_args`.
@@ -163,12 +163,12 @@ fn fulfill_process(
     args: &[std::ffi::OsString],
     refl_args: &[std::ffi::OsString],
 ) -> Result<(), Error> {
-    root.get("args_resolver")?;
+    root.local_get("args_resolver");
     push_arguments(root, args)?;
-    root.fulfill()?;
-    root.get("refl_args_resolver")?;
+    root.promise_fulfill()?;
+    root.local_get("refl_args_resolver");
     push_arguments(root, refl_args)?;
-    root.fulfill()
+    root.promise_fulfill()
 }
 
 /// Compiles the prelude on the `cli` machine, binds the root's share of the
@@ -183,7 +183,7 @@ fn load(
     runtime.run((), |root| {
         root.run(CLI, |m| {
             glam::transition::compile(m, ["glam_cli"], [ModuleInput::script("g", PRELUDE)])?;
-            m.set("prelude")
+            m.local_set("prelude")
         })?;
         bind_process(root, &values, cli_arguments)?;
         if let Some((args, refl_args)) = initial_environment {
@@ -192,21 +192,21 @@ fn load(
         Ok(())
     })?;
     runtime.run(CLI, |m| {
-        m.get("prelude")?;
-        m.access("configuration_definitions")?;
+        m.local_get("prelude");
+        m.dict_get("configuration_definitions")?;
         glam::transition::compile_over(
             m,
             ["configuration"],
             configuration_paths().into_iter().map(ModuleInput::file),
         )?;
-        m.set("configuration")?;
-        m.get("prelude")?;
-        m.access("empty_env")?;
-        m.get("configuration")?;
-        m.access("conf.env")?;
+        m.local_set("configuration")?;
+        m.local_get("prelude");
+        m.dict_get("empty_env")?;
+        m.local_get("configuration");
+        m.dict_get_path(["conf", "env"])?;
         select_entry(m, "env", "conf.env")?;
         m.eval()?;
-        m.set("environment")
+        m.local_set("environment")
     })
 }
 
@@ -215,10 +215,10 @@ fn load(
 /// fallback where it is undefined.
 pub(super) fn select_entry(m: &mut Machine<'_, '_>, entry: &str, path: &str) -> Result<(), Error> {
     m.stash(2)?;
-    m.get("prelude")?;
-    m.access("entry")?;
-    m.push_text(entry);
-    m.push_text(path);
+    m.local_get("prelude");
+    m.dict_get("entry")?;
+    m.text_push(entry);
+    m.text_push(path);
     m.stash_pop(2)?;
     m.apply(4)
 }
@@ -229,10 +229,9 @@ pub(super) fn selects_nothing(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
     if m.kind()? != ValueKind::List {
         return Ok(false);
     }
-    m.dup()?;
-    let items = m.unpack_list()?;
-    m.discard(items)?;
-    Ok(items == 0)
+    m.dup(1)?;
+    m.list_len()?;
+    Ok(m.int_pop()? == 0)
 }
 
 pub(super) fn entry_context(values: &Values, entry: &str) -> Result<Value, Error> {

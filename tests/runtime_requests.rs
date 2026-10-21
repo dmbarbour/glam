@@ -12,7 +12,7 @@ fn runtime() -> Runtime {
 /// Wires the requester `client`'s output `out` to each server's input `in`.
 fn wire(p: &mut Machine<'_, '_>, servers: &[&str]) -> Result<(), Error> {
     for server in servers {
-        p.wire(
+        p.wire_add(
             Endpoint::child("client", "out"),
             Endpoint::child(*server, "in"),
         )?;
@@ -24,15 +24,15 @@ fn wire(p: &mut Machine<'_, '_>, servers: &[&str]) -> Result<(), Error> {
 /// the request doubled.
 fn serve(p: &mut Machine<'_, '_>, server: &str) -> Result<(), Error> {
     p.run(server, |s| {
-        s.read("in", 1)?;
-        s.set("received")?;
-        s.get("received")?;
-        s.access("reply")?;
-        s.get("received")?;
-        s.access("request")?;
-        let request = s.pop_int()?;
-        s.push_int(request * 2);
-        s.fulfill()
+        s.port_read("in", 1)?;
+        s.local_set("received")?;
+        s.local_get("received");
+        s.dict_get("reply")?;
+        s.local_get("received");
+        s.dict_get("request")?;
+        let request = s.int_pop()?;
+        s.int_push(request * 2);
+        s.promise_fulfill()
     })
 }
 
@@ -43,11 +43,11 @@ fn a_server_answers_what_a_requester_asks() {
         .run("p", |p| {
             wire(p, &["server"])?;
             p.run("client", |c| {
-                c.push_int(21);
-                c.ask("out")
+                c.int_push(21);
+                c.port_ask("out")
             })?;
             serve(p, "server")?;
-            p.run("client", |c| c.pop_int())
+            p.run("client", |c| c.int_pop())
         })
         .expect("the turn should succeed");
     assert_eq!(answer, 42);
@@ -61,15 +61,15 @@ fn a_requester_waits_in_a_cut_for_its_answer() {
         .run("p", |p| {
             wire(p, &["server"])?;
             p.run("client", |c| {
-                c.push_int(4);
-                c.ask("out")?;
-                c.set("answer")
+                c.int_push(4);
+                c.port_ask("out")?;
+                c.local_set("answer")
             })?;
             let fork = p.fork("client", move |c| {
                 let mut attempts = 0;
                 let answer = c.cut(|c| {
-                    c.get("answer")?;
-                    let answer = c.pop_int();
+                    c.local_get("answer");
+                    let answer = c.int_pop();
                     if let Err(error) = &answer {
                         assert_eq!(error.kind(), ErrorKind::Retry, "{error}");
                         attempts += 1;
@@ -79,14 +79,14 @@ fn a_requester_waits_in_a_cut_for_its_answer() {
                     }
                     answer
                 })?;
-                c.push_int(answer);
+                c.int_push(answer);
                 Ok(())
             })?;
             waited.recv().expect("the requester's first attempt waits");
             serve(p, "server")?;
             p.join(fork)?;
             p.take("client", 1)?;
-            p.pop_int()
+            p.int_pop()
         })
         .expect("the turn should succeed");
     assert_eq!(answer, 8);
@@ -99,25 +99,25 @@ fn a_failed_cut_sends_no_request_and_a_channel_keeps_commit_order() {
         wire(p, &["server"])?;
         p.run("client", |c| {
             let abandoned = c.cut(|c| -> Result<(), Error> {
-                c.push_int(1);
-                c.ask("out")?;
+                c.int_push(1);
+                c.port_ask("out")?;
                 Err(Error::new("abandoned"))
             });
             assert!(abandoned.is_err());
             for request in [2, 3] {
-                c.push_int(request);
-                c.ask("out")?;
+                c.int_push(request);
+                c.port_ask("out")?;
                 c.discard(1)?;
             }
             Ok(())
         })?;
         let requests = p.run("server", |s| {
-            let count = s.available("in");
-            s.read("in", count)?;
+            let count = s.port_available("in");
+            s.port_read("in", count)?;
             (0..count)
                 .map(|_| {
-                    s.access("request")?;
-                    s.pop_int()
+                    s.dict_get("request")?;
+                    s.int_pop()
                 })
                 .collect::<Result<Vec<_>, Error>>()
         })?;
@@ -137,25 +137,25 @@ fn duplicate_servers_race_and_the_first_resolution_wins() {
     rt.run("p", |p| {
         wire(p, &["first", "second"])?;
         p.run("client", |c| {
-            c.push_int(5);
-            c.ask("out")
+            c.int_push(5);
+            c.port_ask("out")
         })?;
         serve(p, "first")?;
         p.run("second", |s| {
-            s.read("in", 1)?;
-            s.access("reply")?;
+            s.port_read("in", 1)?;
+            s.dict_get("reply")?;
             assert_eq!(
                 s.promise_status()?,
                 PromiseStatus::Fulfilled,
                 "the second server sees it answered"
             );
-            s.push_int(0);
-            let error = s.fulfill().expect_err("it resolved already");
+            s.int_push(0);
+            let error = s.promise_fulfill().expect_err("it resolved already");
             assert!(error.to_string().contains("already resolved"), "{error}");
             Ok(())
         })?;
         assert_eq!(
-            p.run("client", |c| c.pop_int())?,
+            p.run("client", |c| c.int_pop())?,
             10,
             "the first answer stands"
         );
@@ -168,18 +168,18 @@ fn duplicate_servers_race_and_the_first_resolution_wins() {
 fn a_resolver_reads_its_promise_s_status() {
     let mut rt = runtime();
     rt.run("m", |m| {
-        m.promise();
-        m.set("resolver")?;
+        m.promise_new();
+        m.local_set("resolver")?;
         let error = m
             .promise_status()
             .expect_err("a promised value stands for its value, which waits");
         assert_eq!(error.kind(), ErrorKind::Retry, "{error}");
 
-        m.get("resolver")?;
+        m.local_get("resolver");
         assert_eq!(m.promise_status()?, PromiseStatus::Pending);
-        m.push_int(7);
-        m.fulfill()?;
-        m.get("resolver")?;
+        m.int_push(7);
+        m.promise_fulfill()?;
+        m.local_get("resolver");
         assert_eq!(m.promise_status()?, PromiseStatus::Fulfilled);
         m.discard(1)?;
         let error = m
@@ -188,12 +188,12 @@ fn a_resolver_reads_its_promise_s_status() {
         assert!(error.to_string().contains("not a resolver"), "{error}");
         m.discard(1)?;
 
-        m.promise();
-        m.set("broken")?;
-        m.get("broken")?;
-        m.push_text("why");
-        m.break_promise()?;
-        m.get("broken")?;
+        m.promise_new();
+        m.local_set("broken")?;
+        m.local_get("broken");
+        m.text_push("why");
+        m.promise_break()?;
+        m.local_get("broken");
         assert_eq!(m.promise_status()?, PromiseStatus::Broken);
         Ok(())
     })
@@ -206,10 +206,10 @@ fn a_cut_waiting_on_a_status_wakes_when_the_promise_resolves() {
     let (waiting, waited) = mpsc::channel();
     let status = rt
         .run("p", |p| {
-            p.promise();
-            p.set("resolver")?;
+            p.promise_new();
+            p.local_set("resolver")?;
             p.discard(1)?;
-            p.get("resolver")?;
+            p.local_get("resolver");
             p.give("watcher", 1)?;
             let fork = p.fork("watcher", move |w| {
                 let mut attempts = 0;
@@ -228,9 +228,9 @@ fn a_cut_waiting_on_a_status_wakes_when_the_promise_resolves() {
                 })
             })?;
             waited.recv().expect("the watcher's first attempt waits");
-            p.get("resolver")?;
-            p.push_int(1);
-            p.fulfill()?;
+            p.local_get("resolver");
+            p.int_push(1);
+            p.promise_fulfill()?;
             p.join(fork)?;
             p.run("watcher", |w| w.promise_status())
         })
@@ -245,10 +245,10 @@ fn a_cut_that_read_a_promise_pending_conflicts_with_its_resolution() {
     let (resolved, awaiting) = mpsc::channel();
     let attempts = rt
         .run("p", |p| {
-            p.promise();
-            p.set("resolver")?;
+            p.promise_new();
+            p.local_set("resolver")?;
             p.discard(1)?;
-            p.get("resolver")?;
+            p.local_get("resolver");
             p.give("watcher", 1)?;
             let fork = p.fork("watcher", move |w| {
                 let mut attempts = 0;
@@ -262,21 +262,21 @@ fn a_cut_that_read_a_promise_pending_conflicts_with_its_resolution() {
                     Ok(status)
                 })?;
                 assert_eq!(status, PromiseStatus::Fulfilled, "the rerun sees it");
-                w.push_int(attempts);
+                w.int_push(attempts);
                 Ok(())
             })?;
             resolving
                 .recv()
                 .expect("the watcher reads the promise pending");
-            p.get("resolver")?;
-            p.push_int(1);
-            p.fulfill()?;
+            p.local_get("resolver");
+            p.int_push(1);
+            p.promise_fulfill()?;
             resolved
                 .send(())
                 .expect("the watcher awaits the resolution");
             p.join(fork)?;
             p.take("watcher", 1)?;
-            p.pop_int()
+            p.int_pop()
         })
         .expect("the turn should succeed");
     assert_eq!(

@@ -12,19 +12,19 @@ fn runtime() -> Runtime {
 
 /// Pushes the package the tests serve, `{memory: "pkg"}`.
 fn package(m: &mut Machine<'_, '_>) -> Result<(), Error> {
-    m.push_text("pkg");
-    m.make_dict(["memory"])
+    m.text_push("pkg");
+    m.dict_pack(["memory"])
 }
 
 /// Pushes the module that `main.g`, a source the host serves, makes of an
 /// empty base, and then its `result`.
 fn main_result(m: &mut Machine<'_, '_>) -> Result<(), Error> {
-    m.make_dict(Vec::<&str>::new())?;
+    m.dict_pack(Vec::<&str>::new())?;
     package(m)?;
     m.source_record(["main"], ["main.g"])?;
     m.compile()?;
     m.instantiate()?;
-    m.access("result")
+    m.dict_get("result")
 }
 
 /// A request as the server read it: its package's name and its path.
@@ -44,30 +44,33 @@ fn request(path: &[&str]) -> Request {
 /// Serves the request on top of the `sources` machine's stack from `files`,
 /// by path, breaking its promise where `files` has no such source.
 fn answer(s: &mut Machine<'_, '_>, files: &[(&str, &str)]) -> Result<Request, Error> {
-    s.set("received")?;
-    s.get("received")?;
-    s.access("request")?;
-    s.dup()?;
-    s.access("package")?;
-    s.access("memory")?;
-    let package = s.pop_text()?;
-    s.access("path")?;
-    let count = s.unpack_list()?;
+    s.local_set("received")?;
+    s.local_get("received");
+    s.dict_get("request")?;
+    s.dup(1)?;
+    s.dict_get("package")?;
+    s.dict_get("memory")?;
+    let package = s.text_pop()?;
+    s.dict_get("path")?;
+    s.dup(1)?;
+    s.list_len()?;
+    let count = usize::try_from(s.int_pop()?).expect("a path's length fits");
+    s.list_unpack(count)?;
     let mut path = (0..count)
-        .map(|_| s.pop_text())
+        .map(|_| s.text_pop())
         .collect::<Result<Vec<_>, _>>()?;
     path.reverse();
-    s.get("received")?;
-    s.access("reply")?;
+    s.local_get("received");
+    s.dict_get("reply")?;
     let name = path.join("/");
     match files.iter().find(|(file, _)| *file == name) {
         Some((_, body)) => {
-            s.push_bytes(body.as_bytes().to_vec());
-            s.fulfill()?;
+            s.bytes_push(body.as_bytes().to_vec());
+            s.promise_fulfill()?;
         }
         None => {
-            s.push_text(format!("no such source: {name}"));
-            s.break_promise()?;
+            s.text_push(format!("no such source: {name}"));
+            s.promise_break()?;
         }
     }
     Ok(Request { package, path })
@@ -76,8 +79,8 @@ fn answer(s: &mut Machine<'_, '_>, files: &[(&str, &str)]) -> Result<Request, Er
 /// Serves every request the `sources` machine holds.
 fn serve(root: &mut Machine<'_, '_>, files: &[(&str, &str)]) -> Result<Vec<Request>, Error> {
     root.run("sources", |s| {
-        let count = s.available("imports");
-        s.read("imports", count)?;
+        let count = s.port_available("imports");
+        s.port_read("imports", count)?;
         (0..count).map(|_| answer(s, files)).collect()
     })
 }
@@ -85,7 +88,7 @@ fn serve(root: &mut Machine<'_, '_>, files: &[(&str, &str)]) -> Result<Vec<Reque
 /// Wires the root's `imports` output, where requests arrive by default, to
 /// the `sources` machine.
 fn wire_sources(root: &mut Machine<'_, '_>) -> Result<(), Error> {
-    root.wire(
+    root.wire_add(
         Endpoint::output("imports"),
         Endpoint::child("sources", "imports"),
     )
@@ -94,7 +97,7 @@ fn wire_sources(root: &mut Machine<'_, '_>) -> Result<(), Error> {
 /// Evaluates the value on top of `main`'s stack to an integer, or returns
 /// `None` where it waits on a reply, leaving it there.
 fn try_int(root: &mut Machine<'_, '_>) -> Result<Option<i64>, Error> {
-    root.run("main", |m| match m.pop_int() {
+    root.run("main", |m| match m.int_pop() {
         Ok(value) => Ok(Some(value)),
         Err(error) if error.kind() == ErrorKind::Retry => Ok(None),
         Err(error) => Err(error),
@@ -147,18 +150,18 @@ fn an_imported_source_is_the_reply() {
             wire_sources(root)?;
             root.run("main", |m| {
                 package(m)?;
-                m.push_text("data.bin");
-                m.make_list(1)?;
-                m.make_dict(["package", "path"])?;
-                m.import_source()?;
-                assert_eq!(m.pop_bytes().map_err(|e| e.kind()), Err(ErrorKind::Retry));
+                m.text_push("data.bin");
+                m.list_pack(1)?;
+                m.dict_pack(["package", "path"])?;
+                m.source_import()?;
+                assert_eq!(m.bytes_pop().map_err(|e| e.kind()), Err(ErrorKind::Retry));
                 Ok(())
             })?;
             assert_eq!(
                 serve(root, &[("data.bin", "\u{1}binary")])?,
                 [request(&["data.bin"])]
             );
-            root.run("main", |m| m.pop_bytes())
+            root.run("main", |m| m.bytes_pop())
         })
         .expect("the turn should succeed");
     assert_eq!(bytes, &b"\x01binary"[..]);
@@ -180,7 +183,7 @@ fn a_binary_import_is_its_reply() {
             root.run("main", main_result)?;
             let mut asked = Vec::new();
             loop {
-                let value = root.run("main", |m| match m.pop_bytes() {
+                let value = root.run("main", |m| match m.bytes_pop() {
                     Ok(bytes) => Ok(Some(bytes)),
                     Err(error) if error.kind() == ErrorKind::Retry => Ok(None),
                     Err(error) => Err(error),
@@ -229,11 +232,11 @@ fn an_unserved_request_waits_in_the_root_until_the_host_reads_it() {
         root.run("main", main_result)?;
         assert_eq!(try_int(root)?, None);
         assert_eq!(
-            root.available("imports"),
+            root.port_available("imports"),
             1,
             "with the root's output unwired, the request waits in its input"
         );
-        root.read("imports", 1)?;
+        root.port_read("imports", 1)?;
         root.give("sources", 1)?;
         root.run("sources", |s| {
             answer(s, &[("main.g", "language g0\nresult = 7\n")])
@@ -251,13 +254,13 @@ fn a_script_has_no_place_to_import_from() {
         .run((), |root| {
             wire_sources(root)?;
             root.run("main", |m| {
-                m.make_dict(Vec::<&str>::new())?;
+                m.dict_pack(Vec::<&str>::new())?;
                 m.script_object(
                     ["main"],
                     "g",
                     "language g0\nimport \"lib.g\" as lib\nresult = lib.value\n",
                 )?;
-                m.access("result")
+                m.dict_get("result")
             })?;
             let error = try_int(root).expect_err("the import fails");
             assert!(serve(root, &[])?.is_empty(), "nothing was asked");
@@ -272,18 +275,18 @@ fn composed_mixins_override_from_the_top() {
     let mut rt = runtime();
     let (x, y) = rt
         .run("main", |m| {
-            m.make_dict(Vec::<&str>::new())?;
+            m.dict_pack(Vec::<&str>::new())?;
             m.script_record(["main"], "g", "language g0\nx = 1\ny = x * 10\n");
             m.compile()?;
             m.script_record(["main"], "g", "language g0\nx := 2\n");
             m.compile()?;
             m.compose(2)?;
             m.instantiate()?;
-            m.dup()?;
-            m.access("x")?;
-            let x = m.pop_int()?;
-            m.access("y")?;
-            Ok((x, m.pop_int()?))
+            m.dup(1)?;
+            m.dict_get("x")?;
+            let x = m.int_pop()?;
+            m.dict_get("y")?;
+            Ok((x, m.int_pop()?))
         })
         .expect("the turn should succeed");
     assert_eq!(
@@ -298,11 +301,11 @@ fn a_failed_compile_reports_at_the_root_when_forced() {
     let mut rt = runtime();
     rt.run((), |root| {
         root.run("main", |m| {
-            m.make_dict(Vec::<&str>::new())?;
+            m.dict_pack(Vec::<&str>::new())?;
             m.script_object(["broken"], "g", "language g0\nx = (\n")
         })?;
         assert_eq!(
-            root.available("diagnostics"),
+            root.port_available("diagnostics"),
             0,
             "compiling evaluates nothing, so reports nothing"
         );
@@ -311,7 +314,7 @@ fn a_failed_compile_reports_at_the_root_when_forced() {
             .expect_err("the module does not parse");
         assert_eq!(error.kind(), ErrorKind::Failure, "{error}");
         assert!(
-            root.available("diagnostics") > 0,
+            root.port_available("diagnostics") > 0,
             "the compile's diagnostics reach the root"
         );
         Ok(())
@@ -366,12 +369,10 @@ fn serve_until_list(
     let mut asked = Vec::new();
     loop {
         let length = root.run("main", |m| {
-            m.dup()?;
-            match m.unpack_list() {
-                Ok(length) => {
-                    m.discard(length)?;
-                    Ok(Some(length))
-                }
+            m.dup(1)?;
+            m.list_len()?;
+            match m.int_pop() {
+                Ok(length) => Ok(Some(usize::try_from(length).expect("a length fits"))),
                 Err(error) if error.kind() == ErrorKind::Retry => {
                     m.discard(1)?;
                     Ok(None)
@@ -449,15 +450,15 @@ fn serving<R>(
     body: impl FnOnce(&mut Machine<'_, '_>) -> Result<R, Error>,
 ) -> Result<(R, Vec<Request>), Error> {
     wire_sources(root)?;
-    root.wire(Endpoint::output("stop"), Endpoint::child("sources", "stop"))?;
+    root.wire_add(Endpoint::output("stop"), Endpoint::child("sources", "stop"))?;
     let (answered, requests) = mpsc::channel();
     let server = root.fork("sources", move |s| {
         loop {
             let stopping = s.cut(|s| {
-                if s.available("stop") > 0 {
+                if s.port_available("stop") > 0 {
                     return Ok(true);
                 }
-                s.read("imports", 1)?;
+                s.port_read("imports", 1)?;
                 Ok(false)
             })?;
             if stopping {
@@ -468,8 +469,8 @@ fn serving<R>(
         }
     })?;
     let result = body(root);
-    root.push_unit();
-    root.write("stop", 1)?;
+    root.unit_push();
+    root.port_write("stop", 1)?;
     root.join(server)?;
     Ok((result?, requests.try_iter().collect()))
 }
@@ -489,13 +490,13 @@ fn an_import_that_background_work_forces_is_served_while_a_cut_waits() {
         .run((), |root| {
             serving(root, &FILES, |root| {
                 root.run("main", |m| {
-                    m.make_dict(Vec::<&str>::new())?;
+                    m.dict_pack(Vec::<&str>::new())?;
                     package(m)?;
                     m.source_record(["main"], ["main.g"])?;
                     m.compile()?;
                     m.instantiate()?;
-                    m.access("result")?;
-                    m.cut(|m| m.pop_text())
+                    m.dict_get("result")?;
+                    m.cut(|m| m.text_pop())
                 })
             })
         })
@@ -520,7 +521,7 @@ fn a_compile_that_waited_reports_its_diagnostics_once() {
         let (length, asked) = serve_until_list(root, &files)?;
         assert_eq!((length, asked.len()), (2, 2), "the compile waited");
         assert_eq!(
-            root.available("diagnostics"),
+            root.port_available("diagnostics"),
             1,
             "the attempt that waited dropped its warning; the one that finished reported it"
         );

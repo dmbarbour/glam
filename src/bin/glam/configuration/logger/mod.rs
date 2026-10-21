@@ -44,18 +44,18 @@ const UNREAD: &str = "unread";
 /// the fallback until the CLI renders it.
 pub(crate) fn wire_logger(runtime: &mut Runtime) -> Result<(), Error> {
     let keep = |machine: &mut Machine<'_, '_>| {
-        machine.unwire(Endpoint::input(DIAGNOSTICS), Endpoint::output(DIAGNOSTICS))
+        machine.wire_del(Endpoint::input(DIAGNOSTICS), Endpoint::output(DIAGNOSTICS))
     };
     runtime.run([LOGGER, FALLBACK], keep)?;
     runtime.run(LOGGER, |logger| {
         keep(logger)?;
-        logger.wire(
+        logger.wire_add(
             Endpoint::output(UNREAD),
             Endpoint::child(FALLBACK, DIAGNOSTICS),
         )
     })?;
     runtime.run((), |root| {
-        root.wire(
+        root.wire_add(
             Endpoint::input(DIAGNOSTICS),
             Endpoint::child(LOGGER, DIAGNOSTICS),
         )
@@ -205,13 +205,13 @@ fn run_configured_logger(
 /// input holds through its unread output.
 fn hand_over(logger: &mut Machine<'_, '_>) -> Result<(), Error> {
     logger.cut(|logger| {
-        logger.wire(
+        logger.wire_add(
             Endpoint::input(DIAGNOSTICS),
             Endpoint::child(FALLBACK, DIAGNOSTICS),
         )?;
-        let unread = logger.available(DIAGNOSTICS);
-        logger.read(DIAGNOSTICS, unread)?;
-        logger.write(UNREAD, unread)
+        let unread = logger.port_available(DIAGNOSTICS);
+        logger.port_read(DIAGNOSTICS, unread)?;
+        logger.port_write(UNREAD, unread)
     })
 }
 
@@ -221,8 +221,8 @@ pub(crate) fn take_fallback(
     values: &Values,
 ) -> Result<Vec<Diagnostic>, Error> {
     let held = logger.run(FALLBACK, |fallback| {
-        let count = fallback.available(DIAGNOSTICS);
-        fallback.read(DIAGNOSTICS, count)?;
+        let count = fallback.port_available(DIAGNOSTICS);
+        fallback.port_read(DIAGNOSTICS, count)?;
         let mut held = (0..count)
             .map(|_| glam::transition::pop_value(fallback))
             .collect::<Result<Vec<_>, _>>()?;
@@ -257,9 +257,9 @@ pub(crate) fn render_unread(
 
 /// The logger `conf.log` selects, evaluated, or none.
 fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<Value>, Error> {
-    m.make_list(0)?;
-    m.get("configuration")?;
-    m.access("conf.log")?;
+    m.list_pack(0)?;
+    m.local_get("configuration");
+    m.dict_get_path(["conf", "log"])?;
     select_entry(m, "log", "conf.log")?;
     m.eval()?;
     if selects_nothing(m)? {
@@ -296,7 +296,7 @@ pub(crate) mod test_support {
     /// How many diagnostics wait at the logger's input.
     pub(crate) fn held_by_logger(runtime: &mut Runtime) -> usize {
         runtime
-            .run(LOGGER, |logger| Ok(logger.available(DIAGNOSTICS)))
+            .run(LOGGER, |logger| Ok(logger.port_available(DIAGNOSTICS)))
             .expect("the logger is idle")
     }
 

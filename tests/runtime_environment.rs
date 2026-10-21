@@ -24,17 +24,17 @@ extended mixin = mixin with
 /// Binds the object `share`, which the module above defines, as the
 /// machine's share.
 fn bind(m: &mut Machine<'_, '_>, share: &str) -> Result<(), Error> {
-    m.make_dict(Vec::<&str>::new())?;
+    m.dict_pack(Vec::<&str>::new())?;
     m.script_object(["shares"], "g", SHARES)?;
-    m.access(share)?;
-    m.set_env_mixin()
+    m.dict_get(share)?;
+    m.env_mixin_set()
 }
 
 /// The text at `path` in the machine's environment, evaluated.
 fn read(m: &mut Machine<'_, '_>, path: &str) -> Result<String, Error> {
-    m.env();
-    m.access(path)?;
-    m.pop_text()
+    m.env_get();
+    m.dict_get_path(path.split('.'))?;
+    m.text_pop()
 }
 
 #[test]
@@ -65,8 +65,8 @@ fn an_unbound_environment_is_an_empty_object() {
     let mut rt = runtime();
     let kind = rt
         .run(["a", "b"], |m| {
-            m.env();
-            m.access("greeting")?;
+            m.env_get();
+            m.dict_get("greeting")?;
             m.eval()?;
             m.kind()
         })
@@ -87,8 +87,8 @@ fn bindings_are_transactional_and_clear_unbinds_a_subtree() {
             abandoned.expect_err("the cut ended in error").kind(),
             ErrorKind::Failure
         );
-        c.env();
-        c.access("name")?;
+        c.env_get();
+        c.dict_get("name")?;
         c.eval()?;
         assert_eq!(c.kind()?, ValueKind::Dict, "the failed cut bound nothing");
 
@@ -96,8 +96,8 @@ fn bindings_are_transactional_and_clear_unbinds_a_subtree() {
         c.run("g", |g| bind(g, "child_share"))?;
         c.clear()?;
         c.run("g", |g| {
-            g.env();
-            g.access("name")?;
+            g.env_get();
+            g.dict_get("name")?;
             g.eval()?;
             assert_eq!(g.kind()?, ValueKind::Dict, "clear unbound the subtree");
             Ok(())
@@ -115,8 +115,8 @@ fn a_cut_waiting_on_its_environment_wakes_when_an_ancestor_binds() {
             let fork = p.fork("c", move |c| {
                 let mut attempts = 0;
                 c.cut(|c| {
-                    c.env();
-                    c.access("name")?;
+                    c.env_get();
+                    c.dict_get("name")?;
                     c.eval()?;
                     if c.kind()? == ValueKind::Dict {
                         attempts += 1;
@@ -125,9 +125,9 @@ fn a_cut_waiting_on_its_environment_wakes_when_an_ancestor_binds() {
                         }
                         return Err(c.retry());
                     }
-                    c.pop_text()
+                    c.text_pop()
                 })
-                .map(|name| c.push_text(&name))
+                .map(|name| c.text_push(&name))
             })?;
             waited
                 .recv()
@@ -135,7 +135,7 @@ fn a_cut_waiting_on_its_environment_wakes_when_an_ancestor_binds() {
             bind(p, "root_share")?;
             p.join(fork)?;
             p.take("c", 1)?;
-            p.pop_text()
+            p.text_pop()
         })
         .expect("the turn should succeed");
     assert_eq!(name, "root", "the binding woke the cut, which read it");
@@ -148,24 +148,24 @@ fn a_machine_extends_its_own_mixin_and_may_clear_it() {
         .expect("the root sets its mixin");
     let (extended, kept) = rt
         .run("c", |c| {
-            c.get_env_mixin();
-            c.access("greeting")?;
+            c.env_mixin_get();
+            c.dict_get("greeting")?;
             c.eval()?;
             assert_eq!(c.kind()?, ValueKind::Dict, "it has no mixin of its own yet");
             c.discard(1)?;
 
             bind(c, "own_share")?;
-            c.make_dict(Vec::<&str>::new())?;
+            c.dict_pack(Vec::<&str>::new())?;
             c.script_object(["shares"], "g", SHARES)?;
-            c.access("extended")?;
-            c.get_env_mixin();
+            c.dict_get("extended")?;
+            c.env_mixin_get();
             c.apply(1)?;
-            c.set_env_mixin()?;
+            c.env_mixin_set()?;
             let extended = (read(c, "own")?, read(c, "extra")?, read(c, "greeting")?);
 
-            c.clear_env_mixin()?;
-            c.env();
-            c.access("own")?;
+            c.env_mixin_clear()?;
+            c.env_get();
+            c.dict_get("own")?;
             c.eval()?;
             assert_eq!(c.kind()?, ValueKind::Dict, "its mixin is gone");
             c.discard(1)?;
@@ -195,7 +195,7 @@ fn a_machine_with_a_mixin_is_present() {
         [2],
         "p/c holds only its mixin, and is present"
     );
-    rt.run(["p", "c"], |c| c.clear_env_mixin())
+    rt.run(["p", "c"], |c| c.env_mixin_clear())
         .expect("it clears its mixin");
     assert!(walked(&mut rt).is_empty(), "then nothing holds it");
 }

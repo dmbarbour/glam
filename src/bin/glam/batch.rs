@@ -488,23 +488,23 @@ fn assemble(
     inputs: Vec<ModuleInput>,
     cli_args: &[std::ffi::OsString],
 ) -> Result<Bytes, Error> {
-    m.get("prelude")?;
-    m.access("assembly_definitions")?;
+    m.local_get("prelude");
+    m.dict_get("assembly_definitions")?;
     for argument in cli_args {
-        m.push_bytes(argument.as_encoded_bytes().to_vec());
+        m.bytes_push(argument.as_encoded_bytes().to_vec());
     }
-    m.make_list(cli_args.len())?;
-    m.get("environment")?;
+    m.list_pack(cli_args.len())?;
+    m.local_get("environment");
     m.apply(2)?;
     super::profile::time("build", || {
         glam::transition::compile_over(m, ["assembly"], inputs)
     })?;
     m.stash(1)?;
-    m.get("prelude")?;
-    m.access("assembly_result")?;
+    m.local_get("prelude");
+    m.dict_get("assembly_result")?;
     m.stash_pop(1)?;
     m.apply(1)?;
-    super::profile::time("evaluate", || m.pop_bytes())
+    super::profile::time("evaluate", || m.bytes_pop())
 }
 
 #[cfg(test)]

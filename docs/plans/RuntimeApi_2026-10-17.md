@@ -654,7 +654,58 @@ handle API goes.
         `api-import-requests`, passes.
       - Tests: also that a compile which waited reports its diagnostics
         once.
-18. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
+18. `api-stack-ops` — a side path (maintainer, 2026-10-21): a solid stack
+    semantics for the machine, whose operations were first proposals no one
+    had reviewed. A machine's state may move into a `RootFrame<State>` later,
+    which makes the stack's semantics, not its roots, what lasts.
+    - Every operation's arity is static: it depends on the operation and
+      its Rust arguments (`n`, keys, paths, patterns), never on what the
+      stack holds. `unpack_list` and `unpack_dict` go.
+    - Packing and unpacking are symmetric: one after its twin is the
+      identity on well-typed data. Operations that neither extract data to
+      Rust nor evaluate explicitly build lazy thunks.
+    - Names read `type_op`, and the families mirror reflection's effects.
+    - Stack: `dup(n)`, `discard(n)` (Clippy reserves `drop`), `swap`,
+      `flip(n)`, `stash(n)`, `stash_pop(n)`, and `shuffle(pattern)`, a
+      small language: in `"abc-cabbca"` the names left of `-` bind the top
+      items, the rightmost the top, and the right side lists the outputs.
+    - Scalars: `unit_push`, `int_push`/`int_pop`, `text_push`/`text_pop`,
+      `bytes_push`/`bytes_pop`, `atom_push`/`atom_pop`,
+      `abstract_path_push`/`abstract_path_pop`.
+    - Lists: `list_pack(n)` and its twin `list_unpack(n)`, which fails
+      unless the list has exactly `n` items; `list_append`, `list_split`
+      and `list_split_end` (`xs i -- front back`), `list_len`.
+    - Dicts: `dict_pack(keys)` and its twin `dict_unpack(keys)`, which
+      fails where it would drop a key; `dict_insert_keys(keys)`
+      (`i1…in d -- d'`) and `dict_extract_keys(keys)` (`d -- i1…in d'`);
+      `dict_insert` (`item dict key -- dict'`) and `dict_extract`
+      (`dict key -- item dict'`); `dict_union`, lazy, merging a key both hold
+      as glam's dict literals do, so a conflict fails where forced; `dict_get` and path operations; `tag_pack(k)`
+      and `tag_unpack(k)` for singleton tags. Keys are any `Key`.
+    - Evaluation: `eval`, and `eval_budget(&mut steps)`, which spends the
+      borrowed budget and returns `ErrorKind::Retry` once it runs out, so
+      its caller sees the remaining budget (maintainer).
+    - Local state: `local_set`, `local_get`, which pushes `{}` where the
+      machine holds nothing (maintainer), and `local_take`.
+    - Values: `value_push` and `value_pop`, with `Value<'scope>`, a handle
+      rooted for the rest of the turn; the handle API's unscoped value
+      takes a transitional name until it retires.
+    - Later: `list_reverse`, which needs a builtin, and reflection's
+      `dict_entries` and `dict_pairs` with their twins.
+    - As built, first slice (2026-10-21): the stack, scalar, list, dict,
+      tag and local-state operations, and the families renamed to mirror
+      reflection's effects: `promise_new`, `promise_fulfill`,
+      `promise_break`; `env_get` and `env_mixin_*`; `port_write`,
+      `port_read`, `port_try_read`, `port_ask`, `port_available`,
+      `port_pending`, `port_input_connected`, `port_output_connected`;
+      `wire_add`, `wire_del`, `wire_list`, `wire_defaults`; and
+      `source_import`. `dict_get(key)` and `dict_get_path(keys)` replace
+      `access`, whose dotted strings named atoms only. Builders compose the
+      evaluator's lazy builtins: `Append`, `ListSplit` (its `{left,
+      right}` halves), `ListLen`, `DictUpdate` (whose `{}` removes) and
+      `DictUnion`; `dict_unpack` and `list_unpack` evaluate, to check
+      their shape. The CLI tells an empty list by `list_len`.
+19. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
     compilation builds its context from runtime-side parts, the value
     factory, the front ends, an invocation counter and a diagnostics
     port, so no worker reaches an `Assembler`, a `DeferredAssembler` or a
@@ -673,7 +724,7 @@ handle API goes.
       started. Done ahead of the rest of this step, with the drain's own
       test of detached `.task.new` failures, which retire with task
       handles.
-19. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+20. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
     - The turn supplies the effects API, evaluates the program to weak-head
@@ -701,7 +752,7 @@ handle API goes.
       `.promise.*`), which they carry only as bridge behavior: `conf.cli`
       and macros are pure evaluation, ideally handled by pure functions
       (maintainer, 2026-10-21).
-20. `api-reflection-machines` — reflection tasks become tasks on machines
+21. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`
     shares and accepted promises (`obligations-are-accepted-promises`) for
@@ -716,7 +767,7 @@ handle API goes.
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
       a `stderr` port with `.port.*`, and its exit vote goes.
-21. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+22. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
     decides (maintainer, 2026-10-19), in place of exit votes. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
     tasks as machines and no exit votes, rather than building on both. The runtime is
@@ -746,7 +797,7 @@ handle API goes.
      check that evaluation would otherwise need at every wait. Turns
      already fail such a cut when their own evaluation returns
      (`api-transactional-promises`).
-22. `api-cli-sources` — the CLI slice of `api-import-requests`, moved after
+23. `api-cli-sources` — the CLI slice of `api-import-requests`, moved after
     settlement (2026-10-21): a CLI machine serves the requests with
     `FileSourceSystem`, records the reads, and writes the manifest and
     checks that no file changed once settlement is done, so imports forced
@@ -754,13 +805,13 @@ handle API goes.
     with `Runtime::open` and hands its top-level files over as sources;
     the bridge's constructor goes, and with it the assembler's source
     system and the loaders that read files.
-23. `api-handle-retirement` — the public handle types go: `Assembler`,
+24. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-24. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+25. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions

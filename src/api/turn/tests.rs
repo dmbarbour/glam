@@ -15,7 +15,7 @@ fn the_runtime_s_diagnostics_join_the_root_s_diagnostics_input() {
     }
     let decoded = rt
         .run((), |root| {
-            root.read(DIAGNOSTICS.clone(), 2)?;
+            root.port_read(DIAGNOSTICS.clone(), 2)?;
             let second = root.pop()?;
             let first = root.pop()?;
             Ok([first, second].map(|value| {
@@ -43,7 +43,7 @@ fn a_runtime_without_the_default_wiring_keeps_its_diagnostics_on_the_bus() {
         .publish(Diagnostic::new(&values, Severity::Warning, "kept"))
         .expect("the diagnostic should publish");
     let held = rt
-        .run((), |root| Ok(root.available(DIAGNOSTICS.clone())))
+        .run((), |root| Ok(root.port_available(DIAGNOSTICS.clone())))
         .expect("a turn");
     assert_eq!(held, 0);
 }
@@ -62,7 +62,7 @@ fn a_read_of_the_root_s_diagnostics_waits_for_one_to_arrive() {
                         .expect("the diagnostic should publish");
                 })
             };
-            root.read(DIAGNOSTICS.clone(), 1)?;
+            root.port_read(DIAGNOSTICS.clone(), 1)?;
             publisher.join().expect("the publisher should finish");
             let value = root.pop()?;
             Ok(Diagnostic::from_transport_value(&values, &value)?
@@ -80,7 +80,7 @@ fn the_runtime_s_diagnostics_follow_the_root_s_wiring() {
     let bus = rt.assembler().diagnostic_bus();
     let diagnostics = || DIAGNOSTICS.clone();
     rt.run((), |root| {
-        root.wire(
+        root.wire_add(
             Endpoint::input(diagnostics()),
             Endpoint::child("sink", diagnostics()),
         )
@@ -89,7 +89,7 @@ fn the_runtime_s_diagnostics_follow_the_root_s_wiring() {
     bus.publish(Diagnostic::new(&values, Severity::Warning, "looped"))
         .expect("the diagnostic should publish");
     let held = |rt: &mut Runtime, path: MachinePath| {
-        rt.run(path, |m| Ok(m.available(diagnostics())))
+        rt.run(path, |m| Ok(m.port_available(diagnostics())))
             .expect("a turn")
     };
     assert_eq!(
@@ -103,7 +103,7 @@ fn the_runtime_s_diagnostics_follow_the_root_s_wiring() {
     );
 
     rt.run("sink", |sink| {
-        sink.unwire(
+        sink.wire_del(
             Endpoint::input(diagnostics()),
             Endpoint::output(diagnostics()),
         )
@@ -133,7 +133,7 @@ fn a_hand_over_cut_reruns_when_a_diagnostic_arrives_and_keeps_their_order() {
     };
     let diagnostics = || DIAGNOSTICS.clone();
     let keep = |machine: &mut Machine<'_, '_>| {
-        machine.unwire(
+        machine.wire_del(
             Endpoint::input(diagnostics()),
             Endpoint::output(diagnostics()),
         )
@@ -144,14 +144,14 @@ fn a_hand_over_cut_reruns_when_a_diagnostic_arrives_and_keeps_their_order() {
         .expect("the fallback keeps");
     rt.run("logger", |logger| {
         keep(logger)?;
-        logger.wire(
+        logger.wire_add(
             Endpoint::output("unread"),
             Endpoint::child("fallback", diagnostics()),
         )
     })
     .expect("the logger keeps");
     rt.run((), |root| {
-        root.wire(
+        root.wire_add(
             Endpoint::input(diagnostics()),
             Endpoint::child("logger", diagnostics()),
         )
@@ -162,13 +162,13 @@ fn a_hand_over_cut_reruns_when_a_diagnostic_arrives_and_keeps_their_order() {
     let attempts = std::cell::Cell::new(0);
     rt.run("logger", |logger| {
         logger.cut(|logger| {
-            logger.wire(
+            logger.wire_add(
                 Endpoint::input(diagnostics()),
                 Endpoint::child("fallback", diagnostics()),
             )?;
-            let held = logger.available(diagnostics());
-            logger.read(diagnostics(), held)?;
-            logger.write("unread", held)?;
+            let held = logger.port_available(diagnostics());
+            logger.port_read(diagnostics(), held)?;
+            logger.port_write("unread", held)?;
             attempts.set(attempts.get() + 1);
             if attempts.get() == 1 {
                 // It reaches the logger's input, since the rewiring has not
@@ -184,8 +184,8 @@ fn a_hand_over_cut_reruns_when_a_diagnostic_arrives_and_keeps_their_order() {
 
     let messages = rt
         .run(["logger", "fallback"], |fallback| {
-            let count = fallback.available(diagnostics());
-            fallback.read(diagnostics(), count)?;
+            let count = fallback.port_available(diagnostics());
+            fallback.port_read(diagnostics(), count)?;
             let mut messages = (0..count)
                 .map(|_| {
                     let value = fallback.pop()?;
@@ -200,7 +200,7 @@ fn a_hand_over_cut_reruns_when_a_diagnostic_arrives_and_keeps_their_order() {
         .expect("the fallback holds them");
     assert_eq!(messages, ["held", "during", "after"], "each once, in order");
     let left = rt
-        .run("logger", |logger| Ok(logger.available(diagnostics())))
+        .run("logger", |logger| Ok(logger.port_available(diagnostics())))
         .expect("a turn");
     assert_eq!(left, 0);
 }
@@ -210,10 +210,10 @@ fn reflection_reads_the_refl_machine_s_environment_over_its_sealed_one() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     let shares = "language g0\nobject root_share with\n    greeting = \"hello\"\n";
     rt.run((), |root| {
-        root.make_dict(Vec::<&str>::new())?;
+        root.dict_pack(Vec::<&str>::new())?;
         root.script_object(["shares"], "g", shares)?;
-        root.access("root_share")?;
-        root.set_env_mixin()
+        root.dict_get("root_share")?;
+        root.env_mixin_set()
     })
     .expect("the root binds its share");
     let assembler = rt.assembler();
@@ -242,10 +242,10 @@ fn a_broken_promise_fails_its_readers_with_its_message() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     let error = rt
         .run("m", |m| {
-            m.promise();
-            m.push_text("the reason it broke");
-            m.break_promise()?;
-            Ok(m.pop_int().expect_err("the promise was broken"))
+            m.promise_new();
+            m.text_push("the reason it broke");
+            m.promise_break()?;
+            Ok(m.int_pop().expect_err("the promise was broken"))
         })
         .expect("the turn should succeed");
     let values = rt.assembler().values();
@@ -290,14 +290,14 @@ fn a_lost_resolver_breaks_its_promise_and_wakes_its_reader() {
     let (waiting, waited) = std::sync::mpsc::channel();
     let error = rt
         .run("p", |p| {
-            p.promise();
+            p.promise_new();
             p.swap()?;
             p.give("reader", 1)?;
             let fork = p.fork("reader", move |r| {
                 let mut attempts = 0;
                 let read = r.cut(|r| {
-                    r.dup()?;
-                    let read = r.pop_int();
+                    r.dup(1)?;
+                    let read = r.int_pop();
                     if read
                         .as_ref()
                         .is_err_and(|error| error.kind() == ErrorKind::Retry)
@@ -320,7 +320,7 @@ fn a_lost_resolver_breaks_its_promise_and_wakes_its_reader() {
             collect(p);
             p.join(fork)?;
             p.take("reader", 1)?;
-            Ok(p.pop_int().expect_err("the promise was broken"))
+            Ok(p.int_pop().expect_err("the promise was broken"))
         })
         .expect("the turn should succeed");
     let values = rt.assembler().values();
@@ -352,13 +352,13 @@ fn a_resolved_promise_s_record_goes_with_its_resolver() {
                 .promises()
                 .len_for_test()
         };
-        m.promise();
-        m.push_int(1);
-        m.fulfill()?;
+        m.promise_new();
+        m.int_push(1);
+        m.promise_fulfill()?;
         assert_eq!(records(m), 1, "the record keeps how it resolved");
         collect(m);
         assert_eq!(records(m), 0, "nothing can ask it any more");
-        assert_eq!(m.pop_int()?, 1, "the promised value stands");
+        assert_eq!(m.int_pop()?, 1, "the promised value stands");
         Ok(())
     })
     .expect("the turn should succeed");
@@ -368,26 +368,26 @@ fn a_resolved_promise_s_record_goes_with_its_resolver() {
 fn a_volume_lives_while_any_copy_of_its_handle_does() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     rt.run("m", |m| {
-        m.push_int(7);
+        m.int_push(7);
         m.volume_new()?;
         let volume = m.volume_at(1)?;
-        m.dup()?;
-        m.set("copy")?;
+        m.dup(1)?;
+        m.local_set("copy")?;
         m.discard(1)?;
         collect(m);
         assert!(holds(m, volume), "a copy of its handle remains");
-        m.push_unit();
-        m.set("copy")?;
+        m.unit_push();
+        m.local_set("copy")?;
         collect(m);
         assert!(!holds(m, volume), "its last handle is gone");
 
-        m.push_int(3);
+        m.int_push(3);
         m.heap_set(["x"])?;
         m.heap_volume();
         m.discard(1)?;
         collect(m);
         m.heap_get(["x"]);
-        assert_eq!(m.pop_int()?, 3, "the shared heap outlives its handles");
+        assert_eq!(m.int_pop()?, 3, "the shared heap outlives its handles");
         Ok(())
     })
     .expect("the turn should succeed");
@@ -397,10 +397,10 @@ fn a_volume_lives_while_any_copy_of_its_handle_does() {
 fn a_volume_reaching_its_own_handle_is_collected() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     rt.run("m", |m| {
-        m.push_int(7);
+        m.int_push(7);
         m.volume_new()?;
         let volume = m.volume_at(1)?;
-        m.dup()?;
+        m.dup(1)?;
         m.volume_set(["self"])?;
         assert_eq!(m.depth(), 0, "only the volume holds its handle");
         collect(m);
@@ -418,7 +418,7 @@ fn settlement_collects_and_acts_on_death_notices_first() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     let volume = rt
         .run("m", |m| {
-            m.push_int(7);
+            m.int_push(7);
             m.volume_new()?;
             let volume = m.volume_at(1)?;
             m.discard(1)?;
@@ -464,11 +464,11 @@ fn waiter_wakes_on_fulfillment(
     let (attempted, attempts) = mpsc::channel();
     let (done, finished) = mpsc::channel();
     rt.run("p", move |p| {
-        p.promise();
-        p.set("resolver")?;
+        p.promise_new();
+        p.local_set("resolver")?;
         p.give("waiter", 1)?;
         let fork = p.fork("waiter", move |w| {
-            w.set("promised")?;
+            w.local_set("promised")?;
             let value = w.cut(|w| {
                 let value = read(w);
                 if value
@@ -488,12 +488,12 @@ fn waiter_wakes_on_fulfillment(
                 .recv_timeout(Duration::from_secs(10))
                 .expect("the resolving commit wakes the waiter, which reads it pending again");
         });
-        p.get("resolver")?;
-        p.push_int(7);
-        p.fulfill()?;
+        p.local_get("resolver");
+        p.int_push(7);
+        p.promise_fulfill()?;
         let woke = finished.recv_timeout(Duration::from_secs(5));
         if woke.is_err() {
-            p.push_int(0);
+            p.int_push(0);
             p.heap_set(["nudge"])?;
         }
         p.join(fork)?;
@@ -507,8 +507,8 @@ fn waiter_wakes_on_fulfillment(
 fn a_cut_waiting_on_a_promised_value_wakes_to_its_fulfillment() {
     assert!(
         waiter_wakes_on_fulfillment(|w| {
-            w.get("promised")?;
-            w.pop_int()
+            w.local_get("promised");
+            w.int_pop()
         }),
         "the waiter missed the fulfillment"
     );
@@ -518,10 +518,10 @@ fn a_cut_waiting_on_a_promised_value_wakes_to_its_fulfillment() {
 fn a_cut_waiting_on_a_lazy_value_wakes_to_the_fulfillment_it_needs() {
     assert!(
         waiter_wakes_on_fulfillment(|w| {
-            w.get("promised")?;
-            w.make_dict(["value"])?;
-            w.access("value")?;
-            w.pop_int()
+            w.local_get("promised");
+            w.dict_pack(["value"])?;
+            w.dict_get("value")?;
+            w.int_pop()
         }),
         "the waiter missed the fulfillment"
     );

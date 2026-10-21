@@ -15,7 +15,7 @@ fn runtime() -> Runtime {
 fn heap_int(rt: &mut Runtime, path: &[&str]) -> i64 {
     rt.run("reader", |m| {
         m.heap_get(path.iter().copied());
-        m.pop_int()
+        m.int_pop()
     })
     .expect("the heap should hold an integer there")
 }
@@ -47,27 +47,25 @@ fn tally(m: &mut Machine<'_, '_>) -> Result<(), Error> {
         (2, 0),
         "a hook's stack holds only its items"
     );
-    let (top, below) = (m.pop_int()?, m.pop_int()?);
+    let (top, below) = (m.int_pop()?, m.int_pop()?);
     assert_eq!((below, top), (20, 30), "the items keep their order");
-    m.get("count")?;
-    let count = m.pop_int()?;
-    m.push_int(count + below + top);
+    m.local_get("count");
+    let count = m.int_pop()?;
+    m.int_push(count + below + top);
     m.heap_set(["total"])?;
-    m.push_int(count + 1);
-    m.set("count")?;
-    m.push_text("left behind");
+    m.int_push(count + 1);
+    m.local_set("count")?;
+    m.text_push("left behind");
     Ok(())
 }
 
 /// Whether the top value, evaluated, is `{}`; it is popped.
 fn undefined(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
-    if m.kind()? != ValueKind::Dict {
-        m.discard(1)?;
-        return Ok(false);
+    if m.kind()? == ValueKind::Dict && m.dict_unpack(Vec::<&str>::new()).is_ok() {
+        return Ok(true);
     }
-    let entries = m.unpack_dict()?;
-    m.discard(2 * entries)?;
-    Ok(entries == 0)
+    m.discard(1)?;
+    Ok(false)
 }
 
 #[test]
@@ -78,11 +76,11 @@ fn heap_actions_outside_a_cut_commit_at_once() {
         "a missing key reads {{}}"
     );
     rt.run("writer", |m| {
-        m.push_int(41);
+        m.int_push(41);
         m.heap_set(["counter"])?;
-        m.make_dict(Vec::<&str>::new())?;
+        m.dict_pack(Vec::<&str>::new())?;
         m.script_object(["inc"], "g", "language g0\ninc n = n + 1\n")?;
-        m.access("inc")?;
+        m.dict_get("inc")?;
         m.heap_rewrite(["counter"])
     })
     .expect("the writes should commit");
@@ -95,12 +93,12 @@ fn a_cut_commits_its_writes_together_and_reads_its_own() {
     let seen = rt
         .run("writer", |m| {
             m.cut(|m| {
-                m.push_int(1);
+                m.int_push(1);
                 m.heap_set(["a"])?;
-                m.push_int(2);
+                m.int_push(2);
                 m.heap_set(["b"])?;
                 m.heap_get(["a"]);
-                m.pop_int()
+                m.int_pop()
             })
         })
         .expect("the cut should commit");
@@ -115,20 +113,20 @@ fn a_cut_commits_its_writes_together_and_reads_its_own() {
 fn a_failed_cut_undoes_its_writes_and_the_machine_s_state() {
     let mut rt = runtime();
     rt.run("writer", |m| {
-        m.push_int(7);
-        m.set("kept")?;
+        m.int_push(7);
+        m.local_set("kept")?;
         let failed: Result<(), Error> = m.cut(|m| {
-            m.push_int(1);
+            m.int_push(1);
             m.heap_set(["a"])?;
-            m.push_int(99);
-            m.set("kept")?;
-            m.push_text("left behind");
+            m.int_push(99);
+            m.local_set("kept")?;
+            m.text_push("left behind");
             Err(Error::new("this alternative fails"))
         });
         assert!(failed.is_err());
         assert_eq!(m.depth(), 0, "the cut's pushes are undone");
-        m.get("kept")?;
-        assert_eq!(m.pop_int()?, 7, "the cut's state changes are undone");
+        m.local_get("kept");
+        assert_eq!(m.int_pop()?, 7, "the cut's state changes are undone");
         Ok(())
     })
     .expect("the turn should succeed");
@@ -152,10 +150,10 @@ fn nested_cuts_backtrack_alone_and_merge_on_success() {
     let mut rt = runtime();
     rt.run("writer", |m| {
         m.cut(|m| {
-            m.push_int(1);
+            m.int_push(1);
             m.heap_set(["outer"])?;
             let first: Result<(), Error> = m.cut(|m| {
-                m.push_int(2);
+                m.int_push(2);
                 m.heap_set(["first"])?;
                 Err(Error::new("the first alternative fails"))
             });
@@ -173,7 +171,7 @@ fn nested_cuts_backtrack_alone_and_merge_on_success() {
                 "the caller may try another alternative"
             );
             m.cut(|m| {
-                m.push_int(3);
+                m.int_push(3);
                 m.heap_set(["second"])
             })
         })
@@ -232,42 +230,42 @@ fn hooks_run_in_order_on_commit_and_in_reverse_on_abort() {
 fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
     let mut rt = runtime();
     rt.run("hooks", |m| {
-        m.push_int(1);
-        m.set("count")?;
+        m.int_push(1);
+        m.local_set("count")?;
         m.cut(|m| {
-            m.push_text("stashed");
+            m.text_push("stashed");
             m.stash(1)?;
-            m.push_int(10);
-            m.push_int(20);
-            m.push_int(30);
+            m.int_push(10);
+            m.int_push(20);
+            m.int_push(30);
             m.on_commit(2, |m| tally(m).expect("the hook's work should succeed"))?;
-            m.push_int(2);
-            m.set("count")
+            m.int_push(2);
+            m.local_set("count")
         })?;
         assert_eq!(
             (m.depth(), m.stash_depth()),
             (1, 1),
             "the machine's stack and stash return after the hook"
         );
-        assert_eq!(m.pop_int()?, 10);
-        m.get("count")?;
-        assert_eq!(m.pop_int()?, 3, "the hook's state change stays");
+        assert_eq!(m.int_pop()?, 10);
+        m.local_get("count");
+        assert_eq!(m.int_pop()?, 3, "the hook's state change stays");
 
         m.cut(|m| {
             let failed: Result<(), Error> = m.cut(|m| {
-                m.push_text("compensation");
+                m.text_push("compensation");
                 m.on_abort(1, |m| {
                     m.heap_set(["undone"])
                         .expect("the compensation should write")
                 })?;
-                m.push_text("attempt");
+                m.text_push("attempt");
                 m.heap_set(["undone"])?;
                 Err(m.fail())
             });
             assert!(failed.is_err());
             m.heap_get(["undone"]);
             assert_eq!(
-                m.pop_text()?,
+                m.text_pop()?,
                 "compensation",
                 "an abort hook runs within the enclosing cut, after the undo"
             );
@@ -283,7 +281,7 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
     let undone = rt
         .run("reader", |m| {
             m.heap_get(["undone"]);
-            m.pop_text()
+            m.text_pop()
         })
         .expect("the heap should hold a text there");
     assert_eq!(undone, "compensation", "the abort hook's write commits");
@@ -299,7 +297,7 @@ fn a_hook_handles_its_own_failures_and_a_cut_s_outcome_is_its_own() {
                 let log = log.clone();
                 m.on_commit(0, move |m| {
                     // Nothing is on the hook's stack to pop.
-                    if m.pop_int().is_err() {
+                    if m.int_pop().is_err() {
                         log.lock().unwrap().push("the hook handled its failure");
                     }
                 })?;
@@ -324,7 +322,7 @@ fn a_failed_cut_waits_until_something_it_observed_changes() {
                     m.heap_get(["ready"]);
                     m.eval()?;
                     if m.kind()? == ValueKind::Number {
-                        return m.pop_int();
+                        return m.int_pop();
                     }
                     // Signals the writer as the failure backtracks, before
                     // the cut waits, forcing the write after the read.
@@ -333,15 +331,15 @@ fn a_failed_cut_waits_until_something_it_observed_changes() {
                     Err(m.fail())
                 })?;
                 assert_eq!(value, 5);
-                m.push_int(attempts.get());
+                m.int_push(attempts.get());
                 Ok(())
             })?;
             blocked.recv().expect("the reader should fail first");
-            root.push_int(5);
+            root.int_push(5);
             root.heap_set(["ready"])?;
             root.join(reader)?;
             root.take("reader", 1)?;
-            root.pop_int()
+            root.int_pop()
         })
         .expect("the cut should commit once the value is ready");
     assert_eq!(attempts, 2, "the cut runs again once, after the write");
@@ -353,7 +351,7 @@ fn a_conflicting_commit_reruns_the_cut_at_once() {
     let (read_sender, read_receiver) = mpsc::channel();
     let (written_sender, written_receiver) = mpsc::channel();
     rt.run("setup", |m| {
-        m.push_int(1);
+        m.int_push(1);
         m.heap_set(["x"])
     })
     .expect("the setup should commit");
@@ -364,26 +362,26 @@ fn a_conflicting_commit_reruns_the_cut_at_once() {
                 m.cut(|m| {
                     attempts.set(attempts.get() + 1);
                     m.heap_get(["x"]);
-                    let x = m.pop_int()?;
+                    let x = m.int_pop()?;
                     if attempts.get() == 1 {
                         // Forces another commit between this read and this
                         // cut's commit.
                         read_sender.send(()).expect("the writer listens");
                         written_receiver.recv().expect("the writer commits");
                     }
-                    m.push_int(x * 2);
+                    m.int_push(x * 2);
                     m.heap_set(["doubled"])
                 })?;
-                m.push_int(attempts.get());
+                m.int_push(attempts.get());
                 Ok(())
             })?;
             read_receiver.recv().expect("the doubler reads first");
-            root.push_int(10);
+            root.int_push(10);
             root.heap_set(["x"])?;
             written_sender.send(()).expect("the doubler waits");
             root.join(doubler)?;
             root.take("doubler", 1)?;
-            root.pop_int()
+            root.int_pop()
         })
         .expect("the cut should commit");
     assert_eq!(attempts, 2, "the conflict reruns the cut");
@@ -400,25 +398,29 @@ fn a_child_turn_joins_its_parent_s_cut() {
     rt.run("parent", |m| {
         let failed: Result<(), Error> = m.cut(|m| {
             m.run("child", |c| {
-                c.push_int(1);
+                c.int_push(1);
                 c.heap_set(["by_child"])?;
-                c.push_int(7);
-                c.set("mark")
+                c.int_push(7);
+                c.local_set("mark")
             })?;
             Err(m.fail())
         });
         assert!(failed.is_err());
         m.run("child", |c| {
-            assert!(c.get("mark").is_err(), "the cut undid the child's state");
+            c.local_get("mark");
+            assert!(
+                c.dict_unpack(Vec::<&str>::new()).is_ok(),
+                "the cut undid the child's state, which reads `{{}}` at `mark`"
+            );
             Ok(())
         })?;
         m.cut(|m| {
-            m.push_int(3);
+            m.int_push(3);
             m.heap_set(["by_parent"])?;
             m.run("child", |c| {
                 c.heap_get(["by_parent"]);
-                assert_eq!(c.pop_int()?, 3, "a child reads its parent's staged write");
-                c.push_int(2);
+                assert_eq!(c.int_pop()?, 3, "a child reads its parent's staged write");
+                c.int_push(2);
                 c.heap_set(["by_child"])
             })
         })
@@ -442,8 +444,9 @@ fn hooks_run_on_the_machine_that_registered_them() {
         let failed: Result<(), Error> = m.cut(|m| {
             m.run("child", |c| {
                 c.on_abort(0, |c| {
-                    c.push_int(1);
-                    c.set("compensated").expect("the compensation should set");
+                    c.int_push(1);
+                    c.local_set("compensated")
+                        .expect("the compensation should set");
                 })
             })?;
             Err(Error::new("the cut errs"))
@@ -451,12 +454,12 @@ fn hooks_run_on_the_machine_that_registered_them() {
         assert!(failed.is_err());
         m.cut(|m| {
             m.run("child", |c| {
-                c.push_text("child");
-                c.set("name")?;
+                c.text_push("child");
+                c.local_set("name")?;
                 let log = log.clone();
                 c.on_commit(0, move |c| {
-                    c.get("name").expect("the child holds its name");
-                    let name = c.pop_text().expect("the name is text");
+                    c.local_get("name");
+                    let name = c.text_pop().expect("the name is text");
                     log.lock().unwrap().push(if name == "child" {
                         "the child's hook ran on the child"
                     } else {
@@ -470,8 +473,8 @@ fn hooks_run_on_the_machine_that_registered_them() {
     assert_eq!(*log.lock().unwrap(), ["the child's hook ran on the child"]);
     let compensated = rt
         .run(["parent", "child"], |c| {
-            c.get("compensated")?;
-            c.pop_int()
+            c.local_get("compensated");
+            c.int_pop()
         })
         .expect("the abort hook ran on the child, after the undo");
     assert_eq!(compensated, 1);

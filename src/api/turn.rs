@@ -40,7 +40,7 @@ use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
 use crate::compiler::{import_source_in, source_record_in};
-use crate::core::{Key, Value as CoreValue};
+use crate::core::{Builtin, Dict, Key, Value as CoreValue};
 use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute, WorkDependency};
 
 /// How many polls a cut whose evaluation waited reserves each time it pumps
@@ -111,11 +111,11 @@ impl RuntimeConfig {
 /// let words = ["forks", "may", "borrow"];
 /// let total = rt.run("parent", |m| {
 ///     let left = m.fork("left", |c| {
-///         c.push_int(words[..1].len() as i64);
+///         c.int_push(words[..1].len() as i64);
 ///         Ok(())
 ///     })?;
 ///     let right = m.fork("right", |c| {
-///         c.push_int(words[1..].len() as i64);
+///         c.int_push(words[1..].len() as i64);
 ///         Ok(())
 ///     })?;
 ///     m.join(left)?;
@@ -123,7 +123,7 @@ impl RuntimeConfig {
 ///     // What a fork leaves is on its machine's stack.
 ///     m.take("left", 1)?;
 ///     m.take("right", 1)?;
-///     Ok(m.pop_int()? + m.pop_int()?)
+///     Ok(m.int_pop()? + m.int_pop()?)
 /// })?;
 /// assert_eq!(total, 3);
 /// # Ok::<(), glam::Error>(())
@@ -1231,71 +1231,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.state.stash.len()
     }
 
-    pub fn push_unit(&mut self) {
+    pub fn unit_push(&mut self) {
         self.push(self.runtime.assembler.values().unit());
     }
 
-    pub fn push_int(&mut self, value: i64) {
+    pub fn int_push(&mut self, value: i64) {
         self.push(self.runtime.assembler.values().integer(value));
     }
 
-    /// Pushes text, which glam holds as UTF-8 bytes.
-    pub fn push_text(&mut self, text: impl AsRef<str>) {
-        self.push(self.runtime.assembler.values().text(text));
-    }
-
-    pub fn push_bytes(&mut self, bytes: impl Into<Bytes>) {
-        self.push(self.runtime.assembler.values().bytes(bytes));
-    }
-
-    /// Pushes the atom `'name`.
-    pub fn push_atom(&mut self, name: impl AsRef<str>) {
-        self.push(self.runtime.assembler.values().atom_from_text(name));
-    }
-
-    /// Pushes the abstract global path with these parts, an atom that glam
-    /// source names only as `abstract_global_path`.
-    pub fn push_abstract_path<I, S>(&mut self, parts: I)
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        self.push(self.runtime.assembler.values().abstract_global_path(parts));
-    }
-
-    /// Replaces the top `n` values with a list of them, the deepest first.
-    pub fn make_list(&mut self, n: usize) -> Result<(), Error> {
-        let values = self.runtime.assembler.values();
-        self.replace_top(n, |items| values.list(items))
-    }
-
-    /// Replaces the top values, one for each name, with a dict from the
-    /// names to them: the deepest value takes the first name.
-    pub fn make_dict<I, S>(&mut self, names: I) -> Result<(), Error>
-    where
-        I: IntoIterator<Item = S>,
-        S: AsRef<str>,
-    {
-        let names = names.into_iter().collect::<Vec<_>>();
-        for (index, name) in names.iter().enumerate() {
-            if names[..index]
-                .iter()
-                .any(|earlier| earlier.as_ref() == name.as_ref())
-            {
-                return Err(Error::new(format!(
-                    "a dict's names must differ, and `{}` repeats",
-                    name.as_ref()
-                )));
-            }
-        }
-        let values = self.runtime.assembler.values();
-        self.replace_top(names.len(), |items| {
-            values.record(names.into_iter().zip(items))
-        })
-    }
-
     /// Evaluates the top value to an integer and pops it.
-    pub fn pop_int(&mut self) -> Result<i64, Error> {
+    pub fn int_pop(&mut self) -> Result<i64, Error> {
         self.pop_evaluated(Ok, |evaluated| {
             evaluated
                 .as_i64()?
@@ -1303,14 +1248,13 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// Evaluates the top value to bytes and pops them.
-    pub fn pop_bytes(&mut self) -> Result<Bytes, Error> {
-        let values = self.runtime.assembler.values();
-        self.pop_evaluated(|value| values.anno_binary(value), binary)
+    /// Pushes text, which glam holds as UTF-8 bytes.
+    pub fn text_push(&mut self, text: impl AsRef<str>) {
+        self.push(self.runtime.assembler.values().text(text));
     }
 
     /// Evaluates the top value to UTF-8 text and pops it.
-    pub fn pop_text(&mut self) -> Result<String, Error> {
+    pub fn text_pop(&mut self) -> Result<String, Error> {
         let values = self.runtime.assembler.values();
         self.pop_evaluated(
             |value| values.anno_binary(value),
@@ -1321,9 +1265,24 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         )
     }
 
+    pub fn bytes_push(&mut self, bytes: impl Into<Bytes>) {
+        self.push(self.runtime.assembler.values().bytes(bytes));
+    }
+
+    /// Evaluates the top value to bytes and pops them.
+    pub fn bytes_pop(&mut self) -> Result<Bytes, Error> {
+        let values = self.runtime.assembler.values();
+        self.pop_evaluated(|value| values.anno_binary(value), binary)
+    }
+
+    /// Pushes the atom `'name`.
+    pub fn atom_push(&mut self, name: impl AsRef<str>) {
+        self.push(self.runtime.assembler.values().atom_from_text(name));
+    }
+
     /// Evaluates the top value to an atom named by text, such as `'name`,
     /// and pops its name.
-    pub fn pop_atom_name(&mut self) -> Result<String, Error> {
+    pub fn atom_pop(&mut self) -> Result<String, Error> {
         let reflection = self.runtime.assembler.reflection();
         self.pop_evaluated(
             |value| reflection.atom_key(&value),
@@ -1335,39 +1294,309 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         )
     }
 
-    /// Evaluates the top value to a list and replaces it with its items, the
-    /// first deepest, returning how many there are.
-    pub fn unpack_list(&mut self) -> Result<usize, Error> {
-        let values = self.runtime.assembler.values();
-        let items = self.pop_evaluated(
-            |value| values.anno_array(value),
-            |evaluated| {
-                evaluated
-                    .array_items()?
-                    .ok_or_else(|| Error::new("the top value is not a list"))
-            },
-        )?;
-        let count = items.len();
-        self.state.stack.extend(items);
-        Ok(count)
+    /// Pushes the abstract global path with these parts, an atom that glam
+    /// source names only as `abstract_global_path`.
+    pub fn abstract_path_push<I, S>(&mut self, parts: I)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.push(self.runtime.assembler.values().abstract_global_path(parts));
     }
 
-    /// Evaluates the top value to a dict and replaces it with its entries,
-    /// each key pushed before its value, returning how many there are.
-    ///
-    /// This is reflection: glam offers no iteration of a dict's keys, and the
-    /// entries come in the runtime's canonical order of keys.
-    pub fn unpack_dict(&mut self) -> Result<usize, Error> {
-        let value = self.peek()?.clone();
-        let entries = self.runtime.assembler.reflection().dictionary_items(&value);
-        let entries = self.note_evaluation(entries)?;
+    /// Evaluates the top value to an abstract global path and pops its
+    /// parts.
+    pub fn abstract_path_pop(&mut self) -> Result<Vec<String>, Error> {
+        let values = self.runtime.assembler.values();
+        self.pop_evaluated(Ok, |evaluated| {
+            let path = evaluated.into_value();
+            values.with_access(|scoped| match scoped.clone_core(&path)? {
+                CoreValue::Atom(atom) => match atom.key() {
+                    Key::AbstractGlobalPath(parts) => Ok(parts.to_vec()),
+                    _ => Err(Error::new("the atom is not an abstract global path")),
+                },
+                _ => Err(Error::new("the top value is not an abstract global path")),
+            })
+        })
+    }
+
+    /// Replaces the top `n` values with a list of them, the deepest first:
+    /// `a1 … an -- [a1 … an]`. Nothing is evaluated.
+    pub fn list_pack(&mut self, n: usize) -> Result<(), Error> {
+        let values = self.runtime.assembler.values();
+        self.replace_top(n, |items| values.list(items))
+    }
+
+    /// Evaluates the top value to a list of exactly `n` items and replaces
+    /// it with them, the first deepest: `[a1 … an] -- a1 … an`, the twin of
+    /// [`Self::list_pack`]. Any other list fails, changing nothing.
+    pub fn list_unpack(&mut self, n: usize) -> Result<(), Error> {
+        let values = self.runtime.assembler.values();
+        let items = self.peek_evaluated(
+            |value| values.anno_array(value),
+            |evaluated| {
+                let items = evaluated
+                    .array_items()?
+                    .ok_or_else(|| Error::new("the top value is not a list"))?;
+                if items.len() != n {
+                    return Err(Error::new(format!(
+                        "the list holds {} items, not {n}",
+                        items.len()
+                    )));
+                }
+                Ok(items)
+            },
+        )?;
         self.pop()?;
-        let count = entries.len();
-        for (key, value) in entries {
-            self.push(key);
-            self.push(value);
-        }
-        Ok(count)
+        self.state.stack.extend(items);
+        Ok(())
+    }
+
+    /// `xs ys -- xs ++ ys`, lazily.
+    pub fn list_append(&mut self) -> Result<(), Error> {
+        self.rewrite_top(2, |access, items| {
+            let [xs, ys] = <[CoreValue; 2]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top two values"));
+            Ok(vec![builtin_call_in(access, Builtin::Append, [xs, ys])])
+        })
+    }
+
+    /// `xs i -- front back`, lazily: `front` holds the first `i` items, and
+    /// `front ++ back` is `xs`.
+    pub fn list_split(&mut self) -> Result<(), Error> {
+        self.split(Builtin::ListSplit)
+    }
+
+    /// As [`Self::list_split`], counting `i` from the end: `back` holds the
+    /// last `i` items.
+    pub fn list_split_end(&mut self) -> Result<(), Error> {
+        self.split(Builtin::ListSplitEnd)
+    }
+
+    fn split(&mut self, builtin: Builtin) -> Result<(), Error> {
+        self.rewrite_top(2, |access, items| {
+            let [xs, index] = <[CoreValue; 2]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top two values"));
+            let split = builtin_call_in(access, builtin, [index, xs]);
+            let half = |key: &Key| {
+                CoreValue::Lazy(crate::core::LazyValue::from_access_in(
+                    access,
+                    Arc::from([crate::core_net::CoreDataKey::Key(key.clone())]),
+                    Arc::from([access.duplicate_value(&split)]),
+                ))
+            };
+            Ok(vec![
+                half(&crate::core::keys::LEFT),
+                half(&crate::core::keys::RIGHT),
+            ])
+        })
+    }
+
+    /// `xs -- n`, lazily: how many items `xs` holds.
+    pub fn list_len(&mut self) -> Result<(), Error> {
+        self.rewrite_top(1, |access, items| {
+            let [xs] =
+                <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            Ok(vec![builtin_call_in(access, Builtin::ListLen, [xs])])
+        })
+    }
+
+    /// Replaces the top values, one for each key, with a dict from the keys
+    /// to them: `v1 … vn -- {k1:v1 … kn:vn}`, the deepest value under the
+    /// first key. Nothing is evaluated.
+    pub fn dict_pack<K: Into<Key>>(
+        &mut self,
+        keys: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let keys = distinct_keys(keys)?;
+        self.rewrite_top(keys.len(), |_, items| {
+            Ok(vec![CoreValue::Dict(
+                keys.iter()
+                    .cloned()
+                    .zip(items)
+                    .fold(Dict::new_sync(), |dict, (key, item)| dict.insert(key, item)),
+            )])
+        })
+    }
+
+    /// Evaluates the top value to a dict holding no keys but these, and
+    /// replaces it with their values, `{}` where absent:
+    /// `{k1:v1 … kn:vn} -- v1 … vn`, the twin of [`Self::dict_pack`]. A dict
+    /// with any other key fails, changing nothing, as would dropping it.
+    pub fn dict_unpack<K: Into<Key>>(
+        &mut self,
+        keys: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let keys = distinct_keys(keys)?;
+        let items = self.peek_core_evaluated(|access, scoped, value| {
+            let CoreValue::Dict(dict) = value else {
+                return Err(Error::new("the top value is not a dict"));
+            };
+            if let Some((extra, _)) = dict.iter().find(|(key, _)| !keys.contains(key)) {
+                return Err(Error::new(format!(
+                    "the dict holds `{extra:?}`, which unpacking would drop"
+                )));
+            }
+            Ok(keys
+                .iter()
+                .map(|key| {
+                    scoped.wrap(
+                        dict.get(key)
+                            .map(|value| access.duplicate_value(value))
+                            .unwrap_or_else(|| undefined(access)),
+                    )
+                })
+                .collect::<Vec<_>>())
+        })?;
+        self.pop()?;
+        self.state.stack.extend(items);
+        Ok(())
+    }
+
+    /// `i1 … in d -- d'`, lazily: `d` with the items under these keys, the
+    /// deepest under the first.
+    pub fn dict_insert_keys<K: Into<Key>>(
+        &mut self,
+        keys: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let keys = distinct_keys(keys)?;
+        self.rewrite_top(keys.len() + 1, |access, mut items| {
+            let dict = items.pop().expect("the dict is on top");
+            Ok(vec![
+                keys.iter().zip(items).fold(dict, |dict, (key, item)| {
+                    dict_update_in(access, std::slice::from_ref(key), item, dict)
+                }),
+            ])
+        })
+    }
+
+    /// `d -- i1 … in d'`, lazily: the items under these keys, `{}` where
+    /// absent, and `d` without them, the twin of [`Self::dict_insert_keys`].
+    pub fn dict_extract_keys<K: Into<Key>>(
+        &mut self,
+        keys: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let keys = distinct_keys(keys)?;
+        self.rewrite_top(1, |access, items| {
+            let [dict] =
+                <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            let mut extracted = keys
+                .iter()
+                .map(|key| path_access_in(access, &dict, std::slice::from_ref(key)))
+                .collect::<Vec<_>>();
+            extracted.push(keys.iter().fold(dict, |dict, key| {
+                dict_update_in(access, std::slice::from_ref(key), undefined(access), dict)
+            }));
+            Ok(extracted)
+        })
+    }
+
+    /// `item dict key -- dict'`, lazily: `dict` with `item` under `key`.
+    pub fn dict_insert(&mut self) -> Result<(), Error> {
+        self.rewrite_top(3, |access, items| {
+            let [item, dict, key] = <[CoreValue; 3]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top three values"));
+            let path = CoreValue::List(crate::core::List::from_values(vec![key]));
+            Ok(vec![builtin_call_in(
+                access,
+                Builtin::DictUpdate,
+                [path, item, dict],
+            )])
+        })
+    }
+
+    /// `dict key -- item dict'`, lazily: the item under `key`, `{}` where
+    /// absent, and `dict` without it, the twin of [`Self::dict_insert`].
+    pub fn dict_extract(&mut self) -> Result<(), Error> {
+        self.rewrite_top(2, |access, items| {
+            let [dict, key] = <[CoreValue; 2]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top two values"));
+            let item = CoreValue::Lazy(crate::core::LazyValue::from_access_in(
+                access,
+                Arc::from([crate::core_net::CoreDataKey::Index]),
+                Arc::from([access.duplicate_value(&dict), access.duplicate_value(&key)]),
+            ));
+            let path = CoreValue::List(crate::core::List::from_values(vec![key]));
+            let rest =
+                builtin_call_in(access, Builtin::DictUpdate, [path, undefined(access), dict]);
+            Ok(vec![item, rest])
+        })
+    }
+
+    /// `a b -- a ∪ b`, lazily: a dict with both's entries. Where both hold a
+    /// key, their values merge as glam's dict literals' do: dicts merge
+    /// again, and other values fail when that entry is forced.
+    pub fn dict_union(&mut self) -> Result<(), Error> {
+        self.rewrite_top(2, |access, items| {
+            let [left, right] = <[CoreValue; 2]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top two values"));
+            Ok(vec![builtin_call_in(
+                access,
+                Builtin::DictUnion,
+                [left, right],
+            )])
+        })
+    }
+
+    /// `d -- v`, lazily: the member at `key`, `{}` where absent.
+    pub fn dict_get(&mut self, key: impl Into<Key>) -> Result<(), Error> {
+        self.dict_get_path([key])
+    }
+
+    /// `d -- v`, lazily: the member at `path`, a path of keys.
+    pub fn dict_get_path<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = nonempty_path(path)?;
+        self.rewrite_top(1, |access, items| {
+            let [dict] =
+                <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            Ok(vec![path_access_in(access, &dict, &path)])
+        })
+    }
+
+    /// `item d -- d'`, lazily: `d` with `item` at `path`.
+    pub fn dict_insert_path<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = nonempty_path(path)?;
+        self.rewrite_top(2, |access, items| {
+            let [item, dict] = <[CoreValue; 2]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top two values"));
+            Ok(vec![dict_update_in(access, &path, item, dict)])
+        })
+    }
+
+    /// `d -- item d'`, lazily: the item at `path`, `{}` where absent, and `d`
+    /// without it, the twin of [`Self::dict_insert_path`].
+    pub fn dict_extract_path<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = nonempty_path(path)?;
+        self.rewrite_top(1, |access, items| {
+            let [dict] =
+                <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            let item = path_access_in(access, &dict, &path);
+            Ok(vec![
+                item,
+                dict_update_in(access, &path, undefined(access), dict),
+            ])
+        })
+    }
+
+    /// `v -- {key:v}`: a singleton tag.
+    pub fn tag_pack(&mut self, key: impl Into<Key>) -> Result<(), Error> {
+        self.dict_pack([key])
+    }
+
+    /// Evaluates the top value to the tag `{key:v}` and replaces it with
+    /// `v`, the twin of [`Self::tag_pack`]. Any other dict fails, changing
+    /// nothing.
+    pub fn tag_unpack(&mut self, key: impl Into<Key>) -> Result<(), Error> {
+        self.dict_unpack([key])
     }
 
     /// The kind of the top value as it stands, without popping or evaluating
@@ -1388,10 +1617,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             .same_representation(&stack[depth - 2], &stack[depth - 1])
     }
 
-    /// Copies the top value.
-    pub fn dup(&mut self) -> Result<(), Error> {
-        let top = self.peek()?.clone();
-        self.push(top);
+    /// Copies the top `n` values: `a1 … an -- a1 … an a1 … an`.
+    pub fn dup(&mut self, n: usize) -> Result<(), Error> {
+        let depth = self.require(n)?;
+        let copies = self.state.stack[depth - n..].to_vec();
+        self.state.stack.extend(copies);
         Ok(())
     }
 
@@ -1416,6 +1646,21 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
+    /// Rearranges the top values as `pattern` says, a stack effect whose
+    /// input and output arities it fixes: `"abc-cabbca"` is `3 -- 6`. The
+    /// names left of `-` bind the top values, `c` the top, and the names
+    /// right of it, which may repeat a name or leave one out, replace them,
+    /// the last on top. Names are single ASCII letters, each bound once.
+    pub fn shuffle(&mut self, pattern: &str) -> Result<(), Error> {
+        let (inputs, outputs) = shuffle_pattern(pattern)?;
+        let depth = self.require(inputs.len())?;
+        let bound = self.state.stack.split_off(depth - inputs.len());
+        self.state
+            .stack
+            .extend(outputs.iter().map(|&index| bound[index].clone()));
+        Ok(())
+    }
+
     /// Moves the top `n` values to the stash one at a time, as `stash(1)`
     /// does `n` times. The stash is the stack's other side, as in a zipper:
     /// the top value moves first, so it ends deepest, and `stash_pop(n)`
@@ -1437,18 +1682,6 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let moved = self.state.stash.split_off(depth - n);
         self.state.stack.extend(moved.into_iter().rev());
         Ok(())
-    }
-
-    /// Replaces the top value with its member at `path`, a dotted path of
-    /// names: `asm.result`. Nothing is evaluated.
-    pub fn access(&mut self, path: &str) -> Result<(), Error> {
-        let values = self.runtime.assembler.values();
-        self.replace_top(1, |items| {
-            values.access_path(
-                &items[0],
-                path.split('.').map(|name| values.atom_from_text(name)),
-            )
-        })
     }
 
     /// Annotates a value: the annotation is pushed first, then its target,
@@ -1498,6 +1731,62 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
+    /// Replaces the top `n` values with what `build` makes of them, as core
+    /// values within one access region, the deepest first, and pushes what
+    /// it returns in order. Where it fails, they stay. Nothing is evaluated.
+    fn rewrite_top(
+        &mut self,
+        n: usize,
+        build: impl FnOnce(&RuntimeValueAccess<'_>, Vec<CoreValue>) -> Result<Vec<CoreValue>, Error>,
+    ) -> Result<(), Error> {
+        let depth = self.require(n)?;
+        let built = self.runtime.assembler.values().with_access(|scoped| {
+            let items = self.state.stack[depth - n..]
+                .iter()
+                .map(|item| scoped.clone_core(item))
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok::<_, Error>(
+                build(scoped.runtime_access(), items)?
+                    .into_iter()
+                    .map(|value| scoped.wrap(value))
+                    .collect::<Vec<_>>(),
+            )
+        })?;
+        self.state.stack.truncate(depth - n);
+        self.state.stack.extend(built);
+        Ok(())
+    }
+
+    /// Evaluates the top value to weak-head normal form and reads it as a
+    /// core value, leaving the stack as it was.
+    fn peek_core_evaluated<T>(
+        &mut self,
+        read: impl FnOnce(
+            &RuntimeValueAccess<'_>,
+            &super::value::ScopedValues<'_>,
+            &CoreValue,
+        ) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let value = self.peek()?.clone();
+        let evaluated = self.runtime.assembler.evaluator().eval(&value);
+        let evaluated = self.note_evaluation(evaluated)?.into_value();
+        self.runtime.assembler.values().with_access(|scoped| {
+            let value = scoped.clone_core(&evaluated)?;
+            read(scoped.runtime_access(), &scoped, &value)
+        })
+    }
+
+    /// As [`Self::pop_evaluated`], leaving the top value in place.
+    fn peek_evaluated<T>(
+        &mut self,
+        prepare: impl FnOnce(Value) -> Result<Value, Error>,
+        convert: impl FnOnce(crate::api::EvaluatedValue) -> Result<T, Error>,
+    ) -> Result<T, Error> {
+        let value = prepare(self.peek()?.clone())?;
+        let evaluated = self.runtime.assembler.evaluator().eval(&value);
+        convert(self.note_evaluation(evaluated)?)
+    }
+
     /// Evaluates the top value, as `prepare` presents it, to weak-head
     /// normal form, and converts it, popping it once both have succeeded:
     /// where either fails, the value stays. An evaluation that waits on what
@@ -1542,7 +1831,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// binary, lazily: forcing it asks the host for it on the root's
     /// `imports` port (`imports-are-source-requests`). Nothing is
     /// evaluated, the key included.
-    pub fn import_source(&mut self) -> Result<(), Error> {
+    pub fn source_import(&mut self) -> Result<(), Error> {
         let requester = self.runtime.assembler.source_requester();
         let values = self.runtime.assembler.values();
         self.replace_top(1, |items| {
@@ -1681,7 +1970,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// Pops a package and pushes the record that compiles the source at
     /// `path` in it, under `namespace`: its language is the path's
     /// extension, and its binary is asked for when forced
-    /// ([`Self::import_source`]).
+    /// ([`Self::source_import`]).
     pub fn source_record<I, S, P, T>(&mut self, namespace: I, path: P) -> Result<(), Error>
     where
         I: IntoIterator<Item = S>,
@@ -1789,7 +2078,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// overrides what its ancestors' set. Within a cut, the read joins the
     /// cut's transaction and sees its changes, and the cut runs again when a
     /// mixin above changes; outside one, it reads the mixins as they stand.
-    pub fn env(&mut self) {
+    pub fn env_get(&mut self) {
         let machines = environment::environment_chain(&self.path);
         let mixins = match &mut self.cut {
             Some(cut) => machines
@@ -1822,7 +2111,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// machine and its descendants extend, in place of one set before. Only
     /// the machine sets its mixin. Outside a cut, it commits at once;
     /// within one, with the outermost cut.
-    pub fn set_env_mixin(&mut self) -> Result<(), Error> {
+    pub fn env_mixin_set(&mut self) -> Result<(), Error> {
         let mixin = self.peek()?.clone();
         self.runtime.assembler.values().require(&mixin)?;
         let machine = self.path.clone();
@@ -1838,8 +2127,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Pushes this machine's own mixin of the environment, to extend and
     /// set again, or an empty object where it has none. Within a cut, the
-    /// read joins the cut's transaction, as [`Self::env`]'s does.
-    pub fn get_env_mixin(&mut self) {
+    /// read joins the cut's transaction, as [`Self::env_get`]'s does.
+    pub fn env_mixin_get(&mut self) {
         let machine = self.path.clone();
         let mixin = match &mut self.cut {
             Some(cut) => environment::observed_mixin(cut, &machine),
@@ -1865,7 +2154,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// of the machine and its descendants extend its ancestors' alone.
     /// Outside a cut, it commits at once; within one, with the outermost
     /// cut.
-    pub fn clear_env_mixin(&mut self) -> Result<(), Error> {
+    pub fn env_mixin_clear(&mut self) -> Result<(), Error> {
         let machine = self.path.clone();
         let path = environment::environment_share(&machine);
         let unset = self.runtime.assembler.values().empty_dict();
@@ -1897,9 +2186,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Pushes a promised value, which waits until it is resolved, then its
-    /// resolver: an opaque glam value that [`Self::fulfill`] or
-    /// [`Self::break_promise`] resolves, once.
-    pub fn promise(&mut self) {
+    /// resolver: an opaque glam value that [`Self::promise_fulfill`] or
+    /// [`Self::promise_break`] resolves, once.
+    pub fn promise_new(&mut self) {
         let promises = self.promises();
         let (promised, resolver) = self.runtime.assembler.values().with_access(|scoped| {
             let (_, promised, resolver) = promises.allocate(scoped.runtime_access());
@@ -1964,15 +2253,15 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// would wait on it, directly or through lazy values. Where another
     /// resolution commits first, the cut's commit conflicts, and running
     /// again it finds the promise resolved.
-    pub fn fulfill(&mut self) -> Result<(), Error> {
+    pub fn promise_fulfill(&mut self) -> Result<(), Error> {
         self.resolve_promise(Resolution::Fulfill)
     }
 
     /// Pops a value, then a resolver, and breaks the resolver's promise with
     /// the value, a message or a diagnostic, so what reads the promised
-    /// value fails with it. As [`Self::fulfill`], it evaluates the resolver,
+    /// value fails with it. As [`Self::promise_fulfill`], it evaluates the resolver,
     /// resolves once, and within a cut resolves when the cut commits.
-    pub fn break_promise(&mut self) -> Result<(), Error> {
+    pub fn promise_break(&mut self) -> Result<(), Error> {
         self.resolve_promise(Resolution::Break)
     }
 
@@ -2215,7 +2504,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// outside a cut, with the outermost cut within one. An output with no wire is an
     /// error, which pops nothing. Buffers have no bound yet, so a write
     /// never waits.
-    pub fn write(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
+    pub fn port_write(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
         let depth = self.require(n)?;
         let values = self.state.stack[depth - n..].to_vec();
         self.send(port.into(), &values)?;
@@ -2225,11 +2514,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Posts a request on the output `port` (`requests-travel-on-ports`):
     /// replaces the top value with the promise of its reply, and writes
-    /// `{request:value, reply:resolver}`, as [`Self::write`] writes, for a
-    /// server to read and resolve with [`Self::fulfill`] or
-    /// [`Self::break_promise`]. Where several servers receive it, the first
+    /// `{request:value, reply:resolver}`, as [`Self::port_write`] writes, for a
+    /// server to read and resolve with [`Self::promise_fulfill`] or
+    /// [`Self::promise_break`]. Where several servers receive it, the first
     /// resolution wins. Where the write fails, it does nothing.
-    pub fn ask(&mut self, port: impl Into<Key>) -> Result<(), Error> {
+    pub fn port_ask(&mut self, port: impl Into<Key>) -> Result<(), Error> {
         let value = self.peek()?.clone();
         let values = self.runtime.assembler.values();
         values.require(&value)?;
@@ -2273,13 +2562,13 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// this transaction's own writes. When fewer than `n` are there, it is
     /// pushback: within a cut it returns [`ErrorKind::Retry`], which the
     /// outermost cut waits out, and outside one it waits until they are.
-    pub fn read(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
+    pub fn port_read(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
         self.read_port(port.into(), n, true)
     }
 
-    /// As [`Self::read`], but returns [`ErrorKind::Retry`] outside a cut too,
+    /// As [`Self::port_read`], but returns [`ErrorKind::Retry`] outside a cut too,
     /// rather than waiting.
-    pub fn try_read(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
+    pub fn port_try_read(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
         self.read_port(port.into(), n, false)
     }
 
@@ -2320,7 +2609,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// How many values this machine's input `port` holds beyond what this
     /// transaction took. Within a cut the count is a read of the port, so a
     /// cut that fails after counting waits for it to change.
-    pub fn available(&mut self, port: impl Into<Key>) -> usize {
+    pub fn port_available(&mut self, port: impl Into<Key>) -> usize {
         let address = PortAddress {
             machine: self.path.clone(),
             port: port.into(),
@@ -2344,7 +2633,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// feeds the child; from a child's output to its own input, collects
     /// from the child. The wire is this machine's, and takes effect as a
     /// write does: at once outside a cut, with the outermost cut within one.
-    pub fn wire(&mut self, source: Endpoint, destination: Endpoint) -> Result<(), Error> {
+    pub fn wire_add(&mut self, source: Endpoint, destination: Endpoint) -> Result<(), Error> {
         let wire = Wire {
             source: source.0,
             destination: destination.0,
@@ -2357,10 +2646,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Removes the wire from `source` to `destination` that this machine
-    /// owns, if there is one, as [`Self::wire`] adds it. Removing a wire of
+    /// owns, if there is one, as [`Self::wire_add`] adds it. Removing a wire of
     /// the default diagnostics wiring, such as this machine's pass-through
     /// of its diagnostics input, keeps it removed until it is wired again.
-    pub fn unwire(&mut self, source: Endpoint, destination: Endpoint) -> Result<(), Error> {
+    pub fn wire_del(&mut self, source: Endpoint, destination: Endpoint) -> Result<(), Error> {
         let wire = Wire {
             source: source.0,
             destination: destination.0,
@@ -2376,19 +2665,19 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// transaction took, with how many, in port order. Within a cut it reads
     /// all of the machine's inputs at once, so a cut that finds nothing and
     /// retries wakes when any input receives a value.
-    pub fn pending(&mut self) -> Vec<(Key, usize)> {
+    pub fn port_pending(&mut self) -> Vec<(Key, usize)> {
         let machine = self.path.clone();
         self.port_view(|ports| ports.pending(&machine))
     }
 
     /// Whether a wire leads into this machine's input `port`.
-    pub fn input_connected(&mut self, port: impl Into<Key>) -> bool {
+    pub fn port_input_connected(&mut self, port: impl Into<Key>) -> bool {
         let (machine, port) = (self.path.clone(), port.into());
         self.port_view(|ports| ports.input_connected(&machine, &port))
     }
 
     /// Whether a wire leads from this machine's output `port`.
-    pub fn output_connected(&mut self, port: impl Into<Key>) -> bool {
+    pub fn port_output_connected(&mut self, port: impl Into<Key>) -> bool {
         let (machine, port) = (self.path.clone(), port.into());
         self.port_view(|ports| ports.output_connected(&machine, &port))
     }
@@ -2396,7 +2685,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// The wiring this machine owns: its own wires, with the default rule
     /// that applies to it and the default wires it removed. The wires its
     /// parent owns to and from it are the parent's.
-    pub fn wiring(&mut self) -> MachineWiring {
+    pub fn wire_list(&mut self) -> MachineWiring {
         let machine = self.path.clone();
         let owned = self.port_view(|ports| ports.owned_wiring(&machine));
         let pairs = |wires: Vec<Wire>| {
@@ -2421,7 +2710,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// below the root, that input on to its own output. Off, the machine
     /// starts from its own wires alone, and a wire of the rule's shape that
     /// it adds is its own. [`Self::clear`] turns the rule back on.
-    pub fn set_default_wiring(&mut self, enabled: bool) -> Result<(), Error> {
+    pub fn wire_defaults(&mut self, enabled: bool) -> Result<(), Error> {
         let owner = self.path.clone();
         self.port_action(|ports| {
             ports.set_defaults(owner.clone(), enabled);
@@ -2883,23 +3172,30 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// store takes it.
     /// Pops the top value into local state at `key`, replacing what was
     /// there.
-    pub fn set(&mut self, key: impl Into<Key>) -> Result<(), Error> {
+    pub fn local_set(&mut self, key: impl Into<Key>) -> Result<(), Error> {
         let value = self.pop()?;
         self.state.locals.insert(key.into(), value);
         Ok(())
     }
 
-    /// Pushes the local state at `key`.
-    pub fn get(&mut self, key: impl Into<Key>) -> Result<(), Error> {
-        let key = key.into();
-        let value = self
-            .state
-            .locals
-            .get(&key)
-            .ok_or_else(|| Error::new(format!("the machine holds no state at {key:?}")))?
-            .clone();
+    /// Pushes the local state at `key`, or `{}` where the machine holds
+    /// none there.
+    pub fn local_get(&mut self, key: impl Into<Key>) {
+        let value = match self.state.locals.get(&key.into()) {
+            Some(value) => value.clone(),
+            None => self.runtime.assembler.values().empty_dict(),
+        };
         self.push(value);
-        Ok(())
+    }
+
+    /// Moves the local state at `key` to the stack, or pushes `{}` where the
+    /// machine holds none there: the twin of [`Self::local_set`].
+    pub fn local_take(&mut self, key: impl Into<Key>) {
+        let value = match self.state.locals.remove(&key.into()) {
+            Some(value) => value,
+            None => self.runtime.assembler.values().empty_dict(),
+        };
+        self.push(value);
     }
 
     /// Returns the machine to its initial state: an empty stack, stash,
@@ -3020,6 +3316,100 @@ fn underflow(what: &str, needed: usize, held: usize) -> Error {
     Error::new(format!(
         "the machine's {what} holds {held} values, and the operation needs {needed}"
     ))
+}
+
+/// `keys`, which must differ.
+fn distinct_keys<K: Into<Key>>(keys: impl IntoIterator<Item = K>) -> Result<Vec<Key>, Error> {
+    let keys = keys.into_iter().map(Into::into).collect::<Vec<Key>>();
+    for (index, key) in keys.iter().enumerate() {
+        if keys[..index].contains(key) {
+            return Err(Error::new(format!(
+                "a dict's keys must differ, and `{key:?}` repeats"
+            )));
+        }
+    }
+    Ok(keys)
+}
+
+/// `path`, which must not be empty.
+fn nonempty_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Result<Vec<Key>, Error> {
+    let path = key_path(path);
+    if path.is_empty() {
+        return Err(Error::new("a path names at least one key"));
+    }
+    Ok(path)
+}
+
+/// Glam's undefined value, `{}`.
+fn undefined(_access: &RuntimeValueAccess<'_>) -> CoreValue {
+    CoreValue::Dict(Dict::new_sync())
+}
+
+/// The lazy application of `builtin` to `arguments`.
+fn builtin_call_in<const N: usize>(
+    access: &RuntimeValueAccess<'_>,
+    builtin: Builtin,
+    arguments: [CoreValue; N],
+) -> CoreValue {
+    CoreValue::Lazy(crate::core::LazyValue::from_application_in(
+        access,
+        CoreValue::Builtin(builtin),
+        Arc::from(arguments),
+    ))
+}
+
+/// The lazy member of `dict` at `path`.
+fn path_access_in(access: &RuntimeValueAccess<'_>, dict: &CoreValue, path: &[Key]) -> CoreValue {
+    CoreValue::Lazy(crate::core::LazyValue::from_access_in(
+        access,
+        path.iter()
+            .cloned()
+            .map(crate::core_net::CoreDataKey::Key)
+            .collect::<Vec<_>>()
+            .into(),
+        Arc::from([access.duplicate_value(dict)]),
+    ))
+}
+
+/// `dict` with `item` at `path`, lazily; `{}` removes what is there.
+fn dict_update_in(
+    access: &RuntimeValueAccess<'_>,
+    path: &[Key],
+    item: CoreValue,
+    dict: CoreValue,
+) -> CoreValue {
+    let path = CoreValue::List(crate::core::List::from_values(
+        path.iter().map(|key| key.to_value_in(access)).collect(),
+    ));
+    builtin_call_in(access, Builtin::DictUpdate, [path, item, dict])
+}
+
+/// A shuffle's pattern, `"abc-cba"`: the input names' count, and for each
+/// output the index of the input it copies.
+fn shuffle_pattern(pattern: &str) -> Result<(Vec<u8>, Vec<usize>), Error> {
+    let malformed = |reason: &str| Error::new(format!("shuffle pattern `{pattern}` {reason}"));
+    let (inputs, outputs) = pattern
+        .split_once('-')
+        .ok_or_else(|| malformed("separates inputs from outputs with `-`"))?;
+    let inputs = inputs.bytes().collect::<Vec<_>>();
+    for (index, name) in inputs.iter().enumerate() {
+        if !name.is_ascii_alphabetic() {
+            return Err(malformed("names its inputs with ASCII letters"));
+        }
+        if inputs[..index].contains(name) {
+            return Err(malformed("binds each name once"));
+        }
+    }
+    let outputs = outputs
+        .bytes()
+        .map(|name| {
+            inputs
+                .iter()
+                .position(|input| *input == name)
+                .ok_or_else(|| malformed("uses only names its inputs bind"))
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok((inputs, outputs))
 }
 
 fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {

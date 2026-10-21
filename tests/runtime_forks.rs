@@ -21,9 +21,9 @@ fn a_turn_forks_descendants_and_joins_them() {
             let forks = (0..4)
                 .map(|index| {
                     m.fork(format!("worker{index}"), move |w| {
-                        w.push_int(index);
-                        w.set("index")?;
-                        w.push_int(index * 2);
+                        w.int_push(index);
+                        w.local_set("index")?;
+                        w.int_push(index * 2);
                         Ok(())
                     })
                 })
@@ -34,7 +34,7 @@ fn a_turn_forks_descendants_and_joins_them() {
             let mut doubled = 0;
             for index in 0..4 {
                 m.take(format!("worker{index}"), 1)?;
-                doubled += m.pop_int()?;
+                doubled += m.int_pop()?;
             }
             Ok(doubled)
         })
@@ -43,8 +43,8 @@ fn a_turn_forks_descendants_and_joins_them() {
     for index in 0..4 {
         let kept = rt
             .run(["parent".to_owned(), format!("worker{index}")], |w| {
-                w.get("index")?;
-                w.pop_int()
+                w.local_get("index");
+                w.int_pop()
             })
             .expect("a joined machine keeps what its fork did");
         assert_eq!(kept, index);
@@ -58,12 +58,12 @@ fn a_fork_may_borrow_what_outlives_the_turn() {
     let count = rt
         .run("m", |m| {
             let fork = m.fork("counter", |c| {
-                c.push_int(words.len() as i64);
+                c.int_push(words.len() as i64);
                 Ok(())
             })?;
             m.join(fork)?;
             m.take("counter", 1)?;
-            m.pop_int()
+            m.int_pop()
         })
         .expect("the turn should succeed");
     assert_eq!(count, 4);
@@ -76,7 +76,7 @@ fn a_forked_machine_is_unreachable_until_its_join() {
     rt.run("m", |m| {
         let fork = m.fork("busy", move |b| {
             released.recv().expect("the turn releases the fork");
-            b.push_int(1);
+            b.int_push(1);
             Ok(())
         })?;
         for error in [
@@ -96,7 +96,7 @@ fn a_forked_machine_is_unreachable_until_its_join() {
         release.send(()).expect("the fork waits");
         m.join(fork)?;
         m.take("busy", 1)?;
-        assert_eq!(m.pop_int()?, 1, "the joined machine is back");
+        assert_eq!(m.int_pop()?, 1, "the joined machine is back");
 
         let below = m.fork(["outer", "inner"], |_| Ok(()))?;
         let error = m
@@ -115,22 +115,22 @@ fn unjoined_forks_join_at_the_end_of_their_scope_or_turn() {
     rt.run("m", |m| {
         m.scope(|m| {
             let _ = m.fork("scoped", |s| {
-                s.push_int(1);
+                s.int_push(1);
                 Ok(())
             })?;
             Ok(())
         })?;
         m.take("scoped", 1)?;
-        assert_eq!(m.pop_int()?, 1, "the scope joined its fork");
+        assert_eq!(m.int_pop()?, 1, "the scope joined its fork");
         let _ = m.fork("unjoined", |u| {
-            u.push_int(2);
+            u.int_push(2);
             Ok(())
         })?;
         Ok(())
     })
     .expect("the turn should succeed");
     let left = rt
-        .run(["m", "unjoined"], |u| u.pop_int())
+        .run(["m", "unjoined"], |u| u.int_pop())
         .expect("the turn joined its fork");
     assert_eq!(left, 2);
 }
@@ -141,8 +141,8 @@ fn a_panic_in_a_fork_resumes_at_its_join_and_marks_each_machine_it_unwinds() {
     let panicked = catch_unwind(AssertUnwindSafe(|| {
         rt.run("m", |m| {
             let fork = m.fork("p", |p| -> Result<(), Error> {
-                p.push_int(5);
-                p.set("before")?;
+                p.int_push(5);
+                p.local_set("before")?;
                 panic!("the fork panics");
             })?;
             m.join(fork)
@@ -155,8 +155,8 @@ fn a_panic_in_a_fork_resumes_at_its_join_and_marks_each_machine_it_unwinds() {
     );
     let kept = rt
         .recover(["m", "p"], |p| {
-            p.get("before")?;
-            p.pop_int()
+            p.local_get("before");
+            p.int_pop()
         })
         .expect("the machine recovers after a panic");
     assert_eq!(kept, 5, "a fork's changes stay when it unwinds");
@@ -188,7 +188,7 @@ fn a_join_returns_the_fork_s_outcome_and_its_machine_stays_in_error() {
     let mut rt = runtime();
     rt.run("m", |m| {
         let fork = m.fork("f", |f| {
-            f.push_int(7);
+            f.int_push(7);
             Err(Error::new("the fork errs"))
         })?;
         let error = m.join(fork).expect_err("the join returns the fork's error");
@@ -204,7 +204,7 @@ fn a_join_returns_the_fork_s_outcome_and_its_machine_stays_in_error() {
             assert!(error.to_string().contains("in error"), "{error}");
         }
         assert!(m.failed("f")?, "observing the error recovered nothing");
-        let left = m.recover("f", |f| f.pop_int())?;
+        let left = m.recover("f", |f| f.int_pop())?;
         assert_eq!(left, 7, "the fork's machine is as its turn left it");
         m.run("f", |_| Ok(()))?;
 
@@ -262,7 +262,7 @@ fn implicit_joins_propagate_the_first_error_in_join_order() {
 fn the_walk_reports_each_machine_below_a_path_with_its_status() {
     let mut rt = runtime();
     rt.run("m", |m| {
-        m.push_int(1);
+        m.int_push(1);
         m.give("b", 1)?;
         let _ = m.fork(["a", "x"], |_| -> Result<(), Error> {
             Err(Error::new("x errs"))
@@ -322,12 +322,12 @@ fn a_fork_s_thread_may_be_configured() {
     let name = rt
         .run("m", |m| {
             let fork = m.fork_with(thread::Builder::new().name("named".to_owned()), "c", |c| {
-                c.push_text(thread::current().name().unwrap_or("unnamed"));
+                c.text_push(thread::current().name().unwrap_or("unnamed"));
                 Ok(())
             })?;
             m.join(fork)?;
             m.take("c", 1)?;
-            m.pop_text()
+            m.text_pop()
         })
         .expect("the turn should succeed");
     assert_eq!(name, "named");

@@ -15,7 +15,7 @@ fn runtime() -> Runtime {
 fn heap_int(rt: &mut Runtime, key: &str) -> i64 {
     rt.run("reader", |m| {
         m.heap_get([key]);
-        m.pop_int()
+        m.int_pop()
     })
     .expect("the heap should hold an integer there")
 }
@@ -23,7 +23,7 @@ fn heap_int(rt: &mut Runtime, key: &str) -> i64 {
 fn set_ints(rt: &mut Runtime, entries: &[(&str, i64)]) {
     rt.run("setup", |m| {
         for (key, value) in entries {
-            m.push_int(*value);
+            m.int_push(*value);
             m.heap_set([*key])?;
         }
         Ok(())
@@ -41,9 +41,9 @@ fn copy_add(
 ) -> impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static {
     move |f| {
         f.heap_get([from]);
-        let value = f.pop_int()?;
+        let value = f.int_pop()?;
         read.send(()).expect("the cut listens");
-        f.push_int(value + add);
+        f.int_push(value + add);
         f.heap_set([to])
     }
 }
@@ -53,29 +53,29 @@ fn forks_within_a_cut_join_its_transaction() {
     let mut rt = runtime();
     rt.run("m", |m| {
         m.cut(|m| {
-            m.push_int(1);
+            m.int_push(1);
             m.heap_set(["before"])?;
             let left = m.fork("left", |l| {
                 l.heap_get(["before"]);
-                let before = l.pop_int()?;
-                l.push_int(before + 10);
+                let before = l.int_pop()?;
+                l.int_push(before + 10);
                 l.heap_set(["left"])?;
                 let inner = l.fork("inner", |i| {
-                    i.push_int(3);
+                    i.int_push(3);
                     i.heap_set(["inner"])
                 })?;
                 l.join(inner)
             })?;
             let right = m.fork("right", |r| {
-                r.push_int(20);
+                r.int_push(20);
                 r.heap_set(["right"])?;
-                r.push_int(5);
-                r.set("mark")
+                r.int_push(5);
+                r.local_set("mark")
             })?;
             m.join(left)?;
             m.join(right)?;
             m.heap_get(["left"]);
-            assert_eq!(m.pop_int()?, 11, "the cut sees what its forks merged");
+            assert_eq!(m.int_pop()?, 11, "the cut sees what its forks merged");
             Ok(())
         })
     })
@@ -91,8 +91,8 @@ fn forks_within_a_cut_join_its_transaction() {
     );
     let mark = rt
         .run(["m", "right"], |r| {
-            r.get("mark")?;
-            r.pop_int()
+            r.local_get("mark");
+            r.int_pop()
         })
         .expect("the joined machine keeps its state");
     assert_eq!(mark, 5);
@@ -104,16 +104,20 @@ fn a_failed_cut_undoes_its_forks_which_join_at_its_end() {
     rt.run("m", |m| {
         let failed: Result<(), Error> = m.cut(|m| {
             let _ = m.fork("child", |c| {
-                c.push_int(1);
+                c.int_push(1);
                 c.heap_set(["x"])?;
-                c.push_int(2);
-                c.set("mark")
+                c.int_push(2);
+                c.local_set("mark")
             })?;
             Err(Error::new("the cut errs"))
         });
         assert!(failed.is_err());
         m.run("child", |c| {
-            assert!(c.get("mark").is_err(), "the cut undid the fork's machine");
+            c.local_get("mark");
+            assert!(
+                c.dict_unpack(Vec::<&str>::new()).is_ok(),
+                "the cut undid the fork's machine, which holds `{{}}` at `mark`"
+            );
             Ok(())
         })
     })
@@ -175,13 +179,13 @@ fn a_fork_conflicts_with_what_its_cut_wrote_after_the_fork() {
             attempts.set(attempts.get() + 1);
             // The cut's own write before the fork covers its later reads,
             // but not the fork's: the fork depends on it.
-            m.push_int(2);
+            m.int_push(2);
             m.heap_set(["x"])?;
             let (read, have_read) = mpsc::channel();
             let fork = m.fork("f", copy_add("x", "seen", 0, read))?;
             have_read.recv().expect("the fork reads");
             if attempts.get() == 1 {
-                m.push_int(3);
+                m.int_push(3);
                 m.heap_set(["x"])?;
             }
             // An error that the body swallows still runs the cut again.
@@ -202,13 +206,13 @@ fn a_fork_s_hooks_run_on_its_machine() {
         m.cut(|m| {
             let log = Arc::clone(&log);
             let fork = m.fork("f", move |f| {
-                f.push_text("forked");
-                f.set("name")?;
+                f.text_push("forked");
+                f.local_set("name")?;
                 f.on_commit(0, move |f| {
-                    f.get("name").expect("the fork's machine holds its name");
+                    f.local_get("name");
                     log.lock()
                         .unwrap()
-                        .push(f.pop_text().expect("the name is text"));
+                        .push(f.text_pop().expect("the name is text"));
                 })
             })?;
             m.join(fork)
@@ -227,7 +231,7 @@ fn a_failed_cut_waits_on_what_its_forks_read() {
         // Outside the cut, a writer waits for the cut to fail.
         let writer = root.fork("writer", move |w| {
             blocked.recv().expect("the cut fails first");
-            w.push_int(5);
+            w.int_push(5);
             w.heap_set(["ready"])
         })?;
         let ready = root.cut(|m| {
@@ -261,12 +265,12 @@ fn a_fork_within_a_cut_borrows_what_the_turn_declared_before_it() {
             let words = ["declared", "in", "the", "turn"];
             // Made at the turn's level, it joins there, after the cut.
             let outside = m.fork("outside", |o| {
-                o.push_int(1);
+                o.int_push(1);
                 Ok(())
             })?;
             m.cut(|m| {
                 let fork = m.fork("inside", |i| {
-                    i.push_int(words.len() as i64);
+                    i.int_push(words.len() as i64);
                     Ok(())
                 })?;
                 m.join(fork)
@@ -274,7 +278,7 @@ fn a_fork_within_a_cut_borrows_what_the_turn_declared_before_it() {
             m.join(outside)?;
             m.take("inside", 1)?;
             m.take("outside", 1)?;
-            Ok(m.pop_int()? + m.pop_int()?)
+            Ok(m.int_pop()? + m.int_pop()?)
         })
         .expect("the turn should succeed");
     assert_eq!(total, 5);
