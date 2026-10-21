@@ -168,9 +168,7 @@ impl PortState {
             Some(buffer) => (buffer.head, buffer.next()),
             None => (0, 0),
         };
-        head == cursor.start
-            && cursor.next <= next
-            && (!cursor.observed_tail || next == cursor.next)
+        head == cursor.start && cursor.next <= next && cursor.tail.is_none_or(|tail| next == tail)
     }
 
     /// Applies a validated journal, returning whether anything changed.
@@ -237,13 +235,15 @@ fn is_default(diagnostics: bool, owner: &[Key], wire: &Wire) -> bool {
 }
 
 /// A transaction's position in one buffer: its first sequence when the
-/// transaction first read it, the next it would claim, and whether it saw
-/// the buffer's end, so that an item added since invalidates it.
+/// transaction first read it, the next it would claim, and the buffer's end
+/// where it saw that, so that an item added since invalidates it. The end
+/// is where the buffer stood, not the claim: a count of items left
+/// unclaimed sees them, and stands while nothing joins them.
 #[derive(Clone, Debug)]
 struct PortCursor {
     start: u64,
     next: u64,
-    observed_tail: bool,
+    tail: Option<u64>,
 }
 
 #[derive(Clone)]
@@ -375,7 +375,7 @@ impl PortJournal {
         let end = buffer.as_ref().map_or(0, |buffer| buffer.next());
         let cursor = self.cursor(address, head);
         let claimed = if end - cursor.next < n as u64 {
-            cursor.observed_tail = true;
+            cursor.tail = Some(end);
             None
         } else {
             // A claim of none needs no buffer.
@@ -402,7 +402,7 @@ impl PortJournal {
             .get(address)
             .map_or((0, 0), |buffer| (buffer.head, buffer.next()));
         let cursor = self.cursor(address, head);
-        cursor.observed_tail = true;
+        cursor.tail = Some(end);
         let count = (end - cursor.next) as usize;
         let observation = cursor.clone();
         self.observe(address, observation);
@@ -437,7 +437,7 @@ impl PortJournal {
             .or_insert_with(|| PortCursor {
                 start: head,
                 next: head,
-                observed_tail: false,
+                tail: None,
             })
     }
 
@@ -448,7 +448,7 @@ impl PortJournal {
             .and_modify(|prior| {
                 debug_assert_eq!(prior.start, cursor.start);
                 prior.next = prior.next.max(cursor.next);
-                prior.observed_tail |= cursor.observed_tail;
+                prior.tail = prior.tail.max(cursor.tail);
             })
             .or_insert(cursor);
         if let Some(branch) = &self.branch {

@@ -620,3 +620,37 @@ fn the_walk_counts_port_state_as_presence() {
         "p owns wiring, though its state is empty"
     );
 }
+
+/// Fails a cut's attempt past the third, so a cut that would run again
+/// without end fails instead.
+fn bounded(attempts: &Cell<usize>) -> Result<(), Error> {
+    attempts.set(attempts.get() + 1);
+    if attempts.get() > 3 {
+        return Err(Error::new("the cut ran again with nothing changed"));
+    }
+    Ok(())
+}
+
+#[test]
+fn a_cut_that_counts_items_it_leaves_commits() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+        send(p, "a", "out", &[1, 2])?;
+        let attempts = Cell::new(0);
+        let count = p.run("b", |b| {
+            b.cut(|b| {
+                bounded(&attempts)?;
+                b.read("in", 1)?;
+                Ok(b.available("in"))
+            })
+        })?;
+        assert_eq!(
+            (count, attempts.get()),
+            (1, 1),
+            "the count stands while nothing joins the items it left"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
