@@ -1581,7 +1581,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 Ok(
                     scoped.wrap(CoreValue::PartialBuiltin(crate::core::BuiltinCall {
                         builtin: crate::core::Builtin::CompileSource,
-                        arguments: Arc::from([compiler, record]),
+                        arguments: Arc::from([
+                            compiler,
+                            record,
+                            CoreValue::Dict(crate::core::Dict::new_sync()),
+                        ]),
                     })),
                 )
             })

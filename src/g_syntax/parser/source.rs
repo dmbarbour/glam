@@ -244,6 +244,7 @@ impl<'source> StagedSourceParser<'source> {
         ) {
             Ok(environment) => environment,
             Err(error) => {
+                context.note_wait(error.wait.clone());
                 let message = error.headline("macro environment could not be selected");
                 let emission = caused_error_emission(
                     context.values(),
@@ -315,6 +316,7 @@ impl<'source> StagedSourceParser<'source> {
                     return Vec::new();
                 }
                 Err(error) => {
+                    context.note_wait(error.wait.clone());
                     self.diagnostics.push(caused_macro_compiler_diagnostic(
                         context.values(),
                         &original,
@@ -338,6 +340,7 @@ impl<'source> StagedSourceParser<'source> {
             ) {
                 Ok(run) => run,
                 Err(failure) => {
+                    context.note_wait(failure.wait().cloned());
                     let position = failure.frontier().map(|frontier| {
                         let (line, column) = work.position_at(frontier);
                         (frontier, line, column)
@@ -679,6 +682,9 @@ fn macro_frame_value(_access: &RuntimeValueAccess<'_>, frame: &OriginalMacroInvo
 struct MacroLookupFailure {
     message: String,
     cause: Option<Box<crate::api::Diagnostic>>,
+    /// The pending reply the lookup waited on, for which the compile waits
+    /// and runs again (`compile-yields-an-open-mixin`).
+    wait: Option<crate::core::ManagedPromiseRoot>,
 }
 
 impl From<String> for MacroLookupFailure {
@@ -686,6 +692,7 @@ impl From<String> for MacroLookupFailure {
         Self {
             message,
             cause: None,
+            wait: None,
         }
     }
 }
@@ -755,6 +762,7 @@ fn force_macro_lookup_value(
                     &error,
                 )
                 .map(Box::new),
+                wait: execution.awaited_reply(&error),
             }
         })
 }

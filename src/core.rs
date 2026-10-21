@@ -2114,11 +2114,12 @@ pub enum Builtin {
     /// Host-provided capability for inspecting opaque compilation origins.
     /// The constructor is exposed only through the reflection environment.
     InspectOrigin,
-    /// Compiler-private: `compile_source compiler record base self` compiles
-    /// a source record's source over a base and a self
+    /// Compiler-private: `compile_source compiler record replay base self`
+    /// compiles a source record's source over a base and a self
     /// (`compile-yields-an-open-mixin`). Partly applied to the runtime's
-    /// compiler, an opaque value, and a record `{scope, lang, source}`, it is
-    /// an open mixin. The built-in module never binds it.
+    /// compiler, an opaque value, a record `{scope, lang, source}` and `{}`,
+    /// it is an open mixin; a compile that waits on a reply applies it again
+    /// with what it learned as `replay`. The built-in module never binds it.
     CompileSource,
     /// Compiler-private: `mixin_compose outer inner base self` is
     /// `outer (inner base self) self`, so the outer mixin's definitions
@@ -2243,7 +2244,7 @@ impl Builtin {
             Self::InteractionNetBuilderFixRestore => 3,
             Self::NetArity => 2,
             Self::InspectOrigin => 1,
-            Self::CompileSource => 4,
+            Self::CompileSource => 5,
             Self::MixinCompose => 4,
             Self::MergeDuplicate => 3,
             Self::Default => 2,

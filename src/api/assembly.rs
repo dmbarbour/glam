@@ -16,19 +16,20 @@ use super::{
     ReflectionInspector, RuntimeReadiness, Value, ValueEvaluator, Values,
 };
 use crate::compiler::{
-    BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnosticEmitter, ImportCompilers,
-    ImportSite, ModuleLoadArgs, ModuleLoader, ServedImports, SourceCompiler, SourceRecord,
-    SourceRequester, import_failure,
+    BinaryFileLoader, BinaryLoadArgs, CompileCall, CompileContext, CompileDiagnosticEmitter,
+    ImportCompilers, ImportSite, ModuleLoadArgs, ModuleLoader, ServedImports, SourceCache,
+    SourceCompiler, SourceRecord, SourceRequester, import_failure,
 };
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, NetValue,
-    PromisedValue, Value as CoreValue, keys,
+    Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key,
+    LazyValue, ManagedPromiseRoot, NetValue, PromisedValue, Value as CoreValue, keys,
 };
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::evaluation::{
     EvalContext, EvaluationSession, EvaluationSessionRun, ReflectionTaskProfile,
 };
 use crate::g_syntax::compile_source;
+use crate::number::Number;
 use crate::reflection::{
     CommitResult, ConflictAnalysisStrategy, HostSnapshot, ReasoningSessionId, ReflectionEffects,
     ReflectionQueryMutation, ReflectionQueryWriter, ReflectionServices, TaskCommit,
@@ -107,6 +108,28 @@ impl CompilationExecution {
         })
     }
 
+    /// The pending reply that a compile-time evaluation halted on, where it
+    /// halted on one: a compile waits for it, then runs again
+    /// (`compile-yields-an-open-mixin`).
+    pub(crate) fn awaited_reply(&self, halt: &EvaluationHalt) -> Option<ManagedPromiseRoot> {
+        if let Some(promise) = halt.unassigned_promise_root() {
+            return Some(promise.clone());
+        }
+        let wait = halt.blocked_on()?;
+        self.awaited_dependency(&crate::evaluation::WorkDependency::Wait(wait.0))
+    }
+
+    /// The pending reply that `dependency` ultimately waits on.
+    pub(crate) fn awaited_dependency(
+        &self,
+        dependency: &crate::evaluation::WorkDependency,
+    ) -> Option<ManagedPromiseRoot> {
+        self.lookup
+            .values()
+            .work_coordinator()?
+            .awaited_promise_root(dependency)
+    }
+
     pub(crate) fn lookup_context(&self) -> &EvalContext {
         &self.lookup
     }
@@ -126,12 +149,11 @@ impl CompilationExecution {
     }
 
     fn drain(&self) -> bool {
-        let values = self.macros.values();
         let background = self
             .macros
             .for_runtime_background()
             .expect("a compilation runtime must retain its background demand domain");
-        let (background_run, macro_run) = loop {
+        let runs = loop {
             let runs = (
                 background.run_until_quiescent(),
                 self.macros.run_until_quiescent(),
@@ -144,7 +166,28 @@ impl CompilationExecution {
                 break stable;
             }
         };
-        for (scope, run) in [("background", background_run), ("session", macro_run)] {
+        self.report_runs([("background", runs.0), ("session", runs.1)])
+    }
+
+    /// Drains the macro session alone, for an execution an import revived
+    /// within an evaluation: the background domain holds the evaluation that
+    /// forced the import, so waiting for it to settle would wait on itself.
+    fn drain_session(&self) -> bool {
+        let run = loop {
+            let run = self.macros.run_until_quiescent();
+            if self.macros.run_until_quiescent() == run {
+                break run;
+            }
+        };
+        self.report_runs([("session", run)])
+    }
+
+    /// Reports what draining left: failed tasks, and a scheduler that
+    /// became quiescent or deadlocked with work unfinished. Returns whether
+    /// macro reasoning failed.
+    fn report_runs<const N: usize>(&self, runs: [(&str, EvaluationSessionRun); N]) -> bool {
+        let values = self.macros.values();
+        for (scope, run) in runs {
             let (kind, report) = match run {
                 EvaluationSessionRun::Complete(report) => (None, report),
                 EvaluationSessionRun::Quiescent(report) => (Some("became quiescent"), report),
@@ -503,11 +546,13 @@ impl FrontEnd {
 }
 
 /// An import site's provenance, for its compile's trace: its importer's
-/// trace, and the request and namespace the site wrote.
+/// trace, and the request and namespace the site wrote; and its importer's
+/// source cache, which a compile forced while the importer runs shares.
 #[derive(Clone)]
 pub(crate) struct ServedSite {
     parent: Arc<CompilationTrace>,
     import: Arc<ImportSite>,
+    sources: Weak<SourceCache>,
 }
 
 /// A served source's label: its location's, or a script's.
@@ -1475,7 +1520,7 @@ impl Assembler {
             ),
         };
         let result = compile(execution.clone());
-        if revived && execution.drain() {
+        if revived && execution.drain_session() {
             return Err(failure("encountered a macro reasoning failure".to_owned()));
         }
         result
@@ -1509,7 +1554,7 @@ impl Assembler {
         execution: Weak<CompilationExecution>,
     ) -> SourceCompiler {
         let assembler = self.deferred();
-        SourceCompiler(Arc::new(move |record, base, self_value| {
+        SourceCompiler(Arc::new(move |record, call| {
             let subject = match &site {
                 Some(site) => format!("local import `{}`", site.import.request),
                 None => format!("source `{}`", record_label(&record)),
@@ -1524,7 +1569,7 @@ impl Assembler {
             };
             let session = Arc::new(Mutex::new(Vec::new()));
             assembler.compile_in_execution(&session, &execution, &failure, |execution| {
-                assembler.compile_served(record, base, self_value, site.clone(), execution)
+                assembler.compile_served(record, call, site.clone(), execution)
             })
         }))
     }
@@ -1557,13 +1602,15 @@ impl Assembler {
         })
     }
 
-    /// Compiles a served record's source over a base and a self, on the
-    /// thread that forces it.
+    /// Compiles a served record's source for one application, on the thread
+    /// that forces it. Where a compile-time evaluation waited on a reply, the
+    /// attempt yields what waits for it and compiles again, with what the
+    /// attempt learned (`compile-yields-an-open-mixin`); its diagnostics go
+    /// with it.
     fn compile_served(
         &self,
         record: SourceRecord,
-        base: RuntimeValueRoot,
-        self_value: RuntimeValueRoot,
+        call: CompileCall,
         site: Option<ServedSite>,
         execution: Arc<CompilationExecution>,
     ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
@@ -1587,39 +1634,72 @@ impl Assembler {
         };
         let source = Arc::new(SourceArtifact::new(record.source.clone(), identity));
         let namespace = record.scope.namespace.clone();
+        let (invocation, replayed) = self.replayed(&call.replay);
+        let invocation = invocation.unwrap_or_else(|| self.next_compilation_invocation());
+        // A compile forced while its importer runs shares the importer's
+        // cache, so that the importer, compiling again, asks for nothing
+        // this compile asked for.
+        let sources = match site.as_ref().and_then(|site| site.sources.upgrade()) {
+            Some(shared) => {
+                let mut cached = shared.lock().unwrap_or_else(PoisonError::into_inner);
+                for (key, source) in replayed {
+                    if !cached.iter().any(|(asked, _)| *asked == key) {
+                        cached.push((key, source));
+                    }
+                }
+                drop(cached);
+                shared
+            }
+            None => Arc::new(Mutex::new(replayed)),
+        };
         let trace = Arc::new(match &site {
             Some(site) => CompilationTrace::imported(
-                self.next_compilation_invocation(),
+                invocation,
                 &source,
                 namespace.clone(),
                 site.parent.clone(),
                 site.import.request.clone(),
                 site.import.extends.clone(),
             ),
-            None => CompilationTrace::root(
-                self.next_compilation_invocation(),
-                &source,
-                namespace.clone(),
-            ),
+            None => CompilationTrace::root(invocation, &source, namespace.clone()),
         });
         let had_errors = Arc::new(AtomicBool::new(false));
-        let compilers = self.import_compilers(trace.clone(), Arc::downgrade(&execution));
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let compilers = self.import_compilers(
+            trace.clone(),
+            Arc::downgrade(&execution),
+            Arc::downgrade(&sources),
+        );
         let context =
             CompileContext::from_module_path_with_values(values.clone(), namespace.iter().cloned())
                 .with_importer_source(source.clone())
                 .with_compilation_trace(trace.clone())
-                .with_prior_defs_root(base)
-                .with_final_defs_root(self_value)
+                .with_prior_defs_root(call.base.clone())
+                .with_final_defs_root(call.self_value.clone())
                 .with_served_imports(ServedImports {
                     location: record.scope.location.clone(),
                     compilers,
                     requester: self.source_requester(),
+                    sources: sources.clone(),
                 })
                 .with_compilation_execution(execution)
-                .with_diagnostic_emitter(
-                    self.served_diagnostic_emitter(trace.clone(), had_errors.clone()),
-                );
+                .with_diagnostic_emitter(self.served_diagnostic_emitter(
+                    trace.clone(),
+                    had_errors.clone(),
+                    held.clone(),
+                ));
         let definitions = front_end.compile(source.bytes(), &context);
+        if let Some(reply) = context.take_wait() {
+            let sources = sources
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clone();
+            return Ok(self.compile_again(call, reply, invocation, sources));
+        }
+        for diagnostic in std::mem::take(&mut *held.lock().unwrap_or_else(PoisonError::into_inner))
+        {
+            self.record_diagnostic(diagnostic);
+        }
         if had_errors.load(Ordering::Relaxed) {
             return Err(failure(
                 format!("`{label}` failed to compile"),
@@ -1630,21 +1710,104 @@ impl Assembler {
         Ok(definitions)
     }
 
+    /// What earlier attempts of a compile learned, from its `replay`
+    /// argument, `{invocation, sources}`: its invocation, and the sources it
+    /// asked for, by key. The runtime builds that argument, so it is data
+    /// whose outer dicts are evaluated.
+    fn replayed(
+        &self,
+        replay: &RuntimeValueRoot,
+    ) -> (
+        Option<CompilationInvocationId>,
+        Vec<(Key, RuntimeValueRoot)>,
+    ) {
+        self.core_values().with_boundary_access(|access| {
+            replay
+                .with_core(&access, |replay| {
+                    let CoreValue::Dict(replay) = replay else {
+                        return (None, Vec::new());
+                    };
+                    let invocation = match replay.get(&keys::INVOCATION) {
+                        Some(CoreValue::Number(number)) => number
+                            .to_u64_if_integer()
+                            .filter(|id| *id != 0)
+                            .map(CompilationInvocationId::new),
+                        _ => None,
+                    };
+                    let sources = match replay.get(&keys::SOURCES) {
+                        Some(CoreValue::Dict(sources)) => sources
+                            .iter()
+                            .map(|(key, source)| {
+                                (
+                                    key.clone(),
+                                    access.root_runtime_value(access.duplicate_value(source)),
+                                )
+                            })
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                    (invocation, sources)
+                })
+                .expect("a compile's replay belongs to its runtime")
+        })
+    }
+
+    /// `seq reply (compile_source compiler record replay base self)`: waits
+    /// for the reply, then compiles again, with what this attempt learned.
+    fn compile_again(
+        &self,
+        call: CompileCall,
+        reply: ManagedPromiseRoot,
+        invocation: CompilationInvocationId,
+        sources: Vec<(Key, RuntimeValueRoot)>,
+    ) -> RuntimeValueRoot {
+        self.core_values().construct_runtime_value_root(|access| {
+            let sources = sources
+                .iter()
+                .fold(Dict::new_sync(), |dict, (key, source)| {
+                    dict.insert(key.clone(), source.clone_core_with(access))
+                });
+            let replay = Dict::new_sync()
+                .insert(
+                    keys::INVOCATION.clone(),
+                    CoreValue::Number(Number::from_u64(invocation.get())),
+                )
+                .insert(keys::SOURCES.clone(), CoreValue::Dict(sources));
+            let again = CoreValue::Lazy(LazyValue::from_builtin_in(
+                access,
+                BuiltinCall {
+                    builtin: Builtin::CompileSource,
+                    arguments: Arc::from([
+                        call.compiler.clone_core_with(access),
+                        call.record.clone_core_with(access),
+                        CoreValue::Dict(replay),
+                        call.base.clone_core_with(access),
+                        call.self_value.clone_core_with(access),
+                    ]),
+                },
+            ));
+            let reply = CoreValue::Promised(PromisedValue::from_root(&reply, access));
+            CoreValue::builtin_call_in(access, Builtin::Seq, vec![reply, again])
+        })
+    }
+
     /// A compiler for each import site of the compilation `trace` records.
     fn import_compilers(
         &self,
         trace: Arc<CompilationTrace>,
         execution: Weak<CompilationExecution>,
+        sources: Weak<SourceCache>,
     ) -> ImportCompilers {
         let assembler = self.deferred();
         Arc::new(move |import| {
             let site = ServedSite {
                 parent: trace.clone(),
                 import: Arc::new(import),
+                sources: sources.clone(),
             };
             match assembler.upgrade() {
                 Some(assembler) => assembler.source_compiler(Some(site), execution.clone()),
-                None => SourceCompiler(Arc::new(|_, _, _| {
+                None => SourceCompiler(Arc::new(|_, _| {
                     Err(Arc::new(EvaluationFailure::message(
                         "an import cannot compile after its assembler was dropped",
                     )))
@@ -1815,23 +1978,24 @@ impl Assembler {
             .map_err(|error| self.evaluation_error(error))
     }
 
-    /// Publishes a served compile's diagnostics where the runtime's own go
-    /// (`compile-yields-an-open-mixin`); nothing collects them for a caller.
+    /// Holds a served compile's diagnostics for its attempt, which publishes
+    /// them where the runtime's own go once it completes, or drops them
+    /// where it waits and compiles again (`compile-yields-an-open-mixin`).
     fn served_diagnostic_emitter(
         &self,
         trace: Arc<CompilationTrace>,
         had_errors: Arc<AtomicBool>,
+        held: Arc<Mutex<Vec<Diagnostic>>>,
     ) -> CompileDiagnosticEmitter {
-        let assembler = self.deferred();
+        let values = self.values();
         Arc::new(move |severity, message| {
             if severity == Severity::Error {
                 had_errors.store(true, Ordering::Relaxed);
             }
-            if let Some(assembler) = assembler.upgrade() {
-                let diagnostic =
-                    Diagnostic::from_compile(assembler.values().core(), &trace, severity, &message);
-                assembler.record_diagnostic(diagnostic);
-            }
+            let diagnostic = Diagnostic::from_compile(values.core(), &trace, severity, &message);
+            held.lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .push(diagnostic);
         })
     }
 

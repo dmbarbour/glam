@@ -39,6 +39,7 @@ protocol_key!(PATH, "path");
 protocol_key!(PACKAGE, "package");
 protocol_key!(FOLDER, "folder");
 protocol_key!(SCOPE, "scope");
+protocol_key!(SOURCES, "sources");
 protocol_key!(LANG, "lang");
 protocol_key!(EXTENDS, "extends");
 

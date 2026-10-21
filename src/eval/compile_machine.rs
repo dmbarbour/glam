@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use glam_gc::Visitor;
 
-use crate::compiler::{SourceCompiler, SourceRecord};
+use crate::compiler::{CompileCall, SourceCompiler, SourceRecord};
 use crate::core::{
     EvaluationFailure, HostCallRecord, Key, LazyId, LazyValue, Value,
     trace_compatibility_value_managed_edges,
@@ -19,6 +19,8 @@ use super::builtin_machine::RegionalBuiltinPoll;
 
 pub(in crate::eval) struct RegionalCompileMachine {
     compiler: Value,
+    record_value: Value,
+    replay: Value,
     base: Value,
     self_value: Value,
     record: RegionalKeyConversion,
@@ -30,12 +32,14 @@ impl RegionalCompileMachine {
         source_owner: LazyId,
         arguments: &[Value],
     ) -> Self {
-        let [compiler, record, base, self_value] = arguments else {
-            unreachable!("compile retains four operands")
+        let [compiler, record, replay, base, self_value] = arguments else {
+            unreachable!("compile retains five operands")
         };
         let duplicate = |value| access.values().duplicate_value(value);
         Self {
             compiler: duplicate(compiler),
+            record_value: duplicate(record),
+            replay: duplicate(replay),
             base: duplicate(base),
             self_value: duplicate(self_value),
             record: RegionalKeyConversion::new(access, duplicate(record), Some(source_owner)),
@@ -58,7 +62,7 @@ impl RegionalCompileMachine {
         }
     }
 
-    /// The host call that compiles `record` over the base and self.
+    /// The host call that compiles `record` for this application.
     fn compile_in(
         &self,
         access: &EvaluationValueAccess<'_>,
@@ -77,26 +81,34 @@ impl RegionalCompileMachine {
             HostCallRecord::external_with_semantic_values(
                 "source compilation",
                 "src/eval/compile_machine.rs",
-                "the runtime's compiler and the record's data plus explicit base and self",
+                "the runtime's compiler and the record's data plus the explicit arguments",
             ),
             [
+                values.duplicate_value(&self.compiler),
+                values.duplicate_value(&self.record_value),
+                values.duplicate_value(&self.replay),
                 values.duplicate_value(&self.base),
                 values.duplicate_value(&self.self_value),
             ],
             move |captures| {
                 let mut roots = captures.into_roots().into_vec().into_iter();
-                let (Some(base), Some(self_value), None) =
-                    (roots.next(), roots.next(), roots.next())
-                else {
-                    panic!("a compilation receives exactly its base and self");
+                let mut next = || roots.next().expect("a compilation receives its arguments");
+                let call = CompileCall {
+                    compiler: next(),
+                    record: next(),
+                    replay: next(),
+                    base: next(),
+                    self_value: next(),
                 };
-                (compiler.0)(record.clone(), base, self_value)
+                (compiler.0)(record.clone(), call)
             },
         )))
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         trace_compatibility_value_managed_edges(&self.compiler, visitor);
+        trace_compatibility_value_managed_edges(&self.record_value, visitor);
+        trace_compatibility_value_managed_edges(&self.replay, visitor);
         trace_compatibility_value_managed_edges(&self.base, visitor);
         trace_compatibility_value_managed_edges(&self.self_value, visitor);
         self.record.trace_managed_edges(visitor);

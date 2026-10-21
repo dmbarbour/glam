@@ -1241,6 +1241,16 @@ impl EvaluationWorkCoordinator {
     /// producing it waits on, and so on. `None` where the chain reaches work
     /// that runs, or ends at something other than a promise.
     pub(crate) fn awaited_promise(&self, dependency: &WorkDependency) -> Option<PromiseId> {
+        self.awaited_promise_root(dependency)
+            .map(|promise| promise.id())
+    }
+
+    /// The pending promise that `dependency` ultimately waits on, following
+    /// the blocked work that would produce what it needs.
+    pub(crate) fn awaited_promise_root(
+        &self,
+        dependency: &WorkDependency,
+    ) -> Option<ManagedPromiseRoot> {
         let state = self
             .state
             .lock()
@@ -1249,7 +1259,7 @@ impl EvaluationWorkCoordinator {
         let mut seen = TrustedWorkIdSet::default();
         loop {
             if let WorkDependency::Promise(promise) = current {
-                return Some(promise.id());
+                return Some(promise.clone());
             }
             let DependencyEdge::Producer(producer) = dependency_edge_locked(&state, current) else {
                 return None;

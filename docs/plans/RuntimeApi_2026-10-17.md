@@ -630,6 +630,28 @@ handle API goes.
     Replay is the bridge to resumable compilation (`compile-resumable`).
     - Tests: an import that a macro forces while compiling (from
       `api-import-requests`), and a chain of two such imports.
+    - As built (2026-10-21):
+      - A compile-time evaluation that halts waiting reports the pending
+        reply it ultimately waits on, followed through the coordinator's
+        blocked work; the front end notes the first on its compile
+        context, and the attempt runs on, so that its other compile-time
+        requests go out too.
+      - `compile_source` takes a fifth argument, `replay`: `{}`, then
+        `{invocation, sources}`, an ordinary value the collector traces,
+        holding the compile's invocation ID and the lazy binaries it asked
+        for, by key. An attempt that waited returns `seq reply
+        (compile_source compiler record replay' base self)`, and drops
+        its diagnostics.
+      - A compile forced while its importer's attempt runs shares that
+        attempt's cache, through a weak reference its compiler holds, so
+        a chain of compile-time imports asks for each source once.
+      - A revived compilation execution drains its macro session alone,
+        not the whole background domain, which holds the evaluation that
+        forced the import (moved from `api-runtime-compile`): the test of
+        an import that background work forces, from
+        `api-import-requests`, passes.
+      - Tests: also that a compile which waited reports its diagnostics
+        once.
 18. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
     compilation builds its context from runtime-side parts, the value
     factory, the front ends, an invocation counter and a diagnostics
@@ -637,12 +659,9 @@ handle API goes.
     `SourceSystem` (L3), and macro sessions no longer revive a
     `CompilationExecution`. `DeferredAssembler` retires, but for the
     loaders that read files, which go with `api-cli-sources`.
-    - Its tests include an import that background work forces, from
-      `api-import-requests` (2026-10-21). The worker that compiles the
-      served module revives a `CompilationExecution`, whose drain waits for
-      the whole background domain, its own task included, and hangs; the
-      file loaders revive and drain alike. Without that drain the test
-      passes.
+    - The test of an import that background work forces, from
+      `api-import-requests`, landed with `api-compile-replay`, which
+      narrowed a revived execution's drain to its macro session.
 19. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).

@@ -2,7 +2,7 @@
 //! `compile-yields-an-open-mixin`): their keys, the records a compile reads,
 //! and the compiler the runtime hands to the compile builtin.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
 
@@ -211,13 +211,21 @@ pub(crate) fn source_record_in(
     )
 }
 
-/// Compiles a record's source over a base and a self, returning the
-/// module's definitions.
-pub(crate) type SourceCompile = dyn Fn(
-        SourceRecord,
-        RuntimeValueRoot,
-        RuntimeValueRoot,
-    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
+/// One application of the compile builtin: its arguments, as roots. The
+/// compiler and record rebuild the application where the compile waits and
+/// runs again; `replay` carries what earlier attempts learned,
+/// `{invocation, sources}`, or `{}` before the first.
+pub(crate) struct CompileCall {
+    pub(crate) compiler: RuntimeValueRoot,
+    pub(crate) record: RuntimeValueRoot,
+    pub(crate) replay: RuntimeValueRoot,
+    pub(crate) base: RuntimeValueRoot,
+    pub(crate) self_value: RuntimeValueRoot,
+}
+
+/// Compiles a record's source for one application, returning the module's
+/// definitions, or what waits on a reply and then compiles again.
+pub(crate) type SourceCompile = dyn Fn(SourceRecord, CompileCall) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>
     + Send
     + Sync;
 
@@ -227,10 +235,11 @@ pub(crate) type SourceCompile = dyn Fn(
 pub(crate) struct SourceCompiler(pub(crate) Arc<SourceCompile>);
 
 // SAFETY: the payload is a host closure over the assembler's deferred route,
-// a compilation trace, and a weak compilation execution. It holds no Glam
-// value, runtime root or managed pointer: the base and self it compiles over
-// arrive as roots per call, and the runtime's external-owner registry
-// retires it.
+// a compilation trace, a weak compilation execution, and a weak reference to
+// its importer's source cache, whose roots the importer's running attempt
+// owns. It holds no Glam value, runtime root or managed pointer: its
+// arguments arrive as roots per call, and the runtime's external-owner
+// registry retires it.
 unsafe impl OpaquePayloadFamily for SourceCompiler {
     const PAYLOAD_RECORD: OpaquePayloadRecord =
         OpaquePayloadRecord::external("source compiler", "src/compiler/served.rs");
@@ -266,12 +275,38 @@ pub(crate) fn import_source_in(
 }
 
 /// Where a compile's imports come from: its importer's location, a compiler
-/// for each import site, and the route for requests.
+/// for each import site, the route for requests, and the sources this
+/// compile has asked for, kept across its attempts
+/// (`compile-yields-an-open-mixin`).
 #[derive(Clone)]
 pub(crate) struct ServedImports {
     pub(crate) location: Option<SourceKey>,
     pub(crate) compilers: ImportCompilers,
     pub(crate) requester: SourceRequester,
+    pub(crate) sources: Arc<SourceCache>,
+}
+
+/// The sources a tree of compiles has asked for, by key, as lazy binaries:
+/// a compile's own, and its imports' while it runs, so that an attempt that
+/// compiles again asks for nothing twice.
+pub(crate) type SourceCache = Mutex<Vec<(Key, RuntimeValueRoot)>>;
+
+impl ServedImports {
+    /// The source at `location`, as a lazy binary: the one this compile
+    /// already asked for, or a new request.
+    pub(crate) fn source_in(&self, access: &RuntimeValueAccess<'_>, location: &SourceKey) -> Value {
+        let key = location.key();
+        let mut sources = self.sources.lock().unwrap_or_else(PoisonError::into_inner);
+        if let Some((_, source)) = sources.iter().find(|(asked, _)| *asked == key) {
+            return source.clone_core_with(access);
+        }
+        let source = import_source_in(access, self.requester.clone(), location.value_in(access));
+        sources.push((
+            key,
+            access.root_runtime_value(access.duplicate_value(&source)),
+        ));
+        source
+    }
 }
 
 /// One import site's provenance: the request as written, and the namespace

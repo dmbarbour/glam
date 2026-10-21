@@ -25,6 +25,10 @@ impl CompilationInvocationId {
         Self(id)
     }
 
+    pub(crate) fn get(self) -> u64 {
+        self.0
+    }
+
     fn value(self, _access: &RuntimeValueAccess<'_>) -> Value {
         Value::Number(Number::from_u64(self.0))
     }

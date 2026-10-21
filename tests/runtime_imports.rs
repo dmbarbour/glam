@@ -2,6 +2,8 @@
 //! binary on the root's `imports` port (`imports-are-source-requests`,
 //! `compile-yields-an-open-mixin`).
 
+use std::sync::mpsc;
+
 use glam::{Endpoint, Error, ErrorKind, Machine, Runtime, RuntimeConfig};
 
 fn runtime() -> Runtime {
@@ -340,4 +342,189 @@ fn an_inline_import_mixes_into_its_importer() {
         })
         .expect("the turn should succeed");
     assert_eq!(result, 42, "the import reads its importer's final self");
+}
+
+const PAIR_MACRO: &str = "language g0
+pair =
+  .read.sep =>>
+  .read.data >>= \\left ->
+  .read.sep =>>
+  .read.data >>= \\right ->
+  .write.text \"[\" =>>
+  .write.data left =>>
+  .write.text \",\" =>>
+  .write.data right =>>
+  .write.text \"]\"
+";
+
+/// Serves `files` until `main`'s top value, `main.g`'s result, evaluates
+/// to a list, returning its length and the requests served.
+fn serve_until_list(
+    root: &mut Machine<'_, '_>,
+    files: &[(&str, &str)],
+) -> Result<(usize, Vec<Request>), Error> {
+    let mut asked = Vec::new();
+    loop {
+        let length = root.run("main", |m| {
+            m.dup()?;
+            match m.unpack_list() {
+                Ok(length) => {
+                    m.discard(length)?;
+                    Ok(Some(length))
+                }
+                Err(error) if error.kind() == ErrorKind::Retry => {
+                    m.discard(1)?;
+                    Ok(None)
+                }
+                Err(error) => Err(error),
+            }
+        })?;
+        match length {
+            Some(length) => return Ok((length, asked)),
+            None => {
+                let served = serve(root, files)?;
+                assert!(!served.is_empty(), "a compile that waits has asked");
+                asked.extend(served);
+            }
+        }
+    }
+}
+
+#[test]
+fn a_macro_that_forces_an_import_while_compiling_waits_and_compiles_again() {
+    let files = [
+        (
+            "main.g",
+            "language g0\nimport \"macros.g\"\nresult = @pair 10 20\n",
+        ),
+        ("macros.g", PAIR_MACRO),
+    ];
+    let mut rt = runtime();
+    let (length, asked) = rt
+        .run((), |root| {
+            wire_sources(root)?;
+            root.run("main", main_result)?;
+            serve_until_list(root, &files)
+        })
+        .expect("the turn should succeed");
+    assert_eq!(length, 2);
+    assert_eq!(
+        asked,
+        [request(&["main.g"]), request(&["macros.g"])],
+        "the compile that waited asks for nothing again"
+    );
+}
+
+#[test]
+fn a_chain_of_compile_time_imports_waits_at_each() {
+    let files = [
+        (
+            "main.g",
+            "language g0\nimport \"a.g\"\nresult = @pair 3 4\n",
+        ),
+        ("a.g", "language g0\nimport \"b.g\"\nwrapped = @pair 1 2\n"),
+        ("b.g", PAIR_MACRO),
+    ];
+    let mut rt = runtime();
+    let (length, asked) = rt
+        .run((), |root| {
+            wire_sources(root)?;
+            root.run("main", main_result)?;
+            serve_until_list(root, &files)
+        })
+        .expect("the turn should succeed");
+    assert_eq!(length, 2);
+    assert_eq!(
+        asked,
+        [request(&["main.g"]), request(&["a.g"]), request(&["b.g"])]
+    );
+}
+
+/// Runs `body` on the root while a fork of the `sources` machine serves
+/// `files`, until the root writes to its `stop` input; returns what `body`
+/// returns, with the requests the server answered.
+fn serving<R>(
+    root: &mut Machine<'_, '_>,
+    files: &'static [(&'static str, &'static str)],
+    body: impl FnOnce(&mut Machine<'_, '_>) -> Result<R, Error>,
+) -> Result<(R, Vec<Request>), Error> {
+    wire_sources(root)?;
+    root.wire(Endpoint::output("stop"), Endpoint::child("sources", "stop"))?;
+    let (answered, requests) = mpsc::channel();
+    let server = root.fork("sources", move |s| {
+        loop {
+            let stopping = s.cut(|s| {
+                if s.available("stop") > 0 {
+                    return Ok(true);
+                }
+                s.read("imports", 1)?;
+                Ok(false)
+            })?;
+            if stopping {
+                return Ok(());
+            }
+            let request = answer(s, files)?;
+            answered.send(request).expect("the test keeps its receiver");
+        }
+    })?;
+    let result = body(root);
+    root.push_unit();
+    root.write("stop", 1)?;
+    root.join(server)?;
+    Ok((result?, requests.try_iter().collect()))
+}
+
+#[test]
+fn an_import_that_background_work_forces_is_served_while_a_cut_waits() {
+    static FILES: [(&str, &str); 2] = [
+        (
+            "main.g",
+            "language g0\nimport 'std\nimport \"lib.g\" as lib\neffect = seq lib.value (.r ())\nresult = anno { refl:effect } \"ready\"\n",
+        ),
+        ("lib.g", "language g0\nvalue = 5\n"),
+    ];
+    let mut rt = Runtime::open(RuntimeConfig::new().worker_threads(2))
+        .expect("a runtime with workers should open");
+    let (text, requests) = rt
+        .run((), |root| {
+            serving(root, &FILES, |root| {
+                root.run("main", |m| {
+                    m.make_dict(Vec::<&str>::new())?;
+                    package(m)?;
+                    m.source_record(["main"], ["main.g"])?;
+                    m.compile()?;
+                    m.instantiate()?;
+                    m.access("result")?;
+                    m.cut(|m| m.pop_text())
+                })
+            })
+        })
+        .expect("the turn should succeed");
+    assert_eq!(text, "ready");
+    assert_eq!(requests, [request(&["main.g"]), request(&["lib.g"])]);
+}
+
+#[test]
+fn a_compile_that_waited_reports_its_diagnostics_once() {
+    let files = [
+        (
+            "main.g",
+            "language g0\nimport \"macros.g\"\nnoise = let unused = 1 in 2\nresult = @pair 10 20\n",
+        ),
+        ("macros.g", PAIR_MACRO),
+    ];
+    let mut rt = runtime();
+    rt.run((), |root| {
+        wire_sources(root)?;
+        root.run("main", main_result)?;
+        let (length, asked) = serve_until_list(root, &files)?;
+        assert_eq!((length, asked.len()), (2, 2), "the compile waited");
+        assert_eq!(
+            root.available("diagnostics"),
+            1,
+            "the attempt that waited dropped its warning; the one that finished reported it"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
 }

@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue, Values};
 use crate::core::CoreValueFactory;
-use crate::core::{EvaluationHalt, Value};
+use crate::core::{EvaluationHalt, ManagedPromiseRoot, Value};
 use crate::diagnostic::Severity;
 use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute};
 use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
@@ -32,9 +32,21 @@ pub(in crate::g_syntax) struct MacroFailure {
     cause: Option<Diagnostic>,
     frontier: Option<usize>,
     cases: Vec<PublicValue>,
+    /// The pending reply the macro's evaluation waited on, for which the
+    /// compile waits and runs again (`compile-yields-an-open-mixin`).
+    wait: Option<ManagedPromiseRoot>,
 }
 
 impl MacroFailure {
+    pub(in crate::g_syntax) fn wait(&self) -> Option<&ManagedPromiseRoot> {
+        self.wait.as_ref()
+    }
+
+    fn waiting_on(mut self: Box<Self>, wait: Option<ManagedPromiseRoot>) -> Box<Self> {
+        self.wait = wait;
+        self
+    }
+
     pub(in crate::g_syntax) fn message(&self) -> &str {
         self.diagnostic.message()
     }
@@ -149,7 +161,10 @@ pub(in crate::g_syntax) fn run_macro_effect(
                         return Err(macro_error(
                             values,
                             "macro effect is waiting on a lazy producer unavailable to the macro demand session",
-                        ));
+                        )
+                        .waiting_on(execution.awaited_dependency(
+                            &crate::evaluation::WorkDependency::Wait(dependency.clone()),
+                        )));
                     }
                 }
             }
@@ -268,7 +283,9 @@ fn force_result(
             } else {
                 format!("macro result evaluation failed: {error}")
             };
-            macro_error(values, detail).caused_by(cause)
+            macro_error(values, detail)
+                .caused_by(cause)
+                .waiting_on(execution.awaited_reply(&error))
         })
 }
 
@@ -402,6 +419,7 @@ fn macro_error(
         cause: None,
         frontier: None,
         cases: Vec::new(),
+        wait: None,
     })
 }
 
@@ -430,12 +448,15 @@ mod owner_tests {
             cause,
             frontier,
             cases,
+            wait,
         } = failure;
         let _: &Diagnostic = diagnostic;
         // A cause is a public diagnostic, which roots its emission.
         let _: &Option<Diagnostic> = cause;
         let _: &Option<usize> = frontier;
         let _: &Vec<PublicValue> = cases;
+        // The awaited reply is a managed promise root.
+        let _: &Option<ManagedPromiseRoot> = wait;
     }
 
     fn retained_value(domain: &EffectTokenDomain<Arc<()>>) -> (PublicValue, Weak<()>) {
@@ -478,6 +499,7 @@ mod owner_tests {
             cause: None,
             frontier: Some(0),
             cases: vec![case],
+            wait: None,
         };
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_case.upgrade().is_some());

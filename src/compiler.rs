@@ -3,8 +3,8 @@ use std::sync::Arc;
 mod served;
 
 pub(crate) use served::{
-    ImportCompilers, ImportSite, ServedImports, SourceCompiler, SourceKey, SourceRecord,
-    SourceRequester, extension, import_source_in, source_record_in,
+    CompileCall, ImportCompilers, ImportSite, ServedImports, SourceCache, SourceCompiler,
+    SourceKey, SourceRecord, SourceRequester, extension, import_source_in, source_record_in,
 };
 
 use crate::api::CompilationExecution;
@@ -77,6 +77,9 @@ pub(crate) struct CompileContext {
     served: Option<ServedImports>,
     diagnostic_emitter: Option<CompileDiagnosticEmitter>,
     compilation_execution: Option<Arc<CompilationExecution>>,
+    // The first pending reply a compile-time evaluation waited on, for
+    // which the compile waits and runs again (`compile-yields-an-open-mixin`).
+    wait: Arc<std::sync::Mutex<Option<crate::core::ManagedPromiseRoot>>>,
 }
 
 #[cfg(test)]
@@ -125,6 +128,7 @@ impl CompileContext {
             served: None,
             diagnostic_emitter: None,
             compilation_execution: None,
+            wait: Arc::default(),
         }
     }
 
@@ -298,6 +302,27 @@ impl CompileContext {
         ))))
     }
 
+    /// Notes a pending reply that a compile-time evaluation waited on; the
+    /// first one noted is the one the compile waits for.
+    pub(crate) fn note_wait(&self, wait: Option<crate::core::ManagedPromiseRoot>) {
+        let Some(wait) = wait else {
+            return;
+        };
+        let mut noted = self
+            .wait
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        noted.get_or_insert(wait);
+    }
+
+    /// The reply the compile waited on, where it waited.
+    pub(crate) fn take_wait(&self) -> Option<crate::core::ManagedPromiseRoot> {
+        self.wait
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+    }
+
     pub(crate) fn emit_diagnostic(&self, severity: Severity, message: CompileDiagnostic) {
         debug_assert_eq!(message.emission.runtime_id(), self.values.runtime_id());
         if let Some(emitter) = &self.diagnostic_emitter {
@@ -434,9 +459,7 @@ impl CompileContext {
         };
         if let Some(served) = &self.served {
             return match self.served_location(access, served, &request, "binary import") {
-                Ok(location) => {
-                    import_source_in(access, served.requester.clone(), location.value_in(access))
-                }
+                Ok(location) => served.source_in(access, &location),
                 Err(failure) => failure,
             };
         }
@@ -513,7 +536,7 @@ impl CompileContext {
             extends,
         });
         let compiler = Value::Opaque(OpaqueValue::new(access.values(), Arc::new(compiler)));
-        let source = import_source_in(access, served.requester.clone(), location.value_in(access));
+        let source = served.source_in(access, &location);
         let record = source_record_in(
             access,
             Some(location.value_in(access)),
@@ -525,7 +548,13 @@ impl CompileContext {
             access,
             BuiltinCall {
                 builtin: Builtin::CompileSource,
-                arguments: Arc::from([compiler, record, prior_defs, final_defs]),
+                arguments: Arc::from([
+                    compiler,
+                    record,
+                    Value::Dict(Dict::new_sync()),
+                    prior_defs,
+                    final_defs,
+                ]),
             },
         ))
     }
@@ -662,6 +691,7 @@ mod tests {
             served: _,
             diagnostic_emitter: _,
             compilation_execution: _,
+            wait: _,
         } = context;
         let _: &Option<RuntimeValueRoot> = opaque_origin;
         let _: &RuntimeValueRoot = unavailable_origin;
