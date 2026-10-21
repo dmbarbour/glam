@@ -487,6 +487,11 @@ handle API goes.
      network is designed. Reflection's operations come when it is time,
      such as `.todo.add`, `.todo.del` and `.todo.list` (maintainer, the same
      day).
+   - Draft for discussion (2026-10-21):
+     [Reflection Model](ReflectionModel_2026-10-21.md). A reflection task
+     is a machine that runs a program, an effect value the runtime
+     interprets, beside machines that turns drive; its effects are the
+     machine's operations, and `.task.*` names child machines by key.
 15. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
    decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
    quiescent when every machine waits on input or a heap change, retrying
