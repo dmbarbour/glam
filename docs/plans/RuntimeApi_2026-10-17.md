@@ -554,13 +554,56 @@ handle API goes.
      - Fixed on the way: a cut that counted a port's items without
        claiming them all never committed, since validation compared the
        buffer's end with the cut's claims rather than with the end it saw.
-     - Open: an import that a macro forces while compiling fails ("macro
+     - An import that a macro forces while compiling fails ("macro
        environment could not be selected: evaluation is blocked"), since
-       compile-time evaluation treats a wait as an error. How a
-       compilation waits on a reply is a maintainer decision.
+       compile-time evaluation treats a wait as an error. Decided
+       (`compile-yields-an-open-mixin`, maintainer, 2026-10-21): such a
+       wait is pushback, `api-compile-replay`. The same decision keys
+       sources as `{package, path}`, so a request carries the key alone,
+       without its kind, and `api-compile-ops` replaces the shape above.
      - Moved to `api-runtime-compile`: the test of an import that a
        worker forces (see there).
-16. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
+16. `api-compile-ops` — split from `api-runtime-compile` (2026-10-21):
+    compilation as lazy machine operations
+    (`compile-yields-an-open-mixin`, maintainer, 2026-10-21). `m.compile`
+    conflated loading a file, choosing a front end, compiling with its
+    macros, closing the module's fixpoint, evaluating it and returning its
+    diagnostics.
+    - Sources are keyed `{package, path}`: the package an opaque tagged
+      value, such as `{folder: "/home/u/proj"}`, the path a list of keys
+      from it, such as `["lib", "leaf.g"]`. A request carries the key
+      alone, without its kind or any provenance, replacing the shape
+      `api-import-requests` built.
+    - `m.import_source` pops a key and pushes a lazy binary, whose forcing
+      writes the request.
+    - `m.compile` pops `{scope, lang, source}`, the scope being
+      `{location, namespace}`, and pushes an open mixin, a function of
+      base and self: a compiler-private builtin, partly applied, that
+      compiles when applied, on the thread that forces it. It evaluates
+      nothing, and the `.g` front end's imports lower to the same builtin.
+    - Compile diagnostics go where the runtime's own go, through `refl` to
+      the root; a compile that fails, fails when forced.
+    - Helpers close a mixin over a base, making the fixpoint where
+      bootstrapping will happen, compose inputs, earlier overriding later,
+      and build the records for a script and for a source.
+    - `ModuleInput`, `m.compile_over`, and the diagnostics and eager
+      evaluation of today's `m.compile` leave the turn API. The CLI keeps
+      the handle API's path until `api-cli-sources`.
+    - Tests: those of `api-import-requests`, on the new operations; a
+      mixin closed over a base; two inputs composed; a script importing
+      nothing; a failed compile's diagnostics reaching the root.
+17. `api-compile-replay` — a wait while compiling is pushback
+    (`compile-yields-an-open-mixin`): an attempt that waits on a reply
+    abandons, evaluation waits on the reply and applies the compile
+    again. A per-compile cache keeps the lazy binaries the compile has
+    received across its attempts, and goes when it completes; a
+    runtime-wide table of replies is rejected, since binaries may be large
+    and dependencies are mostly affine. Diagnostics are held until an
+    attempt completes, and invocation IDs count compiles, not attempts.
+    Replay is the bridge to resumable compilation (`compile-resumable`).
+    - Tests: an import that a macro forces while compiling (from
+      `api-import-requests`), and a chain of two such imports.
+18. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
     compilation builds its context from runtime-side parts, the value
     factory, the front ends, an invocation counter and a diagnostics
     port, so no worker reaches an `Assembler`, a `DeferredAssembler` or a
@@ -573,7 +616,7 @@ handle API goes.
       the whole background domain, its own task included, and hangs; the
       file loaders revive and drain alike. Without that drain the test
       passes.
-17. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+19. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
     - The turn supplies the effects API, evaluates the program to weak-head
@@ -601,7 +644,7 @@ handle API goes.
       `.promise.*`), which they carry only as bridge behavior: `conf.cli`
       and macros are pure evaluation, ideally handled by pure functions
       (maintainer, 2026-10-21).
-18. `api-reflection-machines` — reflection tasks become tasks on machines
+20. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`
     shares and `.todo.*` for tasks, the obligation set for turns,
@@ -615,7 +658,7 @@ handle API goes.
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
       a `stderr` port with `.port.*`, and its exit vote goes.
-19. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+21. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
     decides (maintainer, 2026-10-19), in place of exit votes. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
     tasks as machines and no exit votes, rather than building on both. The runtime is
@@ -645,7 +688,7 @@ handle API goes.
      check that evaluation would otherwise need at every wait. Turns
      already fail such a cut when their own evaluation returns
      (`api-transactional-promises`).
-20. `api-cli-sources` — the CLI slice of `api-import-requests`, moved after
+22. `api-cli-sources` — the CLI slice of `api-import-requests`, moved after
     settlement (2026-10-21): a CLI machine serves the requests with
     `FileSourceSystem`, records the reads, and writes the manifest and
     checks that no file changed once settlement is done, so imports forced
@@ -653,13 +696,13 @@ handle API goes.
     with `Runtime::open` and hands its top-level files over as sources;
     the bridge's constructor goes, and with it the assembler's source
     system and the loaders that read files.
-21. `api-handle-retirement` — the public handle types go: `Assembler`,
+23. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-22. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+24. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions
@@ -669,6 +712,23 @@ handle API goes.
     its forks.
     - Tests force each ordering: retirement with work queued, a pending
       operation failing as retired, and values inert afterwards.
+
+Later, beyond this plan (2026-10-21):
+- `compile-resumable` — front-end compilers as monadic effects whose
+  assembler-provided handler is pure, resumable at their import effects
+  as evaluation is; it retires replay (maintainer).
+- `compile-bootstrap` — user-defined front ends, `_env.lang.[lang].compile`
+  from the base, and bootstrapping where a mixin is closed: closing with
+  one compiler, reading the next from the result, until it stays the same.
+  Which object's `env.lang` counts, where inputs disagree, needs a
+  semantics pass first.
+- `origin-meta-refl` — compilation origins as `meta_refl` metadata, not
+  opaque payloads that `glam.origin.inspect` opens (maintainer).
+- `api-dict-ops` — a review of the machine's dict operations, for building
+  and taking apart dicts swiftly (maintainer).
+- Candidate (maintainer): default effects served from the root's outputs,
+  as imports are, such as stderr and the fallback diagnostics renderer,
+  rather than callbacks.
 
 Two steps from the ownership plan stand beside these, under their names:
 - `lifecycle-audits` grows with each step: a source audit or compile-fail
@@ -681,8 +741,10 @@ Two steps from the ownership plan stand beside these, under their names:
 precede the CLI's first slice. Cuts precede ports,
 whose buffers request queues extend; the machine tree precedes the loggers' move;
 settlement follows the logs it appends to. Import requests follow requests,
-whose ports and promises carry them, and precede the runtime-side compile
-context, which removes what workers still reach; the hosts retire with the
+whose ports and promises carry them, and precede the compile operations,
+which take their requests' keys, then replay, which needs a compile that
+evaluation applies, and the runtime-side compile context, which removes
+what workers still reach; the hosts retire with the
 steps that take their roles, effect providers and reflection machines. Reflection machines follow effect providers,
 whose turns run effects as tasks will, and settlement follows reflection
 machines, whose waits it classifies. The CLI serves its sources after

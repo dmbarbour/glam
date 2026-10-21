@@ -2466,7 +2466,8 @@ maps the short names used here to file names.
     importer's source, the relative path and whether it is a module or a
     binary, with a reply resolver, and its value awaits the reply: the
     binary itself for a binary import, the front end's compilation of it
-    for a module.
+    for a module. (Amended by `compile-yields-an-open-mixin`: the request
+    names the source's key, `{package, path}`, alone.)
   - The reply is the binary only. Compilation stays runtime code on the
     forcing thread, so an import that a macro forces is just another
     request, and the server never waits on itself.
@@ -2486,6 +2487,64 @@ maps the short names used here to file names.
   `Assembler`, a `DeferredAssembler` or a `SourceSystem`. An import that
   nothing serves waits, and settlement reports it as unresolved.
 - **Recorded in:** runtime API plan, `api-import-requests`.
+
+### Compiling is lazy: a source record becomes an open mixin
+`compile-yields-an-open-mixin` · 2026-10-21 · maintainer · accepted
+- **Context:** the turn API's `m.compile` loaded files, chose a front end,
+  compiled with its macros, closed the module's fixpoint, evaluated it and
+  returned its diagnostics, all at once. Served imports
+  (`imports-are-source-requests`) showed the cost: an import that a macro
+  forces while compiling has no way to wait for its reply. The design's
+  front-end compilers are monadic effects with a pure, assembler-provided
+  handler, which abstracts location, stages imports and tags diagnostics
+  with provenance; `CompileContext` emulated that handler.
+- **Decision:**
+  - A source is keyed `{package, path}`. The package is an opaque tagged
+    value, such as `{folder: "/home/u/proj"}`, and the path a list of keys
+    from it, such as `["lib", "leaf.g"]`, so that path elements need not
+    stay texts and reserve no characters. The assembler composes paths
+    while staying ignorant of how packages are sourced: a package reads as
+    a named dict, and a source as a lazy access into it. A request is
+    `{request: key, reply}`, with neither the import's kind nor any
+    provenance; a key exchanged for a binary is all a logically pure
+    effect should observe.
+  - `m.import_source` pops a key and pushes a lazy binary, whose forcing
+    writes the request.
+  - `m.compile` pops one record, `{scope, lang, source}`, and pushes an
+    open mixin, a function of base and self, which compiles when applied.
+    The scope is `{location, namespace}`: the location a key, absent for a
+    script, which imports nothing local, and the namespace the seed of
+    `abstract_global_path`. `lang` names the language, from a file's
+    extension, and `source` is a lazy binary. Nothing is evaluated.
+  - What a client supplies and a compiler never sees is the scope. A
+    compiler sees only relative imports and relative global paths. Its
+    origin derives from the scope and its importer's origin, and is
+    reflection's alone; invocation IDs, the macro session, the import
+    capability and bootstrap state are the runtime's.
+  - Compile diagnostics go where the runtime's own go, tagged with their
+    origin, and a compile that fails, fails when forced. Helpers close a
+    mixin over a base, compose inputs, and build the records for a script
+    and for a source.
+  - A wait while compiling is pushback, a bridge until compilation is
+    resumable: the attempt abandons, evaluation waits on the reply and
+    applies the compile again. A per-compile cache keeps the lazy binaries
+    a compile has received across its attempts, and goes when it
+    completes; this is acceptable even as a lasting fix (maintainer).
+- **Alternatives rejected:** an eager `m.compile`; blocking whichever
+  thread compiles, which starves workers and hides waits; a thread per
+  compile, which hides its waits from settlement and strands threads on a
+  cycle of compile-time imports; a runtime-wide table of replies, which no
+  collection reclaims, holding binaries that may be large for
+  dependencies that are mostly affine, where the server's digests keep
+  observations consistent instead; popping the scope, language and source
+  as three values rather than one record (maintainer).
+- **Consequences:** `api-compile-ops`, `api-compile-replay` and
+  `api-runtime-compile` follow `api-import-requests`. Bootstrapping
+  belongs where a mixin is closed, `compile-bootstrap`, and resumable
+  compilation, `compile-resumable`, retires replay. Origins become
+  `meta_refl` metadata later, `origin-meta-refl`.
+- **Recorded in:** runtime API plan, `api-compile-ops` and
+  `api-compile-replay`.
 
 ### Reflection tasks are tasks on machines
 `reflection-tasks-are-machine-tasks` · 2026-10-21 · maintainer · accepted
