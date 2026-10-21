@@ -2474,10 +2474,12 @@ maps the short names used here to file names.
     decides what follows. `.child.interrupt` stops a task and flags its
     machine, and settlement's kills are interrupts, so killed machines
     stay recoverable. Only `.child.clear` clears a machine.
-  - `.child.call Key Op` is the one synchronous operation, a
-    transactional remote procedure call: it awaits what was committed to
-    the child before the caller's transaction, then runs `Op` on the child
-    within that transaction.
+  - `.child.call Key Op` is the one synchronous operation: within a
+    transaction, a transactional remote procedure call, which awaits what
+    was committed to the child before the caller's transaction, then runs
+    `Op` on the child within it; outside one, a plain remote procedure
+    call. Rust gets no task operations: hosts model tasking and interrupts
+    with ports, effects and shared state.
   - Reflection gets the machine's operations as effects: `.port.*`, with
     lists of values and `.port.available`; `.wire.*`; `.env.*` for its own
     share; `.todo.*`, the obligation set that takes over `.exit`'s role.
@@ -2488,11 +2490,13 @@ maps the short names used here to file names.
     environment, as reflection boundaries and their claims are its tasks'
     behavior. When its task ends, an annotation machine's local state is
     cleared, and its children remain.
-  - Reflection is annotation tasks with their descendants and the
-    configured logger (later the IDE). Macro expansion, `conf.cli` and
+  - Reflection is annotation tasks with their descendants, and the
+    configured logger (later the IDE), whose fork's turn runs `conf.log`
+    as an effect with the same operations. Macro expansion, `conf.cli` and
     token parsing are pure evaluation with internal handlers, which become
-    turns with providers. An annotation demanded inside a pure search
-    still runs as reflection, outside the search's journal.
+    turns with providers and carry no reflection effects or promises. An
+    annotation demanded inside a pure search still runs as reflection,
+    outside the search's journal.
   - At quiescence, waiting on input, on observed state or for queued
     tasks is idle. Unresolved is an evaluation awaiting a promise no one
     will resolve, a machine in error, a non-empty obligation set, and
@@ -2503,8 +2507,9 @@ maps the short names used here to file names.
   with handles, and machines named for reflection boundaries; pushback
   when tasking a busy child, rather than a queue; a queue that resumes
   after recovery; synchronous interaction inferred from awaiting rather
-  than an explicit call; clearing the machines settlement kills; keeping
-  a `'macro` reasoning role.
+  than an explicit call; task and interrupt operations for Rust turns;
+  clearing the machines settlement kills; keeping a `'macro` reasoning
+  role.
 - **Consequences:** task handles, `.task.*`, the acknowledgement ledger,
   exit votes, `MainEffects` and the `'macro` role retire. `.child.call`
   needs tasks' machine state within the transactional store. Builds stop

@@ -565,17 +565,21 @@ handle API goes.
     - CLI slice: the configured CLI's `CliEffects` and `TokenEffects` become
       providers, their per-branch journals become machine state that cuts
       restore, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
-      public API.
+      public API. They and the macro runner's family lose their reflection
+      effects and promises (`.env`, `.log` where it reaches reflection,
+      `.promise.*`), which they carry only as bridge behavior: `conf.cli`
+      and macros are pure evaluation, ideally handled by pure functions
+      (maintainer, 2026-10-21).
 18. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`
-    shares and `.todo.*` for tasks, `m.task` and the obligation set for
-    turns, annotation tasks on anonymous machines under `refl`, and the
+    shares and `.todo.*` for tasks, the obligation set for turns,
+    annotation tasks on anonymous machines under `refl`, and the
     retirement of task handles, `.task.*`, exit votes and the `'macro`
     role. Its notes are in [Reflection Model](ReflectionModel_2026-10-21.md).
-    - CLI slice: `conf.log` becomes a task on the `logger` machine,
-      reading its diagnostics input and writing a `stderr` port, so
-      `MainEffects` and the logger's host retire.
+    - CLI slice: `conf.log`, which the logger's turn runs as an effect
+      since `api-effect-providers`, reads its diagnostics input and writes
+      a `stderr` port with `.port.*`, and its exit vote goes.
 19. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the

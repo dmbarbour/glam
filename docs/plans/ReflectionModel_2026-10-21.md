@@ -78,6 +78,10 @@ and has no glam counterpart (maintainer).
   happens next is the parent's to decide (maintainer). The machine's local
   state is as the failure left it, for the parent's next tasks to inspect
   and repair.
+- **Why a promise broke.** A promise that recovery, clearing or an
+  interrupt breaks says so, better than a lost resolver's "resolver lost"
+  (maintainer): that its machine was recovered from an error, or cleared,
+  before the task ran, or the interrupt's reason for one it stopped.
 - **Interrupts.** `.child.interrupt Key Reason` stops the running task,
   breaks its promise with `Reason`, and flags the machine, whose state it
   may have left half-done. Settlement's kills are interrupts: each machine
@@ -85,7 +89,8 @@ and has no glam counterpart (maintainer).
   (maintainer).
 - **Clearing.** `.child.clear Key` empties a child and its descendants,
   breaking the promises of the tasks it drops. Nothing else clears a
-  machine.
+  machine, and the representation of a machine with nothing in it, absent,
+  is an economy, not a status (maintainer): such a child reads `'idle`.
 - **Calls.** `.child.call Key Op` is the one synchronous operation, a
   transactional remote procedure call (maintainer): it waits until the
   child has finished what was committed to it before the caller's
@@ -93,11 +98,13 @@ and has no glam counterpart (maintainer).
   the child busy, then runs `Op` on the child within the caller's
   transaction and returns its result. The child's changes commit or abort
   with the caller; a task committed to the child meanwhile conflicts with
-  it. Outside a cut, a call is one atomic step, as every action is. This
-  is the program-side counterpart of a Rust synchronous turn within a cut,
-  which already joins the cut; it is explicit rather than inferred from a
-  caller that awaits a status, queues a task and awaits its result, which
-  serves outside cuts.
+  it. Outside a transaction, a call is a plain remote procedure call
+  (maintainer): the caller waits while the child runs `Op` after what was
+  queued before it, step by step as any task runs, and the call returns
+  `Op`'s result or fails with its failure. Within a cut, it is the
+  program-side counterpart of a Rust synchronous turn, which already joins
+  the cut; it is explicit rather than inferred from a caller that awaits a
+  status, queues a task and awaits its result.
 - **One driver at a time.** A machine runs its queued tasks or takes
   Rust turns, never both. A Rust turn, `give`, `take` or `fork` on a busy
   machine waits for it as a call does, pushback within a cut; on a flagged
@@ -130,7 +137,7 @@ boundary task's child, and each `refl.*` entry as the scanner's.
 | `.heap.*`, `.vol.*`, `.promise.*` | Unchanged: shared-state operations. |
 | `.env Path` | The machine's composed environment, observed. New: `.env.set`, `.env.mine`, `.env.clear` for its own share, as `set_env_mixin`, `get_env_mixin` and `clear_env_mixin`. |
 | `.log Sev Msg` | A convenience that writes an enriched diagnostic to the machine's `diagnostics` output. |
-| `.read_log` (logger) | `.port.read 'diagnostics N`. |
+| `.read_log` (logger) | `.port.read 'diagnostics N`, the logger machine's input. |
 | `.write_stderr Bin` (logger) | `.port.write 'stderr [Bin]`, on a port the CLI wires to a machine that writes stderr. |
 | — | Ports: `.port.read Port N` (a list of `N` values; pushback while fewer are buffered), `.port.write Port List`, `.port.available Port` (an observed count), `.port.pending` (inputs holding values), `.port.ask Port Request` (writes `{request, reply}`, returns the reply's promise). |
 | — | Wiring: `.wire.add Source Destination`, `.wire.del Source Destination`, `.wire.list`, `.wire.defaults Bool`, over the machine's own ports and its children's; endpoints `in:Port`, `out:Port`, `child:{key:Key, port:Port}`. |
@@ -146,18 +153,20 @@ boundary task's child, and each `refl.*` entry as the scanner's.
 
 The CLI's own families (`.read.*`, `.write.*`, `.case`, `.token.*`) and
 the macro runner's are providers' effects within turns
-(`api-effect-providers`), not tasks.
+(`api-effect-providers`), not tasks, and no reflection: `conf.cli` and
+macros are pure evaluation, ideally handled by pure functions
+(maintainer).
 
 ### Rust's counterparts
 
-A turn tasks a descendant with `m.task(path)`, which pops an effect,
-queues it as `.child.task` does, and pushes the promise; awaiting it is
-ordinary evaluation, which blocks outside a cut and is pushback within
-one. `m.fork` remains: it is concurrency for Rust code, as a task is for
-glam code, and both drive a machine, one at a time. `m.recover`,
-`m.machines` and `m.failed` see tasks' machines as any others, with
-`'busy` among the statuses; a turn has `m.todo_add`, `m.todo_del` and
-`m.todos`, and an interrupt, `m.interrupt(path)`.
+Rust gets no task operations (maintainer): a host that wants a machine to
+run glam work models it, as a turn reading requests from a port and
+interpreting them into effects (`api-effect-providers`), and interrupts as
+shared state its turns observe. `m.fork` remains concurrency for Rust code,
+as a task is for glam code; each drives a machine, one at a time.
+`m.recover`, `m.machines` and `m.failed` see tasks' machines as any
+others, with `'busy` among the statuses, and a turn has `m.todo_add`,
+`m.todo_del` and `m.todos` for its own obligations.
 
 ### Obligations
 
@@ -174,12 +183,12 @@ process network.
 
 From an inventory of the sessions and effect runs (2026-10-21):
 
-- **Reflection tasks:** annotation tasks (`anno refl:`, `anno
-  meta_refl:`) with their descendants, which include the front end's
-  boundaries, scanners and `refl.*` tasks, all under `refl`; and the
-  configured logger, `conf.log`, a task on the CLI's `logger` machine,
-  as `conf.ide` will be on an `ide` machine. A reflection task is any
-  task on a machine, wherever the machine is.
+- **Reflection:** annotation tasks (`anno refl:`, `anno meta_refl:`)
+  with their descendants, which include the front end's boundaries,
+  scanners and `refl.*` tasks, all under `refl`; and the configured
+  logger, whose fork's turn runs `conf.log` as an effect on the CLI's
+  `logger` machine (`api-effect-providers`), with the same effects, its
+  reads and its stderr as ports, as `conf.ide` will on an `ide` machine.
 - **Pure evaluation:** the assembler's demand session, `conf.env`,
   completion scripts and `asm.result`; and macro expansion, `conf.cli` and
   token parsing, which run isolated searches whose handlers never commit,
@@ -238,7 +247,12 @@ becomes clearing a machine with its descendants.
   returns would fail every later build; it should wait only until nothing
   is unresolved.
 - The CLI's and macro runner's families install `.promise.*` even where
-  the heap is hidden; their providers should decide.
+  the heap is hidden, and `conf.cli`'s reads the reflection environment
+  with `.env`. Acceptable as bridge behavior, but those families should
+  carry no reflection effects and no promises, which they have only from
+  implementation hiccups (maintainer); `Design.md` now types `conf.cli`
+  without `Refl`. The cleanup belongs to `api-effect-providers`, where
+  these families become providers, ideally pure functions.
 - Documentation drift found by the inventory: `.exit` is exposed to every
   coordinator-launched task, not only the logger; a comment in
   `api/assembly.rs` says annotations run in the macro session, and one in
