@@ -16,12 +16,13 @@ use super::{
     ReflectionInspector, RuntimeReadiness, Value, ValueEvaluator, Values,
 };
 use crate::compiler::{
-    BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnosticEmitter, ModuleLoadArgs,
-    ModuleLoader, import_failure,
+    BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnosticEmitter, ImportCompilers,
+    ImportSite, ModuleLoadArgs, ModuleLoader, ServedImports, SourceCompiler, SourceRecord,
+    SourceRequester, import_failure,
 };
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, HostCallRecord,
-    HostCallRootBundle, Key, LazyValue, NetValue, PromisedValue, Value as CoreValue, keys,
+    Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, NetValue,
+    PromisedValue, Value as CoreValue, keys,
 };
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::evaluation::{
@@ -34,9 +35,7 @@ use crate::reflection::{
     TaskEnvironment, TaskHost, VolumeId, coordinator_task_launcher, volume_effects,
 };
 use crate::runtime::RuntimeValueRoot;
-use crate::source::{
-    FileSourceSystem, RelativeSourcePath, SourceArtifact, SourceIdentity, SourceSystem,
-};
+use crate::source::{FileSourceSystem, SourceArtifact, SourceIdentity, SourceSystem};
 
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
 const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
@@ -445,30 +444,12 @@ impl ReasoningSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleInput {
     File(PathBuf),
-    /// A top-level source its host hands over, named by `identity`, whose
-    /// label's extension selects the front end. Where the host serves
-    /// sources, its imports ask for their sources by `identity`
-    /// (`imports-are-source-requests`).
-    Source {
-        identity: SourceIdentity,
-        body: Bytes,
-    },
-    Script {
-        extension: String,
-        body: Bytes,
-    },
+    Script { extension: String, body: Bytes },
 }
 
 impl ModuleInput {
     pub fn file(path: impl Into<PathBuf>) -> Self {
         Self::File(path.into())
-    }
-
-    pub fn source(identity: SourceIdentity, body: impl Into<Bytes>) -> Self {
-        Self::Source {
-            identity,
-            body: body.into(),
-        }
     }
 
     pub fn script(extension: impl Into<String>, body: impl Into<String>) -> Self {
@@ -521,13 +502,20 @@ impl FrontEnd {
     }
 }
 
-/// What a request for `request`, imported by `importer`, names, where the
-/// host serves `importer`.
-fn served_request(
-    request: &RelativeSourcePath,
-    importer: Option<&SourceArtifact>,
-) -> Option<(SourceIdentity, String)> {
-    importer?.served_request(request)
+/// An import site's provenance, for its compile's trace: its importer's
+/// trace, and the request and namespace the site wrote.
+#[derive(Clone)]
+pub(crate) struct ServedSite {
+    parent: Arc<CompilationTrace>,
+    import: Arc<ImportSite>,
+}
+
+/// A served source's label: its location's, or a script's.
+fn record_label(record: &SourceRecord) -> String {
+    match &record.scope.location {
+        Some(location) => location.label(),
+        None => format!("<script.{}>", record.lang),
+    }
 }
 
 struct PreparedSource {
@@ -1370,18 +1358,6 @@ impl Assembler {
                     .map_err(|error| Error::new(error.to_string()))?;
                 (front_end, Arc::new(source), true)
             }
-            ModuleInput::Source { identity, body } => {
-                let front_end =
-                    FrontEnd::for_path(Path::new(identity.label())).map_err(Error::new)?;
-                let source = SourceArtifact::new(body.clone(), identity.clone());
-                // Where the assembler loads sources itself, a handed-over
-                // source has no resolver, and imports as a script does.
-                let source = match self.source_system {
-                    Some(_) => source,
-                    None => source.served(),
-                };
-                (front_end, Arc::new(source), true)
-            }
             ModuleInput::Script { extension, body } => {
                 let front_end = FrontEnd::for_extension(extension).map_err(Error::new)?;
                 let label: Arc<str> = Arc::from(format!("<script.{extension}>"));
@@ -1440,32 +1416,34 @@ impl Assembler {
         let assembler = self.deferred();
         let execution = Arc::downgrade(execution);
         Arc::new(move |args| {
+            let failure = |values: Option<&CoreValueFactory>, message: String| {
+                import_failure(
+                    values,
+                    message,
+                    args.request.as_str(),
+                    args.importer_trace.as_deref(),
+                    args.importer_source.as_deref(),
+                )
+            };
             let Some(assembler) = assembler.upgrade() else {
-                return Err(import_failure(
+                return Err(failure(
                     None,
                     format!(
                         "local import `{}` cannot run after its assembler was dropped",
                         args.request.as_str()
                     ),
-                    args.request.as_str(),
-                    args.importer_trace.as_deref(),
-                    args.importer_source.as_deref(),
                 ));
             };
-            if assembler.source_system.is_none() {
-                return assembler.request_module(args, session.clone(), execution.clone());
-            }
-            let request = args.request.clone();
-            let importer_source = args.importer_source.clone();
-            let importer_trace = args.importer_trace.clone();
-            assembler.compile_in_execution(
-                &request,
-                importer_trace.as_deref(),
-                importer_source.as_deref(),
-                &session,
-                &execution,
-                |execution| assembler.load_local_module(args, session.clone(), execution),
-            )
+            let values = assembler.core_values();
+            let failure = |message: String| {
+                failure(
+                    Some(&values),
+                    format!("local import `{}` {message}", args.request.as_str()),
+                )
+            };
+            assembler.compile_in_execution(&session, &execution, &failure, |execution| {
+                assembler.load_local_module(args.clone(), session.clone(), execution)
+            })
         })
     }
 
@@ -1474,11 +1452,9 @@ impl Assembler {
     /// after.
     fn compile_in_execution(
         &self,
-        request: &RelativeSourcePath,
-        importer_trace: Option<&CompilationTrace>,
-        importer_source: Option<&SourceArtifact>,
         session: &Arc<Mutex<Vec<Diagnostic>>>,
         execution: &Weak<CompilationExecution>,
+        failure: &dyn Fn(String) -> Arc<EvaluationFailure>,
         compile: impl FnOnce(
             Arc<CompilationExecution>,
         ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>,
@@ -1489,16 +1465,9 @@ impl Assembler {
                 Arc::new(
                     CompilationExecution::new(&self.reasoning, session.clone()).map_err(
                         |error| {
-                            import_failure(
-                                Some(&self.core_values()),
-                                format!(
-                                    "local import `{}` could not create its compilation execution: {error}",
-                                    request.as_str()
-                                ),
-                                request.as_str(),
-                                importer_trace,
-                                importer_source,
-                            )
+                            failure(format!(
+                                "could not create its compilation execution: {error}"
+                            ))
                         },
                     )?,
                 ),
@@ -1507,16 +1476,7 @@ impl Assembler {
         };
         let result = compile(execution.clone());
         if revived && execution.drain() {
-            return Err(import_failure(
-                Some(&self.core_values()),
-                format!(
-                    "local import `{}` encountered a macro reasoning failure",
-                    request.as_str()
-                ),
-                request.as_str(),
-                importer_trace,
-                importer_source,
-            ));
+            return Err(failure("encountered a macro reasoning failure".to_owned()));
         }
         result
     }
@@ -1536,208 +1496,159 @@ impl Assembler {
                     args.importer_source.as_deref(),
                 ));
             };
-            match assembler.source_system {
-                Some(_) => assembler.load_local_binary(args),
-                None => assembler.request_binary(args),
-            }
+            assembler.load_local_binary(args)
         })
     }
 
-    /// Asks the host for an imported module's source on the root's
-    /// `imports` input (`imports-are-source-requests`). The import awaits
-    /// the reply, then compiles it on the thread that forces it, so an
-    /// import that its macros force is just another request.
-    fn request_module(
+    /// The compiler for a client's compile, `site` absent, or for one
+    /// import site, which shares its importer's macro session while that
+    /// lasts (`compile-yields-an-open-mixin`).
+    pub(crate) fn source_compiler(
         &self,
-        args: ModuleLoadArgs,
-        session: Arc<Mutex<Vec<Diagnostic>>>,
+        site: Option<ServedSite>,
         execution: Weak<CompilationExecution>,
-    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
-        let values = self.core_values();
-        let failure = |message: String| {
-            import_failure(
-                Some(&values),
-                message,
-                args.request.as_str(),
-                args.importer_trace.as_deref(),
-                args.importer_source.as_deref(),
-            )
-        };
-        let front_end =
-            FrontEnd::for_path(Path::new(args.request.as_str())).map_err(|message| {
-                failure(format!(
-                    "local import `{}`: {message}",
-                    args.request.as_str()
-                ))
-            })?;
-        let (root, path) = served_request(&args.request, args.importer_source.as_deref())
-            .ok_or_else(|| {
-                failure(format!(
-                    "local import `{}` cannot be requested from a source its host does not serve",
-                    args.request.as_str()
-                ))
-            })?;
-        let reply = self.request_source(&root, &path, "module");
-        let ModuleLoadArgs {
-            request,
-            importer_source,
-            importer_trace,
-            extends,
-            module_path,
-            prior_defs,
-            final_defs,
-        } = args;
+    ) -> SourceCompiler {
         let assembler = self.deferred();
-        let compile = move |captures: HostCallRootBundle| {
-            let mut captures = captures.into_roots().into_vec().into_iter();
-            let (Some(prior_defs), Some(final_defs), Some(reply), None) = (
-                captures.next(),
-                captures.next(),
-                captures.next(),
-                captures.next(),
-            ) else {
-                panic!("a served module's compilation receives its definitions and its reply");
+        SourceCompiler(Arc::new(move |record, base, self_value| {
+            let subject = match &site {
+                Some(site) => format!("local import `{}`", site.import.request),
+                None => format!("source `{}`", record_label(&record)),
             };
             let Some(assembler) = assembler.upgrade() else {
-                return Err(import_failure(
-                    None,
-                    format!(
-                        "local import `{}` cannot run after its assembler was dropped",
-                        request.as_str()
-                    ),
-                    request.as_str(),
-                    importer_trace.as_deref(),
-                    importer_source.as_deref(),
-                ));
+                return Err(Arc::new(EvaluationFailure::message(format!(
+                    "{subject} cannot compile after its assembler was dropped"
+                ))));
             };
-            let bytes = assembler.served_binary(&reply).map_err(|message| {
-                import_failure(
-                    Some(&assembler.core_values()),
-                    format!("local import `{}`: {message}", request.as_str()),
-                    request.as_str(),
-                    importer_trace.as_deref(),
-                    importer_source.as_deref(),
-                )
-            })?;
-            let source = Arc::new(SourceArtifact::served_import(&root, &path, bytes));
-            let args = ModuleLoadArgs {
-                request: request.clone(),
-                importer_source: importer_source.clone(),
-                importer_trace: importer_trace.clone(),
-                extends: extends.clone(),
-                module_path: module_path.clone(),
-                prior_defs,
-                final_defs,
+            let failure = |message: String| {
+                Arc::new(EvaluationFailure::message(format!("{subject} {message}")))
             };
-            assembler.compile_in_execution(
-                &request,
-                importer_trace.as_deref(),
-                importer_source.as_deref(),
-                &session,
-                &execution,
-                |execution| {
-                    assembler.compile_local_module(
-                        front_end,
-                        args,
-                        source,
-                        session.clone(),
-                        execution,
-                    )
-                },
-            )
-        };
-        Ok(values.construct_runtime_value_root(|access| {
-            let reply = reply.clone_core_with(access);
-            let compiled = CoreValue::Lazy(LazyValue::external_host_call_in(
-                access,
-                HostCallRecord::external_with_semantic_values(
-                    "served module compilation",
-                    "src/api/assembly.rs",
-                    "assembler route plus explicit prior/final definitions and the served reply",
-                ),
-                [
-                    prior_defs.clone_core_with(access),
-                    final_defs.clone_core_with(access),
-                    access.duplicate_value(&reply),
-                ],
-                compile,
-            ));
-            CoreValue::builtin_call_in(access, Builtin::Seq, vec![reply, compiled])
+            let session = Arc::new(Mutex::new(Vec::new()));
+            assembler.compile_in_execution(&session, &execution, &failure, |execution| {
+                assembler.compile_served(record, base, self_value, site.clone(), execution)
+            })
         }))
     }
 
-    /// Asks the host for an imported binary on the root's `imports` input
-    /// (`imports-are-source-requests`): the import is the reply.
-    fn request_binary(
-        &self,
-        args: BinaryLoadArgs,
-    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
-        let (root, path) = served_request(&args.request, args.importer_source.as_deref())
-            .ok_or_else(|| {
-                import_failure(
-                    Some(&self.core_values()),
-                    format!(
-                        "binary import `{}` cannot be requested from a source its host does not serve",
-                        args.request.as_str()
-                    ),
-                    args.request.as_str(),
-                    args.importer_trace.as_deref(),
-                    args.importer_source.as_deref(),
-                )
+    /// Writes a request for the source a key names
+    /// (`imports-are-source-requests`). The route holds the runtime weakly,
+    /// since import values beneath its managed graph keep it.
+    pub(crate) fn source_requester(&self) -> SourceRequester {
+        let resources = Arc::downgrade(&self.evaluation_runtime().shared_resources());
+        let values = self.core_values();
+        Arc::new(move |key| {
+            let resources = resources.upgrade().ok_or_else(|| {
+                Arc::new(EvaluationFailure::message(
+                    "a source cannot be asked for after its runtime was dropped",
+                ))
             })?;
-        Ok(self.request_source(&root, &path, "binary"))
+            let promises = resources.reflection_snapshot().1.promises().clone();
+            let (reply, request) = values.with_boundary_access(|access| {
+                let (_, reply, resolver) = promises.allocate(&access);
+                let request = Dict::new_sync()
+                    .insert(keys::REQUEST.clone(), key.clone_core_with(&access))
+                    .insert(keys::REPLY.clone(), resolver);
+                (
+                    access.root_runtime_value(reply),
+                    access.root_runtime_value(CoreValue::Dict(request)),
+                )
+            });
+            admit_runtime_request(&resources, request);
+            Ok(reply)
+        })
     }
 
-    /// Writes `{request: {source, path, kind}, reply: resolver}` into the
-    /// root's `imports` input, and returns the reply's promise.
-    fn request_source(&self, root: &SourceIdentity, path: &str, kind: &str) -> RuntimeValueRoot {
-        let resources = self.evaluation_runtime().shared_resources();
-        let promises = resources.reflection_snapshot().1.promises().clone();
-        let (reply, request) = self.core_values().with_boundary_access(|access| {
-            let (_, reply, resolver) = promises.allocate(&access);
-            let request = Dict::new_sync()
-                .insert(keys::SOURCE.clone(), root.value(&access))
-                .insert(keys::PATH.clone(), CoreValue::binary_from_text(path))
-                .insert(
-                    keys::KIND.clone(),
-                    Key::atom_from_text(kind).to_value_in(&access),
-                );
-            let request = Dict::new_sync()
-                .insert(keys::REQUEST.clone(), CoreValue::Dict(request))
-                .insert(keys::REPLY.clone(), resolver);
-            (
-                access.root_runtime_value(reply),
-                access.root_runtime_value(CoreValue::Dict(request)),
-            )
+    /// Compiles a served record's source over a base and a self, on the
+    /// thread that forces it.
+    fn compile_served(
+        &self,
+        record: SourceRecord,
+        base: RuntimeValueRoot,
+        self_value: RuntimeValueRoot,
+        site: Option<ServedSite>,
+        execution: Arc<CompilationExecution>,
+    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
+        let values = self.core_values();
+        let label = record_label(&record);
+        let failure = |message: String, trace: Option<&CompilationTrace>, source| match &site {
+            Some(site) => import_failure(
+                Some(&values),
+                message,
+                &site.import.request,
+                trace.or(Some(&site.parent)),
+                source,
+            ),
+            None => Arc::new(EvaluationFailure::message(message)),
+        };
+        let front_end = FrontEnd::for_extension(&record.lang)
+            .map_err(|message| failure(format!("`{label}`: {message}"), None, None))?;
+        let identity = match &record.scope.location {
+            Some(location) => SourceIdentity::keyed(label.clone(), location.key()),
+            None => SourceIdentity::script(label.clone(), record.source.clone()),
+        };
+        let source = Arc::new(SourceArtifact::new(record.source.clone(), identity));
+        let namespace = record.scope.namespace.clone();
+        let trace = Arc::new(match &site {
+            Some(site) => CompilationTrace::imported(
+                self.next_compilation_invocation(),
+                &source,
+                namespace.clone(),
+                site.parent.clone(),
+                site.import.request.clone(),
+                site.import.extends.clone(),
+            ),
+            None => CompilationTrace::root(
+                self.next_compilation_invocation(),
+                &source,
+                namespace.clone(),
+            ),
         });
-        admit_runtime_request(&resources, request);
-        reply
+        let had_errors = Arc::new(AtomicBool::new(false));
+        let compilers = self.import_compilers(trace.clone(), Arc::downgrade(&execution));
+        let context =
+            CompileContext::from_module_path_with_values(values.clone(), namespace.iter().cloned())
+                .with_importer_source(source.clone())
+                .with_compilation_trace(trace.clone())
+                .with_prior_defs_root(base)
+                .with_final_defs_root(self_value)
+                .with_served_imports(ServedImports {
+                    location: record.scope.location.clone(),
+                    compilers,
+                    requester: self.source_requester(),
+                })
+                .with_compilation_execution(execution)
+                .with_diagnostic_emitter(
+                    self.served_diagnostic_emitter(trace.clone(), had_errors.clone()),
+                );
+        let definitions = front_end.compile(source.bytes(), &context);
+        if had_errors.load(Ordering::Relaxed) {
+            return Err(failure(
+                format!("`{label}` failed to compile"),
+                Some(&trace),
+                Some(&source),
+            ));
+        }
+        Ok(definitions)
     }
 
-    /// The binary a host served, which `seq` has forced: the weak-head
-    /// normal form the reply reached, read through its promise and memoized
-    /// lazy values, never evaluated here.
-    fn served_binary(&self, reply: &RuntimeValueRoot) -> Result<Bytes, String> {
-        self.core_values().with_boundary_access(|access| {
-            let mut value = reply.clone_core_with(&access);
-            loop {
-                value = match value {
-                    CoreValue::Binary(bytes) => return Ok(bytes),
-                    CoreValue::Promised(promised) => match promised.access(&access).assignment() {
-                        Some(Ok(value)) => value,
-                        _ => return Err("its reply has not arrived".to_owned()),
-                    },
-                    CoreValue::Lazy(lazy) => match lazy.access(&access).cached() {
-                        Some(Ok(evaluated)) => evaluated.into_value_in(&access),
-                        _ => return Err("its reply has not been evaluated".to_owned()),
-                    },
-                    other => {
-                        return Err(format!(
-                            "its reply is {}, not a binary",
-                            access.diagnostic_kind_name(&other)
-                        ));
-                    }
-                }
+    /// A compiler for each import site of the compilation `trace` records.
+    fn import_compilers(
+        &self,
+        trace: Arc<CompilationTrace>,
+        execution: Weak<CompilationExecution>,
+    ) -> ImportCompilers {
+        let assembler = self.deferred();
+        Arc::new(move |import| {
+            let site = ServedSite {
+                parent: trace.clone(),
+                import: Arc::new(import),
+            };
+            match assembler.upgrade() {
+                Some(assembler) => assembler.source_compiler(Some(site), execution.clone()),
+                None => SourceCompiler(Arc::new(|_, _, _| {
+                    Err(Arc::new(EvaluationFailure::message(
+                        "an import cannot compile after its assembler was dropped",
+                    )))
+                })),
             }
         })
     }
@@ -1902,6 +1813,26 @@ impl Assembler {
         self.eval_context()
             .evaluate_root_whnf(definitions.clone())
             .map_err(|error| self.evaluation_error(error))
+    }
+
+    /// Publishes a served compile's diagnostics where the runtime's own go
+    /// (`compile-yields-an-open-mixin`); nothing collects them for a caller.
+    fn served_diagnostic_emitter(
+        &self,
+        trace: Arc<CompilationTrace>,
+        had_errors: Arc<AtomicBool>,
+    ) -> CompileDiagnosticEmitter {
+        let assembler = self.deferred();
+        Arc::new(move |severity, message| {
+            if severity == Severity::Error {
+                had_errors.store(true, Ordering::Relaxed);
+            }
+            if let Some(assembler) = assembler.upgrade() {
+                let diagnostic =
+                    Diagnostic::from_compile(assembler.values().core(), &trace, severity, &message);
+                assembler.record_diagnostic(diagnostic);
+            }
+        })
     }
 
     fn compile_diagnostic_emitter(

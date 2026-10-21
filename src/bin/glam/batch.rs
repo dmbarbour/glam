@@ -496,7 +496,9 @@ fn assemble(
     m.make_list(cli_args.len())?;
     m.get("environment")?;
     m.apply(2)?;
-    super::profile::time("build", || m.compile_over(["assembly"], inputs))?;
+    super::profile::time("build", || {
+        glam::transition::compile_over(m, ["assembly"], inputs)
+    })?;
     m.stash(1)?;
     m.get("prelude")?;
     m.access("assembly_result")?;

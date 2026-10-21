@@ -407,9 +407,6 @@ fn canonical_arguments(
                         .expect("configured script bodies originate as UTF-8 text"),
                 ));
             }
-            ModuleInput::Source { .. } => {
-                unreachable!("the command line names its inputs as files and scripts")
-            }
         }
     }
     if let Some(manifest) = manifest {

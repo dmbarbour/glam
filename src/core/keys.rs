@@ -36,7 +36,10 @@ protocol_key!(IMPORTER, "importer");
 protocol_key!(REQUEST, "request");
 protocol_key!(REPLY, "reply");
 protocol_key!(PATH, "path");
-protocol_key!(KIND, "kind");
+protocol_key!(PACKAGE, "package");
+protocol_key!(FOLDER, "folder");
+protocol_key!(SCOPE, "scope");
+protocol_key!(LANG, "lang");
 protocol_key!(EXTENDS, "extends");
 
 protocol_key!(VALUE, "value");

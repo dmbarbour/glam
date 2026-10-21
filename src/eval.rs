@@ -33,6 +33,7 @@ mod application;
 mod builtin_machine;
 mod builtins;
 mod comparison_machine;
+mod compile_machine;
 mod dict_machine;
 mod effect_machine;
 mod journal_machine;

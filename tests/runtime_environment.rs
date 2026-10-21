@@ -3,7 +3,7 @@
 
 use std::sync::mpsc;
 
-use glam::{Error, ErrorKind, Machine, ModuleInput, Runtime, RuntimeConfig, ValueKind};
+use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig, ValueKind};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -24,7 +24,8 @@ extended mixin = mixin with
 /// Binds the object `share`, which the module above defines, as the
 /// machine's share.
 fn bind(m: &mut Machine<'_, '_>, share: &str) -> Result<(), Error> {
-    m.compile(["shares"], [ModuleInput::script("g", SHARES)])?;
+    m.make_dict(Vec::<&str>::new())?;
+    m.script_object(["shares"], "g", SHARES)?;
     m.access(share)?;
     m.set_env_mixin()
 }
@@ -154,7 +155,8 @@ fn a_machine_extends_its_own_mixin_and_may_clear_it() {
             c.discard(1)?;
 
             bind(c, "own_share")?;
-            c.compile(["shares"], [ModuleInput::script("g", SHARES)])?;
+            c.make_dict(Vec::<&str>::new())?;
+            c.script_object(["shares"], "g", SHARES)?;
             c.access("extended")?;
             c.get_env_mixin();
             c.apply(1)?;

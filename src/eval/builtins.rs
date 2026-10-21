@@ -201,7 +201,21 @@ pub(super) fn apply_builtin_in(
         | Builtin::InteractionNetBuilderData
         | Builtin::InteractionNetBuilderWire
         | Builtin::InteractionNetBuilderRun => Ok(deferred(arguments)),
-        Builtin::InspectOrigin => Ok(deferred(arguments)),
+        Builtin::InspectOrigin | Builtin::CompileSource => Ok(deferred(arguments)),
+        Builtin::MixinCompose => {
+            let [outer, inner, base, self_value] = exact(arguments, "mixin composition")?;
+            let values = access.values();
+            let inner = Value::Lazy(LazyValue::from_application_in(
+                values,
+                inner,
+                Arc::from([base, values.duplicate_value(&self_value)]),
+            ));
+            Ok(Value::Lazy(LazyValue::from_application_in(
+                values,
+                outer,
+                Arc::from([inner, self_value]),
+            )))
+        }
         Builtin::AssertUnit => Ok(deferred(arguments)),
         Builtin::Anno => Ok(deferred(arguments)),
     }

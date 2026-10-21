@@ -39,7 +39,8 @@ use super::runtime::{
 use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
 };
-use crate::core::Key;
+use crate::compiler::{import_source_in, source_record_in};
+use crate::core::{Key, Value as CoreValue};
 use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute, WorkDependency};
 
 /// How many polls a cut whose evaluation waited reserves each time it pumps
@@ -1537,37 +1538,226 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         result
     }
 
-    /// Compiles a module at `module_path` from `inputs`, in order, and
-    /// pushes it, returning its warnings.
-    pub fn compile<I, S>(
-        &mut self,
-        module_path: I,
-        inputs: impl IntoIterator<Item = ModuleInput>,
-    ) -> Result<Vec<Diagnostic>, Error>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<String>,
-    {
-        let (module, diagnostics) = self.compile_module(module_path, inputs, None)?;
-        self.push(module);
-        Ok(diagnostics)
+    /// Pops a source's key, `{package, path}`, and pushes the source's
+    /// binary, lazily: forcing it asks the host for it on the root's
+    /// `imports` port (`imports-are-source-requests`). Nothing is
+    /// evaluated, the key included.
+    pub fn import_source(&mut self) -> Result<(), Error> {
+        let requester = self.runtime.assembler.source_requester();
+        let values = self.runtime.assembler.values();
+        self.replace_top(1, |items| {
+            let [key] =
+                <[Value; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            values.with_access(|scoped| {
+                let key = scoped.clone_core(&key)?;
+                Ok(scoped.wrap(import_source_in(scoped.runtime_access(), requester, key)))
+            })
+        })
     }
 
-    /// As [`Self::compile`], over initial definitions popped from the
-    /// stack: a dict whose names the module starts with, as if an input
-    /// before the first had defined them.
-    pub fn compile_over<I, S>(
+    /// Pops a record, `{scope, lang, source}`, and pushes its open mixin: a
+    /// function of a base and a self that compiles the source when applied,
+    /// on the thread that forces it (`compile-yields-an-open-mixin`). The
+    /// scope is `{location, namespace}`: the source's key, for its relative
+    /// imports, absent for a script, and the namespace that seeds its
+    /// global paths. `lang` names the front end, and `source` is a binary.
+    /// Nothing is evaluated; a compile that fails, fails when forced, and
+    /// its diagnostics go where the runtime's own go.
+    pub fn compile(&mut self) -> Result<(), Error> {
+        let compiler = self
+            .runtime
+            .assembler
+            .source_compiler(None, std::sync::Weak::new());
+        let values = self.runtime.assembler.values();
+        self.replace_top(1, |items| {
+            let [record] =
+                <[Value; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            values.with_access(|scoped| {
+                let record = scoped.clone_core(&record)?;
+                let compiler = CoreValue::Opaque(crate::core::OpaqueValue::new(
+                    scoped.runtime_access().values(),
+                    Arc::new(compiler),
+                ));
+                Ok(
+                    scoped.wrap(CoreValue::PartialBuiltin(crate::core::BuiltinCall {
+                        builtin: crate::core::Builtin::CompileSource,
+                        arguments: Arc::from([compiler, record]),
+                    })),
+                )
+            })
+        })
+    }
+
+    /// Pops a mixin, then the base below it, and pushes the object the mixin
+    /// makes of the base: its fixpoint, whose self is that object. Nothing
+    /// is evaluated.
+    pub fn instantiate(&mut self) -> Result<(), Error> {
+        let values = self.runtime.assembler.values();
+        self.replace_top(2, |items| {
+            let [base, mixin] = <[Value; 2]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top two values"));
+            values.with_access(|scoped| {
+                let access = scoped.runtime_access();
+                let over_base = CoreValue::Lazy(crate::core::LazyValue::from_application_in(
+                    access,
+                    scoped.clone_core(&mixin)?,
+                    Arc::from([scoped.clone_core(&base)?]),
+                ));
+                Ok(scoped.wrap(CoreValue::Lazy(
+                    crate::core::LazyValue::computed_fixpoint_in(
+                        access,
+                        crate::core::FixpointComputation::Function(over_base),
+                    ),
+                )))
+            })
+        })
+    }
+
+    /// Pops `n` mixins and pushes their composition, one mixin: each applies
+    /// over those below it, so the top one's definitions override the rest.
+    pub fn compose(&mut self, n: usize) -> Result<(), Error> {
+        if n == 0 {
+            return Err(Error::new("a composition takes at least one mixin"));
+        }
+        let values = self.runtime.assembler.values();
+        self.replace_top(n, |items| {
+            values.with_access(|scoped| {
+                let mut items = items.iter();
+                let first = items.next().expect("at least one mixin");
+                items
+                    .try_fold(scoped.clone_core(first)?, |inner, outer| {
+                        Ok(CoreValue::PartialBuiltin(crate::core::BuiltinCall {
+                            builtin: crate::core::Builtin::MixinCompose,
+                            arguments: Arc::from([scoped.clone_core(outer)?, inner]),
+                        }))
+                    })
+                    .map(|composed| scoped.wrap(composed))
+            })
+        })
+    }
+
+    /// Pushes the record that compiles `text` as a script in the language of
+    /// `extension`, under `namespace`. A script has no location, so it
+    /// imports nothing local.
+    pub fn script_record<I, S>(&mut self, namespace: I, extension: &str, text: impl Into<String>)
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let namespace = namespace.into_iter().map(Into::into).collect::<Vec<_>>();
+        let text = text.into();
+        let record = self.runtime.assembler.values().with_access(|scoped| {
+            scoped.wrap(source_record_in(
+                scoped.runtime_access(),
+                None,
+                &namespace,
+                extension,
+                CoreValue::binary_from_text(&text),
+            ))
+        });
+        self.push(record);
+    }
+
+    /// Pops a base and pushes the object that a script makes of it: the
+    /// record of `text` in the language of `extension`, under `namespace`,
+    /// compiled and instantiated over the base. Nothing is evaluated.
+    pub fn script_object<I, S>(
+        &mut self,
+        namespace: I,
+        extension: &str,
+        text: impl Into<String>,
+    ) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        self.require(1)?;
+        self.script_record(namespace, extension, text);
+        self.compile()?;
+        self.instantiate()
+    }
+
+    /// Pops a package and pushes the record that compiles the source at
+    /// `path` in it, under `namespace`: its language is the path's
+    /// extension, and its binary is asked for when forced
+    /// ([`Self::import_source`]).
+    pub fn source_record<I, S, P, T>(&mut self, namespace: I, path: P) -> Result<(), Error>
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+        P: IntoIterator<Item = T>,
+        T: Into<String>,
+    {
+        let namespace = namespace.into_iter().map(Into::into).collect::<Vec<_>>();
+        let path = path.into_iter().map(Into::into).collect::<Vec<_>>();
+        let lang = path
+            .last()
+            .and_then(|name| crate::compiler::extension(name))
+            .ok_or_else(|| {
+                Error::new(format!(
+                    "source `{}` has no extension to select a front-end compiler",
+                    path.join("/")
+                ))
+            })?
+            .to_owned();
+        let requester = self.runtime.assembler.source_requester();
+        let values = self.runtime.assembler.values();
+        self.replace_top(1, |items| {
+            let [package] =
+                <[Value; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            values.with_access(|scoped| {
+                let access = scoped.runtime_access();
+                let key = || -> Result<CoreValue, Error> {
+                    Ok(CoreValue::Dict(
+                        crate::core::Dict::new_sync()
+                            .insert(
+                                crate::core::keys::PACKAGE.clone(),
+                                scoped.clone_core(&package)?,
+                            )
+                            .insert(
+                                crate::core::keys::PATH.clone(),
+                                CoreValue::List(crate::core::List::from_values(
+                                    path.iter()
+                                        .map(|name| CoreValue::binary_from_text(name))
+                                        .collect(),
+                                )),
+                            ),
+                    ))
+                };
+                let source = import_source_in(access, requester, key()?);
+                Ok(scoped.wrap(source_record_in(
+                    access,
+                    Some(key()?),
+                    &namespace,
+                    &lang,
+                    source,
+                )))
+            })
+        })
+    }
+
+    /// Eagerly compiles `inputs` through the handle API's assembler, as the
+    /// CLI's transition does (`crate::transition`), over initial definitions
+    /// where given, returning the module and its warnings.
+    pub(crate) fn compile_inputs<I, S>(
         &mut self,
         module_path: I,
         inputs: impl IntoIterator<Item = ModuleInput>,
+        over: bool,
     ) -> Result<Vec<Diagnostic>, Error>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
     {
-        let definitions = self.peek()?.clone();
-        let (module, diagnostics) = self.compile_module(module_path, inputs, Some(definitions))?;
-        self.pop()?;
+        let definitions = if over {
+            Some(self.peek()?.clone())
+        } else {
+            None
+        };
+        let (module, diagnostics) = self.compile_module(module_path, inputs, definitions)?;
+        if over {
+            self.pop()?;
+        }
         self.push(module);
         Ok(diagnostics)
     }

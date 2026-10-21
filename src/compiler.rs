@@ -1,8 +1,16 @@
 use std::sync::Arc;
 
+mod served;
+
+pub(crate) use served::{
+    ImportCompilers, ImportSite, ServedImports, SourceCompiler, SourceKey, SourceRecord,
+    SourceRequester, extension, import_source_in, source_record_in,
+};
+
 use crate::api::CompilationExecution;
 use crate::core::{
-    Atom, CoreValueFactory, Dict, EvaluationFailure, HostCallRecord, Key, LazyValue, Value, keys,
+    Atom, Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluationFailure, HostCallRecord, Key,
+    LazyValue, OpaqueValue, Value, keys,
 };
 use crate::diagnostic::{CompilationTrace, Severity};
 use crate::runtime::RuntimeValueRoot;
@@ -64,6 +72,9 @@ pub(crate) struct CompileContext {
     final_defs: RuntimeValueRoot, // promised final definitions for recursive access
     local_module_loader: Option<ModuleLoader>,
     local_binary_loader: Option<BinaryFileLoader>,
+    // Where the host serves sources, imports become requests and compile
+    // builtins instead of loader calls (`compile-yields-an-open-mixin`).
+    served: Option<ServedImports>,
     diagnostic_emitter: Option<CompileDiagnosticEmitter>,
     compilation_execution: Option<Arc<CompilationExecution>>,
 }
@@ -111,6 +122,7 @@ impl CompileContext {
             final_defs,
             local_module_loader: None,
             local_binary_loader: None,
+            served: None,
             diagnostic_emitter: None,
             compilation_execution: None,
         }
@@ -190,6 +202,11 @@ impl CompileContext {
 
     pub(crate) fn with_local_binary_loader(mut self, loader: BinaryFileLoader) -> Self {
         self.local_binary_loader = Some(loader);
+        self
+    }
+
+    pub(crate) fn with_served_imports(mut self, served: ServedImports) -> Self {
+        self.served = Some(served);
         self
     }
 
@@ -329,6 +346,17 @@ impl CompileContext {
             }
         };
         let (module_path, extends) = self.qualify_module_path(relative_namespace);
+        if let Some(served) = &self.served {
+            return self.served_module_in(
+                access,
+                served,
+                request,
+                module_path,
+                extends,
+                prior_defs,
+                final_defs,
+            );
+        }
         let importer_source = self.importer_source.clone();
         let importer_trace = self.compilation_trace.clone();
         let loader = self.local_module_loader.clone();
@@ -404,6 +432,14 @@ impl CompileContext {
                 );
             }
         };
+        if let Some(served) = &self.served {
+            return match self.served_location(access, served, &request, "binary import") {
+                Ok(location) => {
+                    import_source_in(access, served.requester.clone(), location.value_in(access))
+                }
+                Err(failure) => failure,
+            };
+        }
         let args = BinaryLoadArgs {
             request,
             importer_source: self.importer_source.clone(),
@@ -441,6 +477,85 @@ impl CompileContext {
                 loader(args.clone())
             },
         ))
+    }
+
+    /// A module import where the host serves sources: the compile builtin
+    /// over a record whose source is asked for, with this site's compiler.
+    #[allow(clippy::too_many_arguments)]
+    fn served_module_in(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
+        served: &ServedImports,
+        request: RelativeSourcePath,
+        module_path: Arc<[String]>,
+        extends: Arc<[String]>,
+        prior_defs: Value,
+        final_defs: Value,
+    ) -> Value {
+        let location = match self.served_location(access, served, &request, "local import") {
+            Ok(location) => location,
+            Err(failure) => return failure,
+        };
+        let Some(lang) = location.extension() else {
+            return invalid_import_request_in(
+                access,
+                request.as_str(),
+                format!(
+                    "local import `{}` has no extension to select a front-end compiler",
+                    request.as_str()
+                ),
+                self.compilation_trace.as_deref(),
+                self.importer_source.as_deref(),
+            );
+        };
+        let compiler = (served.compilers)(ImportSite {
+            request: Arc::from(request.as_str()),
+            extends,
+        });
+        let compiler = Value::Opaque(OpaqueValue::new(access.values(), Arc::new(compiler)));
+        let source = import_source_in(access, served.requester.clone(), location.value_in(access));
+        let record = source_record_in(
+            access,
+            Some(location.value_in(access)),
+            &module_path,
+            lang,
+            source,
+        );
+        Value::Lazy(LazyValue::from_builtin_in(
+            access,
+            BuiltinCall {
+                builtin: Builtin::CompileSource,
+                arguments: Arc::from([compiler, record, prior_defs, final_defs]),
+            },
+        ))
+    }
+
+    /// The location of the source that `request` names, from this one's, or
+    /// the failure of a source with no location: a script imports nothing
+    /// local.
+    fn served_location(
+        &self,
+        access: &crate::core::RuntimeValueAccess<'_>,
+        served: &ServedImports,
+        request: &RelativeSourcePath,
+        what: &str,
+    ) -> Result<SourceKey, Value> {
+        served
+            .location
+            .as_ref()
+            .map(|location| location.child(request))
+            .ok_or_else(|| {
+                invalid_import_request_in(
+                    access,
+                    request.as_str(),
+                    format!(
+                        "{what} `{}` has no location to be relative to: a script imports nothing local",
+                        request.as_str()
+                    ),
+                    self.compilation_trace.as_deref(),
+                    self.importer_source.as_deref(),
+                )
+            })
     }
 
     fn qualify_module_path(
@@ -544,6 +659,7 @@ mod tests {
             final_defs,
             local_module_loader: _,
             local_binary_loader: _,
+            served: _,
             diagnostic_emitter: _,
             compilation_execution: _,
         } = context;

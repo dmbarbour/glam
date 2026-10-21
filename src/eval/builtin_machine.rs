@@ -23,6 +23,7 @@ use super::builtins::{
     RegionalNetConstruction, RegionalNetConstructionPoll,
 };
 use super::comparison_machine::RegionalComparisonMachine;
+use super::compile_machine::RegionalCompileMachine;
 use super::dict_machine::RegionalDictBuiltinMachine;
 use super::effect_machine::RegionalEffectMachine;
 use super::journal_machine::RegionalJournalConflictsMachine;
@@ -65,6 +66,7 @@ pub(in crate::eval) enum RegionalBuiltinMachine {
     Assertion(RegionalAssertionMachine),
     Conditional(RegionalConditionalMachine),
     Comparison(RegionalComparisonMachine),
+    Compile(Box<RegionalCompileMachine>),
     Dictionary(RegionalDictBuiltinMachine),
     Effect(Box<RegionalEffectMachine>),
     ListConcat(RegionalListConcatMachine),
@@ -169,6 +171,7 @@ impl RegionalBuiltinMachine {
                 | Builtin::Floor
                 | Builtin::Mod
                 | Builtin::InspectOrigin
+                | Builtin::CompileSource
                 | Builtin::InteractionNet
                 | Builtin::InteractionNetFromNetlist
                 | Builtin::InteractionNetBuilderGet
@@ -253,6 +256,11 @@ impl RegionalBuiltinMachine {
             builtin if RegionalEffectMachine::supports(builtin) => Self::Effect(Box::new(
                 RegionalEffectMachine::new_in(access, source_owner, builtin, arguments),
             )),
+            Builtin::CompileSource => Self::Compile(Box::new(RegionalCompileMachine::new_in(
+                access,
+                source_owner,
+                arguments,
+            ))),
             Builtin::Anno => Self::Annotation(Box::new(RegionalAnnotationMachine::new_in(
                 access,
                 source_owner,
@@ -472,6 +480,7 @@ impl RegionalBuiltinMachine {
             Self::Assertion(machine) => machine.poll_in(access, step_budget),
             Self::Conditional(machine) => machine.poll_in(access, step_budget),
             Self::Comparison(machine) => machine.poll_in(access, step_budget),
+            Self::Compile(machine) => machine.poll_in(access, step_budget),
             Self::Dictionary(machine) => machine.poll_in(access, step_budget),
             Self::Effect(machine) => machine.poll_in(access, step_budget),
             Self::ListConcat(machine) => machine.poll_in(access, step_budget),
@@ -501,6 +510,7 @@ impl RegionalBuiltinMachine {
             Self::Assertion(machine) => machine.trace_managed_edges(visitor),
             Self::Conditional(machine) => machine.trace_managed_edges(visitor),
             Self::Comparison(machine) => machine.trace_managed_edges(visitor),
+            Self::Compile(machine) => machine.trace_managed_edges(visitor),
             Self::Dictionary(machine) => machine.trace_managed_edges(visitor),
             Self::Effect(machine) => machine.trace_managed_edges(visitor),
             Self::ListConcat(machine) => machine.trace_managed_edges(visitor),

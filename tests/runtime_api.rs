@@ -1,7 +1,7 @@
 //! The runtime as an environment: turns on a tree of machines
 //! (`runtime-api-turns-on-machines`, `machines-form-a-tree`).
 
-use glam::{Error, Key, Machine, ModuleInput, Runtime, RuntimeConfig, ValueKind};
+use glam::{Error, ErrorKind, Key, Machine, Runtime, RuntimeConfig, ValueKind};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -12,14 +12,12 @@ fn a_turn_compiles_a_module_and_takes_its_bytes() {
     let mut rt = runtime();
     let text = rt
         .run("cli", |m| {
-            let warnings = m.compile(
+            m.make_dict(Vec::<&str>::new())?;
+            m.script_object(
                 ["example"],
-                [ModuleInput::script(
-                    "g",
-                    "language g0\nasm.result = \"Hello, \" ++ \"turns!\"\n",
-                )],
+                "g",
+                "language g0\nasm.result = \"Hello, \" ++ \"turns!\"\n",
             )?;
-            assert!(warnings.is_empty());
             m.access("asm.result")?;
             m.pop_text()
         })
@@ -174,10 +172,8 @@ fn stack_operations_and_application_compose() {
     let mut rt = runtime();
     let result = rt
         .run("m", |m| {
-            m.compile(
-                ["math"],
-                [ModuleInput::script("g", "language g0\nsub a b = a - b\n")],
-            )?;
+            m.make_dict(Vec::<&str>::new())?;
+            m.script_object(["math"], "g", "language g0\nsub a b = a - b\n")?;
             m.access("sub")?;
             m.push_int(2);
             m.push_int(44);
@@ -366,12 +362,11 @@ fn workers_activate_once_in_a_runtime_opened_without_them() {
     );
     let text = rt
         .run("cli", |m| {
-            m.compile(
+            m.make_dict(Vec::<&str>::new())?;
+            m.script_object(
                 ["example"],
-                [ModuleInput::script(
-                    "g",
-                    "language g0\nasm.result = \"with workers\"\n",
-                )],
+                "g",
+                "language g0\nasm.result = \"with workers\"\n",
             )?;
             m.access("asm.result")?;
             m.pop_text()
@@ -445,10 +440,8 @@ fn a_dict_rejects_repeated_names_and_reading_the_wrong_kind_fails() {
 fn kinds_and_representations_are_observed_without_evaluation() {
     let mut rt = runtime();
     rt.run("data", |m| {
-        m.compile(
-            ["kinds"],
-            [ModuleInput::script("g", "language g0\nanswer = 6 * 7\n")],
-        )?;
+        m.make_dict(Vec::<&str>::new())?;
+        m.script_object(["kinds"], "g", "language g0\nanswer = 6 * 7\n")?;
         m.access("answer")?;
         assert_eq!(m.kind()?, ValueKind::Lazy);
         m.eval()?;
@@ -483,12 +476,10 @@ fn annotations_and_initial_definitions_shape_what_compiles() {
         .run("cli", |m| {
             m.push_text("Hello");
             m.make_dict(["greeting"])?;
-            m.compile_over(
+            m.script_object(
                 ["over"],
-                [ModuleInput::script(
-                    "g",
-                    "language g0\nasm.result = greeting ++ \", over\"\n",
-                )],
+                "g",
+                "language g0\nasm.result = greeting ++ \", over\"\n",
             )?;
             m.access("asm.result")?;
             m.pop_text()
@@ -552,14 +543,11 @@ fn an_operation_that_fails_does_nothing() {
         m.discard(1)?;
 
         m.make_dict(Vec::<&str>::new())?;
-        let error = m
-            .compile_over(
-                ["broken"],
-                [ModuleInput::script("g", "language g0\nx = (\n")],
-            )
-            .expect_err("the module does not parse");
-        assert!(!error.to_string().is_empty());
-        assert_eq!(m.depth(), 1, "the initial definitions stay");
+        m.script_object(["broken"], "g", "language g0\nx = (\n")?;
+        assert_eq!(m.depth(), 1, "compiling evaluates nothing");
+        let error = m.eval().expect_err("the module does not parse");
+        assert_eq!(error.kind(), ErrorKind::Failure, "{error}");
+        assert_eq!(m.depth(), 1, "the module stays");
         Ok(())
     })
     .expect("the turn should succeed");

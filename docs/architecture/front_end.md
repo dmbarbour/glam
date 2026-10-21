@@ -15,13 +15,18 @@ bytes separately and performs its own UTF-8 validation. It cannot replace the
 source system or infer host filesystem authority from a source name.
 
 A runtime that `Runtime::open` opens has no source system: its host serves
-sources (`imports-are-source-requests`). A top-level source arrives as
-`ModuleInput::source`, and each artifact records the top-level source it
-descends from and its folder there. A forced import writes
-`{request: {source, path, kind}, reply}` into the root's `imports` input,
-passed through to the root's output by default; a binary import is the reply,
-and a module import compiles the binary the reply reached, on the thread that
-forces it.
+sources (`imports-are-source-requests`), each keyed `{package, path}`, and
+compiling is lazy (`compile-yields-an-open-mixin`). `m.compile` turns a record
+`{scope, lang, source}` into an open mixin, a partial application of the
+compiler-private `compile_source` builtin to the runtime's compiler, an
+opaque `SourceCompiler`, and the record. Applied to a base and a self, the
+builtin's machine converts the record to a key, so the compile reads its
+scope, language and source as data, and a host call compiles the source on
+the thread that forces it. The scope's location and namespace stay hidden
+from the front end: a served import composes its key from its importer's
+location, and lowers to the same builtin, with a compiler of its own that
+carries the import site's provenance. A source's binary is a lazy request,
+`{request: key, reply}`, written into the root's `imports` input when forced.
 
 `CompileContext` is a capability context for one source invocation. It provides
 relative imports, namespace qualification, prior and promised final module

@@ -210,7 +210,8 @@ fn reflection_reads_the_refl_machine_s_environment_over_its_sealed_one() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     let shares = "language g0\nobject root_share with\n    greeting = \"hello\"\n";
     rt.run((), |root| {
-        root.compile(["shares"], [ModuleInput::script("g", shares)])?;
+        root.make_dict(Vec::<&str>::new())?;
+        root.script_object(["shares"], "g", shares)?;
         root.access("root_share")?;
         root.set_env_mixin()
     })

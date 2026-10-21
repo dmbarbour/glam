@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use glam::{Error, ErrorKind, Machine, ModuleInput, Runtime, RuntimeConfig, ValueKind};
+use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig, ValueKind};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -80,10 +80,8 @@ fn heap_actions_outside_a_cut_commit_at_once() {
     rt.run("writer", |m| {
         m.push_int(41);
         m.heap_set(["counter"])?;
-        m.compile(
-            ["inc"],
-            [ModuleInput::script("g", "language g0\ninc n = n + 1\n")],
-        )?;
+        m.make_dict(Vec::<&str>::new())?;
+        m.script_object(["inc"], "g", "language g0\ninc n = n + 1\n")?;
         m.access("inc")?;
         m.heap_rewrite(["counter"])
     })

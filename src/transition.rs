@@ -3,7 +3,9 @@
 //! has not share one runtime. Only the CLI uses it, and it goes once nothing
 //! in the CLI needs a handle.
 
-use crate::api::{Assembler, DiagnosticsWiring, Error, Machine, Runtime, Value};
+use crate::api::{
+    Assembler, Diagnostic, DiagnosticsWiring, Error, Machine, ModuleInput, Runtime, Value,
+};
 
 /// A runtime around an assembler the caller built, with the default
 /// diagnostics wiring, as `Runtime::open` makes one. Used by the CLI's
@@ -33,6 +35,38 @@ pub fn reflection_environment(machine: &Machine<'_, '_>, role: &str) -> Value {
 /// whose keys are byte strings that a machine's dicts do not build.
 pub fn push_value(machine: &mut Machine<'_, '_>, value: Value) -> Result<(), Error> {
     machine.push_value(value)
+}
+
+/// Compiles `inputs` at `module_path`, eagerly, through the handle API's
+/// assembler, pushing the module and returning its warnings, as the turn
+/// API's compile did before `api-compile-ops`. Used by the CLI's
+/// `configuration` module for its prelude, until `api-cli-sources`.
+pub fn compile<I, S>(
+    machine: &mut Machine<'_, '_>,
+    module_path: I,
+    inputs: impl IntoIterator<Item = ModuleInput>,
+) -> Result<Vec<Diagnostic>, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    machine.compile_inputs(module_path, inputs, false)
+}
+
+/// As [`compile`], over initial definitions popped from the stack. Used by
+/// the CLI's `configuration` and `batch` modules for the configuration and
+/// the assembly, whose files the handle API's source system reads until
+/// `api-cli-sources`.
+pub fn compile_over<I, S>(
+    machine: &mut Machine<'_, '_>,
+    module_path: I,
+    inputs: impl IntoIterator<Item = ModuleInput>,
+) -> Result<Vec<Diagnostic>, Error>
+where
+    I: IntoIterator<Item = S>,
+    S: Into<String>,
+{
+    machine.compile_inputs(module_path, inputs, true)
 }
 
 /// Pops a machine's top value without evaluating it. Used by the CLI's

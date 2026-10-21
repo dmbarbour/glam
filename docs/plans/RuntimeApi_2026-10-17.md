@@ -592,6 +592,33 @@ handle API goes.
     - Tests: those of `api-import-requests`, on the new operations; a
       mixin closed over a base; two inputs composed; a script importing
       nothing; a failed compile's diagnostics reaching the root.
+    - As built (2026-10-21):
+      - `m.import_source`, `m.compile`, `m.instantiate` (the fixpoint of a
+        mixin over a base), `m.compose(n)` (the top mixin outermost),
+        `m.script_record`, `m.source_record` (which pops a package, takes
+        the path from Rust, and reads the language from its extension),
+        and `m.script_object`, a script compiled and instantiated over a
+        base.
+      - The open mixin is `compile_source compiler record`, a partial
+        application of a compiler-private builtin whose first argument is
+        an opaque `SourceCompiler`, a host closure over the assembler's
+        deferred route, until `api-runtime-compile` gives the runtime a
+        compile service of its own. `mixin_compose outer inner` composes.
+      - The builtin's machine converts the whole record to a key, which
+        forces its source to a binary and lets the compile read its scope
+        and language as data, then returns a host call that compiles over
+        the base and self.
+      - A served import composes its key from its importer's location and
+        lowers to the same builtin, with a compiler per import site that
+        carries the site's provenance for the trace; a served source's
+        identity in the trace is its key.
+      - The CLI compiles through `glam::transition::compile` and
+        `compile_over`, the old eager path, until `api-cli-sources`: the
+        bridge's uses in the CLI rise from 13 to 16.
+      - Each compile still makes its own `CompilationExecution` and drains
+        it after, so a compile that a worker forces hangs until
+        `api-runtime-compile`, and one that a macro's import waits on
+        fails until `api-compile-replay`.
 17. `api-compile-replay` — a wait while compiling is pushback
     (`compile-yields-an-open-mixin`): an attempt that waits on a reply
     abandons, evaluation waits on the reply and applies the compile
@@ -773,7 +800,7 @@ so values cross between them: a slice built on turns hands the
 configuration to the logger, which still runs as an `EffectRun`. The bridge
 is that crossing, kept small and visible:
 - **Hidden and named:** `glam::transition`, outside the documented API,
-  whose four functions each name the module where they are used. Their uses
+  whose functions each name the module where they are used. Their uses
   in the CLI count what remains to move, and each step's "As built" records
   the count.
 - **The CLI's alone:** the library's tests and the public tests never use

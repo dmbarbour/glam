@@ -4,7 +4,7 @@
 
 use std::sync::mpsc;
 
-use glam::{Error, ErrorKind, Machine, ModuleInput, PromiseStatus, Runtime, RuntimeConfig};
+use glam::{Error, ErrorKind, Machine, PromiseStatus, Runtime, RuntimeConfig};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -130,12 +130,11 @@ fn a_promise_resolves_once_and_a_broken_one_fails_its_readers() {
 /// Binds as the machine's share an object whose `args` is the value on top.
 fn bind_args(m: &mut Machine<'_, '_>) -> Result<(), Error> {
     m.stash(1)?;
-    m.compile(
+    m.make_dict(Vec::<&str>::new())?;
+    m.script_object(
         ["share"],
-        [ModuleInput::script(
-            "g",
-            "language g0\nimport 'std\nshare args = object_from_dict {args:args}\n",
-        )],
+        "g",
+        "language g0\nimport 'std\nshare args = object_from_dict {args:args}\n",
     )?;
     m.access("share")?;
     m.stash_pop(1)?;

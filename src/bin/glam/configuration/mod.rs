@@ -182,7 +182,7 @@ fn load(
     let values = glam::transition::assembler(runtime).values();
     runtime.run((), |root| {
         root.run(CLI, |m| {
-            m.compile(["glam_cli"], [ModuleInput::script("g", PRELUDE)])?;
+            glam::transition::compile(m, ["glam_cli"], [ModuleInput::script("g", PRELUDE)])?;
             m.set("prelude")
         })?;
         bind_process(root, &values, cli_arguments)?;
@@ -194,7 +194,8 @@ fn load(
     runtime.run(CLI, |m| {
         m.get("prelude")?;
         m.access("configuration_definitions")?;
-        m.compile_over(
+        glam::transition::compile_over(
+            m,
             ["configuration"],
             configuration_paths().into_iter().map(ModuleInput::file),
         )?;
