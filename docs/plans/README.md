@@ -70,10 +70,11 @@ flags a step for discussion when work reaches it, not a decision.
   ownership plan merged in; and a CLI prelude in glam is an experiment,
   `api-cli-prelude`.
 - [`ReflectionModel_2026-10-21.md`](ReflectionModel_2026-10-21.md): the
-  runtime API plan's `api-reflection-model`, a design draft for
-  discussion: reflection tasks as machines that run programs, the effects
-  mapped to machine operations, obligations in place of `.exit`, and which
-  waits settlement reports as unresolved. Drafted 2026-10-21.
+  runtime API plan's `api-reflection-model`, decided 2026-10-21
+  (`reflection-tasks-are-machine-tasks`): reflection tasks as tasks on
+  machines, the effects mapped to machine operations, obligations in place
+  of `.exit`, and which waits settlement reports as unresolved. Its
+  implementation is `api-reflection-machines`.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` is a prefix operator and `:name` a pun everywhere, so braces lost
   their member grammar; follow-ups retired bare tags, rejected tags as

@@ -487,11 +487,19 @@ handle API goes.
      network is designed. Reflection's operations come when it is time,
      such as `.todo.add`, `.todo.del` and `.todo.list` (maintainer, the same
      day).
-   - Draft for discussion (2026-10-21):
-     [Reflection Model](ReflectionModel_2026-10-21.md). A reflection task
-     is a machine that runs a program, an effect value the runtime
-     interprets, beside machines that turns drive; its effects are the
-     machine's operations, and `.task.*` names child machines by key.
+   - *Decided (maintainer, 2026-10-21):*
+     [Reflection Model](ReflectionModel_2026-10-21.md), ADR
+     `reflection-tasks-are-machine-tasks`. A reflection task is a task on
+     a machine, an effect value the runtime runs, with the machine's
+     effectful capabilities and none of a Rust machine's conveniences for
+     evaluation. `.child.task Key Op` queues a task through the child's
+     task port and returns its result's promise; `.child.status`,
+     `.child.interrupt`, `.child.recover` and `.child.clear` act
+     asynchronously, and `.child.call` is a transactional remote
+     procedure call. Annotation tasks run on anonymous machines under
+     `refl`; macro expansion and `conf.cli` are pure evaluation. The
+     obligation set, `.todo.*`, takes over `.exit`'s role, and the
+     decision classifies which waits are unresolved.
 15. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
    decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
    quiescent when every machine waits on input or a heap change, retrying
@@ -506,6 +514,9 @@ handle API goes.
    leaves the logger running; a batch ends when a quiescence finds nothing
    new, ending each fork that then waits in an outermost cut with its
    machine as it was.
+   - Which waits are unresolved, and that a batch may end with tasks
+     still waiting once nothing is: as `reflection-tasks-are-machine-tasks`
+     classifies them (2026-10-21).
    - CLI slice: the CLI's two settlement loops become one, and the bridge
      behavior below that settlement retires goes.
    - Candidate (maintainer, 2026-10-20): recognize a self-wait from
@@ -555,13 +566,23 @@ handle API goes.
       providers, their per-branch journals become machine state that cuts
       restore, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
       public API.
-18. `api-handle-retirement` — the public handle types go: `Assembler`,
+18. `api-reflection-machines` — reflection tasks become tasks on machines
+    (`reflection-tasks-are-machine-tasks`), the implementation of
+    `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`
+    shares and `.todo.*` for tasks, `m.task` and the obligation set for
+    turns, annotation tasks on anonymous machines under `refl`, and the
+    retirement of task handles, `.task.*`, exit votes and the `'macro`
+    role. Its notes are in [Reflection Model](ReflectionModel_2026-10-21.md).
+    - CLI slice: `conf.log` becomes a task on the `logger` machine,
+      reading its diagnostics input and writing a `stderr` port, so
+      `MainEffects` and the logger's host retire.
+19. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-19. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+20. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions
@@ -584,8 +605,9 @@ precede the CLI's first slice. Cuts precede ports,
 whose buffers request queues extend; the machine tree precedes the loggers' move;
 settlement follows the logs it appends to. Hosts follow queues, since their
 requests are queue elements, and precede effect providers, which take what
-remains of the hosts' role. Handle retirement precedes the retirement
-protocol, which needs a sole owner.
+remains of the hosts' role. Reflection machines follow effect providers,
+whose turns run effects as tasks will. Handle retirement precedes the
+retirement protocol, which needs a sole owner.
 
 ## CLI Transition
 

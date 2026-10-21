@@ -2447,6 +2447,73 @@ maps the short names used here to file names.
 - **Recorded in:** runtime API plan, `api-reflection-model` and
   `api-settlement`.
 
+### Reflection tasks are tasks on machines
+`reflection-tasks-are-machine-tasks` · 2026-10-21 · maintainer · accepted
+- **Context:** reflection tasks (`anno refl:`, `refl.*`, `conf.log`) ran as
+  anonymous coordinator tasks with opaque handles, status queries, a
+  failure-acknowledgement ledger, exit votes and a logger specialization,
+  beside the machine model built for the public API: a tree of machines
+  with cuts, error flags, wired ports, environment shares, promises and
+  quiescence. `quiescence-reports-unresolved-state` called for aligning
+  them before settlement.
+- **Decision:**
+  - A reflection task is a task on a machine: an effect value the runtime
+    runs, where a turn is Rust code a thread runs. Both drivers have the
+    same effectful capabilities (local state, children, ports and wiring,
+    the environment share, obligations, the error flag), one driver at a
+    time. A Rust machine's stack and its conveniences for evaluation have
+    no glam counterpart.
+  - `.child.task Key Op` queues `Op` on a child through a task port named
+    by an abstract path, and returns at once a promise that the result
+    fulfills or the failure breaks. A child is `'busy` while a task is
+    queued or running, `'idle` otherwise, `'error` when flagged, and its
+    status changes only by its tasks finishing until its parent acts on
+    it.
+  - A failed task flags its machine and stops its queue. `.child.recover`
+    clears the flag and the queue, which never resumes; the parent
+    decides what follows. `.child.interrupt` stops a task and flags its
+    machine, and settlement's kills are interrupts, so killed machines
+    stay recoverable. Only `.child.clear` clears a machine.
+  - `.child.call Key Op` is the one synchronous operation, a
+    transactional remote procedure call: it awaits what was committed to
+    the child before the caller's transaction, then runs `Op` on the child
+    within that transaction.
+  - Reflection gets the machine's operations as effects: `.port.*`, with
+    lists of values and `.port.available`; `.wire.*`; `.env.*` for its own
+    share; `.todo.*`, the obligation set that takes over `.exit`'s role.
+    `.log` writes the diagnostics output, and the logger's reads and
+    stderr become ports.
+  - Annotation tasks run on anonymous machines under `refl`, keyed by
+    abstract numbers; provenance is the front end's to add to the task's
+    environment, as reflection boundaries and their claims are its tasks'
+    behavior. When its task ends, an annotation machine's local state is
+    cleared, and its children remain.
+  - Reflection is annotation tasks with their descendants and the
+    configured logger (later the IDE). Macro expansion, `conf.cli` and
+    token parsing are pure evaluation with internal handlers, which become
+    turns with providers. An annotation demanded inside a pure search
+    still runs as reflection, outside the search's journal.
+  - At quiescence, waiting on input, on observed state or for queued
+    tasks is idle. Unresolved is an evaluation awaiting a promise no one
+    will resolve, a machine in error, a non-empty obligation set, and
+    killed work. A build or batch may end with tasks still waiting once
+    nothing is unresolved; a deadlock is an error.
+- **Alternatives rejected:** a data stack in reflection's machines; a
+  task's result left on its machine's stack, to be joined; `.task.new`
+  with handles, and machines named for reflection boundaries; pushback
+  when tasking a busy child, rather than a queue; a queue that resumes
+  after recovery; synchronous interaction inferred from awaiting rather
+  than an explicit call; clearing the machines settlement kills; keeping
+  a `'macro` reasoning role.
+- **Consequences:** task handles, `.task.*`, the acknowledgement ledger,
+  exit votes, `MainEffects` and the `'macro` role retire. `.child.call`
+  needs tasks' machine state within the transactional store. Builds stop
+  draining all background reflection. Settlement (`api-settlement`)
+  reports what this classifies as unresolved. Implementation is
+  `api-reflection-machines`, after `api-effect-providers`.
+- **Recorded in:** reflection model plan; runtime API plan,
+  `api-reflection-model`.
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable
@@ -3685,6 +3752,7 @@ Short names used under **Recorded in**, with their files under `docs/`.
 | I8 review | `reviews/GarbageCollectorIntegrationI8_2026-09-10.md` |
 | opaque-representation review | `reviews/GarbageCollectorOpaqueRepresentation_2026-09-11.md` |
 | opaque finalization review | `reviews/OpaqueFinalization_2026-10-20.md` |
+| reflection model plan | `plans/ReflectionModel_2026-10-21.md` |
 | D2h review | `reviews/GarbageCollectorAggressiveD2h_2026-10-01.md` |
 | GCI11R002 holistic review | `reviews/GarbageCollectorGCI11R002Holistic_2026-10-01.md` |
 | I13 cleanup inventory | `reviews/GarbageCollectorI13CleanupInventory_2026-10-02.md` |
