@@ -500,35 +500,7 @@ handle API goes.
      `refl`; macro expansion and `conf.cli` are pure evaluation. The
      obligation set, `.todo.*`, takes over `.exit`'s role, and the
      decision classifies which waits are unresolved.
-15. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
-   decides (maintainer, 2026-10-19), in place of exit votes. The runtime is
-   quiescent when every machine waits on input or a heap change, retrying
-   its current atomic step, and no evaluation work remains; turns in
-   progress are known, so settlement counts them, which the handle API
-   could not. `rt.settle()` waits for quiescence, services maintenance,
-   kills a deadlock, and has a machine whose diagnostics output it checks
-   first build and emit a report of what remains unresolved: obligations
-   no one will meet, machines still in error, task failures no one
-   observed, and the work it killed. Failures known when they happen, a
-   delivery's or a maintenance failure, are diagnostics then. Settlement
-   leaves the logger running; a batch ends when a quiescence finds nothing
-   new, ending each fork that then waits in an outermost cut with its
-   machine as it was.
-   - Which waits are unresolved, and that a batch may end with tasks
-     still waiting once nothing is: as `reflection-tasks-are-machine-tasks`
-     classifies them (2026-10-21).
-   - CLI slice: the CLI's two settlement loops become one, and the bridge
-     behavior below that settlement retires goes.
-   - Candidate (maintainer, 2026-10-20): recognize a self-wait from
-     outside, for the report: a cut that waits on the value of a promise
-     it resolves itself, which only its commit would settle. Inspecting a
-     deadlocked machine's or reflection task's state, its staged
-     resolutions beside where its wait ends, can explain the divergence,
-     a better diagnostic than a bare deadlock, without the cross-layer
-     check that evaluation would otherwise need at every wait. Turns
-     already fail such a cut when their own evaluation returns
-     (`api-transactional-promises`).
-16. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
+15. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
    `lifecycle-host-calls` (L3, L7, L8, L9). The reflection hosts
    (`AssemblerReflectionHost`, `LoggerTaskHost`, `IsolatedTaskHost`) reduce
    to queues and store state that machines serve, and `TaskHost`'s
@@ -543,7 +515,7 @@ handle API goes.
      reads, for the manifest and the final check that no file changed. The
      CLI opens its runtime with `Runtime::open`, and the bridge's
      constructor goes.
-17. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+16. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
     - The turn supplies the effects API, evaluates the program to weak-head
@@ -570,7 +542,7 @@ handle API goes.
       `.promise.*`), which they carry only as bridge behavior: `conf.cli`
       and macros are pure evaluation, ideally handled by pure functions
       (maintainer, 2026-10-21).
-18. `api-reflection-machines` — reflection tasks become tasks on machines
+17. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`
     shares and `.todo.*` for tasks, the obligation set for turns,
@@ -580,6 +552,36 @@ handle API goes.
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
       a `stderr` port with `.port.*`, and its exit vote goes.
+18. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+    decides (maintainer, 2026-10-19), in place of exit votes. It follows
+    `api-reflection-machines` (moved 2026-10-21), so it meets reflection
+    tasks as machines and no exit votes, rather than building on both. The runtime is
+    quiescent when every machine waits on input or a heap change, retrying
+    its current atomic step, and no evaluation work remains; turns in
+    progress are known, so settlement counts them, which the handle API
+    could not. `rt.settle()` waits for quiescence, services maintenance,
+    kills a deadlock, and has a machine whose diagnostics output it checks
+    first build and emit a report of what remains unresolved: obligations
+    no one will meet, machines still in error, task failures no one
+    observed, and the work it killed. Failures known when they happen, a
+    delivery's or a maintenance failure, are diagnostics then. Settlement
+    leaves the logger running; a batch ends when a quiescence finds nothing
+    new, ending each fork that then waits in an outermost cut with its
+    machine as it was.
+    - Which waits are unresolved, and that a batch may end with tasks
+     still waiting once nothing is: as `reflection-tasks-are-machine-tasks`
+     classifies them (2026-10-21).
+    - CLI slice: the CLI's two settlement loops become one, and the bridge
+     behavior below that settlement retires goes.
+    - Candidate (maintainer, 2026-10-20): recognize a self-wait from
+     outside, for the report: a cut that waits on the value of a promise
+     it resolves itself, which only its commit would settle. Inspecting a
+     deadlocked machine's or reflection task's state, its staged
+     resolutions beside where its wait ends, can explain the divergence,
+     a better diagnostic than a bare deadlock, without the cross-layer
+     check that evaluation would otherwise need at every wait. Turns
+     already fail such a cut when their own evaluation returns
+     (`api-transactional-promises`).
 19. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
@@ -610,7 +612,8 @@ whose buffers request queues extend; the machine tree precedes the loggers' move
 settlement follows the logs it appends to. Hosts follow queues, since their
 requests are queue elements, and precede effect providers, which take what
 remains of the hosts' role. Reflection machines follow effect providers,
-whose turns run effects as tasks will. Handle retirement precedes the
+whose turns run effects as tasks will, and settlement follows reflection
+machines, whose waits it classifies. Handle retirement precedes the
 retirement protocol, which needs a sole owner.
 
 ## CLI Transition
