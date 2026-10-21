@@ -502,23 +502,36 @@ handle API goes.
      decision classifies which waits are unresolved.
 15. `api-import-requests` — renamed from `api-hosts-as-machines` and
    narrowed (2026-10-21), absorbing `lifecycle-host-calls` (L3, L9): a
-   forced import's file load becomes a request whose promised value is the
-   import (decision 7), so workers neither call a `SourceSystem` nor upgrade
-   `DeferredAssembler`, which retires. L9's nesting, a macro search within an
-   import, stays: it is inherent to lazy imports. The reflection hosts'
-   retirement (`lifecycle-host-messages`, decision 6) moved to the steps
-   that replace what they do: `api-effect-providers` retires
-   `IsolatedTaskHost` and `LoggerTaskHost`, whose work becomes turns with
-   providers, and `api-reflection-machines` retires
-   `AssemblerReflectionHost` and `TaskHost`'s `snapshot`, `commit` and
-   `validate` hooks, since tasks on machines commit to the runtime's store
-   directly and write diagnostics to ports rather than publishing them in a
-   commit, on a worker.
-   - CLI slice: a CLI machine serves the import queue and records the
-     reads, for the manifest and the final check that no file changed. The
-     CLI opens its runtime with `Runtime::open`, and the bridge's
-     constructor goes.
-16. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
+   forced import asks for its source's binary on a port
+   (`imports-are-source-requests`, maintainer, 2026-10-21). An import's
+   binary is embedded data, not I/O, and the front end is conceptually a
+   pure function over it.
+   - The request names the importer's source, the relative path, and
+     whether it is a module or a binary, with a reply resolver; the import
+     awaits the reply, the binary alone, and a module import compiles it
+     on the forcing thread, as today. A macro that forces an import makes
+     another request.
+   - Requests reach the root's `imports` output by a default wiring rule
+     through the root, as diagnostics pass through; a host serves them by
+     wiring that output to its server.
+   - CLI slice: a CLI machine serves the requests with `FileSourceSystem`,
+     records the reads, and writes the manifest and checks that no file
+     changed once settlement is done, so imports forced during settlement
+     or by the logger count. The CLI opens its runtime with
+     `Runtime::open`, and the bridge's constructor goes.
+   - The reflection hosts' retirement (`lifecycle-host-messages`, decision
+     6) moved to the steps that replace what they do:
+     `api-effect-providers` retires `IsolatedTaskHost` and
+     `LoggerTaskHost`, whose work becomes turns with providers, and
+     `api-reflection-machines` retires `AssemblerReflectionHost` and
+     `TaskHost`'s `snapshot`, `commit` and `validate` hooks.
+16. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
+    compilation builds its context from runtime-side parts, the value
+    factory, the front ends, an invocation counter and a diagnostics
+    port, so no worker reaches an `Assembler`, a `DeferredAssembler` or a
+    `SourceSystem` (L3), and macro sessions no longer revive a
+    `CompilationExecution`. `DeferredAssembler` retires.
+17. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
     - The turn supplies the effects API, evaluates the program to weak-head
@@ -546,7 +559,7 @@ handle API goes.
       `.promise.*`), which they carry only as bridge behavior: `conf.cli`
       and macros are pure evaluation, ideally handled by pure functions
       (maintainer, 2026-10-21).
-17. `api-reflection-machines` — reflection tasks become tasks on machines
+18. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`
     shares and `.todo.*` for tasks, the obligation set for turns,
@@ -560,7 +573,7 @@ handle API goes.
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
       a `stderr` port with `.port.*`, and its exit vote goes.
-18. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+19. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
     decides (maintainer, 2026-10-19), in place of exit votes. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
     tasks as machines and no exit votes, rather than building on both. The runtime is
@@ -590,13 +603,13 @@ handle API goes.
      check that evaluation would otherwise need at every wait. Turns
      already fail such a cut when their own evaluation returns
      (`api-transactional-promises`).
-19. `api-handle-retirement` — the public handle types go: `Assembler`,
+20. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-20. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+21. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions
@@ -618,8 +631,9 @@ Two steps from the ownership plan stand beside these, under their names:
 precede the CLI's first slice. Cuts precede ports,
 whose buffers request queues extend; the machine tree precedes the loggers' move;
 settlement follows the logs it appends to. Import requests follow requests,
-whose ports and promises carry them; the hosts retire with the steps that
-take their roles, effect providers and reflection machines. Reflection machines follow effect providers,
+whose ports and promises carry them, and precede the runtime-side compile
+context, which removes what workers still reach; the hosts retire with the
+steps that take their roles, effect providers and reflection machines. Reflection machines follow effect providers,
 whose turns run effects as tasks will, and settlement follows reflection
 machines, whose waits it classifies. Handle retirement precedes the
 retirement protocol, which needs a sole owner.
@@ -820,7 +834,7 @@ are turns.
 | `lifecycle-queues` | `api-requests` |
 | `lifecycle-host-messages` | `api-effect-providers` and `api-reflection-machines` (from `api-hosts-as-machines`, 2026-10-21) |
 | `lifecycle-leases` | `api-effect-providers` |
-| `lifecycle-host-calls` | `api-import-requests` |
+| `lifecycle-host-calls` | `api-import-requests` and `api-runtime-compile` |
 | `lifecycle-audits` | itself, beside the steps |
 | `lifecycle-external-owners` | itself, beside the steps |
 
@@ -831,7 +845,7 @@ The review's findings, by the step that resolves each:
 - **L2** (the CLI logger on workers): done with `lifecycle-cli-logger`; the
   logger machine (`api-ports`) ends what remains.
 - **L3, L9** (workers upgrading `DeferredAssembler` for imports):
-  `api-import-requests`.
+  `api-import-requests` and `api-runtime-compile`.
 - **L4** (a subscriber leaking its runtime): the diagnostics port
   (`api-ports`) retires subscribers.
 - **L7, L8** (callbacks that capture owners, client code on workers):

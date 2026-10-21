@@ -2447,6 +2447,46 @@ maps the short names used here to file names.
 - **Recorded in:** runtime API plan, `api-reflection-model` and
   `api-settlement`.
 
+### A forced import asks for its source's binary on a port
+`imports-are-source-requests` · 2026-10-21 · maintainer · accepted
+- **Context:** a local import is a lazy value whose producer, a Rust
+  closure, runs on whatever thread forces it, a worker among them. It
+  upgrades `DeferredAssembler`, loads the file through the client's
+  `SourceSystem`, compiles it with the `Assembler`, and recurses into the
+  imports its macros force (the lifecycle review's L3 and L9). That
+  review's decision 7 made the file load I/O for a client thread to serve.
+- **Decision:**
+  - An import's binary is embedded data, not I/O (maintainer): content
+    addressing for remote sources, and secure hashes that keep the
+    observations of local files consistent within an assembly step, fix
+    it as a literal is fixed. The front end is, conceptually, a pure
+    function over that binary. Host closures were the host language's way
+    to present this; the request separates the responsibilities instead.
+  - A forced import writes a request for its source's binary, naming the
+    importer's source, the relative path and whether it is a module or a
+    binary, with a reply resolver, and its value awaits the reply: the
+    binary itself for a binary import, the front end's compilation of it
+    for a module.
+  - The reply is the binary only. Compilation stays runtime code on the
+    forcing thread, so an import that a macro forces is just another
+    request, and the server never waits on itself.
+  - Requests reach the root machine's `imports` output by default, a
+    wiring rule that passes the root's `imports` input through to it, as
+    diagnostics pass through by default, and a host serves them by wiring
+    that output to its server. A host virtualizes sources by serving them.
+  - The server, a host's machine, resolves paths, keeps observations
+    consistent (the CLI's digests) and records them for the manifest.
+- **Alternatives rejected:** the file load framed as I/O; a server that
+  compiles, whose nested imports would wait on its own queue; host
+  closures that load and compile on whichever thread forces an import.
+- **Consequences:** `api-import-requests` builds the request, the default
+  route and the CLI's server, whose manifest then covers imports forced
+  during settlement or by the logger. `api-runtime-compile` builds the
+  compile context from runtime-side parts, so no worker reaches an
+  `Assembler`, a `DeferredAssembler` or a `SourceSystem`. An import that
+  nothing serves waits, and settlement reports it as unresolved.
+- **Recorded in:** runtime API plan, `api-import-requests`.
+
 ### Reflection tasks are tasks on machines
 `reflection-tasks-are-machine-tasks` · 2026-10-21 · maintainer · accepted
 - **Context:** reflection tasks (`anno refl:`, `refl.*`, `conf.log`) ran as
