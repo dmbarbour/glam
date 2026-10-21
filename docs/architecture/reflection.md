@@ -235,11 +235,15 @@ The store's root holds the ephemeron, never the cell or the value, so a
 volume lives while some other path reaches its cell: a handle, the store
 for its own volumes and a host's until revoked (`kept`, which snapshots
 share), or a transaction that reads, writes or creates it, until it ends;
-its commit keys each new version on the cell it holds. A request names its
-volume by a `VolumeTarget`, the handle it decoded or a host's protected
-volume by ID, which it resolves under access to a view of the cell; reads
-check that view against the version's key and leave rooting to the
-caller. Contents reach the cell only
+its commit keys each new version on the cell it holds. The store's users
+reach a volume only through a view of its cell, `VolumeCellView`: reads
+return a view of its contents, a version's, checked against the version's
+key, or the journal's draft, and leave rooting to the caller; writes and
+read observations take a cell view, and creation returns one. Only hosts'
+protected volumes, which the store keeps, go by ID (`*_kept_volume*`). A
+request names its volume by a `VolumeTarget`, the handle it decoded or a
+host's volume by ID, which it resolves under access. A journal's writes
+build drafts, contents cells on which its commit keys the new versions. Contents reach the cell only
 through their ephemeron, so a volume reaching its own handle, or volumes
 reaching each other's, are collected. A collected volume's versions clear
 silently: nothing can name it again, so no transaction conflicts. The store

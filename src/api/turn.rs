@@ -45,9 +45,10 @@ use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute, WorkDependency}
 /// How many polls a cut whose evaluation waited reserves each time it pumps
 /// the work it waits on.
 const AWAIT_PUMP_ALLOWANCE: usize = 4_096;
+use crate::core::{RuntimeValueAccess, VolumeCellView};
 use crate::reflection::{
     ConflictAnalysisStrategy, Promises, Resolution, StoreCommitResult, StoreJournal,
-    resolver_promise,
+    contents_at_path, resolver_promise,
 };
 
 /// What opening a runtime takes. It configures the runtime alone:
@@ -1869,10 +1870,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let values = self.runtime.assembler.values();
         values.require(&initial)?;
         let handle = self.transact(|store, _| {
-            let (_, handle) = store
+            store
                 .create_volume(initial.clone())
-                .map_err(|error| Error::new(error.as_ref()))?;
-            Ok(handle)
+                .map_err(|error| Error::new(error.as_ref()))
         })?;
         self.pop()?;
         self.push(handle);
@@ -1888,21 +1888,33 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
         let path = key_path(path);
-        let volume = self.volume_at(1)?;
-        let value = match &mut self.cut {
-            Some(cut) => {
-                cut.observed |= cut.journal.observe_volume_read(volume, &path);
-                // The cut's journal keeps the volume it read until the cut
-                // ends (`api-volume-cells`).
-                cut.journal.read_volume(volume, &path)
-            }
-            None => self
-                .resources()
-                .reflection_snapshot()
-                .1
-                .volume_value(volume, &path),
-        }
-        .ok_or_else(|| revoked(volume))?;
+        let handle = self.volume_handle_at(1)?;
+        let snapshot = self
+            .cut
+            .is_none()
+            .then(|| self.resources().reflection_snapshot().1);
+        let runtime = self.runtime;
+        let cut = &mut self.cut;
+        let value = runtime.assembler.values().with_access(|scoped| {
+            let access = scoped.runtime_access();
+            let handle = scoped.clone_core(&handle)?;
+            let volume = access
+                .volume_cell(&handle)
+                .expect("the handle names a volume");
+            let contents = match (cut.as_mut(), &snapshot) {
+                (Some(cut), _) => {
+                    cut.observed |= cut.journal.observe_volume_read(volume, &path);
+                    // The cut's journal keeps the volume it read until the
+                    // cut ends (`api-volume-cells`).
+                    cut.journal.read_volume_in(access, volume)
+                }
+                (None, Some(snapshot)) => snapshot.read_volume_in(access, volume),
+                (None, None) => unreachable!("outside a cut, a turn reads a snapshot"),
+            };
+            contents
+                .map(|contents| scoped.wrap(contents_at_path(access, contents, &path)))
+                .ok_or_else(|| revoked(volume.id()))
+        })?;
         self.pop()?;
         self.push(value);
         Ok(())
@@ -1915,7 +1927,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
         let path = key_path(path);
-        self.volume_edit(|journal, volume, value| journal.write_volume(volume, path.clone(), value))
+        self.volume_edit(|journal, access, volume, value| {
+            journal.write_volume_in(access, volume, path.clone(), value)
+        })
     }
 
     /// Pops a function, then a volume's handle, and rewrites the value at
@@ -1926,8 +1940,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
         let path = key_path(path);
-        self.volume_edit(|journal, volume, updater| {
-            journal.rewrite_volume(volume, path.clone(), updater)
+        self.volume_edit(|journal, access, volume, updater| {
+            journal.rewrite_volume_in(access, volume, path.clone(), updater)
         })
     }
 
@@ -1935,33 +1949,64 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// below it, popping both once it has.
     fn volume_edit(
         &mut self,
-        edit: impl Fn(&mut StoreJournal, crate::reflection::VolumeId, Value),
+        edit: impl Fn(&mut StoreJournal, &RuntimeValueAccess<'_>, VolumeCellView<'_>, Value),
     ) -> Result<(), Error> {
         let depth = self.require(2)?;
         let value = self.state.stack[depth - 1].clone();
         self.runtime.assembler.values().require(&value)?;
-        let volume = self.volume_at(2)?;
-        self.store_edit(|journal| edit(journal, volume, value.clone()))?;
+        let handle = self.volume_handle_at(2)?;
+        let values = self.runtime.assembler.values().clone();
+        self.store_edit(|journal| {
+            values.with_access(|scoped| {
+                let handle = scoped
+                    .clone_core(&handle)
+                    .expect("the handle belongs to this runtime");
+                let access = scoped.runtime_access();
+                let volume = access
+                    .volume_cell(&handle)
+                    .expect("the handle names a volume");
+                edit(journal, access, volume, value.clone());
+            })
+        })?;
         self.state.stack.truncate(depth - 2);
         Ok(())
     }
 
-    /// The volume that the handle `n` values down names, evaluating the
-    /// handle, which stays.
-    fn volume_at(&mut self, n: usize) -> Result<crate::reflection::VolumeId, Error> {
+    /// The handle `n` values down, evaluated, where it names a volume; the
+    /// handle stays. Volume operations reach the volume through a view of
+    /// its cell, which the handle gives (`api-volume-cells`).
+    fn volume_handle_at(&mut self, n: usize) -> Result<Value, Error> {
         let depth = self.require(n)?;
         let handle = self.state.stack[depth - n].clone();
         let evaluated = self.runtime.assembler.evaluator().eval(&handle);
-        let evaluated = self.note_evaluation(evaluated)?.into_value();
-        let values = self.runtime.assembler.values();
-        values
-            .with_access(|scoped| {
-                Ok::<_, Error>(crate::reflection::handle_volume(
-                    scoped.runtime_access(),
-                    &scoped.clone_core(&evaluated)?,
-                ))
-            })?
-            .ok_or_else(|| Error::new("the value is not a handle of this runtime's volume"))
+        let handle = self.note_evaluation(evaluated)?.into_value();
+        let names_volume = self.runtime.assembler.values().with_access(|scoped| {
+            Ok::<_, Error>(
+                scoped
+                    .runtime_access()
+                    .volume_cell(&scoped.clone_core(&handle)?)
+                    .is_some(),
+            )
+        })?;
+        if !names_volume {
+            return Err(Error::new(
+                "the value is not a handle of this runtime's volume",
+            ));
+        }
+        Ok(handle)
+    }
+
+    /// The volume that the handle `n` values down names.
+    #[cfg(test)]
+    fn volume_at(&mut self, n: usize) -> Result<crate::reflection::VolumeId, Error> {
+        let handle = self.volume_handle_at(n)?;
+        self.runtime.assembler.values().with_access(|scoped| {
+            Ok(crate::reflection::handle_volume(
+                scoped.runtime_access(),
+                &scoped.clone_core(&handle)?,
+            )
+            .expect("the handle names a volume"))
+        })
     }
 
     /// Pops `n` values and writes them, in order, to this machine's output

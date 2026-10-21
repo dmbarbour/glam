@@ -33,9 +33,22 @@ pub(crate) struct ManagedVolumeContents {
 pub(crate) struct ManagedVolumeEdge(Gc<ManagedVolumeCell>);
 
 /// A volume's cell, viewed while an access region lasts, which keeps the
-/// volume as long: the capability by which a request reads and writes it.
+/// volume as long: the capability by which the store's users read and write
+/// it, in place of its ID.
 #[derive(Clone, Copy)]
 pub(crate) struct VolumeCellView<'access>(GcRef<'access, ManagedVolumeCell>);
+
+/// A volume's contents, viewed while an access region lasts: a committed
+/// version's, or a transaction's draft.
+#[derive(Clone, Copy)]
+pub(crate) struct VolumeContentsView<'access>(GcRef<'access, ManagedVolumeContents>);
+
+/// A transaction's draft of a volume's contents, its value with the
+/// transaction's writes, on which its commit keys the volume's new version.
+#[derive(Clone)]
+pub(crate) struct ManagedVolumeDraft {
+    root: Root<ManagedVolumeContents>,
+}
 
 /// A durable owner's hold on a volume's cell, which keeps the volume: the
 /// store's on its own volumes and a host's, and a transaction's on each
@@ -121,6 +134,31 @@ impl VolumeCellView<'_> {
     pub(crate) fn id(self) -> VolumeId {
         self.0.get().id
     }
+
+    /// A handle to the volume, under `access`, which the view already
+    /// borrows.
+    pub(crate) fn handle_in(self, _access: &RuntimeValueAccess<'_>) -> Value {
+        Value::Volume(crate::core::VolumeValue::from_edge(ManagedVolumeEdge(
+            self.0.edge(),
+        )))
+    }
+}
+
+impl<'access> VolumeContentsView<'access> {
+    /// The contents' value, under `access`, which the view already borrows.
+    pub(crate) fn value_in(self, _access: &RuntimeValueAccess<'_>) -> &'access Value {
+        &self.0.get().value
+    }
+}
+
+impl ManagedVolumeDraft {
+    /// The draft, viewed.
+    pub(crate) fn view_in<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+    ) -> VolumeContentsView<'access> {
+        VolumeContentsView(access.view_root(&self.root))
+    }
 }
 
 impl ManagedVolumeRoot {
@@ -134,26 +172,24 @@ impl ManagedVolumeRoot {
 
     /// A handle to the volume.
     pub(crate) fn handle_in(&self, access: &RuntimeValueAccess<'_>) -> Value {
-        Value::Volume(crate::core::VolumeValue::from_edge(ManagedVolumeEdge(
-            access.project_root(&self.root),
-        )))
+        self.view_in(access).handle_in(access)
     }
 }
 
 impl ManagedVolumeVersion {
-    /// The version's value, borrowed while `access` lasts, where `volume`
-    /// is the cell it is keyed on, which a live view keeps from clearing.
-    pub(crate) fn value_of<'access>(
+    /// The version's contents, viewed, where `volume` is the cell it is
+    /// keyed on, which a live view keeps from clearing.
+    pub(crate) fn contents_of<'access>(
         &self,
         access: &'access RuntimeValueAccess<'_>,
         volume: VolumeCellView<'_>,
-    ) -> Option<&'access Value> {
+    ) -> Option<VolumeContentsView<'access>> {
         let (cell, contents) = access.ephemeron_entry(&self.root)?;
         assert!(
             cell.same_allocation(volume.0),
             "a volume's version is keyed on its cell"
         );
-        Some(&contents.get().value)
+        Some(VolumeContentsView(contents))
     }
 
     /// The version's cell, viewed, or `None` once a collection found the
@@ -204,6 +240,29 @@ impl RuntimeValueAccess<'_> {
             .alloc_view(ManagedVolumeCell { id });
         ManagedVolumeRoot {
             root: self.root(cell),
+        }
+    }
+
+    /// Allocates a draft of a volume's contents holding `value`.
+    pub(crate) fn volume_draft(&self, value: Value) -> ManagedVolumeDraft {
+        let contents = self
+            .allocator::<ManagedVolumeContents>()
+            .expect("a volume's contents fit one collector slot")
+            .alloc_view(ManagedVolumeContents { value });
+        ManagedVolumeDraft {
+            root: self.root(contents),
+        }
+    }
+
+    /// Commits `draft` as a version of `volume`, held through an ephemeron
+    /// keyed on its cell.
+    pub(crate) fn volume_version_of(
+        &self,
+        volume: &ManagedVolumeRoot,
+        draft: &ManagedVolumeDraft,
+    ) -> ManagedVolumeVersion {
+        ManagedVolumeVersion {
+            root: self.root_ephemeron_of(&volume.root, &draft.root),
         }
     }
 

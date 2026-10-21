@@ -443,7 +443,8 @@ mod value_node;
 pub(crate) use value_node::PreparedRuntimeValueRoot;
 mod volume_cells;
 pub(crate) use volume_cells::{
-    ManagedVolumeEdge, ManagedVolumeRoot, ManagedVolumeVersion, VolumeCellView,
+    ManagedVolumeDraft, ManagedVolumeEdge, ManagedVolumeRoot, ManagedVolumeVersion, VolumeCellView,
+    VolumeContentsView,
 };
 mod recursive_cells;
 pub(crate) use recursive_cells::{
@@ -1034,6 +1035,16 @@ impl RuntimeValueAccess<'_> {
         self.scope.root_ephemeron(key, value)
     }
 
+    /// Allocates an ephemeron of the rooted `key` and rooted `value`, and
+    /// roots it.
+    pub(crate) fn root_ephemeron_of<K: ManagedFamily, V: ManagedFamily>(
+        &self,
+        key: &Root<K>,
+        value: &Root<V>,
+    ) -> Root<Ephemeron<K, V>> {
+        self.scope.root_ephemeron_of(key, value)
+    }
+
     /// Views a rooted ephemeron's key and value, or `None` once a collection
     /// found its key unreachable.
     pub(crate) fn ephemeron_entry<'access, K: ManagedFamily, V: ManagedFamily>(
@@ -1242,6 +1253,19 @@ impl CoreValueAllocationScope<'_> {
             .expect("an ephemeron's value fits one collector slot")
             .alloc_view(value);
         let ephemeron = self.mutator.ephemeron(key.as_gc(self.mutator), value);
+        self.mutator.root(ephemeron)
+    }
+
+    /// Allocates an ephemeron of the rooted `key` and rooted `value`, and
+    /// roots it.
+    fn root_ephemeron_of<K: ManagedFamily, V: ManagedFamily>(
+        &self,
+        key: &Root<K>,
+        value: &Root<V>,
+    ) -> Root<Ephemeron<K, V>> {
+        let ephemeron = self
+            .mutator
+            .ephemeron(key.as_gc(self.mutator), value.as_gc(self.mutator));
         self.mutator.root(ephemeron)
     }
 

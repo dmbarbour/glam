@@ -35,10 +35,10 @@ pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry, LazyProducerView,
     ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedDropRecord, ManagedFamily,
     ManagedLazyAccess, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromisePublication,
-    ManagedPromiseRoot, ManagedVolumeRoot, ManagedVolumeVersion, OpaquePayloadFamily,
-    OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueMutator,
-    RuntimeValueObserver, VolumeCellView, assert_outside_mutator, managed_slot_extent,
-    trace_compatibility_value_managed_edges,
+    ManagedPromiseRoot, ManagedVolumeDraft, ManagedVolumeRoot, ManagedVolumeVersion,
+    OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess,
+    RuntimeValueMutator, RuntimeValueObserver, VolumeCellView, VolumeContentsView,
+    assert_outside_mutator, managed_slot_extent, trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};

@@ -144,7 +144,7 @@ fn assert_store_root_boundary_inventory(
         branch,
     } = journal;
     let _: &StoreSnapshot = snapshot;
-    let _: &RedBlackTreeMapSync<VolumeId, PublicValue> = views;
+    let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeDraft> = views;
     let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot> = cells;
     let _: &Arc<Mutex<Box<dyn ConflictObservationIndex>>> = observations;
     let _: &Vec<StoreEdit> = edits;
@@ -462,8 +462,8 @@ fn one_journal_updates_multiple_volumes_atomically() {
     let first = store.create_volume(initial.clone()).unwrap();
     let second = store.create_volume(initial).unwrap();
     let mut journal = StoreJournal::new(store.snapshot());
-    journal.write_volume(first, path(&["value"]), integer(&store, 1));
-    journal.write_volume(second, path(&["value"]), integer(&store, 2));
+    journal.write_by_id(first, path(&["value"]), integer(&store, 1));
+    journal.write_by_id(second, path(&["value"]), integer(&store, 2));
 
     assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
     assert!(same_representation(
@@ -486,8 +486,8 @@ fn revoked_volume_rejects_staged_blind_edits_without_partial_commit() {
     let surviving = store.create_volume(initial).unwrap();
     let original_surviving = store.volume_root(surviving).unwrap();
     let mut journal = StoreJournal::new(store.snapshot());
-    journal.write_volume(revoked, Vec::new(), integer(&store, 1));
-    journal.write_volume(surviving, Vec::new(), integer(&store, 2));
+    journal.write_by_id(revoked, Vec::new(), integer(&store, 1));
+    journal.write_by_id(surviving, Vec::new(), integer(&store, 2));
     assert!(store.revoke_volume(revoked).is_some());
 
     assert_eq!(
@@ -508,7 +508,7 @@ fn revoked_volume_conflicts_with_an_earlier_read() {
     let initial = empty(&store);
     let volume = store.create_volume(initial).unwrap();
     let mut journal = StoreJournal::new(store.snapshot());
-    assert!(journal.observe_volume_read(volume, &[]));
+    assert!(journal.observe_kept_volume_read(volume, &[]));
     assert!(store.revoke_volume(volume).is_some());
 
     assert_eq!(store.try_commit(&journal), StoreCommitResult::Conflict);
@@ -521,7 +521,7 @@ fn writes_never_materialize_a_missing_volume() {
     let volume = store.create_volume(initial).unwrap();
     assert!(store.revoke_volume(volume).is_some());
     let mut journal = StoreJournal::new(store.snapshot());
-    journal.write_volume(volume, Vec::new(), integer(&store, 1));
+    journal.write_by_id(volume, Vec::new(), integer(&store, 1));
 
     assert!(journal.volume_view(volume).is_none());
     assert_eq!(
@@ -852,6 +852,18 @@ fn writes_do_not_erase_earlier_read_dependencies() {
     assert_eq!(store.try_commit(&local), StoreCommitResult::Conflict);
 }
 
+/// Reads `volume` within `journal`'s transaction, through its cell, as a
+/// machine's request does, rooting the result.
+fn read_volume(journal: &mut StoreJournal, volume: VolumeId) -> Option<PublicValue> {
+    journal.with_access(|journal, access| {
+        let cell = journal.volume_cell_in(access, volume)?;
+        let contents = journal.read_volume_in(access, cell)?;
+        Some(PublicValue::from_runtime_root(
+            access.root_runtime_value(contents_at_path(access, contents, &[])),
+        ))
+    })
+}
+
 /// A store whose value domain is its own, which tests may collect.
 fn collectable_store() -> ReflectionStore {
     store_with(crate::core::private_test_value_factory())
@@ -868,9 +880,13 @@ fn collect(store: &ReflectionStore) {
 /// handle (`api-volume-cells`).
 fn glam_volume(store: &mut ReflectionStore, initial: &str) -> (VolumeId, PublicValue) {
     let mut creator = StoreJournal::new(store.snapshot());
-    let (volume, handle) = creator
+    let handle = creator
         .create_volume(text(store, initial))
         .expect("a volume allocates");
+    let volume = store.values.with_boundary_access(|access| {
+        crate::reflection::handle_volume(&access, &handle.runtime_root().clone_core_with(&access))
+            .expect("a volume's handle")
+    });
     assert_eq!(store.try_commit(&creator), StoreCommitResult::Committed);
     (volume, handle)
 }
@@ -884,7 +900,7 @@ fn a_volume_reaching_its_own_handle_is_collected() {
     let mut store = collectable_store();
     let (volume, handle) = glam_volume(&mut store, "first");
     let mut writer = StoreJournal::new(store.snapshot());
-    writer.write_volume(volume, path(&["self"]), handle.clone());
+    writer.write_by_id(volume, path(&["self"]), handle.clone());
     assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
     drop(writer);
 
@@ -904,8 +920,8 @@ fn volumes_reaching_each_other_s_handles_are_collected_together() {
     let (first, first_handle) = glam_volume(&mut store, "first");
     let (second, second_handle) = glam_volume(&mut store, "second");
     let mut writer = StoreJournal::new(store.snapshot());
-    writer.write_volume(first, path(&["other"]), second_handle.clone());
-    writer.write_volume(second, path(&["other"]), first_handle.clone());
+    writer.write_by_id(first, path(&["other"]), second_handle.clone());
+    writer.write_by_id(second, path(&["other"]), first_handle.clone());
     assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
     drop(writer);
 
@@ -925,7 +941,7 @@ fn a_transaction_writing_a_volume_keeps_it_until_it_commits() {
     let mut store = collectable_store();
     let (volume, handle) = glam_volume(&mut store, "first");
     let mut writer = StoreJournal::new(store.snapshot());
-    writer.write_volume(volume, Vec::new(), text(&store, "second"));
+    writer.write_by_id(volume, Vec::new(), text(&store, "second"));
     drop(handle);
 
     collect(&store);
@@ -944,7 +960,7 @@ fn a_transaction_reading_a_volume_keeps_it_until_it_ends() {
     let mut store = collectable_store();
     let (volume, handle) = glam_volume(&mut store, "first");
     let mut reader = StoreJournal::new(store.snapshot());
-    assert!(reader.read_volume(volume, &[]).is_some());
+    assert!(read_volume(&mut reader, volume).is_some());
     drop(handle);
 
     collect(&store);
@@ -970,14 +986,14 @@ fn reads_root_only_their_results() {
 
     let mut reader = StoreJournal::new(store.snapshot());
     let before = registrations();
-    assert!(reader.read_volume(volume, &[]).is_some());
+    assert!(read_volume(&mut reader, volume).is_some());
     assert_eq!(
         registrations() - before,
         2,
         "a transaction's first read keeps the volume's cell too"
     );
     let before = registrations();
-    assert!(reader.read_volume(volume, &[]).is_some());
+    assert!(read_volume(&mut reader, volume).is_some());
     assert_eq!(registrations() - before, 1, "and only the first");
     drop(handle);
 }
@@ -989,7 +1005,7 @@ fn a_snapshot_keeps_the_version_it_began_from() {
     let (volume, handle) = glam_volume(&mut store, "first");
     let before = store.snapshot();
     let mut writer = StoreJournal::new(store.snapshot());
-    writer.write_volume(volume, Vec::new(), text(&store, "second"));
+    writer.write_by_id(volume, Vec::new(), text(&store, "second"));
     assert_eq!(store.try_commit(&writer), StoreCommitResult::Committed);
     drop(writer);
 
@@ -1072,7 +1088,7 @@ fn a_revoked_volume_s_late_writes_stay_an_error() {
         .create_volume(text(&store, "owned"))
         .expect("a volume allocates");
     let mut late = StoreJournal::new(store.snapshot());
-    late.write_volume(revoked, Vec::new(), text(&store, "late"));
+    late.write_by_id(revoked, Vec::new(), text(&store, "late"));
     assert!(store.revoke_volume(revoked).is_some());
     assert_eq!(
         store.try_commit(&late),

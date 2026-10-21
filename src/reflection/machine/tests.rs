@@ -691,7 +691,9 @@ impl TestHost {
         {
             let mut state = self.state.lock().unwrap();
             let mut journal = StoreJournal::new(state.store.snapshot());
-            journal.write_volume(volume, Vec::new(), value);
+            journal.with_access(|journal, access| {
+                journal.write_kept_volume_in(access, volume, Vec::new(), value)
+            });
             assert_eq!(
                 state.store.try_commit(&journal),
                 StoreCommitResult::Committed
@@ -8890,7 +8892,7 @@ fn child_tasks_inherit_same_session_volume_capabilities() {
         .unwrap()
         .store
         .snapshot()
-        .committed(volume)
+        .committed_for_test(volume)
         .expect("child write must not remove the volume");
     assert_eq!(
         assembler.to_binary(&final_value).unwrap(),

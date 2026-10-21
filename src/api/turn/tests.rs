@@ -280,8 +280,7 @@ fn holds(m: &Machine<'_, '_>, volume: crate::reflection::VolumeId) -> bool {
     m.resources()
         .reflection_snapshot()
         .1
-        .volume_value(volume, &[])
-        .is_some()
+        .holds_volume_for_test(volume)
 }
 
 #[test]

@@ -1893,6 +1893,16 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   `Volume`; evaluation still sees it as opaque. Tests: the request test
   above, a reader keeping its volume through a collection, which fails
   without the journal's keep, and reads' root counts.
+- Then the cell view became the store's whole external API for volumes
+  (maintainer, the same day: a verifiable capability in place of a detail
+  of the representation, so reasoning stays local). Writes, read
+  observations and turns take a `VolumeCellView`, and creation returns
+  one; reads return a `VolumeContentsView`, asserting first that a
+  version's ephemeron key is the cell. A journal's writes build drafts,
+  `Contents` cells, which its reads view and its commit keys the new
+  versions on. The ID-based methods are the store's own; only hosts'
+  protected volumes, which the store keeps until revoked, go by ID, through
+  the `*_kept_volume*` methods.
 
 ## Verification
 

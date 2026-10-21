@@ -23,7 +23,8 @@ pub use promises::PromiseStatus;
 pub(crate) use promises::{
     Promises, Resolution, SELF_AWAITED, Settled, publish_settled, resolver_promise,
 };
-pub(crate) use store::DeathNotice;
+pub(crate) use store::{DeathNotice, contents_at_path};
+#[cfg(test)]
 pub(crate) use volume_handle::handle_volume;
 
 pub use protocol::{

@@ -25,8 +25,8 @@ use super::promises::{PromiseId, PromiseStatus, Promises, Resolution, Settled};
 use crate::api::{Value as PublicValue, Values};
 pub use crate::core::VolumeId;
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, Key, LazyValue, List, ManagedVolumeRoot, ManagedVolumeVersion,
-    RuntimeValueAccess, Value, VolumeCellView,
+    Builtin, CoreValueFactory, Dict, Key, LazyValue, List, ManagedVolumeDraft, ManagedVolumeRoot,
+    ManagedVolumeVersion, RuntimeValueAccess, Value, VolumeCellView, VolumeContentsView,
 };
 use crate::core_net::CoreDataKey;
 use crate::number::Number;
@@ -197,8 +197,14 @@ impl StoreSnapshot {
 
     /// The value at `path` in `volume`, as a lazy access, or `None` where
     /// the volume does not exist.
-    pub(crate) fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
+    fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
         version_value_at_path(&self.values, self.versions.get(&volume)?, path)
+    }
+
+    /// Whether `volume` exists and reads in this snapshot.
+    #[cfg(test)]
+    pub(crate) fn holds_volume_for_test(&self, volume: VolumeId) -> bool {
+        self.volume_value(volume, &[]).is_some()
     }
 
     /// The shared heap's committed value.
@@ -223,14 +229,19 @@ impl StoreSnapshot {
     }
 
     /// The committed value of `volume`, or `None` where it does not exist.
-    pub(crate) fn committed(&self, volume: VolumeId) -> Option<PublicValue> {
+    fn committed(&self, volume: VolumeId) -> Option<PublicValue> {
         version_value_at_path(&self.values, self.versions.get(&volume)?, &[])
     }
 
-    /// The cell of `volume`, viewed, where the store kept it: its own
-    /// volumes and those hosts created and have not revoked, which hosts'
-    /// protected capabilities name by ID.
-    pub(crate) fn kept_cell_in<'access>(
+    /// As [`Self::committed`], for tests.
+    #[cfg(test)]
+    pub(crate) fn committed_for_test(&self, volume: VolumeId) -> Option<PublicValue> {
+        self.committed(volume)
+    }
+
+    /// The cell of a host's protected volume, which its capability names by
+    /// ID, viewed, where the store kept it: until the host revokes it.
+    pub(crate) fn kept_volume_in<'access>(
         &self,
         access: &'access RuntimeValueAccess<'_>,
         volume: VolumeId,
@@ -238,20 +249,14 @@ impl StoreSnapshot {
         Some(self.kept.get(&volume)?.view_in(access))
     }
 
-    /// The value at `path` in `volume`, as a lazy access left to the caller
-    /// to root, or `None` where the volume does not exist in this snapshot.
-    pub(crate) fn read_volume_in(
+    /// The committed contents of `volume`, viewed, or `None` where the
+    /// volume does not exist in this snapshot.
+    pub(crate) fn read_volume_in<'access>(
         &self,
-        access: &RuntimeValueAccess<'_>,
+        access: &'access RuntimeValueAccess<'_>,
         volume: VolumeCellView<'_>,
-        path: &[Key],
-    ) -> Option<Value> {
-        let value = self.versions.get(&volume.id())?.value_of(access, volume)?;
-        Some(lazy_core_value_path(
-            access,
-            access.duplicate_value(value),
-            path,
-        ))
+    ) -> Option<VolumeContentsView<'access>> {
+        self.versions.get(&volume.id())?.contents_of(access, volume)
     }
 
     /// Whether `volume` exists in this snapshot.
@@ -338,11 +343,12 @@ fn reserve_volume(next: &AtomicU64) -> Result<VolumeId, Arc<str>> {
 #[derive(Clone)]
 pub struct StoreJournal {
     snapshot: StoreSnapshot,
-    /// The volumes this journal has written, with its writes: the others
-    /// read from the snapshot.
-    views: RedBlackTreeMapSync<VolumeId, PublicValue>,
-    /// The cells of the volumes this journal writes, which it keeps until it
-    /// commits, keying their new versions on them.
+    /// Drafts of the volumes this journal has written, with its writes: the
+    /// others read from the snapshot. Its commit keys each volume's new
+    /// version on its draft.
+    views: RedBlackTreeMapSync<VolumeId, ManagedVolumeDraft>,
+    /// The cells of the volumes this journal reads or writes, which it keeps
+    /// until its transaction ends.
     cells: RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot>,
     observations: Arc<Mutex<Box<dyn ConflictObservationIndex>>>,
     edits: Vec<StoreEdit>,
@@ -458,36 +464,40 @@ impl StoreJournal {
                 ..
             } => {
                 let volume = edit.address().reflection_parts().0;
-                self.views.insert_mut(volume, initial.clone());
+                self.views.insert_mut(
+                    volume,
+                    access.volume_draft(initial.runtime_root().clone_core_with(access)),
+                );
                 self.cells.insert_mut(volume, cell.clone());
                 self.edits.push(edit);
             }
         }
     }
 
-    /// Allocates a volume with `initial` as its root, returning its ID and
-    /// a handle to it: its ID is reserved at once, and the volume exists
-    /// from the commit on, so an aborted transaction burns the ID. This
-    /// journal reads and writes it as any other volume.
-    pub(crate) fn create_volume(
-        &mut self,
-        initial: PublicValue,
-    ) -> Result<(VolumeId, PublicValue), Arc<str>> {
-        let values = self.snapshot.values.clone();
-        values.with_boundary_access(|access| self.create_volume_in(&access, initial))
+    /// Allocates a volume with `initial` as its root, returning a handle to
+    /// it: its ID is reserved at once, and the volume exists from the commit
+    /// on, so an aborted transaction burns the ID. This journal reads and
+    /// writes it as any other volume.
+    pub(crate) fn create_volume(&mut self, initial: PublicValue) -> Result<PublicValue, Arc<str>> {
+        self.with_access(|journal, access| {
+            let volume = journal.create_volume_in(access, initial)?;
+            Ok(PublicValue::from_runtime_root(
+                access.root_runtime_value(volume.handle_in(access)),
+            ))
+        })
     }
 
-    /// As [`Self::create_volume`], for a caller that holds `access`.
-    pub(crate) fn create_volume_in(
+    /// As [`Self::create_volume`], under `access`, returning the volume's
+    /// cell, viewed.
+    pub(crate) fn create_volume_in<'access>(
         &mut self,
-        access: &RuntimeValueAccess<'_>,
+        access: &'access RuntimeValueAccess<'_>,
         initial: PublicValue,
-    ) -> Result<(VolumeId, PublicValue), Arc<str>> {
+    ) -> Result<VolumeCellView<'access>, Arc<str>> {
         debug_assert_eq!(initial.runtime_id(), self.snapshot.values.runtime_id());
         let volume = reserve_volume(&self.snapshot.next_volume)?;
         let cell = access.new_volume(volume);
-        let handle =
-            PublicValue::from_runtime_root(access.root_runtime_value(cell.handle_in(access)));
+        let view = cell.view_in(access);
         self.replay(
             access,
             StoreEdit::Create {
@@ -496,12 +506,103 @@ impl StoreJournal {
                 volume: cell,
             },
         );
-        Ok((volume, handle))
+        Ok(view)
+    }
+
+    /// Runs `operation` on this journal under a fresh access region.
+    pub(crate) fn with_access<R>(
+        &mut self,
+        operation: impl FnOnce(&mut Self, &RuntimeValueAccess<'_>) -> R,
+    ) -> R {
+        let values = self.snapshot.values.clone();
+        values.with_boundary_access(|access| operation(self, &access))
+    }
+
+    /// Reads `volume`, returning its contents with this journal's writes,
+    /// viewed, or `None` where the volume does not exist in the journal's
+    /// snapshot. The journal keeps the volume until its transaction ends
+    /// (`api-volume-cells`).
+    pub(crate) fn read_volume_in<'access>(
+        &mut self,
+        access: &'access RuntimeValueAccess<'_>,
+        volume: VolumeCellView<'_>,
+    ) -> Option<VolumeContentsView<'access>> {
+        self.keep_volume_in(access, volume);
+        match self.views.get(&volume.id()) {
+            Some(draft) => Some(draft.view_in(access)),
+            None => self
+                .snapshot
+                .versions
+                .get(&volume.id())?
+                .contents_of(access, volume),
+        }
+    }
+
+    /// Records a read at `path` in `volume`, as [`Self::observe_read`] does
+    /// in the user heap.
+    pub(crate) fn observe_volume_read(&mut self, volume: VolumeCellView<'_>, path: &[Key]) -> bool {
+        self.observe_read_by_id(volume.id(), path)
+    }
+
+    /// Writes `value` at `path` in `volume`, keeping the volume until the
+    /// transaction ends.
+    pub(crate) fn write_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeCellView<'_>,
+        path: Vec<Key>,
+        value: PublicValue,
+    ) {
+        self.keep_volume_in(access, volume);
+        self.write_by_id_in(access, volume.id(), path, value);
+    }
+
+    /// Rewrites the value at `path` in `volume` with `updater`, as
+    /// [`Self::write_volume_in`] writes.
+    pub(crate) fn rewrite_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeCellView<'_>,
+        path: Vec<Key>,
+        updater: PublicValue,
+    ) {
+        self.keep_volume_in(access, volume);
+        self.rewrite_by_id_in(access, volume.id(), path, updater);
+    }
+
+    /// Records a read at `path` in a host's protected volume, which its
+    /// capability names by ID.
+    pub(crate) fn observe_kept_volume_read(&mut self, volume: VolumeId, path: &[Key]) -> bool {
+        self.observe_read_by_id(volume, path)
+    }
+
+    /// Writes `value` at `path` in a host's protected volume, which its
+    /// capability names by ID: blindly, so a write to one the host revoked
+    /// fails at the commit.
+    pub(crate) fn write_kept_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+        path: Vec<Key>,
+        value: PublicValue,
+    ) {
+        self.write_by_id_in(access, volume, path, value);
+    }
+
+    /// As [`Self::write_kept_volume_in`], for a rewrite.
+    pub(crate) fn rewrite_kept_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+        path: Vec<Key>,
+        updater: PublicValue,
+    ) {
+        self.rewrite_by_id_in(access, volume, path, updater);
     }
 
     /// The value at `path` in `volume`, with this journal's writes, as a
     /// lazy access, or `None` where the volume does not exist.
-    pub(crate) fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
+    fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
         self.snapshot
             .values
             .try_construct_runtime_value_root(|access| {
@@ -520,54 +621,14 @@ impl StoreJournal {
         path: &[Key],
     ) -> Option<Value> {
         let value = match self.views.get(&volume) {
-            Some(view) => view.runtime_root().clone_core_with(access),
+            Some(draft) => access.duplicate_value(draft.view_in(access).value_in(access)),
             None => self.snapshot.versions.get(&volume)?.value_in(access)?,
         };
         Some(lazy_core_value_path(access, value, path))
     }
 
-    /// Reads the value at `path` in `volume`, with this journal's writes,
-    /// as a lazy access left to the caller to root, or `None` where the
-    /// volume does not exist in the journal's snapshot. The journal keeps
-    /// the volume until its transaction ends (`api-volume-cells`).
-    pub(crate) fn read_volume_in(
-        &mut self,
-        access: &RuntimeValueAccess<'_>,
-        volume: VolumeCellView<'_>,
-        path: &[Key],
-    ) -> Option<Value> {
-        self.keep_volume_in(access, volume);
-        let value = match self.views.get(&volume.id()) {
-            Some(view) => view.runtime_root().clone_core_with(access),
-            None => access.duplicate_value(
-                self.snapshot
-                    .versions
-                    .get(&volume.id())?
-                    .value_of(access, volume)?,
-            ),
-        };
-        Some(lazy_core_value_path(access, value, path))
-    }
-
-    /// As [`Self::read_volume_in`], for a volume named by its ID, whose
-    /// handle the caller holds.
-    pub(crate) fn read_volume(&mut self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
-        let values = self.snapshot.values.clone();
-        values
-            .try_construct_runtime_value_root(|access| {
-                let cell = self.volume_cell_in(access, volume).ok_or(())?;
-                self.read_volume_in(access, cell, path).ok_or(())
-            })
-            .ok()
-            .map(PublicValue::from_runtime_root)
-    }
-
     /// Keeps `volume` until this journal's transaction ends.
-    pub(crate) fn keep_volume_in(
-        &mut self,
-        access: &RuntimeValueAccess<'_>,
-        volume: VolumeCellView<'_>,
-    ) {
+    fn keep_volume_in(&mut self, access: &RuntimeValueAccess<'_>, volume: VolumeCellView<'_>) {
         if !self.cells.contains_key(&volume.id()) {
             self.cells
                 .insert_mut(volume.id(), access.keep_volume(volume));
@@ -591,13 +652,13 @@ impl StoreJournal {
     /// may widen that dependency; an earlier covering set makes it internal.
     /// Earlier observations remain intact.
     pub(crate) fn observe_read(&mut self, path: &[Key]) -> bool {
-        self.observe_volume_read(self.snapshot.heap_volume, path)
+        self.observe_read_by_id(self.snapshot.heap_volume, path)
     }
 
     /// Records a read at `path` in the machines' environment volume, as
     /// [`Self::observe_read`] does in the user heap.
     pub(crate) fn observe_environment_read(&mut self, path: &[Key]) -> bool {
-        self.observe_volume_read(self.snapshot.environment_volume, path)
+        self.observe_read_by_id(self.snapshot.environment_volume, path)
     }
 
     /// The value at `path` in the machines' environment volume, with this
@@ -609,10 +670,10 @@ impl StoreJournal {
 
     /// Writes `value` at `path` in the machines' environment volume.
     pub(crate) fn write_environment(&mut self, path: Vec<Key>, value: PublicValue) {
-        self.write_volume(self.snapshot.environment_volume, path, value);
+        self.write_by_id(self.snapshot.environment_volume, path, value);
     }
 
-    pub(crate) fn observe_volume_read(&mut self, volume: VolumeId, path: &[Key]) -> bool {
+    fn observe_read_by_id(&mut self, volume: VolumeId, path: &[Key]) -> bool {
         let path = ConflictPath::from_keys(path.to_vec());
         // A branch's read depends on the transaction's state at the fork,
         // which the branch's own edits alone may cover.
@@ -644,7 +705,7 @@ impl StoreJournal {
     /// Records a read of `promise`'s status, which its resolution writes.
     /// Returns whether the read observed the snapshot.
     pub(crate) fn observe_promise_read(&mut self, promise: PromiseId) -> bool {
-        self.observe_volume_read(self.snapshot.runtime_volume, &promise_path(promise))
+        self.observe_read_by_id(self.snapshot.runtime_volume, &promise_path(promise))
     }
 
     /// Stages `promise`'s resolution (`promise-resolution-commits-with-its-cut`):
@@ -737,7 +798,7 @@ impl StoreJournal {
     /// snapshot.
     pub(crate) fn observe_virtual_read(&mut self, path: &[Key]) -> bool {
         let keys = virtual_keys(path);
-        self.observe_volume_read(self.snapshot.runtime_volume, &keys)
+        self.observe_read_by_id(self.snapshot.runtime_volume, &keys)
     }
 
     /// Records a set of the virtual resource at `path`, which changes no
@@ -784,29 +845,17 @@ impl StoreJournal {
 
     /// The value of `volume`, with this journal's writes, or `None` where
     /// the volume does not exist.
-    pub(crate) fn volume_view(&self, volume: VolumeId) -> Option<PublicValue> {
+    fn volume_view(&self, volume: VolumeId) -> Option<PublicValue> {
         self.volume_value(volume, &[])
     }
 
-    /// As [`Self::view`], for a caller that holds `access`.
+    /// As [`StoreSnapshot::heap_value`]'s root, in this journal's view, for
+    /// a caller that holds `access`.
     pub(crate) fn view_in(&self, access: &RuntimeValueAccess<'_>) -> PublicValue {
-        self.volume_view_in(access, self.snapshot.heap_volume)
-            .expect("the user heap volume must always exist")
-    }
-
-    /// As [`Self::volume_view`], for a caller that holds `access`.
-    pub(crate) fn volume_view_in(
-        &self,
-        access: &RuntimeValueAccess<'_>,
-        volume: VolumeId,
-    ) -> Option<PublicValue> {
-        if let Some(view) = self.views.get(&volume) {
-            return Some(view.clone());
-        }
-        let value = self.value_at_in(access, volume, &[])?;
-        Some(PublicValue::from_runtime_root(
-            access.root_runtime_value(value),
-        ))
+        let value = self
+            .value_at_in(access, self.snapshot.heap_volume, &[])
+            .expect("the user heap volume must always exist");
+        PublicValue::from_runtime_root(access.root_runtime_value(value))
     }
 
     #[cfg(test)]
@@ -826,7 +875,7 @@ impl StoreJournal {
         state: PublicValue,
     ) -> Result<Arc<EvaluationQueryHandle>, Arc<str>> {
         let handle = self.snapshot.query_domain.allocate()?;
-        self.write_volume(self.snapshot.runtime_volume, query_path(handle.id), state);
+        self.write_by_id(self.snapshot.runtime_volume, query_path(handle.id), state);
         Ok(handle)
     }
 
@@ -848,7 +897,7 @@ impl StoreJournal {
             return false;
         }
         let path = query_path(handle.id);
-        self.observe_volume_read(self.snapshot.runtime_volume, &path)
+        self.observe_read_by_id(self.snapshot.runtime_volume, &path)
     }
 
     fn peek_query_with_observation(
@@ -881,7 +930,7 @@ impl StoreJournal {
     }
 
     pub(crate) fn write(&mut self, path: Vec<Key>, value: PublicValue) {
-        self.write_volume(self.snapshot.heap_volume, path, value);
+        self.write_by_id(self.snapshot.heap_volume, path, value);
     }
 
     /// As [`Self::write`], for a caller that holds `access`.
@@ -891,17 +940,16 @@ impl StoreJournal {
         path: Vec<Key>,
         value: PublicValue,
     ) {
-        self.write_volume_in(access, self.snapshot.heap_volume, path, value);
+        self.write_by_id_in(access, self.snapshot.heap_volume, path, value);
     }
 
-    pub(crate) fn write_volume(&mut self, volume: VolumeId, path: Vec<Key>, value: PublicValue) {
+    fn write_by_id(&mut self, volume: VolumeId, path: Vec<Key>, value: PublicValue) {
         let edit = self.set_edit(volume, path, value);
-        let values = self.snapshot.values.clone();
-        values.with_boundary_access(|access| self.push_edit(&access, volume, edit));
+        self.with_access(|journal, access| journal.push_edit(access, volume, edit));
     }
 
-    /// As [`Self::write_volume`], for a caller that holds `access`.
-    pub(crate) fn write_volume_in(
+    /// As [`Self::write_by_id`], for a caller that holds `access`.
+    fn write_by_id_in(
         &mut self,
         access: &RuntimeValueAccess<'_>,
         volume: VolumeId,
@@ -913,7 +961,7 @@ impl StoreJournal {
     }
 
     pub(crate) fn rewrite(&mut self, path: Vec<Key>, updater: PublicValue) {
-        self.rewrite_volume(self.snapshot.heap_volume, path, updater);
+        self.rewrite_by_id(self.snapshot.heap_volume, path, updater);
     }
 
     /// As [`Self::rewrite`], for a caller that holds `access`.
@@ -923,22 +971,16 @@ impl StoreJournal {
         path: Vec<Key>,
         updater: PublicValue,
     ) {
-        self.rewrite_volume_in(access, self.snapshot.heap_volume, path, updater);
+        self.rewrite_by_id_in(access, self.snapshot.heap_volume, path, updater);
     }
 
-    pub(crate) fn rewrite_volume(
-        &mut self,
-        volume: VolumeId,
-        path: Vec<Key>,
-        updater: PublicValue,
-    ) {
+    fn rewrite_by_id(&mut self, volume: VolumeId, path: Vec<Key>, updater: PublicValue) {
         let edit = self.rewrite_edit(volume, path, updater);
-        let values = self.snapshot.values.clone();
-        values.with_boundary_access(|access| self.push_edit(&access, volume, edit));
+        self.with_access(|journal, access| journal.push_edit(access, volume, edit));
     }
 
-    /// As [`Self::rewrite_volume`], for a caller that holds `access`.
-    pub(crate) fn rewrite_volume_in(
+    /// As [`Self::rewrite_by_id`], for a caller that holds `access`.
+    fn rewrite_by_id_in(
         &mut self,
         access: &RuntimeValueAccess<'_>,
         volume: VolumeId,
@@ -968,12 +1010,12 @@ impl StoreJournal {
     /// Records `edit`, applying it to the volume's view where the volume
     /// exists, and keeping the volume's cell until the commit.
     fn push_edit(&mut self, access: &RuntimeValueAccess<'_>, volume: VolumeId, edit: StoreEdit) {
-        if let Some(view) = self.volume_view_in(access, volume) {
+        if let Some(current) = self.value_at_in(access, volume, &[]) {
             if let Some(cell) = self.volume_cell_in(access, volume) {
                 self.keep_volume_in(access, cell);
             }
-            self.views
-                .insert_mut(volume, apply_edit(access, view, &edit));
+            let draft = access.volume_draft(apply_edit_in(access, current, &edit));
+            self.views.insert_mut(volume, draft);
         }
         self.edits.push(edit);
     }
@@ -1234,7 +1276,7 @@ impl ReflectionStore {
             return false;
         }
         let mut journal = StoreJournal::new(self.snapshot());
-        journal.write_volume(
+        journal.write_by_id(
             self.runtime_volume,
             query_path(handle.id),
             complete_query_value(&self.values, result),
@@ -1319,25 +1361,26 @@ impl ReflectionStore {
                 self.prune_collected(&access);
             }
             // A journal that began from the current revision already holds
-            // each written volume's new value; another applies its edits to
-            // the volumes as they stand now.
-            let written = if current {
-                written_volumes(&journal.edits)
-                    .into_iter()
-                    .filter_map(|volume| Some((volume, journal.views.get(&volume)?.clone())))
-                    .collect()
+            // a draft of each written volume, on which the new version is
+            // keyed; another applies its edits to the volumes as they stand
+            // now. A volume without a cell here was collected: nothing can
+            // read its edits.
+            if current {
+                for volume in written_volumes(&journal.edits) {
+                    if let (Some(cell), Some(draft)) =
+                        (journal.cells.get(&volume), journal.views.get(&volume))
+                    {
+                        self.versions
+                            .insert_mut(volume, access.volume_version_of(cell, draft));
+                    }
+                }
             } else {
-                rebase_edits(&access, &self.versions, &journal.edits)
-            };
-            for (volume, value) in written {
-                // A volume without a cell here was collected: nothing can
-                // read its edits.
-                let Some(cell) = journal.cells.get(&volume) else {
-                    continue;
-                };
-                let version =
-                    access.volume_version(cell, value.runtime_root().clone_core_with(&access));
-                self.versions.insert_mut(volume, version);
+                for (volume, value) in rebase_edits(&access, &self.versions, &journal.edits) {
+                    if let Some(cell) = journal.cells.get(&volume) {
+                        self.versions
+                            .insert_mut(volume, access.volume_version(cell, value));
+                    }
+                }
             }
         });
         self.revision = self.revision.wrapping_add(1);
@@ -1364,30 +1407,34 @@ impl ReflectionStore {
         if retired.is_empty() {
             return false;
         }
-        let Some(mut root) = self.committed(self.runtime_volume) else {
+        let Some(version) = self.versions.get(&self.runtime_volume).cloned() else {
             return false;
         };
         self.revision = self.revision.wrapping_add(1);
-        for id in retired {
-            let path = ConflictPath::from_keys(query_path(id));
-            root = PublicValue::from_runtime_root(self.values.construct_runtime_value_root(
-                |access| {
-                    apply_value_at_path_in(access, &root, &path, Value::Dict(Dict::new_sync()))
-                },
-            ));
+        let paths = retired
+            .into_iter()
+            .map(|id| ConflictPath::from_keys(query_path(id)))
+            .collect::<Vec<_>>();
+        let version = self.values.with_boundary_access(|access| {
+            let mut root = version
+                .value_in(&access)
+                .expect("the store keeps its runtime volume");
+            for path in &paths {
+                root = apply_value_at_path_in(&access, root, path, Value::Dict(Dict::new_sync()));
+            }
+            access.volume_version(
+                self.kept
+                    .get(&self.runtime_volume)
+                    .expect("the store keeps its runtime volume"),
+                root,
+            )
+        });
+        for path in paths {
             self.latest_changes.insert(
                 ConflictAddress::reflection(self.runtime_volume, path),
                 self.revision,
             );
         }
-        let version = self.values.with_boundary_access(|access| {
-            access.volume_version(
-                self.kept
-                    .get(&self.runtime_volume)
-                    .expect("the store keeps its runtime volume"),
-                root.runtime_root().clone_core_with(&access),
-            )
-        });
         self.versions.insert_mut(self.runtime_volume, version);
         true
     }
@@ -1441,32 +1488,31 @@ fn rebase_edits(
     access: &RuntimeValueAccess<'_>,
     versions: &RedBlackTreeMapSync<VolumeId, ManagedVolumeVersion>,
     edits: &[StoreEdit],
-) -> BTreeMap<VolumeId, PublicValue> {
+) -> BTreeMap<VolumeId, Value> {
     let mut written = BTreeMap::new();
     for edit in edits {
         let volume = edit.address().reflection_parts().0;
-        if let StoreEdit::Create { initial, .. } = edit {
-            written.insert(volume, initial.clone());
-            continue;
-        }
         if !written_volumes(std::slice::from_ref(edit)).contains(&volume) {
             continue;
         }
         // Validation refuses edits to revoked volumes, so a volume missing
         // here was collected, and nothing can read its edits.
-        let current = match written.get(&volume) {
-            Some(current) => current.clone(),
+        let current = match written.remove(&volume) {
+            Some(current) => current,
             None => {
                 let Some(value) = versions
                     .get(&volume)
                     .and_then(|version| version.value_in(access))
                 else {
+                    if let StoreEdit::Create { initial, .. } = edit {
+                        written.insert(volume, initial.runtime_root().clone_core_with(access));
+                    }
                     continue;
                 };
-                PublicValue::from_runtime_root(access.root_runtime_value(value))
+                value
             }
         };
-        written.insert(volume, apply_edit(access, current, edit));
+        written.insert(volume, apply_edit_in(access, current, edit));
     }
     written
 }
@@ -1600,14 +1646,13 @@ pub(crate) fn decode_query_state(
     ))
 }
 
-fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEdit) -> PublicValue {
-    PublicValue::from_runtime_root(access.root_runtime_value(match edit {
+/// `current` with `edit` applied.
+fn apply_edit_in(access: &RuntimeValueAccess<'_>, current: Value, edit: &StoreEdit) -> Value {
+    match edit {
         StoreEdit::Set { value: None, .. }
         | StoreEdit::Rewrite { updater: None, .. }
-        | StoreEdit::Resolve { .. } => {
-            return root;
-        }
-        StoreEdit::Create { initial, .. } => return initial.clone(),
+        | StoreEdit::Resolve { .. } => current,
+        StoreEdit::Create { initial, .. } => initial.runtime_root().clone_core_with(access),
         StoreEdit::Set {
             address,
             value: Some(value),
@@ -1615,9 +1660,9 @@ fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEd
             let (_, path) = address.reflection_parts();
             apply_value_at_path_in(
                 access,
-                &root,
+                current,
                 path,
-                value.clone().into_runtime_root().clone_core_with(access),
+                value.runtime_root().clone_core_with(access),
             )
         }
         StoreEdit::Rewrite {
@@ -1625,24 +1670,20 @@ fn apply_edit(access: &RuntimeValueAccess<'_>, root: PublicValue, edit: &StoreEd
             updater: Some(updater),
         } => {
             let (_, path) = address.reflection_parts();
-            let prior = lazy_core_value_path(
-                access,
-                root.clone().into_runtime_root().clone_core_with(access),
-                path.keys(),
-            );
+            let prior = lazy_core_value_path(access, access.duplicate_value(&current), path.keys());
             let updated = Value::Lazy(LazyValue::from_application_in(
                 access,
-                updater.clone().into_runtime_root().clone_core_with(access),
+                updater.runtime_root().clone_core_with(access),
                 Arc::from([prior]),
             ));
-            apply_value_at_path_in(access, &root, path, updated)
+            apply_value_at_path_in(access, current, path, updated)
         }
-    }))
+    }
 }
 
 fn apply_value_at_path_in(
     access: &RuntimeValueAccess<'_>,
-    root: &PublicValue,
+    root: Value,
     path: &ConflictPath,
     value: Value,
 ) -> Value {
@@ -1655,14 +1696,20 @@ fn apply_value_at_path_in(
             .map(|key| access.value_from_key(key))
             .collect(),
     ));
-    Value::builtin_call_in(
+    Value::builtin_call_in(access, Builtin::DictUpdate, vec![path, value, root])
+}
+
+/// The value at `path` in a volume's `contents`, as a lazy access left to
+/// the caller to root.
+pub(crate) fn contents_at_path(
+    access: &RuntimeValueAccess<'_>,
+    contents: VolumeContentsView<'_>,
+    path: &[Key],
+) -> Value {
+    lazy_core_value_path(
         access,
-        Builtin::DictUpdate,
-        vec![
-            path,
-            value,
-            root.clone().into_runtime_root().clone_core_with(access),
-        ],
+        access.duplicate_value(contents.value_in(access)),
+        path,
     )
 }
 
