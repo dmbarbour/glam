@@ -346,7 +346,7 @@ handle API goes.
    - Effect channels from reflection: the runtime's route into `refl`,
      diagnostics' today, generalizes to an output per effect channel as each
      channel's consumer moves: stderr with the logger's third stage
-     (`api-effect-providers`), imports with `api-hosts-as-machines`.
+     (`api-effect-providers`), imports with `api-import-requests`.
    - Tests: a failed cut sends no request; a channel's order matches commit
      order; a server answering a request a requester awaits; duplicate
      servers racing, the second resolution failing; a promise's status as
@@ -500,17 +500,20 @@ handle API goes.
      `refl`; macro expansion and `conf.cli` are pure evaluation. The
      obligation set, `.todo.*`, takes over `.exit`'s role, and the
      decision classifies which waits are unresolved.
-15. `api-hosts-as-machines` — absorbs `lifecycle-host-messages` and
-   `lifecycle-host-calls` (L3, L7, L8, L9). The reflection hosts
-   (`AssemblerReflectionHost`, `LoggerTaskHost`, `IsolatedTaskHost`) reduce
-   to queues and store state that machines serve, and `TaskHost`'s
-   `snapshot`, `commit` and `validate` hooks retire (decision 6). The
-   assembler host's diagnostics become appends to the diagnostic log, no
-   longer published during a commit, on a worker.
-   - A forced import's file load becomes a request whose promised value is
-     the import (decision 7), so workers neither call a `SourceSystem` nor
-     upgrade `DeferredAssembler`, which retires. L9's nesting, a macro
-     search within an import, stays: it is inherent to lazy imports.
+15. `api-import-requests` — renamed from `api-hosts-as-machines` and
+   narrowed (2026-10-21), absorbing `lifecycle-host-calls` (L3, L9): a
+   forced import's file load becomes a request whose promised value is the
+   import (decision 7), so workers neither call a `SourceSystem` nor upgrade
+   `DeferredAssembler`, which retires. L9's nesting, a macro search within an
+   import, stays: it is inherent to lazy imports. The reflection hosts'
+   retirement (`lifecycle-host-messages`, decision 6) moved to the steps
+   that replace what they do: `api-effect-providers` retires
+   `IsolatedTaskHost` and `LoggerTaskHost`, whose work becomes turns with
+   providers, and `api-reflection-machines` retires
+   `AssemblerReflectionHost` and `TaskHost`'s `snapshot`, `commit` and
+   `validate` hooks, since tasks on machines commit to the runtime's store
+   directly and write diagnostics to ports rather than publishing them in a
+   commit, on a worker.
    - CLI slice: a CLI machine serves the import queue and records the
      reads, for the manifest and the final check that no file changed. The
      CLI opens its runtime with `Runtime::open`, and the bridge's
@@ -537,7 +540,8 @@ handle API goes.
     - CLI slice: the configured CLI's `CliEffects` and `TokenEffects` become
       providers, their per-branch journals become machine state that cuts
       restore, and `IsolatedTaskHost` and `IsolatedEffectSearch` leave the
-      public API. They and the macro runner's family lose their reflection
+      public API; with the logger's turn running `conf.log`, `LoggerTaskHost`
+      retires too (from `api-hosts-as-machines`, 2026-10-21). They and the macro runner's family lose their reflection
       effects and promises (`.env`, `.log` where it reaches reflection,
       `.promise.*`), which they carry only as bridge behavior: `conf.cli`
       and macros are pure evaluation, ideally handled by pure functions
@@ -548,7 +552,11 @@ handle API goes.
     shares and `.todo.*` for tasks, the obligation set for turns,
     annotation tasks on anonymous machines under `refl`, and the
     retirement of task handles, `.task.*`, exit votes and the `'macro`
-    role. Its notes are in [Reflection Model](ReflectionModel_2026-10-21.md).
+    role. Tasks commit to the runtime's store directly, so
+    `AssemblerReflectionHost` and `TaskHost`'s `snapshot`, `commit` and
+    `validate` hooks retire with the handles (decision 6, from
+    `api-hosts-as-machines`, 2026-10-21). Its notes are in
+    [Reflection Model](ReflectionModel_2026-10-21.md).
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
       a `stderr` port with `.port.*`, and its exit vote goes.
@@ -609,9 +617,9 @@ Two steps from the ownership plan stand beside these, under their names:
 `api-runtime-turns` comes first, then the bridge. The data operations
 precede the CLI's first slice. Cuts precede ports,
 whose buffers request queues extend; the machine tree precedes the loggers' move;
-settlement follows the logs it appends to. Hosts follow queues, since their
-requests are queue elements, and precede effect providers, which take what
-remains of the hosts' role. Reflection machines follow effect providers,
+settlement follows the logs it appends to. Import requests follow requests,
+whose ports and promises carry them; the hosts retire with the steps that
+take their roles, effect providers and reflection machines. Reflection machines follow effect providers,
 whose turns run effects as tasks will, and settlement follows reflection
 machines, whose waits it classifies. Handle retirement precedes the
 retirement protocol, which needs a sole owner.
@@ -643,7 +651,7 @@ is that crossing, kept small and visible:
   the count.
 - **The CLI's alone:** the library's tests and the public tests never use
   it (`tests-follow-target-architecture`).
-- **Retired by plan:** the constructor goes with `api-hosts-as-machines`,
+- **Retired by plan:** the constructor goes with `api-import-requests`,
   and the rest with `api-handle-retirement`, or sooner when no use remains.
 
 The alternative, the CLI moving whole once turns cover all of it, would
@@ -810,9 +818,9 @@ are turns.
 | `lifecycle-cli-logger` | done 2026-10-16 |
 | `lifecycle-owner` | the owner: `api-runtime-turns`; the retirement protocol: `api-retirement` |
 | `lifecycle-queues` | `api-requests` |
-| `lifecycle-host-messages` | `api-hosts-as-machines` |
+| `lifecycle-host-messages` | `api-effect-providers` and `api-reflection-machines` (from `api-hosts-as-machines`, 2026-10-21) |
 | `lifecycle-leases` | `api-effect-providers` |
-| `lifecycle-host-calls` | `api-hosts-as-machines` |
+| `lifecycle-host-calls` | `api-import-requests` |
 | `lifecycle-audits` | itself, beside the steps |
 | `lifecycle-external-owners` | itself, beside the steps |
 
@@ -823,11 +831,11 @@ The review's findings, by the step that resolves each:
 - **L2** (the CLI logger on workers): done with `lifecycle-cli-logger`; the
   logger machine (`api-ports`) ends what remains.
 - **L3, L9** (workers upgrading `DeferredAssembler` for imports):
-  `api-hosts-as-machines`.
+  `api-import-requests`.
 - **L4** (a subscriber leaking its runtime): the diagnostics port
   (`api-ports`) retires subscribers.
 - **L7, L8** (callbacks that capture owners, client code on workers):
-  `api-hosts-as-machines` and `api-effect-providers`, with
+  `api-effect-providers` and `api-reflection-machines`, with
   `lifecycle-audits` to keep them out.
 - **L11:** `lifecycle-external-owners`. **L12** (runtime IDs checked at run
   time) is information: values within a turn come from one runtime.
@@ -1975,4 +1983,4 @@ the public API, in `tests/`.
   retired operations' error (`api-retirement`); the queue capability's
   representation, and a request's status, possibly with a received state
   (`api-requests`); which host state moves into the store
-  (`api-hosts-as-machines`).
+  (`api-reflection-machines`, from `api-hosts-as-machines`).
