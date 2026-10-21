@@ -2479,9 +2479,9 @@ maps the short names used here to file names.
 - **Alternatives rejected:** the file load framed as I/O; a server that
   compiles, whose nested imports would wait on its own queue; host
   closures that load and compile on whichever thread forces an import.
-- **Consequences:** `api-import-requests` builds the request, the default
-  route and the CLI's server, whose manifest then covers imports forced
-  during settlement or by the logger. `api-runtime-compile` builds the
+- **Consequences:** `api-import-requests` builds the request and the
+  default route, and `api-cli-sources` the CLI's server, whose manifest
+  then covers imports forced during settlement or by the logger. `api-runtime-compile` builds the
   compile context from runtime-side parts, so no worker reaches an
   `Assembler`, a `DeferredAssembler` or a `SourceSystem`. An import that
   nothing serves waits, and settlement reports it as unresolved.

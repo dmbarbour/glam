@@ -514,23 +514,65 @@ handle API goes.
    - Requests reach the root's `imports` output by a default wiring rule
      through the root, as diagnostics pass through; a host serves them by
      wiring that output to its server.
-   - CLI slice: a CLI machine serves the requests with `FileSourceSystem`,
-     records the reads, and writes the manifest and checks that no file
-     changed once settlement is done, so imports forced during settlement
-     or by the logger count. The CLI opens its runtime with
-     `Runtime::open`, and the bridge's constructor goes.
+   - The CLI slice moved to `api-cli-sources` (2026-10-21). The CLI's
+     evaluations still run on the handle API's paths, which give up on an
+     evaluation stably blocked on a promise rather than wait for it, and
+     its settlement kills such an evaluation as a deadlock, so a server
+     forked beside them would race both. Once effect providers, reflection
+     machines and settlement have moved those evaluations into turns,
+     whose cuts wait, and settlement counts turns, the CLI serves its
+     sources without a race.
    - The reflection hosts' retirement (`lifecycle-host-messages`, decision
      6) moved to the steps that replace what they do:
      `api-effect-providers` retires `IsolatedTaskHost` and
      `LoggerTaskHost`, whose work becomes turns with providers, and
      `api-reflection-machines` retires `AssemblerReflectionHost` and
      `TaskHost`'s `snapshot`, `commit` and `validate` hooks.
+   - As built (2026-10-21):
+     - A runtime that `Runtime::open` opens has no source system: its host
+       hands over a top-level source as `ModuleInput::source(identity,
+       bytes)`, whose label's extension selects the front end, and a file
+       input there is an error. The handle API's assembler, and so the
+       CLI's, keeps its source system and today's loaders until
+       `api-cli-sources`.
+     - A request is `{request: {source, path, kind}, reply}`. `source` is
+       the top-level source's identity; `path` is the import's path from
+       that source's folder, which nested imports compose, since imports
+       are child-relative; `kind` is `'module` or `'binary`. An imported
+       source's identity is `{import: path}`, which the compilation's
+       import chain leads back to the top-level source, and its label
+       joins the path to that source's folder. A script has no folder,
+       and imports nothing.
+     - A binary import is the reply. A module import is `seq reply
+       compile`, where `compile` reads the binary the reply reached, never
+       evaluating it, and compiles it on the thread that forces it. A
+       broken reply fails the import with the server's reason, so the
+       server words it.
+     - The default wiring passes the root's `imports` input through to
+       its output, under `DiagnosticsWiring::ToRoot`. Where that output
+       has no wire, or under `None`, requests wait in the root's input.
+     - Fixed on the way: a cut that counted a port's items without
+       claiming them all never committed, since validation compared the
+       buffer's end with the cut's claims rather than with the end it saw.
+     - Open: an import that a macro forces while compiling fails ("macro
+       environment could not be selected: evaluation is blocked"), since
+       compile-time evaluation treats a wait as an error. How a
+       compilation waits on a reply is a maintainer decision.
+     - Moved to `api-runtime-compile`: the test of an import that a
+       worker forces (see there).
 16. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
     compilation builds its context from runtime-side parts, the value
     factory, the front ends, an invocation counter and a diagnostics
     port, so no worker reaches an `Assembler`, a `DeferredAssembler` or a
     `SourceSystem` (L3), and macro sessions no longer revive a
-    `CompilationExecution`. `DeferredAssembler` retires.
+    `CompilationExecution`. `DeferredAssembler` retires, but for the
+    loaders that read files, which go with `api-cli-sources`.
+    - Its tests include an import that background work forces, from
+      `api-import-requests` (2026-10-21). The worker that compiles the
+      served module revives a `CompilationExecution`, whose drain waits for
+      the whole background domain, its own task included, and hangs; the
+      file loaders revive and drain alike. Without that drain the test
+      passes.
 17. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
@@ -603,13 +645,21 @@ handle API goes.
      check that evaluation would otherwise need at every wait. Turns
      already fail such a cut when their own evaluation returns
      (`api-transactional-promises`).
-20. `api-handle-retirement` — the public handle types go: `Assembler`,
+20. `api-cli-sources` — the CLI slice of `api-import-requests`, moved after
+    settlement (2026-10-21): a CLI machine serves the requests with
+    `FileSourceSystem`, records the reads, and writes the manifest and
+    checks that no file changed once settlement is done, so imports forced
+    during settlement or by the logger count. The CLI opens its runtime
+    with `Runtime::open` and hands its top-level files over as sources;
+    the bridge's constructor goes, and with it the assembler's source
+    system and the loaders that read files.
+21. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-21. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+22. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions
@@ -635,7 +685,8 @@ whose ports and promises carry them, and precede the runtime-side compile
 context, which removes what workers still reach; the hosts retire with the
 steps that take their roles, effect providers and reflection machines. Reflection machines follow effect providers,
 whose turns run effects as tasks will, and settlement follows reflection
-machines, whose waits it classifies. Handle retirement precedes the
+machines, whose waits it classifies. The CLI serves its sources after
+settlement, once its evaluations wait in turns. Handle retirement precedes the
 retirement protocol, which needs a sole owner.
 
 ## CLI Transition
@@ -665,7 +716,7 @@ is that crossing, kept small and visible:
   the count.
 - **The CLI's alone:** the library's tests and the public tests never use
   it (`tests-follow-target-architecture`).
-- **Retired by plan:** the constructor goes with `api-import-requests`,
+- **Retired by plan:** the constructor goes with `api-cli-sources`,
   and the rest with `api-handle-retirement`, or sooner when no use remains.
 
 The alternative, the CLI moving whole once turns cover all of it, would

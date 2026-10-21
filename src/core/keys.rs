@@ -34,6 +34,9 @@ protocol_key!(NAMESPACE, "namespace");
 protocol_key!(IMPORT_CHAIN, "import_chain");
 protocol_key!(IMPORTER, "importer");
 protocol_key!(REQUEST, "request");
+protocol_key!(REPLY, "reply");
+protocol_key!(PATH, "path");
+protocol_key!(KIND, "kind");
 protocol_key!(EXTENDS, "extends");
 
 protocol_key!(VALUE, "value");

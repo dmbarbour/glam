@@ -65,11 +65,14 @@ pub struct RuntimeConfig {
 pub enum DiagnosticsWiring {
     /// Each child's diagnostics output to its parent's diagnostics input,
     /// and each machine's diagnostics input, the root's aside, through to its
-    /// own output, so diagnostics gather at the root's input. A machine
-    /// intervenes by unwiring a default wire it owns.
+    /// own output, so diagnostics gather at the root's input. The root
+    /// passes its `imports` input, where the runtime asks for sources
+    /// (`imports-are-source-requests`), through to its output, for the host
+    /// to wire to its server. A machine intervenes by unwiring a default
+    /// wire it owns.
     #[default]
     ToRoot,
-    /// None: the diagnostics ports are wired as any other.
+    /// None: the diagnostics and imports ports are wired as any other.
     None,
 }
 
@@ -460,7 +463,12 @@ impl Runtime {
             }
             None => EvaluationRuntime::new(config.worker_threads)?,
         };
-        let assembler = Assembler::builder().evaluation_runtime(runtime).build()?;
+        // The host serves sources: imports ask for them on the root's
+        // `imports` port (`imports-are-source-requests`).
+        let assembler = Assembler::builder()
+            .evaluation_runtime(runtime)
+            .served_sources()
+            .build()?;
         Self::around(assembler, config.diagnostics_wiring)
     }
 

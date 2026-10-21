@@ -6,7 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
-use super::ports::{PortAddress, PortJournal, PortState};
+use super::ports::{IMPORTS, PortAddress, PortJournal, PortState};
 use super::shares::{ShareJournal, ShareRecord};
 use super::{RuntimeSharedResources, publish_runtime_observation};
 use crate::api::{Error, Value};
@@ -813,6 +813,32 @@ pub(in crate::api) fn route_runtime_diagnostic_guarded(
         .ok_or_else(|| Error::new("diagnostic ingress route is not registered"))?;
     state.events.ports.admit(address, prepared.payload);
     Ok(())
+}
+
+/// Writes a request the runtime makes for a source into the root's
+/// `imports` input at once, outside any transaction, from where it passes on
+/// as a child's write would (`imports-are-source-requests`).
+pub(in crate::api) fn admit_runtime_request(
+    resources: &Arc<RuntimeSharedResources>,
+    request: RuntimeValueRoot,
+) {
+    debug_assert_eq!(request.runtime_id(), resources.id);
+    let mutation = resources.mutation_admission.mutation_guard();
+    resources
+        .transactions
+        .state
+        .lock()
+        .expect("runtime transaction mutex should not be poisoned")
+        .events
+        .ports
+        .admit(
+            PortAddress {
+                machine: Vec::new(),
+                port: IMPORTS.clone(),
+            },
+            request,
+        );
+    publish_runtime_observation(resources, mutation);
 }
 
 fn admit_runtime_input(

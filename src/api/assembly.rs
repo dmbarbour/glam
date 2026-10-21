@@ -8,7 +8,7 @@ use bytes::Bytes;
 use super::DiagnosticCounts;
 use super::diagnostics::DiagnosticCallback;
 use super::error::net_build_error;
-use super::runtime::RuntimeSharedResources;
+use super::runtime::{RuntimeSharedResources, admit_runtime_request};
 use super::turn::environment::{REFL, committed_environment};
 use super::{
     Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, DiagnosticSubscription,
@@ -20,8 +20,8 @@ use crate::compiler::{
     ModuleLoader, import_failure,
 };
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, Key, NetValue,
-    PromisedValue, Value as CoreValue,
+    Builtin, CoreValueFactory, Dict, EvaluationFailure, EvaluationHalt, HostCallRecord,
+    HostCallRootBundle, Key, LazyValue, NetValue, PromisedValue, Value as CoreValue, keys,
 };
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::evaluation::{
@@ -34,7 +34,9 @@ use crate::reflection::{
     TaskEnvironment, TaskHost, VolumeId, coordinator_task_launcher, volume_effects,
 };
 use crate::runtime::RuntimeValueRoot;
-use crate::source::{FileSourceSystem, SourceArtifact, SourceIdentity, SourceSystem};
+use crate::source::{
+    FileSourceSystem, RelativeSourcePath, SourceArtifact, SourceIdentity, SourceSystem,
+};
 
 const GLAM_COMPATIBILITY_VERSION: &str = "0.1.0";
 const IMPLEMENTATION_NAME: &str = "rust-bootstrap";
@@ -443,12 +445,30 @@ impl ReasoningSession {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ModuleInput {
     File(PathBuf),
-    Script { extension: String, body: Bytes },
+    /// A top-level source its host hands over, named by `identity`, whose
+    /// label's extension selects the front end. Where the host serves
+    /// sources, its imports ask for their sources by `identity`
+    /// (`imports-are-source-requests`).
+    Source {
+        identity: SourceIdentity,
+        body: Bytes,
+    },
+    Script {
+        extension: String,
+        body: Bytes,
+    },
 }
 
 impl ModuleInput {
     pub fn file(path: impl Into<PathBuf>) -> Self {
         Self::File(path.into())
+    }
+
+    pub fn source(identity: SourceIdentity, body: impl Into<Bytes>) -> Self {
+        Self::Source {
+            identity,
+            body: body.into(),
+        }
     }
 
     pub fn script(extension: impl Into<String>, body: impl Into<String>) -> Self {
@@ -499,6 +519,15 @@ impl FrontEnd {
             Self::G => compile_source(source, context),
         }
     }
+}
+
+/// What a request for `request`, imported by `importer`, names, where the
+/// host serves `importer`.
+fn served_request(
+    request: &RelativeSourcePath,
+    importer: Option<&SourceArtifact>,
+) -> Option<(SourceIdentity, String)> {
+    importer?.served_request(request)
 }
 
 struct PreparedSource {
@@ -641,7 +670,7 @@ impl ReasoningVolume {
 }
 #[derive(Clone)]
 pub struct Assembler {
-    source_system: Arc<dyn SourceSystem>,
+    source_system: Option<Arc<dyn SourceSystem>>,
     next_compilation_invocation: Arc<AtomicU64>,
     pub(super) reasoning: Arc<ReasoningSession>,
     diagnostic_attachments: Vec<DiagnosticAttachment>,
@@ -653,7 +682,7 @@ pub struct Assembler {
 /// value domain through the external-owner registry.
 #[derive(Clone)]
 struct DeferredAssembler {
-    source_system: Arc<dyn SourceSystem>,
+    source_system: Option<Arc<dyn SourceSystem>>,
     next_compilation_invocation: Arc<AtomicU64>,
     reasoning: Weak<ReasoningSession>,
 }
@@ -676,7 +705,7 @@ struct DiagnosticAttachment {
 
 /// Staged construction of one assembler and its single reasoning session.
 pub struct AssemblerBuilder {
-    source_system: Arc<dyn SourceSystem>,
+    source_system: Option<Arc<dyn SourceSystem>>,
     pub(super) runtime: EvaluationRuntime,
     host: Arc<AssemblerReflectionHost>,
     diagnostics: DiagnosticBus,
@@ -743,7 +772,7 @@ impl Default for AssemblerBuilder {
             diagnostics.clone(),
         ));
         Self {
-            source_system: Arc::new(FileSourceSystem::default()),
+            source_system: Some(Arc::new(FileSourceSystem::default())),
             runtime,
             host,
             diagnostics,
@@ -764,7 +793,14 @@ impl AssemblerBuilder {
     }
 
     pub fn source_system(mut self, source_system: impl SourceSystem + 'static) -> Self {
-        self.source_system = Arc::new(source_system);
+        self.source_system = Some(Arc::new(source_system));
+        self
+    }
+
+    /// No source system: the host serves sources, and imports ask for them
+    /// on the root's `imports` port (`imports-are-source-requests`).
+    pub(crate) fn served_sources(mut self) -> Self {
+        self.source_system = None;
         self
     }
 
@@ -1318,6 +1354,42 @@ impl Assembler {
         input: &ModuleInput,
         setup: CompileSetup,
     ) -> Result<PreparedSource, Error> {
+        // What the source's imports are relative to: a script has no place,
+        // so it imports nothing.
+        let (front_end, source, importer) = match input {
+            ModuleInput::File(path) => {
+                let front_end = FrontEnd::for_path(path).map_err(Error::new)?;
+                let source_system = self.source_system.as_ref().ok_or_else(|| {
+                    Error::new(format!(
+                        "`{}` is a file, but this runtime's host serves its sources: it hands over a top-level source as `ModuleInput::source`",
+                        path.display()
+                    ))
+                })?;
+                let source = source_system
+                    .load_top_level(path)
+                    .map_err(|error| Error::new(error.to_string()))?;
+                (front_end, Arc::new(source), true)
+            }
+            ModuleInput::Source { identity, body } => {
+                let front_end =
+                    FrontEnd::for_path(Path::new(identity.label())).map_err(Error::new)?;
+                let source = SourceArtifact::new(body.clone(), identity.clone());
+                // Where the assembler loads sources itself, a handed-over
+                // source has no resolver, and imports as a script does.
+                let source = match self.source_system {
+                    Some(_) => source,
+                    None => source.served(),
+                };
+                (front_end, Arc::new(source), true)
+            }
+            ModuleInput::Script { extension, body } => {
+                let front_end = FrontEnd::for_extension(extension).map_err(Error::new)?;
+                let label: Arc<str> = Arc::from(format!("<script.{extension}>"));
+                let source =
+                    SourceArtifact::new(body.clone(), SourceIdentity::script(label, body.clone()));
+                (front_end, Arc::new(source), false)
+            }
+        };
         let CompileSetup {
             module_path,
             prior_defs,
@@ -1327,79 +1399,37 @@ impl Assembler {
             session,
             execution,
         } = setup;
-        match input {
-            ModuleInput::File(path) => {
-                let front_end = FrontEnd::for_path(path).map_err(Error::new)?;
-                let source = Arc::new(
-                    self.source_system
-                        .load_top_level(path)
-                        .map_err(|error| Error::new(error.to_string()))?,
-                );
-                let trace = Arc::new(CompilationTrace::root(
-                    self.next_compilation_invocation(),
-                    &source,
-                    module_path.clone(),
-                ));
-                let had_errors = Arc::new(AtomicBool::new(false));
-                let context = CompileContext::from_module_path_with_values(
-                    self.core_values(),
-                    module_path.iter().cloned(),
-                )
-                .with_importer_source(source.clone())
-                .with_compilation_trace(trace.clone())
-                .with_prior_defs_root(prior_defs)
-                .with_final_defs_root(final_defs)
-                .with_local_module_loader(module_loader)
-                .with_local_binary_loader(binary_loader)
-                .with_compilation_execution(execution)
-                .with_diagnostic_emitter(self.compile_diagnostic_emitter(
-                    trace,
-                    session,
-                    had_errors.clone(),
-                ));
-                Ok(PreparedSource {
-                    front_end,
-                    source,
-                    context,
-                    had_errors,
-                })
-            }
-            ModuleInput::Script { extension, body } => {
-                let front_end = FrontEnd::for_extension(extension).map_err(Error::new)?;
-                let label: Arc<str> = Arc::from(format!("<script.{extension}>"));
-                let source = Arc::new(SourceArtifact::new(
-                    body.clone(),
-                    SourceIdentity::script(label, body.clone()),
-                ));
-                let trace = Arc::new(CompilationTrace::root(
-                    self.next_compilation_invocation(),
-                    &source,
-                    module_path.clone(),
-                ));
-                let had_errors = Arc::new(AtomicBool::new(false));
-                let context = CompileContext::from_module_path_with_values(
-                    self.core_values(),
-                    module_path.iter().cloned(),
-                )
-                .with_compilation_trace(trace.clone())
-                .with_prior_defs_root(prior_defs)
-                .with_final_defs_root(final_defs)
-                .with_local_module_loader(module_loader)
-                .with_local_binary_loader(binary_loader)
-                .with_compilation_execution(execution)
-                .with_diagnostic_emitter(self.compile_diagnostic_emitter(
-                    trace,
-                    session,
-                    had_errors.clone(),
-                ));
-                Ok(PreparedSource {
-                    front_end,
-                    source,
-                    context,
-                    had_errors,
-                })
-            }
+        let trace = Arc::new(CompilationTrace::root(
+            self.next_compilation_invocation(),
+            &source,
+            module_path.clone(),
+        ));
+        let had_errors = Arc::new(AtomicBool::new(false));
+        let mut context = CompileContext::from_module_path_with_values(
+            self.core_values(),
+            module_path.iter().cloned(),
+        );
+        if importer {
+            context = context.with_importer_source(source.clone());
         }
+        let context = context
+            .with_compilation_trace(trace.clone())
+            .with_prior_defs_root(prior_defs)
+            .with_final_defs_root(final_defs)
+            .with_local_module_loader(module_loader)
+            .with_local_binary_loader(binary_loader)
+            .with_compilation_execution(execution)
+            .with_diagnostic_emitter(self.compile_diagnostic_emitter(
+                trace,
+                session,
+                had_errors.clone(),
+            ));
+        Ok(PreparedSource {
+            front_end,
+            source,
+            context,
+            had_errors,
+        })
     }
 
     fn module_loader(
@@ -1422,46 +1452,73 @@ impl Assembler {
                     args.importer_source.as_deref(),
                 ));
             };
-            let (execution, revived) = match execution.upgrade() {
-                Some(execution) => (execution, false),
-                None => (
-                    Arc::new(
-                        CompilationExecution::new(&assembler.reasoning, session.clone()).map_err(
-                            |error| {
-                                import_failure(
-                                    Some(&assembler.core_values()),
-                                    format!(
-                                        "local import `{}` could not create its compilation execution: {error}",
-                                        args.request.as_str()
-                                    ),
-                                    args.request.as_str(),
-                                    args.importer_trace.as_deref(),
-                                    args.importer_source.as_deref(),
-                                )
-                            },
-                        )?,
-                    ),
-                    true,
-                ),
-            };
+            if assembler.source_system.is_none() {
+                return assembler.request_module(args, session.clone(), execution.clone());
+            }
             let request = args.request.clone();
             let importer_source = args.importer_source.clone();
             let importer_trace = args.importer_trace.clone();
-            let result = assembler.load_local_module(args, session.clone(), execution.clone());
-            if revived && execution.drain() {
-                return Err(import_failure(
-                    Some(&assembler.core_values()),
-                    format!(
-                        "local import `{}` encountered a macro reasoning failure",
-                        request.as_str()
-                    ),
-                    request.as_str(),
-                    importer_trace.as_deref(),
-                    importer_source.as_deref(),
-                ));
-            }
-            result
+            assembler.compile_in_execution(
+                &request,
+                importer_trace.as_deref(),
+                importer_source.as_deref(),
+                &session,
+                &execution,
+                |execution| assembler.load_local_module(args, session.clone(), execution),
+            )
         })
+    }
+
+    /// Runs `compile` in the execution of the compilation that made the
+    /// import, or, once that has ended, in a revived one, which it drains
+    /// after.
+    fn compile_in_execution(
+        &self,
+        request: &RelativeSourcePath,
+        importer_trace: Option<&CompilationTrace>,
+        importer_source: Option<&SourceArtifact>,
+        session: &Arc<Mutex<Vec<Diagnostic>>>,
+        execution: &Weak<CompilationExecution>,
+        compile: impl FnOnce(
+            Arc<CompilationExecution>,
+        ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>,
+    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
+        let (execution, revived) = match execution.upgrade() {
+            Some(execution) => (execution, false),
+            None => (
+                Arc::new(
+                    CompilationExecution::new(&self.reasoning, session.clone()).map_err(
+                        |error| {
+                            import_failure(
+                                Some(&self.core_values()),
+                                format!(
+                                    "local import `{}` could not create its compilation execution: {error}",
+                                    request.as_str()
+                                ),
+                                request.as_str(),
+                                importer_trace,
+                                importer_source,
+                            )
+                        },
+                    )?,
+                ),
+                true,
+            ),
+        };
+        let result = compile(execution.clone());
+        if revived && execution.drain() {
+            return Err(import_failure(
+                Some(&self.core_values()),
+                format!(
+                    "local import `{}` encountered a macro reasoning failure",
+                    request.as_str()
+                ),
+                request.as_str(),
+                importer_trace,
+                importer_source,
+            ));
+        }
+        result
     }
 
     fn binary_loader(&self) -> BinaryFileLoader {
@@ -1479,7 +1536,209 @@ impl Assembler {
                     args.importer_source.as_deref(),
                 ));
             };
-            assembler.load_local_binary(args)
+            match assembler.source_system {
+                Some(_) => assembler.load_local_binary(args),
+                None => assembler.request_binary(args),
+            }
+        })
+    }
+
+    /// Asks the host for an imported module's source on the root's
+    /// `imports` input (`imports-are-source-requests`). The import awaits
+    /// the reply, then compiles it on the thread that forces it, so an
+    /// import that its macros force is just another request.
+    fn request_module(
+        &self,
+        args: ModuleLoadArgs,
+        session: Arc<Mutex<Vec<Diagnostic>>>,
+        execution: Weak<CompilationExecution>,
+    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
+        let values = self.core_values();
+        let failure = |message: String| {
+            import_failure(
+                Some(&values),
+                message,
+                args.request.as_str(),
+                args.importer_trace.as_deref(),
+                args.importer_source.as_deref(),
+            )
+        };
+        let front_end =
+            FrontEnd::for_path(Path::new(args.request.as_str())).map_err(|message| {
+                failure(format!(
+                    "local import `{}`: {message}",
+                    args.request.as_str()
+                ))
+            })?;
+        let (root, path) = served_request(&args.request, args.importer_source.as_deref())
+            .ok_or_else(|| {
+                failure(format!(
+                    "local import `{}` cannot be requested from a source its host does not serve",
+                    args.request.as_str()
+                ))
+            })?;
+        let reply = self.request_source(&root, &path, "module");
+        let ModuleLoadArgs {
+            request,
+            importer_source,
+            importer_trace,
+            extends,
+            module_path,
+            prior_defs,
+            final_defs,
+        } = args;
+        let assembler = self.deferred();
+        let compile = move |captures: HostCallRootBundle| {
+            let mut captures = captures.into_roots().into_vec().into_iter();
+            let (Some(prior_defs), Some(final_defs), Some(reply), None) = (
+                captures.next(),
+                captures.next(),
+                captures.next(),
+                captures.next(),
+            ) else {
+                panic!("a served module's compilation receives its definitions and its reply");
+            };
+            let Some(assembler) = assembler.upgrade() else {
+                return Err(import_failure(
+                    None,
+                    format!(
+                        "local import `{}` cannot run after its assembler was dropped",
+                        request.as_str()
+                    ),
+                    request.as_str(),
+                    importer_trace.as_deref(),
+                    importer_source.as_deref(),
+                ));
+            };
+            let bytes = assembler.served_binary(&reply).map_err(|message| {
+                import_failure(
+                    Some(&assembler.core_values()),
+                    format!("local import `{}`: {message}", request.as_str()),
+                    request.as_str(),
+                    importer_trace.as_deref(),
+                    importer_source.as_deref(),
+                )
+            })?;
+            let source = Arc::new(SourceArtifact::served_import(&root, &path, bytes));
+            let args = ModuleLoadArgs {
+                request: request.clone(),
+                importer_source: importer_source.clone(),
+                importer_trace: importer_trace.clone(),
+                extends: extends.clone(),
+                module_path: module_path.clone(),
+                prior_defs,
+                final_defs,
+            };
+            assembler.compile_in_execution(
+                &request,
+                importer_trace.as_deref(),
+                importer_source.as_deref(),
+                &session,
+                &execution,
+                |execution| {
+                    assembler.compile_local_module(
+                        front_end,
+                        args,
+                        source,
+                        session.clone(),
+                        execution,
+                    )
+                },
+            )
+        };
+        Ok(values.construct_runtime_value_root(|access| {
+            let reply = reply.clone_core_with(access);
+            let compiled = CoreValue::Lazy(LazyValue::external_host_call_in(
+                access,
+                HostCallRecord::external_with_semantic_values(
+                    "served module compilation",
+                    "src/api/assembly.rs",
+                    "assembler route plus explicit prior/final definitions and the served reply",
+                ),
+                [
+                    prior_defs.clone_core_with(access),
+                    final_defs.clone_core_with(access),
+                    access.duplicate_value(&reply),
+                ],
+                compile,
+            ));
+            CoreValue::builtin_call_in(access, Builtin::Seq, vec![reply, compiled])
+        }))
+    }
+
+    /// Asks the host for an imported binary on the root's `imports` input
+    /// (`imports-are-source-requests`): the import is the reply.
+    fn request_binary(
+        &self,
+        args: BinaryLoadArgs,
+    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
+        let (root, path) = served_request(&args.request, args.importer_source.as_deref())
+            .ok_or_else(|| {
+                import_failure(
+                    Some(&self.core_values()),
+                    format!(
+                        "binary import `{}` cannot be requested from a source its host does not serve",
+                        args.request.as_str()
+                    ),
+                    args.request.as_str(),
+                    args.importer_trace.as_deref(),
+                    args.importer_source.as_deref(),
+                )
+            })?;
+        Ok(self.request_source(&root, &path, "binary"))
+    }
+
+    /// Writes `{request: {source, path, kind}, reply: resolver}` into the
+    /// root's `imports` input, and returns the reply's promise.
+    fn request_source(&self, root: &SourceIdentity, path: &str, kind: &str) -> RuntimeValueRoot {
+        let resources = self.evaluation_runtime().shared_resources();
+        let promises = resources.reflection_snapshot().1.promises().clone();
+        let (reply, request) = self.core_values().with_boundary_access(|access| {
+            let (_, reply, resolver) = promises.allocate(&access);
+            let request = Dict::new_sync()
+                .insert(keys::SOURCE.clone(), root.value(&access))
+                .insert(keys::PATH.clone(), CoreValue::binary_from_text(path))
+                .insert(
+                    keys::KIND.clone(),
+                    Key::atom_from_text(kind).to_value_in(&access),
+                );
+            let request = Dict::new_sync()
+                .insert(keys::REQUEST.clone(), CoreValue::Dict(request))
+                .insert(keys::REPLY.clone(), resolver);
+            (
+                access.root_runtime_value(reply),
+                access.root_runtime_value(CoreValue::Dict(request)),
+            )
+        });
+        admit_runtime_request(&resources, request);
+        reply
+    }
+
+    /// The binary a host served, which `seq` has forced: the weak-head
+    /// normal form the reply reached, read through its promise and memoized
+    /// lazy values, never evaluated here.
+    fn served_binary(&self, reply: &RuntimeValueRoot) -> Result<Bytes, String> {
+        self.core_values().with_boundary_access(|access| {
+            let mut value = reply.clone_core_with(&access);
+            loop {
+                value = match value {
+                    CoreValue::Binary(bytes) => return Ok(bytes),
+                    CoreValue::Promised(promised) => match promised.access(&access).assignment() {
+                        Some(Ok(value)) => value,
+                        _ => return Err("its reply has not arrived".to_owned()),
+                    },
+                    CoreValue::Lazy(lazy) => match lazy.access(&access).cached() {
+                        Some(Ok(evaluated)) => evaluated.into_value_in(&access),
+                        _ => return Err("its reply has not been evaluated".to_owned()),
+                    },
+                    other => {
+                        return Err(format!(
+                            "its reply is {}, not a binary",
+                            access.diagnostic_kind_name(&other)
+                        ));
+                    }
+                }
+            }
         })
     }
 
@@ -1523,6 +1782,18 @@ impl Assembler {
                 Some(importer),
             )
         })?);
+        self.compile_local_module(front_end, args, source, session, execution)
+    }
+
+    /// Compiles an imported module's source, loaded or served.
+    fn compile_local_module(
+        &self,
+        front_end: FrontEnd,
+        args: ModuleLoadArgs,
+        source: Arc<SourceArtifact>,
+        session: Arc<Mutex<Vec<Diagnostic>>>,
+        execution: Arc<CompilationExecution>,
+    ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
         let module_loader = self.module_loader(session.clone(), &execution);
         let binary_loader = self.binary_loader();
         let had_errors = Arc::new(AtomicBool::new(false));

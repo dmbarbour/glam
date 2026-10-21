@@ -26,6 +26,12 @@ use crate::runtime::RuntimeValueRoot;
 /// The diagnostics port, which the default configuration wires.
 pub(in crate::api) static DIAGNOSTICS: LazyLock<Key> = LazyLock::new(|| Key::from("diagnostics"));
 
+/// The port where the runtime asks for sources' binaries
+/// (`imports-are-source-requests`): it writes requests into the root's
+/// input, which the default configuration passes through to the root's
+/// output, for the host to wire to its server.
+pub(in crate::api) static IMPORTS: LazyLock<Key> = LazyLock::new(|| Key::from("imports"));
+
 /// A machine's port in one role: the machine's path from the root, and the
 /// port's name.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
@@ -117,8 +123,9 @@ impl PortState {
     }
 
     /// Sets whether the default diagnostics wiring applies: each child's
-    /// diagnostics output to its parent's diagnostics input, and each
-    /// machine's diagnostics input, the root's aside, to its own output.
+    /// diagnostics output to its parent's diagnostics input, each machine's
+    /// diagnostics input, the root's aside, to its own output, and the
+    /// root's imports input to its output.
     pub(in crate::api) fn set_diagnostics_wiring(&mut self, enabled: bool) {
         if self.diagnostics != enabled {
             self.diagnostics = enabled;
@@ -128,7 +135,8 @@ impl PortState {
 
     /// Delivers `value` to the input at `address` at once, outside any
     /// transaction, as runtime inputs are admitted: for diagnostics that the
-    /// runtime routes to a port. It arrives as a child's write would, passing
+    /// runtime routes to a port, and for its requests for sources. It
+    /// arrives as a child's write would, passing
     /// through where the machine wired the input on; where that routing
     /// fails, by a loop or an unconnected output, it waits in the input
     /// itself, so that nothing is lost. The caller holds the transaction lock
@@ -219,7 +227,7 @@ fn machine_buffers(
 }
 
 /// Whether `wire`, owned by the machine at `owner`, is one of the default
-/// diagnostics wiring's.
+/// wiring's: the diagnostics wiring, and the root's imports pass-through.
 fn is_default(diagnostics: bool, owner: &[Key], wire: &Wire) -> bool {
     let port = &*DIAGNOSTICS;
     diagnostics
@@ -228,7 +236,8 @@ fn is_default(diagnostics: bool, owner: &[Key], wire: &Wire) -> bool {
                 source == port && destination == port
             }
             (WireEnd::In(source), WireEnd::Out(destination)) => {
-                !owner.is_empty() && source == port && destination == port
+                let passed = if owner.is_empty() { &*IMPORTS } else { port };
+                source == passed && destination == passed
             }
             _ => false,
         }
@@ -700,7 +709,7 @@ impl PortJournal {
         let port = &*DIAGNOSTICS;
         let candidates = match source {
             WireEnd::Child(_, source) if source == port => vec![WireEnd::In(port.clone())],
-            WireEnd::In(source) if source == port => vec![WireEnd::Out(port.clone())],
+            WireEnd::In(source) => vec![WireEnd::Out(source.clone())],
             _ => Vec::new(),
         };
         candidates

@@ -8,11 +8,20 @@ syntax lives in [`../Syntax.md`](../Syntax.md).
 
 ## Compilation Boundary
 
-`SourceSystem` is the assembler's source-discovery authority. A load returns an
-immutable `SourceArtifact` containing the exact bytes, source identity, content
-digest, and a relative resolver for imports. The front end receives the bytes
-separately and performs its own UTF-8 validation. It cannot replace the source
-system or infer host filesystem authority from a source name.
+`SourceSystem` is the handle API's source-discovery authority. A load returns
+an immutable `SourceArtifact` containing the exact bytes, source identity,
+content digest, and a relative resolver for imports. The front end receives the
+bytes separately and performs its own UTF-8 validation. It cannot replace the
+source system or infer host filesystem authority from a source name.
+
+A runtime that `Runtime::open` opens has no source system: its host serves
+sources (`imports-are-source-requests`). A top-level source arrives as
+`ModuleInput::source`, and each artifact records the top-level source it
+descends from and its folder there. A forced import writes
+`{request: {source, path, kind}, reply}` into the root's `imports` input,
+passed through to the root's output by default; a binary import is the reply,
+and a module import compiles the binary the reply reached, on the thread that
+forces it.
 
 `CompileContext` is a capability context for one source invocation. It provides
 relative imports, namespace qualification, prior and promised final module

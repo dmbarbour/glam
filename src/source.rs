@@ -133,6 +133,18 @@ pub struct SourceArtifact {
     identity: SourceIdentity,
     digest: ContentDigest,
     imports: Option<Arc<dyn ImportResolver>>,
+    location: Option<Arc<SourceLocation>>,
+}
+
+/// Where a source sits among those its host serves
+/// (`imports-are-source-requests`): the top-level source it descends from,
+/// and its folder, relative to that source's. Imports are child-relative, so
+/// every source a top-level source imports, directly or not, lies below its
+/// folder.
+#[derive(Debug)]
+struct SourceLocation {
+    root: SourceIdentity,
+    folder: Arc<str>,
 }
 
 impl SourceArtifact {
@@ -145,7 +157,57 @@ impl SourceArtifact {
             identity,
             digest,
             imports: None,
+            location: None,
         }
+    }
+
+    /// As a top-level source whose host serves what it imports: a request
+    /// names this source and the import's path from its folder.
+    pub(crate) fn served(mut self) -> Self {
+        self.location = Some(Arc::new(SourceLocation {
+            root: self.identity.clone(),
+            folder: Arc::from(""),
+        }));
+        self
+    }
+
+    /// The source a host served for `path`, from the folder of the
+    /// top-level source `root`. Its identity is that path, which the
+    /// compilation's import chain leads back to `root`; its label joins the
+    /// path to `root`'s folder.
+    pub(crate) fn served_import(root: &SourceIdentity, path: &str, bytes: Bytes) -> Self {
+        let label = match Path::new(root.label()).parent() {
+            Some(folder) if !folder.as_os_str().is_empty() => {
+                folder.join(path).display().to_string()
+            }
+            _ => path.to_owned(),
+        };
+        let folder = path.rsplit_once('/').map_or("", |(folder, _)| folder);
+        let mut artifact = Self::new(
+            bytes,
+            SourceIdentity::new(label, "import", Bytes::copy_from_slice(path.as_bytes())),
+        );
+        artifact.location = Some(Arc::new(SourceLocation {
+            root: root.clone(),
+            folder: Arc::from(folder),
+        }));
+        artifact
+    }
+
+    /// What a request for `request`, imported by this source, names: the
+    /// top-level source it descends from, and its path from that source's
+    /// folder. A source its host does not serve names none.
+    pub(crate) fn served_request(
+        &self,
+        request: &RelativeSourcePath,
+    ) -> Option<(SourceIdentity, String)> {
+        let location = self.location.as_ref()?;
+        let path = if location.folder.is_empty() {
+            request.as_str().to_owned()
+        } else {
+            format!("{}/{}", location.folder, request.as_str())
+        };
+        Some((location.root.clone(), path))
     }
 
     pub fn with_import_resolver(mut self, resolver: impl ImportResolver + 'static) -> Self {
@@ -188,6 +250,7 @@ impl fmt::Debug for SourceArtifact {
             .field("identity", &self.identity)
             .field("digest", &self.digest)
             .field("supports_imports", &self.imports.is_some())
+            .field("served", &self.location.is_some())
             .finish()
     }
 }
