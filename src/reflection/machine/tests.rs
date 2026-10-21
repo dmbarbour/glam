@@ -991,11 +991,13 @@ impl TaskHost<StandardEffects> for TestHost {
 
 impl TaskHost<ReflectionEffects> for TestHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
+        self.probe_callback_boundary(CallbackProbeKind::Snapshot);
         let state = self.state.lock().unwrap();
         HostSnapshot::new(state.generation, state.store.snapshot(), ())
     }
 
     fn validate(&self, validation: TaskValidation<'_, ReflectionEffects>) -> ValidationResult {
+        self.probe_callback_boundary(CallbackProbeKind::Validation);
         let state = self.state.lock().unwrap();
         if state.closed {
             return ValidationResult::Closed;
@@ -1010,6 +1012,7 @@ impl TaskHost<ReflectionEffects> for TestHost {
     }
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
+        self.probe_callback_boundary(CallbackProbeKind::Commit);
         let (store, _snapshot, journal) = commit.into_parts();
         {
             let mut state = self.state.lock().unwrap();
@@ -1896,11 +1899,15 @@ fn assert_state_path_root_inventory(
                 let _: &RuntimeValueRoot = value;
             }
             StorePathOperation::VolumeGet(volume) => {
-                let _: &VolumeId = volume;
+                assert_volume_target(volume, |handle| {
+                    let _: &RuntimeValueRoot = handle;
+                });
             }
             StorePathOperation::VolumeSet(volume, value)
             | StorePathOperation::VolumeRewrite(volume, value) => {
-                let _: &VolumeId = volume;
+                assert_volume_target(volume, |handle| {
+                    let _: &RuntimeValueRoot = handle;
+                });
                 let _: &RuntimeValueRoot = value;
             }
         },
@@ -3259,11 +3266,11 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
             assert_request_value(right);
         }
         Request::VolumeGet(volume, value) => {
-            let _: &VolumeId = volume;
+            assert_volume_target(volume, assert_request_value);
             assert_request_value(value);
         }
         Request::VolumeSet(volume, left, right) | Request::VolumeRewrite(volume, left, right) => {
-            let _: &VolumeId = volume;
+            assert_volume_target(volume, assert_request_value);
             assert_request_value(left);
             assert_request_value(right);
         }
@@ -9288,4 +9295,61 @@ fn a_cut_that_read_a_promise_pending_retries_once_it_resolves() {
             .unwrap(),
         b"resolved".as_slice()
     );
+}
+
+/// Runs `main` from a module of `source` against a host that collects at
+/// each of its callbacks, returning the completed value's text and how many
+/// snapshot callbacks collected.
+fn run_collecting_at_callbacks(source: &str) -> (String, usize) {
+    let assembler = Assembler::default();
+    let host = Arc::new(TestHost::with_callback_probe(assembler.core_values()));
+    let module = assembler
+        .module(["reflection_collecting_callbacks"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    let effect = assembler
+        .get(module.value(), "main")
+        .expect("the fixture should define main");
+    let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
+    let outcome = EffectRun::new(
+        &assembler.evaluation_runtime(),
+        &effect,
+        ReflectionEffects,
+        reflection_host,
+    )
+    .run()
+    .expect("the effect should run");
+    let TaskOutcome::Complete(value) = outcome else {
+        panic!("the effect should complete")
+    };
+    (
+        String::from_utf8(assembler.to_binary(&value).expect("a text result").to_vec())
+            .expect("UTF-8 text"),
+        host.callback_probe_count(CallbackProbeKind::Snapshot),
+    )
+}
+
+#[test]
+fn a_volume_request_keeps_its_volume_until_it_completes() {
+    // The handle lives only in the read's request, and in the branch's
+    // effect, which the branch keeps to run again: the host's snapshot
+    // callback collects after the request decodes and before it reads
+    // (`api-volume-cells`).
+    let (read, collections) = run_collecting_at_callbacks(
+        "language g0\nimport 'std\nmain = .vol.new \"kept\" >>= (\\h -> .vol.get h [])\n",
+    );
+    assert_eq!(read, "kept");
+    assert!(collections >= 2, "the read's snapshot collected");
+}
+
+/// A volume target holds a kept volume's ID or a handle's value
+/// (`api-volume-cells`).
+fn assert_volume_target<V>(volume: &VolumeTarget<V>, mut assert_handle: impl FnMut(&V)) {
+    match volume {
+        VolumeTarget::Kept(volume) => {
+            let _: &VolumeId = volume;
+        }
+        VolumeTarget::Handle(handle) => assert_handle(handle),
+    }
 }

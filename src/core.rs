@@ -37,7 +37,7 @@ pub(crate) use managed::{
     ManagedLazyAccess, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromisePublication,
     ManagedPromiseRoot, ManagedVolumeRoot, ManagedVolumeVersion, OpaquePayloadFamily,
     OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueMutator,
-    RuntimeValueObserver, assert_outside_mutator, managed_slot_extent,
+    RuntimeValueObserver, VolumeCellView, assert_outside_mutator, managed_slot_extent,
     trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
@@ -1068,6 +1068,15 @@ impl VolumeValue {
     /// The volume this handle names.
     pub(crate) fn id_in(&self, access: &RuntimeValueAccess<'_>) -> VolumeId {
         self.edge.id(access)
+    }
+
+    /// The volume's cell, viewed. The caller holds the handle under
+    /// `access`.
+    pub(crate) fn cell_in<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+    ) -> managed::VolumeCellView<'access> {
+        self.edge.view(access)
     }
 }
 
@@ -2654,7 +2663,9 @@ impl RuntimeValueAccess<'_> {
             Value::Net(_) => "Net",
             Value::Lazy(_) | Value::Promised(_) => "Lazy",
             Value::Metadata(_) => "Sealed",
-            Value::Opaque(_) | Value::Volume(_) => "Opaque",
+            Value::Opaque(_) => "Opaque",
+            // Evaluation sees a handle as opaque; diagnostics name it.
+            Value::Volume(_) => "Volume",
         }
     }
 

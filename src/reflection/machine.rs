@@ -16,7 +16,7 @@ use super::store::{StoreJournal, StoreSnapshot, VolumeId};
 use crate::api::{EvaluatedValue, Value as PublicValue, Values};
 use crate::core::{
     Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, FunctionValue, Key, LazyValue, List,
-    NetValue, PromisedValue, RuntimeValueAccess, Value, keys,
+    NetValue, PromisedValue, RuntimeValueAccess, Value, VolumeCellView, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
@@ -2098,26 +2098,38 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ))
                 })
             }
-            StorePathOperation::VolumeGet(volume) => {
+            StorePathOperation::VolumeGet(target) => {
                 let checkpoint = branch.retry_candidate();
-                let root = if let Some(transaction) = branch.transaction.as_mut() {
+                // A read roots only its result; within a transaction, the
+                // journal keeps the volume it read (`api-volume-cells`).
+                let read = if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
-                    let observed = transaction.store.observe_volume_read(volume, &path);
-                    let root = context.with_runtime_access(|access| {
-                        transaction.store.volume_view_in(&access, volume)
+                    let (observed, read) = context.with_runtime_access(|access| {
+                        let volume = target.id_in(&access);
+                        let observed = transaction.store.observe_volume_read(volume, &path);
+                        let read = target
+                            .cell_in(&access, transaction.store.snapshot())
+                            .and_then(|cell| transaction.store.read_volume_in(&access, cell, &path))
+                            .map(|value| access.root_runtime_value(value));
+                        (observed, read)
                     });
                     if observed {
                         branch.observe(checkpoint, generation);
                     }
-                    root
+                    read
                 } else {
-                    context.suspend(|| self.host.snapshot().store().committed(volume))
+                    let snapshot = context.suspend(|| self.host.snapshot().store().clone());
+                    context.with_runtime_access(|access| {
+                        target
+                            .cell_in(&access, &snapshot)
+                            .and_then(|cell| snapshot.read_volume_in(&access, cell, &path))
+                            .map(|value| access.root_runtime_value(value))
+                    })
                 };
-                let value = match root {
-                    Some(root) => context.with_runtime_access(|access| {
-                        lazy_value_path_root(&access, &root.clone().into_runtime_root(), &path)
-                    }),
+                let value = match read {
+                    Some(value) => value,
                     None => context.with_runtime_access(|access| {
+                        let volume = target.id_in(&access);
                         access.root_runtime_value(Value::Lazy(LazyValue::error_in(
                             &access,
                             format!("reflection volume {} has been revoked", volume.get()),
@@ -2130,12 +2142,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 ));
             }
-            StorePathOperation::VolumeSet(volume, value) => {
+            StorePathOperation::VolumeSet(target, value) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
                     context.with_runtime_access(|access| {
+                        if let Some(cell) = target.cell_in(&access, transaction.store.snapshot()) {
+                            transaction.store.keep_volume_in(&access, cell);
+                        }
                         transaction.store.write_volume_in(
                             &access,
-                            volume,
+                            target.id_in(&access),
                             path,
                             PublicValue::from_runtime_root(value),
                         )
@@ -2145,7 +2160,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }));
                 }
                 // One suspension covers the snapshot, the edit and the
-                // commit.
+                // commit, while the target keeps the volume.
+                let volume = context.with_runtime_access(|access| target.id_in(&access));
                 context.suspend(|| {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
@@ -2157,12 +2173,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ))
                 })
             }
-            StorePathOperation::VolumeRewrite(volume, updater) => {
+            StorePathOperation::VolumeRewrite(target, updater) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
                     context.with_runtime_access(|access| {
+                        if let Some(cell) = target.cell_in(&access, transaction.store.snapshot()) {
+                            transaction.store.keep_volume_in(&access, cell);
+                        }
                         transaction.store.rewrite_volume_in(
                             &access,
-                            volume,
+                            target.id_in(&access),
                             path,
                             PublicValue::from_runtime_root(updater),
                         )
@@ -2172,7 +2191,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     }));
                 }
                 // One suspension covers the snapshot, the edit and the
-                // commit.
+                // commit, while the target keeps the volume.
+                let volume = context.with_runtime_access(|access| target.id_in(&access));
                 context.suspend(|| {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
@@ -4515,9 +4535,9 @@ enum StorePathOperation {
     HeapGet,
     HeapSet(RuntimeValueRoot),
     HeapRewrite(RuntimeValueRoot),
-    VolumeGet(VolumeId),
-    VolumeSet(VolumeId, RuntimeValueRoot),
-    VolumeRewrite(VolumeId, RuntimeValueRoot),
+    VolumeGet(VolumeTarget),
+    VolumeSet(VolumeTarget, RuntimeValueRoot),
+    VolumeRewrite(VolumeTarget, RuntimeValueRoot),
 }
 
 impl<S: TaskSpecialization> StatePathWork<S> {
@@ -4595,7 +4615,7 @@ impl<S: TaskSpecialization> StatePathWork<S> {
     }
 
     fn volume_get(
-        volume: VolumeId,
+        volume: VolumeTarget,
         path: RuntimeValueRoot,
         branch: Branch<S>,
         scope_depth: usize,
@@ -4609,7 +4629,7 @@ impl<S: TaskSpecialization> StatePathWork<S> {
     }
 
     fn volume_set(
-        volume: VolumeId,
+        volume: VolumeTarget,
         path: RuntimeValueRoot,
         value: RuntimeValueRoot,
         branch: Branch<S>,
@@ -4624,7 +4644,7 @@ impl<S: TaskSpecialization> StatePathWork<S> {
     }
 
     fn volume_rewrite(
-        volume: VolumeId,
+        volume: VolumeTarget,
         path: RuntimeValueRoot,
         updater: RuntimeValueRoot,
         branch: Branch<S>,
@@ -5189,9 +5209,9 @@ enum Request<R, V = RuntimeValueRoot> {
     HeapSet(V, V),
     HeapRewrite(V, V),
     HeapVolume,
-    VolumeGet(VolumeId, V),
-    VolumeSet(VolumeId, V, V),
-    VolumeRewrite(VolumeId, V, V),
+    VolumeGet(VolumeTarget<V>, V),
+    VolumeSet(VolumeTarget<V>, V, V),
+    VolumeRewrite(VolumeTarget<V>, V, V),
     VolumeNew(V),
     PromiseNew,
     PromiseStatus(PromiseId),
@@ -5237,6 +5257,41 @@ enum HandleOperation {
 struct VolumeRequestIdentity {
     volume: VolumeId,
     operation: VolumeOperation,
+}
+
+/// The volume a request names (`api-volume-cells`).
+#[derive(Clone)]
+enum VolumeTarget<V = RuntimeValueRoot> {
+    /// A host's protected volume, by its ID, which the store keeps until
+    /// the host revokes it.
+    Kept(VolumeId),
+    /// A volume's handle, as the request decoded it, which keeps the volume
+    /// until the request completes.
+    Handle(V),
+}
+
+impl VolumeTarget {
+    /// The volume's ID.
+    fn id_in(&self, access: &RuntimeValueAccess<'_>) -> VolumeId {
+        match self {
+            Self::Kept(volume) => *volume,
+            Self::Handle(handle) => handle_volume(access, &handle.clone_core_with(access))
+                .expect("decoding checked the volume's handle"),
+        }
+    }
+
+    /// The volume's cell, viewed: the handle's, or for a host's volume, the
+    /// one the store kept in `snapshot`, unless the host revoked it.
+    fn cell_in<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+        snapshot: &StoreSnapshot,
+    ) -> Option<VolumeCellView<'access>> {
+        match self {
+            Self::Kept(volume) => snapshot.kept_cell_in(access, *volume),
+            Self::Handle(handle) => access.volume_cell(&handle.clone_core_with(access)),
+        }
+    }
 }
 
 enum RequestSelection<R> {
@@ -5326,15 +5381,15 @@ impl<R> RequestSelection<R> {
             Self::Volume(VolumeRequestIdentity {
                 volume,
                 operation: VolumeOperation::Get,
-            }) => Request::VolumeGet(volume, next()),
+            }) => Request::VolumeGet(VolumeTarget::Kept(volume), next()),
             Self::Volume(VolumeRequestIdentity {
                 volume,
                 operation: VolumeOperation::Set,
-            }) => Request::VolumeSet(volume, next(), next()),
+            }) => Request::VolumeSet(VolumeTarget::Kept(volume), next(), next()),
             Self::Volume(VolumeRequestIdentity {
                 volume,
                 operation: VolumeOperation::Rewrite,
-            }) => Request::VolumeRewrite(volume, next(), next()),
+            }) => Request::VolumeRewrite(VolumeTarget::Kept(volume), next(), next()),
             Self::VolumeNew => Request::VolumeNew(next()),
             Self::PromiseNew => Request::PromiseNew,
             Self::Reset => Request::Reset(next(), next()),
@@ -5546,11 +5601,14 @@ impl<R: Clone> RequestDecodeWork<R> {
                                 handle_volume(access.values(), &handle)
                             })
                         });
-                        let Some(volume) = volume else {
+                        if volume.is_none() {
                             return RequestDecodePoll::Failed(TaskHalt::new(
                                 "a volume effect needs a handle of this runtime's volume",
                             ));
-                        };
+                        }
+                        // The request keeps the handle, and so its volume,
+                        // until it completes (`api-volume-cells`).
+                        let volume = VolumeTarget::Handle(handle);
                         RequestDecodePoll::Ready(match operation {
                             VolumeOperation::Get => Request::VolumeGet(volume, next()),
                             VolumeOperation::Set => Request::VolumeSet(volume, next(), next()),

@@ -234,15 +234,19 @@ value, one per commit, since snapshots keep the versions they began from.
 The store's root holds the ephemeron, never the cell or the value, so a
 volume lives while some other path reaches its cell: a handle, the store
 for its own volumes and a host's until revoked (`kept`, which snapshots
-share), or a transaction that writes or creates it, until it commits, which
-keys the new version on the cell it holds. Contents reach the cell only
+share), or a transaction that reads, writes or creates it, until it ends;
+its commit keys each new version on the cell it holds. A request names its
+volume by a `VolumeTarget`, the handle it decoded or a host's protected
+volume by ID, which it resolves under access to a view of the cell; reads
+check that view against the version's key and leave rooting to the
+caller. Contents reach the cell only
 through their ephemeron, so a volume reaching its own handle, or volumes
 reaching each other's, are collected. A collected volume's versions clear
 silently: nothing can name it again, so no transaction conflicts. The store
 prunes cleared versions as it creates a volume, the only change that grows
-its map, if a collection has completed since it last pruned. Reading a
-version roots its value afresh, under an access region; a machine's poll,
-which holds one, uses the journal's `_in` forms.
+its map, if a collection has completed since it last pruned. A read roots
+its result alone, under an access region; a machine's poll, which holds
+one, uses the journal's `_in` forms.
 
 Promises are shared with machines through the store, which records each one
 (`reflection/promises.rs`). `.promise.new` returns `{promise, resolver}`;

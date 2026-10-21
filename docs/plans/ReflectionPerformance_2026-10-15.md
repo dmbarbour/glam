@@ -211,6 +211,21 @@ without end. Ports keep their own conflict state, bounded by the ports.
 entries, since pruning them alone could hide a conflict from a journal
 still running, which a low-water mark accounts for.
 
+### Volume reads and writes (`perf-volume-access`)
+
+Noted by the maintainer (2026-10-21) after `api-volume-cells`, for when
+the performance plan resumes. Committed volume values are ephemeron
+versions, so each read roots its result afresh, and a journal views only
+the volumes it wrote, so a transaction reading one volume repeatedly roots
+each read; each commit allocates a `Contents` cell and an ephemeron per
+written volume, with a root. The standard workloads barely use volumes
+(the cost there is within 0.2%).
+
+- **A workload** that creates volumes and writes and reads them in
+  quantity, in families of three sizes, within and outside transactions.
+- **A read cache** in the journal, beside the cells it already keeps for
+  the volumes it reads, so repeated reads share a view.
+
 ### Per-volume histories (`perf-volume-histories`)
 
 An idea from the maintainer (2026-10-20), not scheduled, as volumes became

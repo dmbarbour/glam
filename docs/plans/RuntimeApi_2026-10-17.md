@@ -1872,6 +1872,27 @@ more than a commit hook (`promise-resolution-commits-with-its-cut`):
   and allocations a run, from the store's versions and fresh reads. None
   of these workloads writes volumes in quantity; one that does is
   unmeasured.
+- Review the next day (maintainer, 2026-10-21), on the silent death of a
+  volume. It is serializable: death changes no value and records no change,
+  writes before it still conflict, and nothing can name the volume again. A
+  replay starts from rooted state, so a volume can die under a transaction
+  only where every path to naming it again passes through an upstream
+  change, itself a conflict. A suspected gap, a reflection request
+  carrying a bare `VolumeId` from decoding to execution while a collection
+  ran between polls, does not occur: the branch keeps its effect, which
+  holds the handle, until the request completes, to run it again. A test
+  with a host collecting at its snapshot callback confirms it.
+- Even so, following the review: a request carries a `VolumeTarget`,
+  the handle it decoded (already rooted) or a host's protected volume by
+  ID, and resolves it under access to a `VolumeCellView`, a view of the
+  cell. Reads take that view, check it against the version's key, and
+  return the value unrooted, so a read outside a transaction roots only
+  its result, once where it rooted twice. A transaction's journal keeps
+  each volume it reads, as it keeps those it writes, until it ends
+  (`read_volume_in`, `read_volume` for turns). Diagnostics name a handle
+  `Volume`; evaluation still sees it as opaque. Tests: the request test
+  above, a reader keeping its volume through a collection, which fails
+  without the journal's keep, and reads' root counts.
 
 ## Verification
 

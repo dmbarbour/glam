@@ -442,7 +442,9 @@ pub(crate) use external_owners::{ExternalOwnerHandle, ExternalOwnerKey, External
 mod value_node;
 pub(crate) use value_node::PreparedRuntimeValueRoot;
 mod volume_cells;
-pub(crate) use volume_cells::{ManagedVolumeEdge, ManagedVolumeRoot, ManagedVolumeVersion};
+pub(crate) use volume_cells::{
+    ManagedVolumeEdge, ManagedVolumeRoot, ManagedVolumeVersion, VolumeCellView,
+};
 mod recursive_cells;
 pub(crate) use recursive_cells::{
     LazyProducerView, ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot,
@@ -1058,6 +1060,14 @@ impl RuntimeValueAccess<'_> {
     /// Borrows one same-domain root under this region's mutator authority.
     pub(crate) fn get<'access, T: ManagedFamily>(&'access self, root: &Root<T>) -> &'access T {
         self.scope.get(root)
+    }
+
+    /// Views one same-domain root under this region's mutator authority.
+    pub(crate) fn view_root<'access, T: ManagedFamily>(
+        &'access self,
+        root: &Root<T>,
+    ) -> GcRef<'access, T> {
+        root.as_gc(self.scope.mutator)
     }
 
     /// Borrows one live interior edge under this region's mutator authority.

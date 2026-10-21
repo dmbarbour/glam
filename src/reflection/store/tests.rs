@@ -940,6 +940,49 @@ fn a_transaction_writing_a_volume_keeps_it_until_it_commits() {
 }
 
 #[test]
+fn a_transaction_reading_a_volume_keeps_it_until_it_ends() {
+    let mut store = collectable_store();
+    let (volume, handle) = glam_volume(&mut store, "first");
+    let mut reader = StoreJournal::new(store.snapshot());
+    assert!(reader.read_volume(volume, &[]).is_some());
+    drop(handle);
+
+    collect(&store);
+    assert!(reads(&store, volume), "the reader keeps the volume's cell");
+    drop(reader);
+    collect(&store);
+    assert!(!reads(&store, volume));
+}
+
+#[test]
+fn reads_root_only_their_results() {
+    let mut store = collectable_store();
+    let (volume, handle) = glam_volume(&mut store, "first");
+    let registrations = || store.values.managed_root_registrations_for_test();
+
+    let before = registrations();
+    assert!(store.snapshot().volume_value(volume, &[]).is_some());
+    assert_eq!(
+        registrations() - before,
+        1,
+        "a read outside a transaction roots its result alone"
+    );
+
+    let mut reader = StoreJournal::new(store.snapshot());
+    let before = registrations();
+    assert!(reader.read_volume(volume, &[]).is_some());
+    assert_eq!(
+        registrations() - before,
+        2,
+        "a transaction's first read keeps the volume's cell too"
+    );
+    let before = registrations();
+    assert!(reader.read_volume(volume, &[]).is_some());
+    assert_eq!(registrations() - before, 1, "and only the first");
+    drop(handle);
+}
+
+#[test]
 fn a_snapshot_keeps_the_version_it_began_from() {
     let assembler = Assembler::default();
     let mut store = store_with(assembler.core_values());

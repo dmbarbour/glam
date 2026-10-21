@@ -26,7 +26,7 @@ use crate::api::{Value as PublicValue, Values};
 pub use crate::core::VolumeId;
 use crate::core::{
     Builtin, CoreValueFactory, Dict, Key, LazyValue, List, ManagedVolumeRoot, ManagedVolumeVersion,
-    RuntimeValueAccess, Value,
+    RuntimeValueAccess, Value, VolumeCellView,
 };
 use crate::core_net::CoreDataKey;
 use crate::number::Number;
@@ -227,6 +227,33 @@ impl StoreSnapshot {
         version_value_at_path(&self.values, self.versions.get(&volume)?, &[])
     }
 
+    /// The cell of `volume`, viewed, where the store kept it: its own
+    /// volumes and those hosts created and have not revoked, which hosts'
+    /// protected capabilities name by ID.
+    pub(crate) fn kept_cell_in<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+        volume: VolumeId,
+    ) -> Option<VolumeCellView<'access>> {
+        Some(self.kept.get(&volume)?.view_in(access))
+    }
+
+    /// The value at `path` in `volume`, as a lazy access left to the caller
+    /// to root, or `None` where the volume does not exist in this snapshot.
+    pub(crate) fn read_volume_in(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeCellView<'_>,
+        path: &[Key],
+    ) -> Option<Value> {
+        let value = self.versions.get(&volume.id())?.value_of(access, volume)?;
+        Some(lazy_core_value_path(
+            access,
+            access.duplicate_value(value),
+            path,
+        ))
+    }
+
     /// Whether `volume` exists in this snapshot.
     fn has_volume(&self, volume: VolumeId) -> bool {
         self.versions.contains_key(&volume)
@@ -336,6 +363,11 @@ struct Branch {
 }
 
 impl StoreJournal {
+    /// The snapshot the journal began from.
+    pub(crate) fn snapshot(&self) -> &StoreSnapshot {
+        &self.snapshot
+    }
+
     #[doc(hidden)]
     pub fn new(snapshot: StoreSnapshot) -> Self {
         let observations = Arc::new(Mutex::new(snapshot.strategy.begin()));
@@ -470,8 +502,89 @@ impl StoreJournal {
     /// The value at `path` in `volume`, with this journal's writes, as a
     /// lazy access, or `None` where the volume does not exist.
     pub(crate) fn volume_value(&self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
-        let root = self.volume_view(volume)?;
-        Some(value_at_path(&self.snapshot.values, &root, path))
+        self.snapshot
+            .values
+            .try_construct_runtime_value_root(|access| {
+                self.value_at_in(access, volume, path).ok_or(())
+            })
+            .ok()
+            .map(PublicValue::from_runtime_root)
+    }
+
+    /// As [`Self::volume_value`], under `access`, left to the caller to
+    /// root.
+    fn value_at_in(
+        &self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+        path: &[Key],
+    ) -> Option<Value> {
+        let value = match self.views.get(&volume) {
+            Some(view) => view.runtime_root().clone_core_with(access),
+            None => self.snapshot.versions.get(&volume)?.value_in(access)?,
+        };
+        Some(lazy_core_value_path(access, value, path))
+    }
+
+    /// Reads the value at `path` in `volume`, with this journal's writes,
+    /// as a lazy access left to the caller to root, or `None` where the
+    /// volume does not exist in the journal's snapshot. The journal keeps
+    /// the volume until its transaction ends (`api-volume-cells`).
+    pub(crate) fn read_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeCellView<'_>,
+        path: &[Key],
+    ) -> Option<Value> {
+        self.keep_volume_in(access, volume);
+        let value = match self.views.get(&volume.id()) {
+            Some(view) => view.runtime_root().clone_core_with(access),
+            None => access.duplicate_value(
+                self.snapshot
+                    .versions
+                    .get(&volume.id())?
+                    .value_of(access, volume)?,
+            ),
+        };
+        Some(lazy_core_value_path(access, value, path))
+    }
+
+    /// As [`Self::read_volume_in`], for a volume named by its ID, whose
+    /// handle the caller holds.
+    pub(crate) fn read_volume(&mut self, volume: VolumeId, path: &[Key]) -> Option<PublicValue> {
+        let values = self.snapshot.values.clone();
+        values
+            .try_construct_runtime_value_root(|access| {
+                let cell = self.volume_cell_in(access, volume).ok_or(())?;
+                self.read_volume_in(access, cell, path).ok_or(())
+            })
+            .ok()
+            .map(PublicValue::from_runtime_root)
+    }
+
+    /// Keeps `volume` until this journal's transaction ends.
+    pub(crate) fn keep_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeCellView<'_>,
+    ) {
+        if !self.cells.contains_key(&volume.id()) {
+            self.cells
+                .insert_mut(volume.id(), access.keep_volume(volume));
+        }
+    }
+
+    /// The cell of `volume`, viewed: the one this journal keeps, else its
+    /// snapshot version's.
+    fn volume_cell_in<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+        volume: VolumeId,
+    ) -> Option<VolumeCellView<'access>> {
+        match self.cells.get(&volume) {
+            Some(cell) => Some(cell.view_in(access)),
+            None => self.snapshot.versions.get(&volume)?.cell_in(access),
+        }
     }
 
     /// Records the portion of the snapshot needed by this read. Local rewrites
@@ -490,10 +603,8 @@ impl StoreJournal {
     /// The value at `path` in the machines' environment volume, with this
     /// journal's writes, as a lazy access: a missing key reads `{}`.
     pub(crate) fn environment_value(&self, path: &[Key]) -> PublicValue {
-        let root = self
-            .volume_view(self.snapshot.environment_volume)
-            .expect("the environment volume must always exist");
-        value_at_path(&self.snapshot.values, &root, path)
+        self.volume_value(self.snapshot.environment_volume, path)
+            .expect("the environment volume must always exist")
     }
 
     /// Writes `value` at `path` in the machines' environment volume.
@@ -658,6 +769,7 @@ impl StoreJournal {
         )
     }
 
+    #[cfg(test)]
     pub(crate) fn view(&self) -> PublicValue {
         self.volume_view(self.snapshot.heap_volume)
             .expect("the user heap volume must always exist")
@@ -666,16 +778,14 @@ impl StoreJournal {
     /// As [`StoreSnapshot::heap_value`], in this journal's view, which
     /// holds its own writes. It records no read.
     pub(crate) fn heap_value(&self, path: &[Key]) -> PublicValue {
-        value_at_path(&self.snapshot.values, &self.view(), path)
+        self.volume_value(self.snapshot.heap_volume, path)
+            .expect("the user heap volume must always exist")
     }
 
     /// The value of `volume`, with this journal's writes, or `None` where
     /// the volume does not exist.
     pub(crate) fn volume_view(&self, volume: VolumeId) -> Option<PublicValue> {
-        self.views
-            .get(&volume)
-            .cloned()
-            .or_else(|| self.snapshot.committed(volume))
+        self.volume_value(volume, &[])
     }
 
     /// As [`Self::view`], for a caller that holds `access`.
@@ -693,7 +803,7 @@ impl StoreJournal {
         if let Some(view) = self.views.get(&volume) {
             return Some(view.clone());
         }
-        let value = self.snapshot.versions.get(&volume)?.value_in(access)?;
+        let value = self.value_at_in(access, volume, &[])?;
         Some(PublicValue::from_runtime_root(
             access.root_runtime_value(value),
         ))
@@ -859,14 +969,8 @@ impl StoreJournal {
     /// exists, and keeping the volume's cell until the commit.
     fn push_edit(&mut self, access: &RuntimeValueAccess<'_>, volume: VolumeId, edit: StoreEdit) {
         if let Some(view) = self.volume_view_in(access, volume) {
-            if !self.cells.contains_key(&volume)
-                && let Some(cell) = self
-                    .snapshot
-                    .versions
-                    .get(&volume)
-                    .and_then(|version| version.volume_in(access))
-            {
-                self.cells.insert_mut(volume, cell);
+            if let Some(cell) = self.volume_cell_in(access, volume) {
+                self.keep_volume_in(access, cell);
             }
             self.views
                 .insert_mut(volume, apply_edit(access, view, &edit));
@@ -1560,12 +1664,6 @@ fn apply_value_at_path_in(
             root.clone().into_runtime_root().clone_core_with(access),
         ],
     )
-}
-
-fn value_at_path(values: &CoreValueFactory, root: &PublicValue, path: &[Key]) -> PublicValue {
-    PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
-        lazy_core_value_path(access, root.runtime_root().clone_core_with(access), path)
-    }))
 }
 
 /// The value at `path` in `version`, as a lazy access, or `None` once a

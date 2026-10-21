@@ -1892,7 +1892,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let value = match &mut self.cut {
             Some(cut) => {
                 cut.observed |= cut.journal.observe_volume_read(volume, &path);
-                cut.journal.volume_value(volume, &path)
+                // The cut's journal keeps the volume it read until the cut
+                // ends (`api-volume-cells`).
+                cut.journal.read_volume(volume, &path)
             }
             None => self
                 .resources()

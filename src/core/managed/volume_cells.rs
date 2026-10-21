@@ -10,7 +10,7 @@
 //! must keep a volume, such as the store for its own volumes, hold a root on
 //! its cell.
 
-use glam_gc::{Ephemeron, Gc, Root, Trace, Visitor};
+use glam_gc::{Ephemeron, Gc, GcRef, Root, Trace, Visitor};
 
 use super::{ManagedDropRecord, ManagedFamily, RuntimeValueAccess, managed_slot_extent};
 use crate::core::{Value, VolumeId};
@@ -31,6 +31,11 @@ pub(crate) struct ManagedVolumeContents {
 
 /// A handle's edge to its volume's cell.
 pub(crate) struct ManagedVolumeEdge(Gc<ManagedVolumeCell>);
+
+/// A volume's cell, viewed while an access region lasts, which keeps the
+/// volume as long: the capability by which a request reads and writes it.
+#[derive(Clone, Copy)]
+pub(crate) struct VolumeCellView<'access>(GcRef<'access, ManagedVolumeCell>);
 
 /// A durable owner's hold on a volume's cell, which keeps the volume: the
 /// store's on its own volumes and a host's, and a transaction's on each
@@ -101,9 +106,32 @@ impl ManagedVolumeEdge {
     pub(crate) fn id(&self, access: &RuntimeValueAccess<'_>) -> VolumeId {
         access.get_edge(&self.0).id
     }
+
+    /// The volume's cell, viewed. The caller reaches the edge from a live
+    /// owner under `access`.
+    pub(crate) fn view<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+    ) -> VolumeCellView<'access> {
+        VolumeCellView(access.view_edge(&self.0, super::EdgeLiveness::HeldValue))
+    }
+}
+
+impl VolumeCellView<'_> {
+    pub(crate) fn id(self) -> VolumeId {
+        self.0.get().id
+    }
 }
 
 impl ManagedVolumeRoot {
+    /// The volume's cell, viewed.
+    pub(crate) fn view_in<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+    ) -> VolumeCellView<'access> {
+        VolumeCellView(access.view_root(&self.root))
+    }
+
     /// A handle to the volume.
     pub(crate) fn handle_in(&self, access: &RuntimeValueAccess<'_>) -> Value {
         Value::Volume(crate::core::VolumeValue::from_edge(ManagedVolumeEdge(
@@ -113,20 +141,36 @@ impl ManagedVolumeRoot {
 }
 
 impl ManagedVolumeVersion {
+    /// The version's value, borrowed while `access` lasts, where `volume`
+    /// is the cell it is keyed on, which a live view keeps from clearing.
+    pub(crate) fn value_of<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+        volume: VolumeCellView<'_>,
+    ) -> Option<&'access Value> {
+        let (cell, contents) = access.ephemeron_entry(&self.root)?;
+        assert!(
+            cell.same_allocation(volume.0),
+            "a volume's version is keyed on its cell"
+        );
+        Some(&contents.get().value)
+    }
+
+    /// The version's cell, viewed, or `None` once a collection found the
+    /// volume unreachable.
+    pub(crate) fn cell_in<'access>(
+        &self,
+        access: &'access RuntimeValueAccess<'_>,
+    ) -> Option<VolumeCellView<'access>> {
+        let (cell, _) = access.ephemeron_entry(&self.root)?;
+        Some(VolumeCellView(cell))
+    }
+
     /// The version's value, or `None` once a collection found the volume
     /// unreachable.
     pub(crate) fn value_in(&self, access: &RuntimeValueAccess<'_>) -> Option<Value> {
         let (_, contents) = access.ephemeron_entry(&self.root)?;
         Some(access.duplicate_value(&contents.get().value))
-    }
-
-    /// A root on the version's volume, or `None` once a collection found the
-    /// volume unreachable.
-    pub(crate) fn volume_in(&self, access: &RuntimeValueAccess<'_>) -> Option<ManagedVolumeRoot> {
-        let (cell, _) = access.ephemeron_entry(&self.root)?;
-        Some(ManagedVolumeRoot {
-            root: access.root(cell),
-        })
     }
 
     /// Whether a collection found the volume unreachable.
@@ -136,6 +180,22 @@ impl ManagedVolumeVersion {
 }
 
 impl RuntimeValueAccess<'_> {
+    /// The cell that `value`, a volume's handle, names, or `None` for
+    /// another value. The caller holds `value` under this access.
+    pub(crate) fn volume_cell(&self, value: &Value) -> Option<VolumeCellView<'_>> {
+        let Value::Volume(handle) = value else {
+            return None;
+        };
+        Some(handle.cell_in(self))
+    }
+
+    /// A root on `volume`'s cell, which keeps the volume.
+    pub(crate) fn keep_volume(&self, volume: VolumeCellView<'_>) -> ManagedVolumeRoot {
+        ManagedVolumeRoot {
+            root: self.root(volume.0),
+        }
+    }
+
     /// Allocates the cell of a new volume, `id`, and roots it.
     pub(crate) fn new_volume(&self, id: VolumeId) -> ManagedVolumeRoot {
         let cell = self
