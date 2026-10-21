@@ -148,7 +148,7 @@ boundary task's child, and each `refl.*` entry as the scanner's.
 | `.task.cancel H` | `.child.interrupt Key Reason`. |
 | — | `.child.clear Key`; `.child.call Key Op`. |
 | `.exit.success`, `.exit.error` | Retire: a machine waiting on input or for tasks is idle. |
-| — | Obligations: `.todo.add Key`, `.todo.del Key`, `.todo.list`. |
+| — | Obligations, as accepted promises (`obligations-are-accepted-promises`): `.promise.accept Resolver Diagnostic`, `.promise.abandon Resolver`, `.promise.accepted Resolver`. |
 | `.eval`, `.meta.inspect`, `.dict_items`, `.env 'glam.origin.inspect` | Unchanged: evaluation and inspection. |
 
 The CLI's own families (`.read.*`, `.write.*`, `.case`, `.token.*`) and
@@ -165,19 +165,31 @@ interpreting them into effects (`api-effect-providers`), and interrupts as
 shared state its turns observe. `m.fork` remains concurrency for Rust code,
 as a task is for glam code; each drives a machine, one at a time.
 `m.recover`, `m.machines` and `m.failed` see tasks' machines as any
-others, with `'busy` among the statuses, and a turn has `m.todo_add`,
-`m.todo_del` and `m.todos` for its own obligations.
+others, with `'busy` among the statuses, and a turn has
+`m.accept_promise`, `m.abandon_promise` and `m.promise_is_accepted` for
+its machine's obligations.
 
 ### Obligations
 
 `.exit` also said that a machine, locally, had nothing outstanding. That
-role passes to an explicit checklist, as the maintainer proposed on
-2026-10-19: a set of keys in the machine's state. `.todo.add Key` adds
-one, `.todo.del Key` removes it, and `.todo.list` reads the set. The set
-is transactional machine state, the machine's alone; a key describes
-itself. Settlement reports the machines whose sets are not empty.
-Reflection over other machines' sets waits for reflection over the
-process network.
+role passed first to a checklist of keys, `.todo.*` (maintainer,
+2026-10-19), then to accepted promises (`obligations-are-accepted-promises`,
+maintainer, 2026-10-21), capabilities that discharge themselves:
+
+- `.promise.accept Resolver Diagnostic` adds the promise to the machine's
+  accepted set, with a diagnostic saying what is owed, and commits with
+  the cut. Acceptance is explicit, never read into a value's shape, and
+  several machines may accept one promise.
+- Resolving the promise, by anyone, discharges it for every acceptor.
+  `.promise.abandon Resolver` removes it without breaking it.
+- `.promise.accepted Resolver` reads whether any machine accepted it.
+  Within a cut it is a tracked read, so servers that check before
+  accepting serialize, and the second skips what the first took.
+- Acceptance holds the resolver, so an accepted promise is never lost.
+- A machine in error keeps what it accepted, for its recovery; clearing a
+  machine abandons it all. A child accepts its queued tasks' promises.
+- A to-do is a promise the machine makes and accepts: finishing is
+  fulfilling it, which others may await.
 
 ### Which work is reflection
 
@@ -220,7 +232,8 @@ settlement reports it:
   resolver, including a machine waiting on a promise its own cut
   resolves, or on a task it queued in that cut;
 - a machine in error, with its failure;
-- a non-empty obligation set, with its keys;
+- a promise a machine accepted, still pending, with its diagnostic and the
+  machine's state, waiting on input or in error;
 - the work settlement kills, a deadlocked cycle among them.
 
 A request no one answered is unresolved only when something waits on its

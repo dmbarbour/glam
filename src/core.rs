@@ -2119,7 +2119,9 @@ pub enum Builtin {
     /// (`compile-yields-an-open-mixin`). Partly applied to the runtime's
     /// compiler, an opaque value, a record `{scope, lang, source}` and `{}`,
     /// it is an open mixin; a compile that waits on a reply applies it again
-    /// with what it learned as `replay`. The built-in module never binds it.
+    /// with what it learned as `replay`. The built-in module never binds it,
+    /// so only the runtime builds its applications, and `replay`, though it
+    /// uses plain keys, is never a client's to supply.
     CompileSource,
     /// Compiler-private: `mixin_compose outer inner base self` is
     /// `outer (inner base self) self`, so the outer mixin's definitions

@@ -1564,10 +1564,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// Nothing is evaluated; a compile that fails, fails when forced, and
     /// its diagnostics go where the runtime's own go.
     pub fn compile(&mut self) -> Result<(), Error> {
-        let compiler = self
-            .runtime
-            .assembler
-            .source_compiler(None, std::sync::Weak::new());
+        let compiler = self.runtime.assembler.source_compiler(None);
         let values = self.runtime.assembler.values();
         self.replace_top(1, |items| {
             let [record] =

@@ -100,7 +100,7 @@ disagree.
 - Built-in closed helpers and modules are published as one complete rooted
   cache bundle per runtime. Paths, environments, promises, and reflection
   tasks remain per compilation or module. Compiler state crossing source
-  loading, macro/evaluator waits, imports, diagnostics, or execution drain must
+  loading, macro/evaluator waits, imports, or diagnostics must
   be runtime-rooted and projected only within one callback-free compiler
   operation.
 

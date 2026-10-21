@@ -499,7 +499,9 @@ handle API goes.
      procedure call. Annotation tasks run on anonymous machines under
      `refl`; macro expansion and `conf.cli` are pure evaluation. The
      obligation set, `.todo.*`, takes over `.exit`'s role, and the
-     decision classifies which waits are unresolved.
+     decision classifies which waits are unresolved. Obligations became
+     promises a machine accepts, and `.todo.*` retired
+     (`obligations-are-accepted-promises`, maintainer, 2026-10-21).
 15. `api-import-requests` — renamed from `api-hosts-as-machines` and
    narrowed (2026-10-21), absorbing `lifecycle-host-calls` (L3, L9): a
    forced import asks for its source's binary on a port
@@ -662,6 +664,15 @@ handle API goes.
     - The test of an import that background work forces, from
       `api-import-requests`, landed with `api-compile-replay`, which
       narrowed a revived execution's drain to its macro session.
+    - No compile drains (maintainer, 2026-10-21): a compile ends when its
+      front end does, and sparks and reflection work its macros started
+      run on in the background, with no imports or diagnostics of that
+      compile. One `CompilationExecution` per runtime, made by the first
+      compile, serves every compile, so none is revived, and a dropped
+      per-compile macro session no longer abandons what its macros
+      started. Done ahead of the rest of this step, with the drain's own
+      test of detached `.task.new` failures, which retire with task
+      handles.
 19. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
@@ -693,7 +704,8 @@ handle API goes.
 20. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`
-    shares and `.todo.*` for tasks, the obligation set for turns,
+    shares and accepted promises (`obligations-are-accepted-promises`) for
+    tasks and turns alike,
     annotation tasks on anonymous machines under `refl`, and the
     retirement of task handles, `.task.*`, exit votes and the `'macro`
     role. Tasks commit to the runtime's store directly, so
@@ -767,7 +779,12 @@ Later, beyond this plan (2026-10-21):
   from the base, and bootstrapping where a mixin is closed: closing with
   one compiler, reading the next from the result, until it stays the same.
   Which object's `env.lang` counts, where inputs disagree, needs a
-  semantics pass first.
+  semantics pass first. Closing stays `fix (mixin base)` without it
+  (maintainer, 2026-10-21). The record takes an optional `compiler`,
+  used in place of one drawn from the base, so `compile_source` serves a
+  bootstrap loop with small changes; the builtin then converts `scope`,
+  `lang` and `source` to a key and passes `compiler`, a function, as a
+  value.
 - `origin-meta-refl` — compilation origins as `meta_refl` metadata, not
   opaque payloads that `glam.origin.inspect` opens (maintainer).
 - `api-dict-ops` — a review of the machine's dict operations, for building

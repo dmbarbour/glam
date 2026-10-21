@@ -25,9 +25,7 @@ use crate::core::{
     LazyValue, ManagedPromiseRoot, NetValue, PromisedValue, Value as CoreValue, keys,
 };
 use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
-use crate::evaluation::{
-    EvalContext, EvaluationSession, EvaluationSessionRun, ReflectionTaskProfile,
-};
+use crate::evaluation::{EvalContext, EvaluationSession, ReflectionTaskProfile};
 use crate::g_syntax::compile_source;
 use crate::number::Number;
 use crate::reflection::{
@@ -61,15 +59,13 @@ pub(crate) struct CompilationExecution {
     _macro_owner: Arc<EvaluationSession>,
     #[cfg(test)]
     macro_host: Arc<AssemblerReflectionHost>,
+    #[cfg(test)]
     macro_diagnostics: DiagnosticBus,
     _diagnostic_forwarder: DiagnosticSubscription,
 }
 
 impl CompilationExecution {
-    fn new(
-        reasoning: &ReasoningSession,
-        build_diagnostics: Arc<Mutex<Vec<Diagnostic>>>,
-    ) -> Result<Self, Error> {
+    fn new(reasoning: &ReasoningSession) -> Result<Self, Error> {
         let diagnostics = DiagnosticBus::for_runtime(&reasoning.runtime());
         let host = Arc::new(AssemblerReflectionHost::new_unsealed(
             &reasoning.runtime(),
@@ -90,10 +86,6 @@ impl CompilationExecution {
         let diagnostic_values = reasoning.eval_context().values().clone();
         let forwarder = diagnostics.subscribe(DiagnosticCallback(move |event: DiagnosticEvent| {
             let diagnostic = macro_reflection_diagnostic(&diagnostic_values, event.diagnostic());
-            build_diagnostics
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .push(diagnostic.clone());
             assembler_diagnostics.publish_local(diagnostic);
         }));
 
@@ -103,6 +95,7 @@ impl CompilationExecution {
             _macro_owner: evaluation,
             #[cfg(test)]
             macro_host: host,
+            #[cfg(test)]
             macro_diagnostics: diagnostics,
             _diagnostic_forwarder: forwarder,
         })
@@ -146,101 +139,6 @@ impl CompilationExecution {
     #[cfg(test)]
     pub(crate) fn macro_heap(&self) -> Value {
         self.macro_host.resources.reflection_root()
-    }
-
-    fn drain(&self) -> bool {
-        let background = self
-            .macros
-            .for_runtime_background()
-            .expect("a compilation runtime must retain its background demand domain");
-        let runs = loop {
-            let runs = (
-                background.run_until_quiescent(),
-                self.macros.run_until_quiescent(),
-            );
-            let stable = (
-                background.run_until_quiescent(),
-                self.macros.run_until_quiescent(),
-            );
-            if stable == runs {
-                break stable;
-            }
-        };
-        self.report_runs([("background", runs.0), ("session", runs.1)])
-    }
-
-    /// Drains the macro session alone, for an execution an import revived
-    /// within an evaluation: the background domain holds the evaluation that
-    /// forced the import, so waiting for it to settle would wait on itself.
-    fn drain_session(&self) -> bool {
-        let run = loop {
-            let run = self.macros.run_until_quiescent();
-            if self.macros.run_until_quiescent() == run {
-                break run;
-            }
-        };
-        self.report_runs([("session", run)])
-    }
-
-    /// Reports what draining left: failed tasks, and a scheduler that
-    /// became quiescent or deadlocked with work unfinished. Returns whether
-    /// macro reasoning failed.
-    fn report_runs<const N: usize>(&self, runs: [(&str, EvaluationSessionRun); N]) -> bool {
-        let values = self.macros.values();
-        for (scope, run) in runs {
-            let (kind, report) = match run {
-                EvaluationSessionRun::Complete(report) => (None, report),
-                EvaluationSessionRun::Quiescent(report) => (Some("became quiescent"), report),
-                EvaluationSessionRun::Deadlocked(report) => (Some("deadlocked"), report),
-            };
-            for (task, error) in report.failures.iter() {
-                self.macro_diagnostics
-                    .publish_local(Diagnostic::new_with_factory(
-                        values,
-                        Severity::Error,
-                        format!(
-                            "macro reflection {scope} task {} failed: {}",
-                            task.get(),
-                            error.as_failure()
-                        ),
-                    ));
-            }
-            if let Some(kind) = kind {
-                let mut details = Vec::new();
-                for task in report.unfinished {
-                    let dependency = task
-                        .dependency
-                        .map(|dependency| format!(" waiting on task {}", dependency.get()))
-                        .unwrap_or_default();
-                    details.push(format!(
-                        "task {} is {:?}{dependency}",
-                        task.task.get(),
-                        task.state
-                    ));
-                }
-                self.macro_diagnostics
-                    .publish_local(Diagnostic::new_with_factory(
-                        values,
-                        Severity::Error,
-                        format!(
-                            "macro reflection {scope} scheduler {kind} with {} unfinished task{}{}",
-                            details.len(),
-                            if details.len() == 1 { "" } else { "s" },
-                            if details.is_empty() {
-                                String::new()
-                            } else {
-                                format!(": {}", details.join("; "))
-                            }
-                        ),
-                    ));
-            }
-        }
-        self.macro_diagnostics.counts().errors() != 0
-    }
-
-    #[cfg(test)]
-    pub(crate) fn drain_for_test(&self) -> bool {
-        self.drain()
     }
 }
 
@@ -435,6 +333,10 @@ pub(super) struct ReasoningSession {
     diagnostics: DiagnosticBus,
     pub(super) runtime: EvaluationRuntime,
     evaluation: Arc<EvaluationSession>,
+    /// The macro session every compile shares, made by the first: a
+    /// compile ends when its front end does, and work its macros started
+    /// runs on in the background, so no compile drains or revives one.
+    compilation: Arc<Mutex<Option<Arc<CompilationExecution>>>>,
 }
 
 impl ReasoningSession {
@@ -454,7 +356,22 @@ impl ReasoningSession {
             diagnostics,
             runtime,
             evaluation,
+            compilation: Arc::default(),
         })
+    }
+
+    /// The macro session every compile shares.
+    fn compilation_execution(&self) -> Result<Arc<CompilationExecution>, Error> {
+        let mut compilation = self
+            .compilation
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner);
+        if let Some(execution) = compilation.as_ref() {
+            return Ok(execution.clone());
+        }
+        let execution = Arc::new(CompilationExecution::new(self)?);
+        *compilation = Some(execution.clone());
+        Ok(execution)
     }
 
     fn environment(&self) -> Value {
@@ -1064,7 +981,7 @@ impl Assembler {
     #[cfg(test)]
     pub(crate) fn test_compilation_execution(&self) -> Arc<CompilationExecution> {
         Arc::new(
-            CompilationExecution::new(&self.reasoning, Arc::new(Mutex::new(Vec::new())))
+            CompilationExecution::new(&self.reasoning)
                 .expect("test compilation execution must be constructible"),
         )
     }
@@ -1311,29 +1228,24 @@ impl Assembler {
     ) -> Result<BuiltModule, Error> {
         initial_definitions.require_runtime(self.reasoning.runtime.id())?;
         let session = Arc::new(Mutex::new(Vec::new()));
-        let execution = Arc::new(CompilationExecution::new(&self.reasoning, session.clone())?);
+        let execution = self.reasoning.compilation_execution()?;
         let result = self.build_module_inner(
             module_path,
             inputs,
             initial_definitions.into_runtime_root(),
             session.clone(),
-            execution.clone(),
+            execution,
         );
-        let execution_failed = execution.drain();
         let diagnostics = session
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .clone();
-
-        match (result, execution_failed) {
-            (Ok(_), true) => {
-                Err(Error::new("module macro reasoning failed").with_diagnostics(diagnostics))
-            }
-            (Ok(value), false) => Ok(BuiltModule {
+        match result {
+            Ok(value) => Ok(BuiltModule {
                 value: Value::from_runtime_root(value),
                 diagnostics,
             }),
-            (Err(error), _) => Err(error.with_diagnostics(diagnostics)),
+            Err(error) => Err(error.with_diagnostics(diagnostics)),
         }
     }
 
@@ -1345,7 +1257,7 @@ impl Assembler {
         session: Arc<Mutex<Vec<Diagnostic>>>,
         execution: Arc<CompilationExecution>,
     ) -> Result<RuntimeValueRoot, Error> {
-        let module_loader = self.module_loader(session.clone(), &execution);
+        let module_loader = self.module_loader(session.clone());
         let binary_loader = self.binary_loader();
         let module_context = CompileContext::from_module_path_with_values(
             self.core_values(),
@@ -1453,13 +1365,8 @@ impl Assembler {
         })
     }
 
-    fn module_loader(
-        &self,
-        session: Arc<Mutex<Vec<Diagnostic>>>,
-        execution: &Arc<CompilationExecution>,
-    ) -> ModuleLoader {
+    fn module_loader(&self, session: Arc<Mutex<Vec<Diagnostic>>>) -> ModuleLoader {
         let assembler = self.deferred();
-        let execution = Arc::downgrade(execution);
         Arc::new(move |args| {
             let failure = |values: Option<&CoreValueFactory>, message: String| {
                 import_failure(
@@ -1486,44 +1393,27 @@ impl Assembler {
                     format!("local import `{}` {message}", args.request.as_str()),
                 )
             };
-            assembler.compile_in_execution(&session, &execution, &failure, |execution| {
+            assembler.compile_in_execution(&failure, |execution| {
                 assembler.load_local_module(args.clone(), session.clone(), execution)
             })
         })
     }
 
-    /// Runs `compile` in the execution of the compilation that made the
-    /// import, or, once that has ended, in a revived one, which it drains
-    /// after.
+    /// Runs `compile` in the macro session every compile shares; it ends
+    /// when its front end does.
     fn compile_in_execution(
         &self,
-        session: &Arc<Mutex<Vec<Diagnostic>>>,
-        execution: &Weak<CompilationExecution>,
         failure: &dyn Fn(String) -> Arc<EvaluationFailure>,
         compile: impl FnOnce(
             Arc<CompilationExecution>,
         ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>>,
     ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
-        let (execution, revived) = match execution.upgrade() {
-            Some(execution) => (execution, false),
-            None => (
-                Arc::new(
-                    CompilationExecution::new(&self.reasoning, session.clone()).map_err(
-                        |error| {
-                            failure(format!(
-                                "could not create its compilation execution: {error}"
-                            ))
-                        },
-                    )?,
-                ),
-                true,
-            ),
-        };
-        let result = compile(execution.clone());
-        if revived && execution.drain_session() {
-            return Err(failure("encountered a macro reasoning failure".to_owned()));
-        }
-        result
+        let execution = self.reasoning.compilation_execution().map_err(|error| {
+            failure(format!(
+                "could not create its compilation execution: {error}"
+            ))
+        })?;
+        compile(execution)
     }
 
     fn binary_loader(&self) -> BinaryFileLoader {
@@ -1546,13 +1436,8 @@ impl Assembler {
     }
 
     /// The compiler for a client's compile, `site` absent, or for one
-    /// import site, which shares its importer's macro session while that
-    /// lasts (`compile-yields-an-open-mixin`).
-    pub(crate) fn source_compiler(
-        &self,
-        site: Option<ServedSite>,
-        execution: Weak<CompilationExecution>,
-    ) -> SourceCompiler {
+    /// import site (`compile-yields-an-open-mixin`).
+    pub(crate) fn source_compiler(&self, site: Option<ServedSite>) -> SourceCompiler {
         let assembler = self.deferred();
         SourceCompiler(Arc::new(move |record, call| {
             let subject = match &site {
@@ -1567,8 +1452,7 @@ impl Assembler {
             let failure = |message: String| {
                 Arc::new(EvaluationFailure::message(format!("{subject} {message}")))
             };
-            let session = Arc::new(Mutex::new(Vec::new()));
-            assembler.compile_in_execution(&session, &execution, &failure, |execution| {
+            assembler.compile_in_execution(&failure, |execution| {
                 assembler.compile_served(record, call, site.clone(), execution)
             })
         }))
@@ -1665,11 +1549,7 @@ impl Assembler {
         });
         let had_errors = Arc::new(AtomicBool::new(false));
         let held = Arc::new(Mutex::new(Vec::new()));
-        let compilers = self.import_compilers(
-            trace.clone(),
-            Arc::downgrade(&execution),
-            Arc::downgrade(&sources),
-        );
+        let compilers = self.import_compilers(trace.clone(), Arc::downgrade(&sources));
         let context =
             CompileContext::from_module_path_with_values(values.clone(), namespace.iter().cloned())
                 .with_importer_source(source.clone())
@@ -1795,7 +1675,6 @@ impl Assembler {
     fn import_compilers(
         &self,
         trace: Arc<CompilationTrace>,
-        execution: Weak<CompilationExecution>,
         sources: Weak<SourceCache>,
     ) -> ImportCompilers {
         let assembler = self.deferred();
@@ -1806,7 +1685,7 @@ impl Assembler {
                 sources: sources.clone(),
             };
             match assembler.upgrade() {
-                Some(assembler) => assembler.source_compiler(Some(site), execution.clone()),
+                Some(assembler) => assembler.source_compiler(Some(site)),
                 None => SourceCompiler(Arc::new(|_, _| {
                     Err(Arc::new(EvaluationFailure::message(
                         "an import cannot compile after its assembler was dropped",
@@ -1868,7 +1747,7 @@ impl Assembler {
         session: Arc<Mutex<Vec<Diagnostic>>>,
         execution: Arc<CompilationExecution>,
     ) -> Result<RuntimeValueRoot, Arc<EvaluationFailure>> {
-        let module_loader = self.module_loader(session.clone(), &execution);
+        let module_loader = self.module_loader(session.clone());
         let binary_loader = self.binary_loader();
         let had_errors = Arc::new(AtomicBool::new(false));
         let trace = match args.importer_trace {
@@ -2067,11 +1946,9 @@ mod tests {
         let assembler = Assembler::new();
         let observer = assembler.core_values().runtime_value_observer();
         let session = Arc::new(Mutex::new(Vec::new()));
-        let execution = assembler.test_compilation_execution();
-        let module_loader = assembler.module_loader(session, &execution);
+        let module_loader = assembler.module_loader(session);
         let binary_loader = assembler.binary_loader();
 
-        drop(execution);
         drop(assembler);
         assert!(
             observer.upgrade().is_none(),

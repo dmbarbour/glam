@@ -111,7 +111,7 @@ over their submodules rather than additional implementation layers.
 ```text
 `glam` binary or embedding client
   -> AssemblerBuilder fixes SourceSystem + EvaluationRuntime + reasoning policy
-  -> ModuleBuilder creates one CompilationExecution
+  -> ModuleBuilder uses the runtime's shared CompilationExecution
   -> SourceArtifact bytes + CompileContext capabilities
   -> selected front end produces closed module Value
   -> explicit evaluation / reflection inspection / extraction

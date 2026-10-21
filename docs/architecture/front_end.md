@@ -36,19 +36,21 @@ or act as a general value-construction DSL. The compiler decides whether and
 where to place the opaque origin in its own context frames.
 
 Compiler state which can cross a source load, macro/evaluator wait, recursive
-import, diagnostic callback, or compilation drain is runtime-rooted. This
+import, or diagnostic callback is runtime-rooted. This
 includes prior and promised final definitions, opaque origins, import requests,
 declaration-to-declaration definitions, macro embedded data, and the completed
 module result. Raw semantic values are projected only for one bounded,
 callback-free parser, resolver, or lowering operation; the completed state is
 republished before that operation yields control.
 
-One top-level module build allocates one `CompilationExecution`. Every ordered
-input and recursive import in that build shares its import lookup context and
-macro demand session. Macro tasks have their own demand ownership and
-diagnostic counts, but enter the same `EvaluationRuntime` work coordinator,
-reflection heap, protected-volume namespace, query domain, and executor as the
-rest of the build.
+One `CompilationExecution` per runtime serves every compile, top-level or
+imported, eager or served: its import lookup context and macro demand session.
+Macro tasks have their own demand ownership and diagnostic counts, but enter
+the same `EvaluationRuntime` work coordinator, reflection heap,
+protected-volume namespace, query domain, and executor as the rest of the
+runtime. A compile ends when its front end does: what its macros started and
+did not wait on runs on in the background, with no new imports or
+diagnostics of that compile, and nothing drains it.
 
 ## Built-in `.g` Pipeline
 
@@ -66,7 +68,6 @@ SourceArtifact bytes
   -> check the `language` position and analyze source-wide name use, once,
      over every parsed declaration
   -> close the module final-definition promise
-  -> drain compilation-session macro reasoning
   -> closed module Value
 ```
 
@@ -147,8 +148,9 @@ lowering point.
 
 Module lowering owns declaration order, the open module fixpoint, prior versus
 final definitions, imports, automatic reflection boundaries, and definition
-assertions. Imports re-enter the same assembler and `CompilationExecution`
-through the relative resolver carried by the imported artifact.
+assertions. Imports re-enter the same assembler and `CompilationExecution`,
+through the relative resolver carried by the imported artifact, or, where the
+host serves sources, through the compile builtin.
 
 Import requests and compiler-supplied `abstract_global_path` components are
 relative. The compiler rejects absolute paths, parent traversal, empty or dot

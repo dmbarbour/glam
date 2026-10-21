@@ -65,7 +65,7 @@ policy is part of the library API.
 
 ```text
 ModuleBuilder + ordered ModuleInput values
-  -> allocate one CompilationExecution for this top-level build
+  -> the runtime's shared CompilationExecution
   -> Assembler::build_module_inner
        -> the input's extension selects a FrontEnd, or the input is rejected
        -> SourceSystem returns an immutable SourceArtifact
@@ -74,7 +74,6 @@ ModuleBuilder + ordered ModuleInput values
        -> selected front end parses and lowers one source
        -> imports re-enter the same Assembler session and CompilationExecution
   -> module final-definition promise closes the module fixpoint
-  -> drain compilation-session macro reflection reasoning
   -> assembled module Value
 ```
 
@@ -94,8 +93,10 @@ imports take any extension.
 
 Each source compilation receives a local invocation ID. Diagnostic envelopes
 retain compact source/import provenance without retaining module values or
-environments. `CompilationExecution` shares import lookup and one macro demand
-session across all inputs and recursive imports in the build. See the
+environments. One `CompilationExecution` per runtime shares import lookup
+and one macro demand session across every compile. A compile ends when its
+front end does; work its macros started and did not wait on runs on in the
+background, and nothing drains it. See the
 [front-end architecture](front_end.md) for parsing, macro staging, lowering,
 and compiler-value caching, and the [diagnostic architecture](diagnostics.md)
 for provenance and macro-bus bridging.

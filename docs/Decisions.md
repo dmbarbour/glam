@@ -2582,6 +2582,8 @@ maps the short names used here to file names.
   - Reflection gets the machine's operations as effects: `.port.*`, with
     lists of values and `.port.available`; `.wire.*`; `.env.*` for its own
     share; `.todo.*`, the obligation set that takes over `.exit`'s role.
+    (Amended by `obligations-are-accepted-promises`: obligations are
+    promises a machine accepts, and `.todo.*` retires.)
     `.log` writes the diagnostics output, and the logger's reads and
     stderr become ports.
   - Annotation tasks run on anonymous machines under `refl`, keyed by
@@ -2598,8 +2600,8 @@ maps the short names used here to file names.
     outside the search's journal.
   - At quiescence, waiting on input, on observed state or for queued
     tasks is idle. Unresolved is an evaluation awaiting a promise no one
-    will resolve, a machine in error, a non-empty obligation set, and
-    killed work. A build or batch may end with tasks still waiting once
+    will resolve, a machine in error, a non-empty obligation set (an
+    accepted promise still pending, as amended), and killed work. A build or batch may end with tasks still waiting once
     nothing is unresolved; a deadlock is an error.
 - **Alternatives rejected:** a data stack in reflection's machines; a
   task's result left on its machine's stack, to be joined; `.task.new`
@@ -2617,6 +2619,40 @@ maps the short names used here to file names.
   `api-reflection-machines`, after `api-effect-providers`.
 - **Recorded in:** reflection model plan; runtime API plan,
   `api-reflection-model`.
+
+### Obligations are promises a machine accepts
+`obligations-are-accepted-promises` · 2026-10-21 · maintainer · accepted
+- **Context:** the reflection model gave each machine an obligation set
+  of keys, `.todo.*`, to take over `.exit`'s role, while pending replies
+  travel as promises. A machine removed a finished key by hand, nothing
+  could await one, and a wait on a promise could not say who owed it.
+- **Decision:**
+  - A machine accepts a promise, holding its resolver:
+    `.promise.accept Resolver Diagnostic` adds it to the machine's
+    accepted set, with a diagnostic saying what is owed, and commits with
+    the cut. Acceptance is explicit, and several machines may accept one
+    promise.
+  - Resolving the promise, by anyone, discharges it for every acceptor;
+    `.promise.abandon Resolver` removes it without breaking it, and
+    `.promise.accepted Resolver` reads whether any machine accepted it, a
+    tracked read within a cut.
+  - Acceptance holds the resolver, so an accepted promise is never lost.
+    A machine in error keeps what it accepted, for recovery; clearing a
+    machine abandons it all. A child accepts its queued tasks' promises.
+  - `.todo.*` retires: a to-do is a promise the machine makes and
+    accepts, finished by fulfilling it, which others may await.
+  - Turns get `m.accept_promise`, `m.abandon_promise` and
+    `m.promise_is_accepted`.
+  - At quiescence, an accepted promise still pending is unresolved, and
+    settlement reports it with its diagnostic and its acceptor's state; a
+    wait on a promise names its acceptors, or that no one accepted it.
+- **Alternatives rejected:** a separate set of keys, removed by hand and
+  never awaited; accepting a request's reply implicitly when reading it
+  from a port, which would read meaning into a value's shape.
+- **Consequences:** amends `reflection-tasks-are-machine-tasks`.
+  `api-reflection-machines` builds acceptance with the other effects, and
+  `api-settlement` reports accepted promises in place of obligation sets.
+- **Recorded in:** reflection model plan, Obligations.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted

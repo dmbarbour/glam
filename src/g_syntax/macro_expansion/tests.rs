@@ -447,7 +447,13 @@ fn committed_reflection_heap_and_children_outlive_macro_alternatives() {
         )
         .expect("macro effect should select its fallback");
     }
-    assert!(!execution.drain_for_test());
+    // Nothing drains a compile: the detached child runs on in the runtime's
+    // background domain, which the test drives.
+    let _ = execution
+        .macro_context()
+        .for_runtime_background()
+        .expect("the runtime has a background domain")
+        .run_until_quiescent();
     let counts = execution.macro_diagnostic_counts();
     assert_eq!(counts.info(), 0);
     assert_eq!(counts.warnings(), 0);
@@ -463,7 +469,6 @@ fn macro_reflection_heap_is_shared_with_the_evaluation_runtime() {
 
     run(&execution, &effect, Value::Dict(Dict::new_sync()))
         .expect("macro reflection heap write should complete");
-    assert!(!execution.drain_for_test());
 
     let macro_value = assembler
         .get(&execution.macro_heap(), "macro_only")
@@ -486,39 +491,6 @@ fn macro_reflection_heap_is_shared_with_the_evaluation_runtime() {
             )
             .expect("assembler heap value should belong to the assembler runtime")
     );
-}
-
-#[test]
-fn compilation_execution_drain_reports_detached_failure_and_deadlock() {
-    for (source, expected) in [
-        (
-            "anno refl:(.task.new (.fail) >>= (\\_ -> .r ())) (.r ())",
-            "failed",
-        ),
-        (
-            "anno refl:(.task.new (.cut (.heap.get '.never >>= (\\_ -> .fail))) >>= (\\_ -> .r ())) (.r ())",
-            "deadlocked",
-        ),
-    ] {
-        let (assembler, effect) = compile_effects(source);
-        let observed = Arc::new(Mutex::new(Vec::new()));
-        let _subscription = assembler
-            .diagnostic_bus()
-            .subscribe(DiagnosticMessages::new(&assembler, observed.clone()));
-        let execution = assembler.test_compilation_execution();
-
-        run(&execution, &effect, Value::Dict(Dict::new_sync()))
-            .expect("detached child should not fail its completed parent");
-        assert!(execution.drain_for_test());
-        assert!(
-            observed
-                .lock()
-                .expect("diagnostic observation mutex should not be poisoned")
-                .iter()
-                .any(|message| message.contains(expected)),
-            "expected a macro reflection diagnostic containing `{expected}`"
-        );
-    }
 }
 
 #[test]
