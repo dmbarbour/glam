@@ -572,11 +572,13 @@ impl LazyTaskMachine {
     /// access region that read the source: `Ok(Some(work))` once installed,
     /// `Ok(None)` if another poller installed a checkpoint or cached a
     /// result first, and `Err(source)` for a source whose start needs work
-    /// outside an access region.
+    /// outside an access region. Applying a compiled function is a reduction,
+    /// which pays a unit from `step_budget`, forgiven when none is left.
     fn install_source_in(
         &self,
         access: &crate::evaluation::EvaluationValueAccess<'_>,
         source: LazySource,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> Result<Option<LazyTaskWork>, LazySource> {
         let install = |checkpoint: ManagedLazyCheckpointEdge| {
             access
@@ -639,6 +641,7 @@ impl LazyTaskMachine {
                     .compiled(arguments.len());
                 if let Some(compiled) = compiled {
                     let value = super::operator::apply_compiled(access, compiled, &arguments);
+                    let _ = step_budget.try_consume();
                     let work = super::whnf::RegionalWhnfWork::from_focus(access, value);
                     (
                         self.install_regional_whnf_in(access, work),
@@ -1671,6 +1674,9 @@ impl LazyTaskMachine {
             // route's claim stays held, and the next phase performs the
             // host-to-WHNF family handoff from its result.
             poll_context.suspend(|| invoke_host_call(&durable_context, &self.lazy));
+            // Invoking the call is a step of its own, which pays a unit,
+            // forgiven when none is left (`budget-batch-admission`).
+            let _ = step_budget.try_consume();
             return Phase::Next;
         }
         poll_context.evaluate(&durable_context, |context| {
@@ -1686,7 +1692,7 @@ impl LazyTaskMachine {
                         return ProduceStart::Cached(result);
                     }
                     match lazy.source_snapshot() {
-                        Some(source) => match self.install_source_in(&access, source) {
+                        Some(source) => match self.install_source_in(&access, source, step_budget) {
                             Ok(Some(work)) => ProduceStart::Work(work),
                             Ok(None) => ProduceStart::Rejected,
                             Err(source) => ProduceStart::Source(source),
@@ -1797,10 +1803,17 @@ impl LazyTaskMachine {
                             LazyTaskWork::WhnfCheckpoint
                         }
                         LazySource::Builtin(call) if compiles_at_once(&call) => {
-                            if !step_budget.try_consume() {
+                            // The batch is admitted while a unit remains, and
+                            // the application pays its unit after it, forgiven
+                            // when the batch spent the last
+                            // (`budget-batch-admission`).
+                            if step_budget.remaining() == 0 {
                                 return Phase::End(EvaluationMachinePoll::BudgetExhausted);
                             }
-                            if self.compile_annotated_target(context, &call, step_budget) {
+                            let installed =
+                                self.compile_annotated_target(context, &call, step_budget);
+                            let _ = step_budget.try_consume();
+                            if installed {
                                 LazyTaskWork::WhnfCheckpoint
                             } else if let Some(work) = self.checkpoint_work(context) {
                                 work

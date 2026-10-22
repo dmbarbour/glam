@@ -298,3 +298,11 @@ first.
     while the other session's driver finishes one synchronous action, since
     that driver clears its flag before it would block. A wake source would
     let it wait instead.
+- `budget-batch-admission` (2026-10-22): an `anno 'compile` batch starts
+  only while a unit remains. In the annotation machine, a target whose
+  demand spent the last unit waits in a `Compiling` phase for the next
+  step. The compile-at-once builtin admits its batch with a unit left
+  rather than spending it first, then pays for its application, so the
+  batch sees the unit it was admitted with; the totals are unchanged.
+  Applying a compiled function and invoking a host call each pay a unit,
+  forgiven when none is left (open question 3, as recommended).

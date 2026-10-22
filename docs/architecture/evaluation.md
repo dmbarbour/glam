@@ -329,6 +329,10 @@ A step pays one unit when it changes state, and observing is free (decision
   to go on. It needs a unit to start, and one that changes the machine's
   state pays one as it ends, forgiven when its operand evaluation spent the
   last; reporting a boundary or a failure is free.
+- **Host and compiled calls:** invoking a host call and applying a
+  compiled function each pay one unit, forgiven when none is left. An
+  `anno 'compile` batch is admitted while a unit remains, and its
+  reductions are charged with the overrun forgiven.
 - **Nets:** each rule application is charged at its claim; see
   [`interaction_nets.md`](interaction_nets.md) "The Net Driver".
 - **Reflection:** the effect machine runs its phases within a poll while a

@@ -90,6 +90,9 @@ enum RegionalAnnotationPhase {
     /// normalized in place.
     NormalizeTarget(NormalizationKind, RegionalWhnfWork),
     Normalizing(Value),
+    /// `'compile`: the target's value, whose batch starts while a unit
+    /// remains (`budget-batch-admission`).
+    Compiling(Value),
     Ready(Value),
     Done,
 }
@@ -757,6 +760,12 @@ impl RegionalAnnotationMachine {
                         NormalizationKind::Normalize => {
                             self.phase = RegionalAnnotationPhase::Normalizing(target);
                         }
+                        // The batch starts only while a unit remains, in this
+                        // step or the next.
+                        NormalizationKind::Compile if step_budget.remaining() == 0 => {
+                            self.phase = RegionalAnnotationPhase::Compiling(target);
+                            return RegionalBuiltinPoll::Continue;
+                        }
                         NormalizationKind::Compile => {
                             super::net::compile_value_in(access, &target, step_budget);
                             return RegionalBuiltinPoll::Ready(target);
@@ -766,6 +775,10 @@ impl RegionalAnnotationMachine {
                             return RegionalBuiltinPoll::Ready(target);
                         }
                     }
+                }
+                RegionalAnnotationPhase::Compiling(target) => {
+                    super::net::compile_value_in(access, &target, step_budget);
+                    return RegionalBuiltinPoll::Ready(target);
                 }
                 RegionalAnnotationPhase::Normalizing(target) => {
                     if super::net::normalize_value_in(access, &target, step_budget) {
@@ -1155,7 +1168,9 @@ impl RegionalAnnotationPhase {
                 trace_value(diagnostic_context, visitor);
                 target.trace_managed_edges(visitor);
             }
-            Self::Ready(value) | Self::Normalizing(value) => trace_value(value, visitor),
+            Self::Ready(value) | Self::Normalizing(value) | Self::Compiling(value) => {
+                trace_value(value, visitor)
+            }
             Self::Done => {}
         }
     }
