@@ -2699,7 +2699,10 @@ maps the short names used here to file names.
   - The provider answers its own requests through the machine's stack,
     `State Args -- State Response`: the effect's state below the request's
     arguments, so what a provider keeps per branch it keeps in that state,
-    under its own key, and keeps no journals. Its `Answer` returns a value,
+    under its own key, and keeps no journals. It answers on a stack of its
+    own, as a commit hook runs: it sees only that frame and an empty stash,
+    must leave a state and a result, and the turn's stack and stash return
+    after (maintainer, 2026-10-22: a scoped view of the machine). Its `Answer` returns a value,
     resumes once per alternative, or runs an operation in the request's
     place with a closing request (`Scoped`). Failure and pushback are
     `m.fail()` and `m.retry()`. It is borrowed for one run and receives

@@ -76,12 +76,13 @@ pub trait EffectProvider {
     /// its tag, and its arity.
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>>;
 
-    /// Answers `request`, whose arguments are on top of `m`'s stack, the
-    /// last on top, above the effect's state: `state args -- state' result`,
-    /// as [`Answer`] says. The state is the effect's own, which `.get []`
-    /// reads, so what the provider keeps there each branch keeps for itself.
-    /// Failing, `Err(m.fail())`, fails the request within the effect; any
-    /// other error ends the run.
+    /// Answers `request` on a stack of its own, as a commit hook runs:
+    /// the effect's state, then the request's arguments, the last on top,
+    /// and an empty stash. It leaves `state' result`, as [`Answer`] says, and
+    /// the stash empty; the turn's own stack and stash return after. The
+    /// state is the effect's, which `.get []` reads, so what the provider
+    /// keeps there each branch keeps for itself. Failing, `Err(m.fail())`,
+    /// fails the request within the effect; any other error ends the run.
     fn answer(&mut self, m: &mut Machine<'_, '_>, request: &Self::Request)
     -> Result<Answer, Error>;
 }
@@ -520,9 +521,10 @@ impl Machine<'_, '_> {
         }
     }
 
-    /// Answers `request` with `arguments` on the stack, above `state` for
-    /// the provider's own requests, serving a standard request or handing it
-    /// to `provider`, and reads the answer off the stack.
+    /// Answers `request` on a stack of its own, as a commit hook runs:
+    /// `arguments`, above `state` for the provider's own requests, and an
+    /// empty stash. It serves a standard request or hands it to `provider`,
+    /// and reads the answer off that stack before the turn's returns.
     fn answer_parked<P: EffectProvider>(
         &mut self,
         provider: &mut P,
@@ -532,40 +534,36 @@ impl Machine<'_, '_> {
         path: Vec<Key>,
         arguments: Vec<HandleValue>,
     ) -> Result<Answered, Error> {
-        let depth = self.depth();
         let arity = arguments.len();
         let stateful = state.is_some();
-        self.state.stack.extend(state);
-        for argument in arguments {
-            self.push(argument);
-        }
+        let frame = state.into_iter().chain(arguments).collect();
+        let stack = std::mem::replace(&mut self.state.stack, frame);
+        let stash = std::mem::take(&mut self.state.stash);
         let answer = match request {
             TurnRequest::Standard(standard) => self
                 .serve_standard(standard, &path)
                 .map(|()| Answer::Return),
             TurnRequest::Provider(index) => provider.answer(self, &names[index]),
         };
+        let mut frame = std::mem::replace(&mut self.state.stack, stack);
+        let frame_stash = std::mem::replace(&mut self.state.stash, stash);
         match answer {
             Ok(Answer::Return) => {
-                if self.depth() != depth + usize::from(stateful) + 1 {
-                    self.state.stack.truncate(depth);
+                if frame.len() != usize::from(stateful) + 1 || !frame_stash.is_empty() {
                     return Err(Error::new(format!(
                         "an effect provider's return must replace the effect's state and its \
-                         request's {arity} arguments with a state and a result"
+                         request's {arity} arguments with a state and a result, and leave its \
+                         stash empty"
                     )));
                 }
-                let result = self.pop()?;
-                let state = if stateful { Some(self.pop()?) } else { None };
-                Ok(Answered::Return { state, result })
+                let result = frame.pop().expect("the frame holds the result");
+                Ok(Answered::Return {
+                    state: frame.pop(),
+                    result,
+                })
             }
-            Err(error) if error.kind() == ErrorKind::Backtrack => {
-                self.state.stack.truncate(depth);
-                Ok(Answered::Fail)
-            }
-            Err(error) => {
-                self.state.stack.truncate(depth);
-                Err(error)
-            }
+            Err(error) if error.kind() == ErrorKind::Backtrack => Ok(Answered::Fail),
+            Err(error) => Err(error),
         }
     }
 

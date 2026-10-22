@@ -845,7 +845,10 @@ handle API goes.
       and `effect_run` takes and returns the state. A provider's request
       receives it below its arguments (`RequestContext::state`) and
       answers with the state to continue from, which the request demands
-      to a dict before installing (`set_state`). A turn's effect machine
+      to a dict before installing (`set_state`), as `.set []` does. The
+      provider answers on a stack of its own, as a commit hook runs: only
+      the state and arguments, an empty stash, and an enforced
+      `state' result` left; the turn's stack and stash return after. A turn's effect machine
       leaves the host families to the turn
       (`TaskSpecialization::serves_host_families`) and, unable to undo
       their effects in a failed alternative, has no search until the next

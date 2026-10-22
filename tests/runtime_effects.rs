@@ -118,6 +118,52 @@ fn a_provider_answers_an_effects_requests_on_the_turns_thread() {
     );
 }
 
+/// Answers `.peek` with the depth of the stack it sees, or with a stack
+/// it leaves too short.
+struct Peek {
+    short: bool,
+}
+
+impl EffectProvider for Peek {
+    type Request = ();
+
+    fn requests(&self) -> Vec<EffectRequestSpec<()>> {
+        vec![EffectRequestSpec::new(
+            "peek",
+            ["peek_test", "request", "peek"],
+            1,
+            (),
+        )]
+    }
+
+    fn answer(&mut self, m: &mut Machine<'_, '_>, _request: &()) -> Result<Answer, Error> {
+        let depth = m.depth() as i64;
+        m.discard(if self.short { 2 } else { 1 })?;
+        m.int_push(depth);
+        Ok(Answer::Return)
+    }
+}
+
+#[test]
+fn a_provider_answers_on_a_stack_of_its_own() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        m.int_push(99);
+        run(m, ".peek ()", &mut Peek { short: false })?;
+        assert_eq!(m.int_pop()?, 2, "the provider sees its state and argument");
+        let error = run(m, ".peek ()", &mut Peek { short: true })
+            .expect_err("an answer must leave a state and a result");
+        assert!(
+            error.to_string().contains("a state and a result"),
+            "{error}"
+        );
+        assert_eq!(m.int_pop()?, 99, "the turn's own stack is untouched");
+        assert_eq!(m.depth(), 0);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
 #[test]
 fn a_failed_request_fails_the_effect_as_a_backtrack() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
