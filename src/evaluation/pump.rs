@@ -286,7 +286,7 @@ impl ClaimedTask {
         let poll = self.finish_polled_under(mutator, polled);
         let yielded = matches!(
             poll,
-            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended
         );
         let (_, _, released, _) = self.release(mutator, poll);
         if let Some(machine) = released {
@@ -312,14 +312,7 @@ impl ClaimedTask {
         // still claimed, so readiness stays `Busy` through any collection
         // here.
         self.coordinator.service_collection_pressure_under(mutator);
-        let (poll, spark) = match poll {
-            EvaluationMachinePoll::ScheduleSpark(value) => {
-                (EvaluationMachinePoll::Yielded, Some(value))
-            }
-            poll => (poll, None),
-        };
-        let demand = spark.as_ref().map(|_| self.kind.demand().demand());
-        let released = match self.kind {
+        match self.kind {
             ClaimedTaskKind::Reflection(task) => {
                 release_reflection_task(mutator, &self.coordinator, task, poll)
             }
@@ -329,14 +322,7 @@ impl ClaimedTask {
             ClaimedTaskKind::LazyRoute(route) => {
                 release_lazy_route(mutator, &self.coordinator, route, poll)
             }
-        };
-        if let Some(value) = spark {
-            self.coordinator.submit_spark_root(
-                demand.expect("a spark request must retain its demand session"),
-                value,
-            );
         }
-        released
     }
 }
 
@@ -405,9 +391,9 @@ fn release_lazy_route(
     let work = claimed.id();
     let lazy = claimed.lazy().clone();
     let (work_poll, terminal) = match poll {
-        EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
-        EvaluationMachinePoll::ScheduleSpark(_) => {
-            unreachable!("claimed-task release must externalize spark requests")
+        // Contended work runs again, as work that spent its budget does.
+        EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended => {
+            (DeferredWorkPoll::Yielded, None)
         }
         EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(_) => unreachable!("lazy route cannot vote to exit"),
@@ -741,7 +727,7 @@ pub(super) fn pump_demand_on_route(
         let poll = claimed.finish_polled_under(mutator, polled);
         let yielded = matches!(
             poll,
-            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended
         );
         let (_, _, released, route_release) = claimed.release(mutator, poll);
         if exact_claim {
@@ -781,9 +767,9 @@ fn release_reflection_task(
     let work = claimed.id();
     let mut torn = false;
     let (work_poll, terminal) = match poll {
-        EvaluationMachinePoll::Yielded => (ReflectionWorkPoll::Yielded, None),
-        EvaluationMachinePoll::ScheduleSpark(_) => {
-            unreachable!("claimed-task release must externalize spark requests")
+        // Contended work runs again, as work that spent its budget does.
+        EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended => {
+            (ReflectionWorkPoll::Yielded, None)
         }
         EvaluationMachinePoll::Blocked(block) => (ReflectionWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(exit) => (ReflectionWorkPoll::Exit(exit), None),
@@ -910,9 +896,9 @@ fn release_deferred_task(
     let work = claimed.id();
     let mut torn = false;
     let (work_poll, terminal) = match poll {
-        EvaluationMachinePoll::Yielded => (DeferredWorkPoll::Yielded, None),
-        EvaluationMachinePoll::ScheduleSpark(_) => {
-            unreachable!("claimed-task release must externalize spark requests")
+        // Contended work runs again, as work that spent its budget does.
+        EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended => {
+            (DeferredWorkPoll::Yielded, None)
         }
         EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(exit) => {

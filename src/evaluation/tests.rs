@@ -99,14 +99,13 @@ fn evaluation_step_budget_reports_exact_zero_one_and_many_spend() {
 /// root/edge policy here.
 fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePoll) {
     match poll {
-        EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Cancelled => {}
+        EvaluationMachinePoll::Yielded
+        | EvaluationMachinePoll::Contended
+        | EvaluationMachinePoll::Cancelled => {}
         // A panic report holds no managed edges.
         EvaluationMachinePoll::Panicked { report, torn } => {
             let _: &crate::core::EvaluationPanic = report;
             let _: &bool = torn;
-        }
-        EvaluationMachinePoll::ScheduleSpark(value) => {
-            let _: &RuntimeValueRoot = value;
         }
         EvaluationMachinePoll::Blocked(block) => {
             let EvaluationTaskBlock {

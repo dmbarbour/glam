@@ -509,7 +509,9 @@ pub(crate) fn poll_lazy_route(
                 }
                 claims.release(&finished.lazy);
             }
-            poll @ (EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Blocked(_)) => {
+            poll @ (EvaluationMachinePoll::Yielded
+            | EvaluationMachinePoll::Contended
+            | EvaluationMachinePoll::Blocked(_)) => {
                 let (top, below) = stack
                     .split_last()
                     .expect("an inline lazy sits above the base");
@@ -525,7 +527,6 @@ pub(crate) fn poll_lazy_route(
                 claims.release(&top);
                 return spill_inline(&context, &top, poll);
             }
-            poll @ EvaluationMachinePoll::ScheduleSpark(_) => return poll,
             EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
@@ -1413,7 +1414,11 @@ impl LazyTaskMachine {
                 self.work = LazyTaskWork::WhnfCheckpoint;
                 Phase::Next
             }
-            Transition::Spark(value) => Phase::End(EvaluationMachinePoll::ScheduleSpark(value)),
+            Transition::Spark(value) => {
+                // The spark runs beside this lazy, which goes on.
+                context.context().spark_root(value);
+                Phase::Next
+            }
             Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
             Transition::Moved => self.resume_moved(context),
             Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
@@ -1523,18 +1528,18 @@ impl LazyTaskMachine {
                 Transition::Pending(Ok(NetWhnfAccessPoll::BudgetExhausted)) => {
                     return Phase::End(EvaluationMachinePoll::Yielded);
                 }
-                // Until it blocks on another thread (`budget-waits-block`).
-                Transition::Pending(Ok(NetWhnfAccessPoll::Disturbed)) => {
-                    return Phase::End(EvaluationMachinePoll::Yielded);
-                }
-                Transition::Pending(Ok(NetWhnfAccessPoll::SemanticInFlight)) => {
-                    return Phase::End(EvaluationMachinePoll::Yielded);
+                // Another thread changed the net, or another session's driver
+                // holds its semantic action: run again once it has moved on.
+                Transition::Pending(Ok(
+                    NetWhnfAccessPoll::Disturbed | NetWhnfAccessPoll::SemanticInFlight,
+                )) => {
+                    return Phase::End(EvaluationMachinePoll::Contended);
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::Contended(contention))) => {
                     // The wait is for another thread, which a collection may
                     // be waiting on, so it runs once heap admission ends.
                     context.after_admission(move || contention.wait_for_disturbance());
-                    return Phase::End(EvaluationMachinePoll::Yielded);
+                    return Phase::End(EvaluationMachinePoll::Contended);
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::Semantic(action))) => {
                     let result = drive_net_semantic_action(context, action, step_budget);

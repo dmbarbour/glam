@@ -226,7 +226,7 @@ fn poll_list_effect_until_blocked(
             EvaluationMachinePoll::Failed(failure) => {
                 panic!("list-effect fixture failed: {failure}")
             }
-            EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Contended
             | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
@@ -269,7 +269,7 @@ fn drive_list_effect_after_route_loss(
             EvaluationMachinePoll::Failed(failure) => {
                 panic!("list-effect fixture failed: {failure}")
             }
-            EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Contended
             | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
@@ -619,6 +619,25 @@ fn applying_an_immediate_builtin_costs_one_unit() {
         2,
         "one poll applies the builtin; the next reports its result for free"
     );
+}
+
+/// A spark request does not end its poll: the spark is submitted beside the
+/// lazy, which goes on to its value (`budget-waits-block`).
+#[test]
+fn a_spark_request_goes_on_within_its_poll() {
+    let context = isolated_context();
+    let sparked = LazyValue::semantic_thunk(context.values(), |_| Ok(number(1)));
+    let mut machine = lazy_machine(
+        &context,
+        builtin_lazy(&context, Builtin::Spark, [Value::Lazy(sparked), number(42)]),
+    );
+    let outcome = crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
+        machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(64))
+    });
+    let EvaluationMachinePoll::Complete(value) = outcome else {
+        panic!("the spark's target completes within the poll that requested it")
+    };
+    value.assert_same_representation_for_test(context.values(), &number(42));
 }
 
 #[test]
@@ -1097,7 +1116,7 @@ fn poll_until_blocked_after_route_loss(
             }
             EvaluationMachinePoll::Complete(_) => panic!("the fixture completed before blocking"),
             EvaluationMachinePoll::Failed(failure) => panic!("the fixture failed: {failure}"),
-            EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Contended
             | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
@@ -1143,7 +1162,7 @@ fn poll_until_stalled_child_wait_after_route_loss(
             EvaluationMachinePoll::Failed(failure) => {
                 panic!("construction failed before its wait: {failure}")
             }
-            EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Contended
             | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
@@ -1192,7 +1211,7 @@ fn drive_after_route_loss(
             }
             EvaluationMachinePoll::Complete(value) => return value.clone_core_for_test(),
             EvaluationMachinePoll::Failed(failure) => panic!("the fixture failed: {failure}"),
-            EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Contended
             | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
@@ -1240,7 +1259,7 @@ fn drive_failure_after_route_loss(
             EvaluationMachinePoll::Complete(_) => {
                 panic!("the failure fixture unexpectedly completed")
             }
-            EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Contended
             | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
@@ -1318,7 +1337,7 @@ fn poll_object_until_blocked(
             }
             EvaluationMachinePoll::Failed(failure) => panic!("object fixture failed: {failure}"),
             EvaluationMachinePoll::Complete(_) => panic!("object fixture completed early"),
-            EvaluationMachinePoll::ScheduleSpark(_)
+            EvaluationMachinePoll::Contended
             | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
@@ -1606,8 +1625,8 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
                         pump_to_ready(&context, &wait);
                     }
                 }
-                EvaluationMachinePoll::ScheduleSpark(_) => {
-                    panic!("resumed net-WHNF checkpoint unexpectedly scheduled a spark")
+                EvaluationMachinePoll::Contended => {
+                    panic!("resumed net-WHNF checkpoint was unexpectedly contended")
                 }
                 EvaluationMachinePoll::Exit(_) => {
                     panic!("resumed net-WHNF checkpoint unexpectedly requested exit")
@@ -1744,7 +1763,7 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
                 EvaluationMachinePoll::Failed(failure) => {
                     panic!("object fixture failed: {failure}")
                 }
-                EvaluationMachinePoll::ScheduleSpark(_)
+                EvaluationMachinePoll::Contended
                 | EvaluationMachinePoll::Exit(_)
                 | EvaluationMachinePoll::Cancelled
                 | EvaluationMachinePoll::Panicked { .. } => {
@@ -3158,8 +3177,8 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         }) {
             EvaluationMachinePoll::Yielded => collect_between_handoffs(&context),
-            EvaluationMachinePoll::ScheduleSpark(_) => {
-                panic!("the host-call fixture must not schedule a spark")
+            EvaluationMachinePoll::Contended => {
+                panic!("the host-call fixture must not be contended")
             }
             EvaluationMachinePoll::Complete(value) => break value,
             EvaluationMachinePoll::Blocked(_) => {
@@ -3221,8 +3240,8 @@ fn reflection_source_hands_off_to_an_ordinary_promised_whnf_checkpoint() {
         }
         EvaluationMachinePoll::Complete(_) => panic!("reflection handoff completed early"),
         EvaluationMachinePoll::Failed(failure) => panic!("reflection handoff failed: {failure}"),
-        EvaluationMachinePoll::ScheduleSpark(_) => {
-            panic!("reflection handoff unexpectedly scheduled a spark")
+        EvaluationMachinePoll::Contended => {
+            panic!("reflection handoff was unexpectedly contended")
         }
         EvaluationMachinePoll::Exit(_) => panic!("reflection handoff requested exit"),
         EvaluationMachinePoll::Panicked { report, .. } => {

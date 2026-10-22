@@ -4884,8 +4884,8 @@ fn poll_machine_exit(
             )
         }) {
             EvaluationMachinePoll::Yielded => {}
-            EvaluationMachinePoll::ScheduleSpark(_) => {
-                panic!("exit fixture unexpectedly scheduled a spark")
+            EvaluationMachinePoll::Contended => {
+                panic!("exit fixture was unexpectedly contended")
             }
             EvaluationMachinePoll::Exit(exit) => return exit,
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
@@ -5134,8 +5134,8 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(256))
         }) {
             EvaluationMachinePoll::Yielded => {}
-            EvaluationMachinePoll::ScheduleSpark(_) => {
-                panic!("disturbed exit retry unexpectedly scheduled a spark")
+            EvaluationMachinePoll::Contended => {
+                panic!("disturbed exit retry was unexpectedly contended")
             }
             EvaluationMachinePoll::Complete(value) => break value,
             EvaluationMachinePoll::Blocked(EvaluationTaskBlock {

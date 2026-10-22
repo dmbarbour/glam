@@ -3774,6 +3774,9 @@ maps the short names used here to file names.
   the driver releases its claim: reflection activations and the net
   contention wait (host calls too, until `coarse-grained-mutator` let them
   suspend instead). A poll with deferred work ends its quantum.
+  Amended 2026-10-22 (`budget-lazy-route`, `budget-waits-block`): deferred
+  work no longer ends a poll; a net's contention wait ends it as
+  `Contended`.
   Nested synchronous drivers do not run inside quanta; test sources that
   did now read their inputs as evaluator steps or run as host calls.
   Supersedes `quantum-held-region`, whose release points no longer exist

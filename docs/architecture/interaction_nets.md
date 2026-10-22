@@ -174,7 +174,10 @@ contended: wait for the net's disturbance epoch, then yield
   Observation is free: interface polls, chain walks, dependency resolution,
   and rechecking a blocked checkpoint's wait. A poll that performs no
   reduction ends in a result, handoff, contention or block, so free
-  observation cannot loop.
+  observation cannot loop. A pass whose own progress emptied the worklist
+  restarts from the request root within the poll; a pass that only saw
+  other threads' changes, a contended batch, or a handoff in flight in
+  another session ends the poll as `Contended`.
 - **Batches.** Only one evaluator may hold a net's batch; a second claimant
   gets `Contended` at once. Stepping a source's pair or cursor opens a batch
   on that source, so source-local work runs in the source.
@@ -183,7 +186,8 @@ contended: wait for the net's disturbance epoch, then yield
   `NormalForm` and `StableCursor` fail as "exposed a bind" or "non-data
   normal form".
 - **Handoffs.** A handoff re-queues its exact `ActivePair`. While it runs,
-  `semantic_in_flight` makes other routes on the same lazy yield.
+  `semantic_in_flight` ends other routes' polls on the same lazy as
+  `Contended`.
 
 ## Semantic Handoffs
 

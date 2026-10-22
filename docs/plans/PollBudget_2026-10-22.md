@@ -258,3 +258,14 @@ first.
 - `budget-machine-steps`, refined (2026-10-22): only a step that changes
   its machine's state pays its unit, as the maintainer framed it; one that
   only reports a boundary or a failure is free again, as the ADR has it.
+- `budget-waits-block` (2026-10-22): one scheduler outcome,
+  `EvaluationMachinePoll::Contended`, for a poll another thread stopped:
+  the net's contention, after its wait past admission; a semantic action
+  in flight in another session; a pass that only saw other threads'
+  changes. The scheduler runs such work again, as it does work that spent
+  its budget, and the route spills an inline lazy that is contended. None
+  of these has a wake source to block on, so `Blocked` did not fit. Deferred
+  work stopped ending a poll with `budget-lazy-route`, when the repoll it
+  gated went. A spark request is submitted from the lazy's poll, which
+  goes on to its next phase, so `ScheduleSpark` and the release's spark
+  conversion went (`a_spark_request_goes_on_within_its_poll`).

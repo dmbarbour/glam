@@ -842,7 +842,8 @@ impl EvalContext {
         }
     }
 
-    #[cfg(test)]
+    /// Submits `value` as a spark of this context's demand session, which
+    /// a poll may do and go on (`budget-waits-block`).
     pub(crate) fn spark_root(&self, value: RuntimeValueRoot) {
         if !self.session.is_closed()
             && let Some(coordinator) = self.coordinator()

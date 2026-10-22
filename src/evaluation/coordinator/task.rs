@@ -138,7 +138,10 @@ pub(crate) struct EvaluationExitBlock {
 
 pub(crate) enum EvaluationMachinePoll {
     Yielded,
-    ScheduleSpark(RuntimeValueRoot),
+    /// Another thread holds, or is changing, what the poll needs. The poll
+    /// ended with budget left, after any wait for that thread, and the work
+    /// runs again (`budget-waits-block`).
+    Contended,
     Blocked(EvaluationTaskBlock),
     Exit(EvaluationExitBlock),
     Complete(RuntimeValueRoot),

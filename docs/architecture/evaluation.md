@@ -275,7 +275,9 @@ another thread or calls out to a host either suspends the mutator
 (`suspend`: host calls, whose result the same quantum then consumes,
 reflection host callbacks, and specialization requests) or runs at the
 boundary (`after_admission`: reflection launches and the net contention
-wait, after which the quantum ends). Pumped work borrows the pumping
+wait). Deferred work does not end a poll; a contended net ends it as
+`Contended`, which runs the work again once its wait is done, as the
+scheduler runs work that spent its budget again. Pumped work borrows the pumping
 quantum's mutator, and its boundary releases under it. A suspension costs about
 two heap entries, so adjacent operations share one; the evaluation budget
 bounds how long a quantum runs between boundaries.
@@ -593,7 +595,9 @@ regional operation. Whole-value tests use runtime-owned client demand; there is
 no broader direct evaluator facade. Reflection and
 metadata-reflection annotations perform regional recognition and input
 validation before crossing their named durable handoffs; `seq` and `spark`
-likewise publish scheduler work only after managed access closes.
+likewise publish scheduler work only after managed access closes. A spark
+request is submitted from the lazy's own poll, which goes on to the next
+phase (`budget-waits-block`).
 
 Machine-visible admission uses demand state and a weak coordinator route, not
 an upgraded owner lease. Its fast closed-flag check is advisory; reflection
