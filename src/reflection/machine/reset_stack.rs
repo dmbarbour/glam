@@ -120,7 +120,7 @@ impl ResetStackMachine {
                         self.state = ResetStackState::StackWhnf(demand);
                         ResetStackPoll::Pending(dependency)
                     }
-                    WhnfOwnerPoll::Yielded => {
+                    WhnfOwnerPoll::BudgetExhausted => {
                         self.state = ResetStackState::StackWhnf(demand);
                         ResetStackPoll::Yielded
                     }
@@ -150,7 +150,7 @@ impl ResetStackMachine {
                         self.state = ResetStackState::Frames(front);
                         ResetStackPoll::Pending(dependency)
                     }
-                    ListFrontPoll::Yielded => {
+                    ListFrontPoll::Continue | ListFrontPoll::BudgetExhausted => {
                         self.state = ResetStackState::Frames(front);
                         ResetStackPoll::Yielded
                     }
@@ -235,7 +235,7 @@ impl ResetFrameMachine {
                         self.state = ResetFrameState::FrameWhnf(demand);
                         ResetFramePoll::Pending(dependency)
                     }
-                    WhnfOwnerPoll::Yielded => {
+                    WhnfOwnerPoll::BudgetExhausted => {
                         self.state = ResetFrameState::FrameWhnf(demand);
                         ResetFramePoll::Yielded
                     }
@@ -285,7 +285,7 @@ impl ResetFrameMachine {
                     self.state = ResetFrameState::Fields { front, fields };
                     ResetFramePoll::Pending(dependency)
                 }
-                ListFrontPoll::Yielded => {
+                ListFrontPoll::Continue | ListFrontPoll::BudgetExhausted => {
                     self.state = ResetFrameState::Fields { front, fields };
                     ResetFramePoll::Yielded
                 }
@@ -322,7 +322,7 @@ impl ResetFrameMachine {
                         };
                         ResetFramePoll::Pending(dependency)
                     }
-                    ConversionPoll::Yielded => {
+                    ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {
                         self.state = ResetFrameState::Key {
                             conversion,
                             continuation,
@@ -456,7 +456,7 @@ fn poll_usize(
     let value = match poll_whnf_computation(demand, poll_context, context, step_budget) {
         WhnfOwnerPoll::Ready(value) => value,
         WhnfOwnerPoll::Pending(dependency) => return UsizePoll::Pending(dependency),
-        WhnfOwnerPoll::Yielded => return UsizePoll::Yielded,
+        WhnfOwnerPoll::BudgetExhausted => return UsizePoll::Yielded,
         WhnfOwnerPoll::Failed(failure) => {
             return UsizePoll::Failed(TaskHalt::rooted_failure(failure));
         }

@@ -29,7 +29,8 @@ pub(in crate::eval) enum RegionalListEffectPoll {
         result: Option<(Value, Value)>,
     },
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -161,7 +162,9 @@ impl RegionalListEffect {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalListEffectPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalListEffectPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalListEffectPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalListEffectPoll::Failed(failure);
                     }
@@ -184,7 +187,7 @@ impl RegionalListEffect {
                             Some(self.source_owner),
                         );
                         *phase = RunPhase::Application;
-                        RegionalListEffectPoll::Yielded
+                        RegionalListEffectPoll::Continue
                     }
                     RunPhase::Application => {
                         if matches!(value, Value::List(_)) {
@@ -213,7 +216,8 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::Boundary(request) => {
                     RegionalListEffectPoll::Boundary(request)
                 }
-                RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalListEffectPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalListEffectPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
             },
             ListEffectState::FlatMapResults {
@@ -229,7 +233,8 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::Boundary(request) => {
                     RegionalListEffectPoll::Boundary(request)
                 }
-                RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalListEffectPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalListEffectPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
             },
             ListEffectState::Cut { front } => match front.poll_in(access, step_budget) {
@@ -242,7 +247,8 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::Boundary(request) => {
                     RegionalListEffectPoll::Boundary(request)
                 }
-                RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalListEffectPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalListEffectPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
             },
             ListEffectState::FirstResult { front } => match front.poll_in(access, step_budget) {
@@ -255,7 +261,8 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::Boundary(request) => {
                     RegionalListEffectPoll::Boundary(request)
                 }
-                RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalListEffectPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalListEffectPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
             },
             ListEffectState::FixFunction {
@@ -272,7 +279,9 @@ impl RegionalListEffect {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalListEffectPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalListEffectPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalListEffectPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalListEffectPoll::Failed(failure);
                     }
@@ -294,7 +303,7 @@ impl RegionalListEffect {
                     handle,
                     front: RegionalListFront::new_in(access, results, Some(self.source_owner)),
                 };
-                RegionalListEffectPoll::Yielded
+                RegionalListEffectPoll::Continue
             }
             ListEffectState::Fix {
                 function,
@@ -306,7 +315,7 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::Ready(Some((_head, tail))) if *skipped < *alternative => {
                     *skipped += 1;
                     *front = RegionalListFront::new_in(access, tail, Some(self.source_owner));
-                    RegionalListEffectPoll::Yielded
+                    RegionalListEffectPoll::Continue
                 }
                 RegionalListFrontPoll::Ready(Some((head, _tail))) => {
                     let next_alternative = match alternative.checked_add(1) {
@@ -341,7 +350,8 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::Boundary(request) => {
                     RegionalListEffectPoll::Boundary(request)
                 }
-                RegionalListFrontPoll::Yielded => RegionalListEffectPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalListEffectPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalListEffectPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
             },
         }

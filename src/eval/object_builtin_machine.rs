@@ -233,7 +233,7 @@ impl RegionalObjectBuiltinMachine {
                 self.phase = ObjectPhase::SpecValue {
                     spec: regional_demand(access, spec, source_owner),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::SpecValue { spec } => {
                 let spec = match poll_whnf_in(access, spec, step_budget) {
@@ -262,7 +262,7 @@ impl RegionalObjectBuiltinMachine {
                     message,
                     spec: regional_demand(access, spec, source_owner),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::DiagnosticSpec { message, spec } => {
                 let spec = match poll_whnf_in(access, spec, step_budget) {
@@ -296,7 +296,7 @@ impl RegionalObjectBuiltinMachine {
                     ),
                     prior,
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::ContextDefsInterface {
                 frames,
@@ -323,7 +323,7 @@ impl RegionalObjectBuiltinMachine {
                     ),
                     interface,
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::ContextDefsContext {
                 frames,
@@ -350,7 +350,7 @@ impl RegionalObjectBuiltinMachine {
                     spec: regional_demand(access, spec, source_owner),
                     parts: access.values().duplicate_value(parts),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::LocalSpec { spec, parts } => {
                 let spec = match poll_whnf_in(access, spec, step_budget) {
@@ -365,7 +365,7 @@ impl RegionalObjectBuiltinMachine {
                     name: regional_demand(access, name, source_owner),
                     parts: access.values().duplicate_value(parts),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::LocalName { name, parts } => {
                 let name = match poll_whnf_in(access, name, step_budget) {
@@ -380,7 +380,7 @@ impl RegionalObjectBuiltinMachine {
                         source_owner,
                     ),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::LocalParts { name, parts } => {
                 let parts = match poll_whnf_in(access, parts, step_budget) {
@@ -397,7 +397,7 @@ impl RegionalObjectBuiltinMachine {
                                 Some(self.source_owner),
                             ),
                         };
-                        RegionalBuiltinPoll::Yielded
+                        RegionalBuiltinPoll::Continue
                     }
                     Value::Dict(dict) if dict.is_empty() => RegionalBuiltinPoll::Ready(
                         local_name_in(access, std::slice::from_ref(name)),
@@ -410,7 +410,7 @@ impl RegionalObjectBuiltinMachine {
                     RegionalListFrontPoll::Ready(Some((value, tail))) => {
                         values.push(value);
                         *front = RegionalListFront::new_in(access, tail, Some(self.source_owner));
-                        RegionalBuiltinPoll::Yielded
+                        RegionalBuiltinPoll::Continue
                     }
                     RegionalListFrontPoll::Ready(None) => {
                         RegionalBuiltinPoll::Ready(local_name_in(access, values))
@@ -418,7 +418,8 @@ impl RegionalObjectBuiltinMachine {
                     RegionalListFrontPoll::Boundary(request) => {
                         RegionalBuiltinPoll::Boundary(request)
                     }
-                    RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                    RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+                    RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                     RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
                 }
             }
@@ -446,7 +447,7 @@ impl RegionalObjectBuiltinMachine {
                         source_owner,
                     ),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::DictDefsDict { base, dict } => {
                 let dict = match poll_whnf_in(access, dict, step_budget) {
@@ -475,7 +476,7 @@ impl RegionalObjectBuiltinMachine {
                     value,
                     spec: regional_demand(access, spec, source_owner),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             ObjectPhase::FromDictSpec { value, spec } => {
                 let spec = match poll_whnf_in(access, spec, step_budget) {
@@ -580,7 +581,7 @@ fn poll_whnf_in(
     match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
         RegionalWhnfStatus::Ready(value) => Ok(value),
         RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
-        RegionalWhnfStatus::Yielded => Err(RegionalBuiltinPoll::Yielded),
+        RegionalWhnfStatus::BudgetExhausted => Err(RegionalBuiltinPoll::BudgetExhausted),
         RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
     }
 }

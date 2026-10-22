@@ -55,7 +55,8 @@ struct RegionalSequentialDemands {
 enum RegionalSequentialDemandPoll<'a> {
     Ready(&'a [Value]),
     Boundary(super::whnf::RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -144,7 +145,8 @@ impl RegionalDictBuiltinMachine {
                     RegionalConversionPoll::Boundary(request) => {
                         RegionalBuiltinPoll::Boundary(request)
                     }
-                    RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                    RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+                    RegionalConversionPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                     RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
                 }
             }
@@ -154,8 +156,11 @@ impl RegionalDictBuiltinMachine {
                     RegionalSequentialDemandPoll::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalSequentialDemandPoll::Yielded => {
-                        return RegionalBuiltinPoll::Yielded;
+                    RegionalSequentialDemandPoll::Continue => {
+                        return RegionalBuiltinPoll::Continue;
+                    }
+                    RegionalSequentialDemandPoll::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
                     }
                     RegionalSequentialDemandPoll::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
@@ -177,12 +182,15 @@ impl RegionalDictBuiltinMachine {
                         RegionalConversionPoll::Ready(path_keys) => {
                             *keys = Some(path_keys);
                             *path = None;
-                            RegionalBuiltinPoll::Yielded
+                            RegionalBuiltinPoll::Continue
                         }
                         RegionalConversionPoll::Boundary(request) => {
                             RegionalBuiltinPoll::Boundary(request)
                         }
-                        RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                        RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+                        RegionalConversionPoll::BudgetExhausted => {
+                            RegionalBuiltinPoll::BudgetExhausted
+                        }
                         RegionalConversionPoll::Failed(failure) => {
                             RegionalBuiltinPoll::Failed(failure)
                         }
@@ -207,7 +215,9 @@ impl RegionalDictBuiltinMachine {
                         RegionalWhnfStatus::Boundary(request) => {
                             return RegionalBuiltinPoll::Boundary(request);
                         }
-                        RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                        RegionalWhnfStatus::BudgetExhausted => {
+                            return RegionalBuiltinPoll::BudgetExhausted;
+                        }
                         RegionalWhnfStatus::Failed(failure) => {
                             return RegionalBuiltinPoll::Failed(failure);
                         }
@@ -220,8 +230,11 @@ impl RegionalDictBuiltinMachine {
                     RegionalSequentialDemandPoll::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalSequentialDemandPoll::Yielded => {
-                        return RegionalBuiltinPoll::Yielded;
+                    RegionalSequentialDemandPoll::Continue => {
+                        return RegionalBuiltinPoll::Continue;
+                    }
+                    RegionalSequentialDemandPoll::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
                     }
                     RegionalSequentialDemandPoll::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
@@ -247,7 +260,10 @@ impl RegionalDictBuiltinMachine {
                 RegionalSemanticUndefinedPoll::Boundary(request) => {
                     RegionalBuiltinPoll::Boundary(request)
                 }
-                RegionalSemanticUndefinedPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalSemanticUndefinedPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalSemanticUndefinedPoll::BudgetExhausted => {
+                    RegionalBuiltinPoll::BudgetExhausted
+                }
                 RegionalSemanticUndefinedPoll::Failed(failure) => {
                     RegionalBuiltinPoll::Failed(failure)
                 }
@@ -329,12 +345,12 @@ impl RegionalSequentialDemands {
                         .into_value_in(access.values()),
                 );
                 self.demand = None;
-                RegionalSequentialDemandPoll::Yielded
+                RegionalSequentialDemandPoll::Continue
             }
             RegionalWhnfStatus::Boundary(request) => {
                 RegionalSequentialDemandPoll::Boundary(request)
             }
-            RegionalWhnfStatus::Yielded => RegionalSequentialDemandPoll::Yielded,
+            RegionalWhnfStatus::BudgetExhausted => RegionalSequentialDemandPoll::BudgetExhausted,
             RegionalWhnfStatus::Failed(failure) => RegionalSequentialDemandPoll::Failed(failure),
         }
     }

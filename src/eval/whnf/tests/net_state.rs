@@ -420,7 +420,7 @@ fn net_state_and_durable_work_share_exact_budget_split_semantics() {
                 reduce_shell,
             );
             assert_eq!(first_budget.spent(), first_quantum);
-            let RegionalWhnfStatus::Yielded = first else {
+            let RegionalWhnfStatus::BudgetExhausted = first else {
                 panic!("a spent quantum must preserve a successor")
             };
             let mut rest_budget = WhnfStepBudget::new(2 - first_quantum + 1);
@@ -471,7 +471,7 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
         };
 
         let mut zero = WhnfStepBudget::new(0);
-        let (RegionalWhnfStatus::Yielded, unchanged) =
+        let (RegionalWhnfStatus::BudgetExhausted, unchanged) =
             drive_net_state(&access, make_state(), &mut zero, advance_frame)
         else {
             panic!("zero allowance must yield before frame mutation")
@@ -487,7 +487,7 @@ fn net_driver_retains_frame_state_on_yield_boundary_and_failure() {
         );
 
         let mut one = WhnfStepBudget::new(1);
-        let (RegionalWhnfStatus::Yielded, advanced) =
+        let (RegionalWhnfStatus::BudgetExhausted, advanced) =
             drive_net_state(&access, make_state(), &mut one, advance_frame)
         else {
             panic!("one completed transition must yield its complete successor")

@@ -57,7 +57,8 @@ impl RegionalCompileMachine {
                 Err(failure) => RegionalBuiltinPoll::Failed(failure),
             },
             RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-            RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+            RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+            RegionalConversionPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
             RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
         }
     }

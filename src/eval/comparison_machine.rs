@@ -96,14 +96,15 @@ enum FrameAction {
     Push(ComparisonFrame),
     Complete(ComparisonResult),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
 enum TuplePayloadPoll {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -143,7 +144,7 @@ impl RegionalComparisonMachine {
                 self.frames.pop();
                 self.child_result = Some(result);
             }
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         let Some(frame) = self.frames.last_mut() else {
@@ -156,11 +157,11 @@ impl RegionalComparisonMachine {
                     .frames
                     .last_mut()
                     .expect("replacement requires the current frame") = frame;
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             FrameAction::Push(frame) => {
                 self.frames.push(frame);
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             FrameAction::Complete(result) => {
                 self.frames.pop();
@@ -168,11 +169,12 @@ impl RegionalComparisonMachine {
                     self.finish(access, result)
                 } else {
                     self.child_result = Some(result);
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
             }
             FrameAction::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-            FrameAction::Yielded => RegionalBuiltinPoll::Yielded,
+            FrameAction::Continue => RegionalBuiltinPoll::Continue,
+            FrameAction::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
             FrameAction::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
         }
     }
@@ -311,7 +313,7 @@ impl ValueComparisonFrame {
                 RegionalWhnfStatus::Boundary(request) => {
                     return FrameAction::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return FrameAction::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => return FrameAction::BudgetExhausted,
                 RegionalWhnfStatus::Failed(failure) => return FrameAction::Failed(failure),
             };
         self.demand = None;
@@ -320,7 +322,7 @@ impl ValueComparisonFrame {
         } else {
             self.right_ready = Some(value);
         }
-        FrameAction::Yielded
+        FrameAction::Continue
     }
 
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
@@ -581,12 +583,13 @@ impl ListComparisonFrame {
                 RegionalListFrontPoll::Boundary(request) => {
                     return FrameAction::Boundary(request);
                 }
-                RegionalListFrontPoll::Yielded => return FrameAction::Yielded,
+                RegionalListFrontPoll::Continue => return FrameAction::Continue,
+                RegionalListFrontPoll::BudgetExhausted => return FrameAction::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => {
                     return FrameAction::Failed(failure);
                 }
             });
-            return FrameAction::Yielded;
+            return FrameAction::Continue;
         }
         if self.right_item.is_none() {
             self.right_item = Some(match self.right.poll_in(access, step_budget) {
@@ -594,12 +597,13 @@ impl ListComparisonFrame {
                 RegionalListFrontPoll::Boundary(request) => {
                     return FrameAction::Boundary(request);
                 }
-                RegionalListFrontPoll::Yielded => return FrameAction::Yielded,
+                RegionalListFrontPoll::Continue => return FrameAction::Continue,
+                RegionalListFrontPoll::BudgetExhausted => return FrameAction::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => {
                     return FrameAction::Failed(failure);
                 }
             });
-            return FrameAction::Yielded;
+            return FrameAction::Continue;
         }
 
         let left = self
@@ -761,26 +765,28 @@ impl TupleOrderingFrame {
                 RegionalTaggedPayloadPoll::Ready(Some(payload)) => {
                     self.left_payload = Some(payload);
                     self.phase = TupleOrderingPhase::RightTag;
-                    FrameAction::Yielded
+                    FrameAction::Continue
                 }
                 RegionalTaggedPayloadPoll::Ready(None) => failure_message(format!(
                     "{name} builtin can only order dictionaries tagged as `tuple`"
                 )),
                 RegionalTaggedPayloadPoll::Boundary(request) => FrameAction::Boundary(request),
-                RegionalTaggedPayloadPoll::Yielded => FrameAction::Yielded,
+                RegionalTaggedPayloadPoll::Continue => FrameAction::Continue,
+                RegionalTaggedPayloadPoll::BudgetExhausted => FrameAction::BudgetExhausted,
                 RegionalTaggedPayloadPoll::Failed(failure) => FrameAction::Failed(failure),
             },
             TupleOrderingPhase::RightTag => match self.right_tag.poll_in(access, step_budget) {
                 RegionalTaggedPayloadPoll::Ready(Some(payload)) => {
                     self.right_payload = Some(payload);
                     self.phase = TupleOrderingPhase::LeftPayload;
-                    FrameAction::Yielded
+                    FrameAction::Continue
                 }
                 RegionalTaggedPayloadPoll::Ready(None) => failure_message(format!(
                     "{name} builtin can only order dictionaries tagged as `tuple`"
                 )),
                 RegionalTaggedPayloadPoll::Boundary(request) => FrameAction::Boundary(request),
-                RegionalTaggedPayloadPoll::Yielded => FrameAction::Yielded,
+                RegionalTaggedPayloadPoll::Continue => FrameAction::Continue,
+                RegionalTaggedPayloadPoll::BudgetExhausted => FrameAction::BudgetExhausted,
                 RegionalTaggedPayloadPoll::Failed(failure) => FrameAction::Failed(failure),
             },
             TupleOrderingPhase::LeftPayload => {
@@ -797,10 +803,10 @@ impl TupleOrderingFrame {
                     TuplePayloadPoll::Ready(list) => {
                         self.left_list = Some(list);
                         self.phase = TupleOrderingPhase::RightPayload;
-                        FrameAction::Yielded
+                        FrameAction::Continue
                     }
                     TuplePayloadPoll::Boundary(request) => FrameAction::Boundary(request),
-                    TuplePayloadPoll::Yielded => FrameAction::Yielded,
+                    TuplePayloadPoll::BudgetExhausted => FrameAction::BudgetExhausted,
                     TuplePayloadPoll::Failed(failure) => FrameAction::Failed(failure),
                 }
             }
@@ -830,7 +836,7 @@ impl TupleOrderingFrame {
                         )))
                     }
                     TuplePayloadPoll::Boundary(request) => FrameAction::Boundary(request),
-                    TuplePayloadPoll::Yielded => FrameAction::Yielded,
+                    TuplePayloadPoll::BudgetExhausted => FrameAction::BudgetExhausted,
                     TuplePayloadPoll::Failed(failure) => FrameAction::Failed(failure),
                 }
             }
@@ -882,7 +888,7 @@ fn demand_tuple_payload(
             RegionalWhnfStatus::Boundary(request) => {
                 return TuplePayloadPoll::Boundary(request);
             }
-            RegionalWhnfStatus::Yielded => return TuplePayloadPoll::Yielded,
+            RegionalWhnfStatus::BudgetExhausted => return TuplePayloadPoll::BudgetExhausted,
             RegionalWhnfStatus::Failed(failure) => return TuplePayloadPoll::Failed(failure),
         };
     *demand = None;

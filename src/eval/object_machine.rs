@@ -95,7 +95,8 @@ struct ObjectMixMachine {
 pub(in crate::eval) enum RegionalObjectFixpointPoll {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -140,12 +141,13 @@ impl RegionalObjectFixpoint {
                         access,
                         entries.into_iter().map(|entry| entry.spec).collect(),
                     ));
-                    RegionalObjectFixpointPoll::Yielded
+                    RegionalObjectFixpointPoll::Continue
                 }
                 LinearizationPoll::Boundary(request) => {
                     RegionalObjectFixpointPoll::Boundary(request)
                 }
-                LinearizationPoll::Yielded => RegionalObjectFixpointPoll::Yielded,
+                LinearizationPoll::Continue => RegionalObjectFixpointPoll::Continue,
+                LinearizationPoll::BudgetExhausted => RegionalObjectFixpointPoll::BudgetExhausted,
                 LinearizationPoll::Failed(failure) => RegionalObjectFixpointPoll::Failed(failure),
             },
             ObjectState::Mix(machine) => {
@@ -174,7 +176,8 @@ impl RegionalObjectFixpoint {
 enum LinearizationPoll {
     Ready(Vec<LinearizedObjectSpec>),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -224,15 +227,15 @@ impl ObjectLinearizationMachine {
                             Some(self.source_owner),
                         ),
                     });
-                    LinearizationPoll::Yielded
+                    LinearizationPoll::Continue
                 }
                 RegionalWhnfStatus::Boundary(request) => {
                     self.top_state(LinearizationState::DemandSpec(demand));
                     LinearizationPoll::Boundary(request)
                 }
-                RegionalWhnfStatus::Yielded => {
+                RegionalWhnfStatus::BudgetExhausted => {
                     self.top_state(LinearizationState::DemandSpec(demand));
-                    LinearizationPoll::Yielded
+                    LinearizationPoll::BudgetExhausted
                 }
                 RegionalWhnfStatus::Failed(failure) => LinearizationPoll::Failed(failure),
             },
@@ -274,15 +277,19 @@ impl ObjectLinearizationMachine {
                         demand: RegionalWhnfWork::from_focus(access, deps)
                             .with_source_owner(self.source_owner),
                     });
-                    LinearizationPoll::Yielded
+                    LinearizationPoll::Continue
                 }
                 RegionalConversionPoll::Boundary(request) => {
                     self.top_state(LinearizationState::ConvertName { spec, conversion });
                     LinearizationPoll::Boundary(request)
                 }
-                RegionalConversionPoll::Yielded => {
+                RegionalConversionPoll::Continue => {
                     self.top_state(LinearizationState::ConvertName { spec, conversion });
-                    LinearizationPoll::Yielded
+                    LinearizationPoll::Continue
+                }
+                RegionalConversionPoll::BudgetExhausted => {
+                    self.top_state(LinearizationState::ConvertName { spec, conversion });
+                    LinearizationPoll::BudgetExhausted
                 }
                 RegionalConversionPoll::Failed(failure) => LinearizationPoll::Failed(failure),
             },
@@ -304,11 +311,11 @@ impl ObjectLinearizationMachine {
                                 ),
                                 deps: Vec::new(),
                             });
-                            LinearizationPoll::Yielded
+                            LinearizationPoll::Continue
                         }
                         Ok(None) => {
                             self.top_state(empty_visit(entry));
-                            LinearizationPoll::Yielded
+                            LinearizationPoll::Continue
                         }
                         Err(error) => LinearizationPoll::Failed(error.into_permanent_failure()),
                     },
@@ -316,9 +323,9 @@ impl ObjectLinearizationMachine {
                         self.top_state(LinearizationState::DemandDeps { entry, demand });
                         LinearizationPoll::Boundary(request)
                     }
-                    RegionalWhnfStatus::Yielded => {
+                    RegionalWhnfStatus::BudgetExhausted => {
                         self.top_state(LinearizationState::DemandDeps { entry, demand });
-                        LinearizationPoll::Yielded
+                        LinearizationPoll::BudgetExhausted
                     }
                     RegionalWhnfStatus::Failed(failure) => LinearizationPoll::Failed(failure),
                 }
@@ -335,7 +342,7 @@ impl ObjectLinearizationMachine {
                         front: RegionalListFront::new_in(access, tail, Some(self.source_owner)),
                         deps,
                     });
-                    LinearizationPoll::Yielded
+                    LinearizationPoll::Continue
                 }
                 RegionalListFrontPoll::Ready(None) => {
                     self.top_state(LinearizationState::VisitDeps {
@@ -347,15 +354,19 @@ impl ObjectLinearizationMachine {
                         saw_named: false,
                         awaiting_child: false,
                     });
-                    LinearizationPoll::Yielded
+                    LinearizationPoll::Continue
                 }
                 RegionalListFrontPoll::Boundary(request) => {
                     self.top_state(LinearizationState::ReadDeps { entry, front, deps });
                     LinearizationPoll::Boundary(request)
                 }
-                RegionalListFrontPoll::Yielded => {
+                RegionalListFrontPoll::Continue => {
                     self.top_state(LinearizationState::ReadDeps { entry, front, deps });
-                    LinearizationPoll::Yielded
+                    LinearizationPoll::Continue
+                }
+                RegionalListFrontPoll::BudgetExhausted => {
+                    self.top_state(LinearizationState::ReadDeps { entry, front, deps });
+                    LinearizationPoll::BudgetExhausted
                 }
                 RegionalListFrontPoll::Failed(failure) => LinearizationPoll::Failed(failure),
             },
@@ -389,7 +400,7 @@ impl ObjectLinearizationMachine {
                 });
                 self.stack
                     .push(LinearizationFrame::new_in(access, dep, self.source_owner));
-                LinearizationPoll::Yielded
+                LinearizationPoll::Continue
             }
             LinearizationState::Transition => {
                 unreachable!("object linearization transition must be replaced")
@@ -445,7 +456,7 @@ impl ObjectLinearizationMachine {
         direct.push(dep_entry);
         sequences.push(result);
         *awaiting_child = false;
-        LinearizationPoll::Yielded
+        LinearizationPoll::Continue
     }
 
     fn top_state(&mut self, state: LinearizationState) {
@@ -506,7 +517,9 @@ impl ObjectMixMachine {
                 RegionalWhnfStatus::Boundary(request) => {
                     return RegionalObjectFixpointPoll::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return RegionalObjectFixpointPoll::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => {
+                    return RegionalObjectFixpointPoll::BudgetExhausted;
+                }
                 RegionalWhnfStatus::Failed(failure) => {
                     return RegionalObjectFixpointPoll::Failed(failure);
                 }
@@ -520,7 +533,7 @@ impl ObjectMixMachine {
                         self.pending_defs.push(extension);
                         self.pending_defs.push(prior);
                         self.phase = MixPhase::Start;
-                        return RegionalObjectFixpointPoll::Yielded;
+                        return RegionalObjectFixpointPoll::Continue;
                     }
                     self.application = Some(regional_application_in(
                         access,
@@ -529,7 +542,7 @@ impl ObjectMixMachine {
                         source_owner,
                     ));
                     self.phase = MixPhase::ApplyBase;
-                    return RegionalObjectFixpointPoll::Yielded;
+                    return RegionalObjectFixpointPoll::Continue;
                 }
                 MixPhase::ApplyBase => {
                     self.application = Some(regional_application_in(
@@ -539,7 +552,7 @@ impl ObjectMixMachine {
                         source_owner,
                     ));
                     self.phase = MixPhase::ApplySelf;
-                    return RegionalObjectFixpointPoll::Yielded;
+                    return RegionalObjectFixpointPoll::Continue;
                 }
                 MixPhase::ApplySelf => {
                     if !matches!(value, Value::Dict(_)) {
@@ -552,7 +565,7 @@ impl ObjectMixMachine {
                     }
                     self.base = value;
                     self.phase = MixPhase::Start;
-                    return RegionalObjectFixpointPoll::Yielded;
+                    return RegionalObjectFixpointPoll::Continue;
                 }
                 MixPhase::Start => unreachable!("object mix phase must name its application"),
             }
@@ -581,7 +594,7 @@ impl ObjectMixMachine {
         self.application =
             Some(RegionalWhnfWork::from_focus(access, defs).with_source_owner(source_owner));
         self.phase = MixPhase::DemandDefs;
-        RegionalObjectFixpointPoll::Yielded
+        RegionalObjectFixpointPoll::Continue
     }
 }
 

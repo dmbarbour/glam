@@ -615,10 +615,11 @@ impl RegionalBuilderBuiltinMachine {
                 RegionalConversionPoll::Ready(keys) => {
                     self.keys = Some(keys);
                     self.path = None;
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
                 RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalConversionPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
@@ -628,10 +629,11 @@ impl RegionalBuilderBuiltinMachine {
                 RegionalConversionPoll::Ready(key) => {
                     self.converted_key = Some(key);
                     self.key = None;
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
                 RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalConversionPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
@@ -659,7 +661,7 @@ impl RegionalBuilderBuiltinMachine {
                 RegionalWhnfStatus::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
                 RegionalWhnfStatus::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -670,7 +672,7 @@ impl RegionalBuilderBuiltinMachine {
                     .into_value_in(access.values()),
             );
             self.operand_demand = None;
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         if self.decoded.is_none() {
@@ -689,7 +691,9 @@ impl RegionalBuilderBuiltinMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -704,7 +708,7 @@ impl RegionalBuilderBuiltinMachine {
                 }
             };
             self.state_demand = None;
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         match &self.operation {
@@ -747,7 +751,9 @@ impl RegionalBuilderBuiltinMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -790,10 +796,11 @@ impl RegionalBuilderBuiltinMachine {
             AccessRegionalPoll::Whnf(demand) => {
                 self.access = None;
                 self.result_demand = Some(demand);
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             AccessRegionalPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-            AccessRegionalPoll::Yielded => RegionalBuiltinPoll::Yielded,
+            AccessRegionalPoll::Continue => RegionalBuiltinPoll::Continue,
+            AccessRegionalPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
             AccessRegionalPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
         }
     }
@@ -858,7 +865,7 @@ impl RegionalBuilderBuiltinMachine {
             RegionalWhnfStatus::Boundary(request) => {
                 return RegionalBuiltinPoll::Boundary(request);
             }
-            RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
             RegionalWhnfStatus::Failed(failure) => {
                 return RegionalBuiltinPoll::Failed(failure);
             }

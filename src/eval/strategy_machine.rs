@@ -12,7 +12,8 @@ use super::whnf::WhnfComputation;
 pub(crate) enum StrategyDemandPoll {
     Ready,
     Pending(WorkDependency),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed,
 }
 
@@ -65,7 +66,7 @@ impl StrategyDemandMachine {
         ) {
             WhnfOwnerPoll::Ready(value) => value,
             WhnfOwnerPoll::Pending(dependency) => return StrategyDemandPoll::Pending(dependency),
-            WhnfOwnerPoll::Yielded => return StrategyDemandPoll::Yielded,
+            WhnfOwnerPoll::BudgetExhausted => return StrategyDemandPoll::BudgetExhausted,
             WhnfOwnerPoll::Failed(_) => return StrategyDemandPoll::Failed,
         };
 
@@ -80,7 +81,7 @@ impl StrategyDemandMachine {
             if let Some(metadata) = metadata {
                 self.demand = WhnfComputation::from_root(metadata);
                 self.phase = StrategyDemandPhase::Metadata;
-                return StrategyDemandPoll::Yielded;
+                return StrategyDemandPoll::Continue;
             }
         }
 

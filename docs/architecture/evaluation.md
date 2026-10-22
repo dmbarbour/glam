@@ -320,10 +320,12 @@ A step pays one unit when it changes state, and observing is free (decision
 `reduction-costs-one-budget-unit`). A step needs a unit available to start:
 - **WHNF:** the regional driver charges each delegation; reporting a ready
   value, a boundary or a failure costs nothing.
-- **Builtins:** applying an immediate builtin costs one unit. A builtin
-  machine step pays one unit when its operand evaluation cost nothing
-  (`ManagedLazyCheckpointEdge::machine_step`); a machine takes at most one
-  step per poll.
+- **Builtins:** applying an immediate builtin costs one unit. A regional
+  machine runs its steps within one poll, under one access region, until it
+  is ready, reaches a boundary or fails, or the budget is spent
+  (`ManagedLazyCheckpointEdge::machine_steps`). A step reports `Continue`
+  to go on; it needs a unit to start and pays one as it ends, forgiven when
+  its operand evaluation spent the last.
 - **Nets:** each rule application is charged at its claim; see
   [`interaction_nets.md`](interaction_nets.md) "The Net Driver".
 - **Reflection:** delegating phases charge an administrative unit only when

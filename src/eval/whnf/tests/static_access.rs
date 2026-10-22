@@ -47,7 +47,7 @@ fn static_access_resumes_at_the_exact_intermediate_dictionary() {
 
     assert!(matches!(
         poll(&context, &mut computation),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     let WhnfPoll::Deferred(WhnfDeferredRequest::Promise(root)) = poll(&context, &mut computation)
     else {
@@ -63,11 +63,11 @@ fn static_access_resumes_at_the_exact_intermediate_dictionary() {
     .expect_without_debug("the intermediate promise should accept its assignment");
     assert!(matches!(
         poll(&context, &mut computation),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     assert!(matches!(
         poll(&context, &mut computation),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     let WhnfPoll::Ready(result) = poll(&context, &mut computation) else {
         panic!("the retained path must finish after the intermediate assignment")
@@ -83,7 +83,10 @@ fn static_access_preserves_missing_and_nondictionary_results() {
     let context = context();
     let missing = Key::atom_from_text("missing");
     let mut absent = static_access(&context, Value::Dict(Dict::new_sync()), [missing.clone()]);
-    assert!(matches!(poll(&context, &mut absent), WhnfPoll::Yielded));
+    assert!(matches!(
+        poll(&context, &mut absent),
+        WhnfPoll::BudgetExhausted
+    ));
     let WhnfPoll::Ready(value) = poll(&context, &mut absent) else {
         panic!("a missing static key must produce undefined")
     };

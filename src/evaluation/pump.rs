@@ -43,7 +43,7 @@ impl ClientDemandOperation {
             super::whnf::WhnfOwnerPoll::Pending(dependency) => {
                 coordinator::ClientDemandPoll::Blocked(dependency)
             }
-            super::whnf::WhnfOwnerPoll::Yielded => coordinator::ClientDemandPoll::Yielded,
+            super::whnf::WhnfOwnerPoll::BudgetExhausted => coordinator::ClientDemandPoll::Yielded,
             super::whnf::WhnfOwnerPoll::Failed(failure) => {
                 coordinator::ClientDemandPoll::Failed(failure)
             }
@@ -1337,9 +1337,12 @@ impl EvaluationWorkCoordinator {
                     coordinator::SparkWorkPoll::Blocked(dependency)
                 }
             }
-            Ok(crate::eval::strategy_machine::StrategyDemandPoll::Yielded) => {
-                coordinator::SparkWorkPoll::Yielded
-            }
+            // Until sparks loop over their own steps (`budget-exhausted-only`),
+            // a step that continues yields as one that spent the budget does.
+            Ok(
+                crate::eval::strategy_machine::StrategyDemandPoll::Continue
+                | crate::eval::strategy_machine::StrategyDemandPoll::BudgetExhausted,
+            ) => coordinator::SparkWorkPoll::Yielded,
         };
         drop(context);
         // The quantum boundary, while the spark is still claimed.

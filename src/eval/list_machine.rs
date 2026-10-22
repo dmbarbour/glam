@@ -30,7 +30,8 @@ use super::whnf::{
 pub(crate) enum ListFrontPoll {
     Ready(Option<(RuntimeValueRoot, RuntimeValueRoot)>),
     Pending(crate::evaluation::WorkDependency),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
 
@@ -70,7 +71,8 @@ pub(in crate::eval) struct RegionalListFront {
 pub(in crate::eval) enum RegionalListFrontPoll<Item = Value> {
     Ready(Option<(Item, Value)>),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -92,14 +94,16 @@ pub(in crate::eval) struct RegionalListBack {
 pub(in crate::eval) enum RegionalListBackPoll<Item = Value> {
     Ready(Option<(Value, Item)>),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
 enum DurableListFrontPoll {
     Ready(Option<(RuntimeValueRoot, RuntimeValueRoot)>),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
 
@@ -177,7 +181,7 @@ impl RegionalListFront {
             }
             ListFrontStep::Deferred { deferred, suffix } => {
                 self.defer_chunk_in(access, deferred, suffix);
-                RegionalListFrontPoll::Yielded
+                RegionalListFrontPoll::Continue
             }
         }
     }
@@ -203,7 +207,7 @@ impl RegionalListFront {
             }
             ListFrontLeafStep::Deferred { deferred, suffix } => {
                 self.defer_chunk_in(access, deferred, suffix);
-                RegionalListFrontPoll::Yielded
+                RegionalListFrontPoll::Continue
             }
         }
     }
@@ -222,7 +226,9 @@ impl RegionalListFront {
             RegionalWhnfStatus::Boundary(request) => {
                 return Some(RegionalListFrontPoll::Boundary(request));
             }
-            RegionalWhnfStatus::Yielded => return Some(RegionalListFrontPoll::Yielded),
+            RegionalWhnfStatus::BudgetExhausted => {
+                return Some(RegionalListFrontPoll::BudgetExhausted);
+            }
             RegionalWhnfStatus::Failed(failure) => {
                 return Some(RegionalListFrontPoll::Failed(failure));
             }
@@ -236,7 +242,7 @@ impl RegionalListFront {
             Err(error) => return Some(RegionalListFrontPoll::Failed(error)),
         };
         self.chunk = None;
-        Some(RegionalListFrontPoll::Yielded)
+        Some(RegionalListFrontPoll::Continue)
     }
 
     fn defer_chunk_in(
@@ -301,7 +307,7 @@ impl RegionalListBack {
             }
             ListBackStep::Deferred { prefix, deferred } => {
                 self.defer_chunk_in(access, prefix, deferred);
-                RegionalListBackPoll::Yielded
+                RegionalListBackPoll::Continue
             }
         }
     }
@@ -327,7 +333,7 @@ impl RegionalListBack {
             }
             ListBackLeafStep::Deferred { prefix, deferred } => {
                 self.defer_chunk_in(access, prefix, deferred);
-                RegionalListBackPoll::Yielded
+                RegionalListBackPoll::Continue
             }
         }
     }
@@ -346,7 +352,9 @@ impl RegionalListBack {
             RegionalWhnfStatus::Boundary(request) => {
                 return Some(RegionalListBackPoll::Boundary(request));
             }
-            RegionalWhnfStatus::Yielded => return Some(RegionalListBackPoll::Yielded),
+            RegionalWhnfStatus::BudgetExhausted => {
+                return Some(RegionalListBackPoll::BudgetExhausted);
+            }
             RegionalWhnfStatus::Failed(failure) => {
                 return Some(RegionalListBackPoll::Failed(failure));
             }
@@ -360,7 +368,7 @@ impl RegionalListBack {
             Err(error) => return Some(RegionalListBackPoll::Failed(error)),
         };
         self.chunk = None;
-        Some(RegionalListBackPoll::Yielded)
+        Some(RegionalListBackPoll::Continue)
     }
 
     fn defer_chunk_in(
@@ -443,7 +451,8 @@ impl ManagedListFrontRoot {
             }
             RegionalListFrontPoll::Ready(None) => DurableListFrontPoll::Ready(None),
             RegionalListFrontPoll::Boundary(request) => DurableListFrontPoll::Boundary(request),
-            RegionalListFrontPoll::Yielded => DurableListFrontPoll::Yielded,
+            RegionalListFrontPoll::Continue => DurableListFrontPoll::Continue,
+            RegionalListFrontPoll::BudgetExhausted => DurableListFrontPoll::BudgetExhausted,
             RegionalListFrontPoll::Failed(failure) => {
                 DurableListFrontPoll::Failed(access.values().root_runtime_failure(failure))
             }
@@ -464,14 +473,15 @@ fn interpret_durable_list_front(
                 poll_context.root_failure(failure)
             }) {
                 WhnfOwnerPoll::Pending(dependency) => ListFrontPoll::Pending(dependency),
-                WhnfOwnerPoll::Yielded => ListFrontPoll::Yielded,
+                WhnfOwnerPoll::BudgetExhausted => ListFrontPoll::BudgetExhausted,
                 WhnfOwnerPoll::Failed(failure) => ListFrontPoll::Failed(failure),
                 WhnfOwnerPoll::Ready(_) => {
                     unreachable!("a semantic boundary cannot produce an immediate value")
                 }
             }
         }
-        DurableListFrontPoll::Yielded => ListFrontPoll::Yielded,
+        DurableListFrontPoll::Continue => ListFrontPoll::Continue,
+        DurableListFrontPoll::BudgetExhausted => ListFrontPoll::BudgetExhausted,
         DurableListFrontPoll::Failed(failure) => ListFrontPoll::Failed(failure),
     }
 }
@@ -606,7 +616,7 @@ mod tests {
 
         assert!(matches!(
             poll_front(&mut machine, &context, 1),
-            ListFrontPoll::Yielded
+            ListFrontPoll::Continue
         ));
         assert_eq!(
             context.values().managed_root_registrations_for_test(),
@@ -636,7 +646,7 @@ mod tests {
         let (item, tail) = loop {
             match poll_front(&mut machine, &context, 1) {
                 ListFrontPoll::Ready(Some(result)) => break result,
-                ListFrontPoll::Yielded => {
+                ListFrontPoll::Continue | ListFrontPoll::BudgetExhausted => {
                     context
                         .values()
                         .collect_managed_for_test()

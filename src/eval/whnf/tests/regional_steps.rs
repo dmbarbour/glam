@@ -102,7 +102,7 @@ fn budget_yield_retains_work_without_inventing_a_dependency() {
             transitions += 1;
             RegionalWhnfStep::Delegate(access.values().duplicate_value(&work.focus))
         });
-        let RegionalWhnfDrive::Yielded(work) = outcome else {
+        let RegionalWhnfDrive::BudgetExhausted(work) = outcome else {
             panic!("budget exhaustion must yield without a dependency")
         };
         assert_eq!(transitions, 3);

@@ -25,7 +25,8 @@ use super::whnf::{
 pub(in crate::eval) enum RegionalTaggedPayloadPoll {
     Ready(Option<Value>),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -42,7 +43,8 @@ pub(in crate::eval) struct RegionalTaggedPayload {
 pub(in crate::eval) enum RegionalSemanticUndefinedPoll {
     Ready(bool),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -103,7 +105,7 @@ impl RegionalTaggedPayload {
                 candidate,
                 self.source_owner,
             ));
-            return RegionalTaggedPayloadPoll::Yielded;
+            return RegionalTaggedPayloadPoll::Continue;
         }
 
         match self
@@ -119,10 +121,10 @@ impl RegionalTaggedPayload {
                     if undefined {
                         RegionalTaggedPayloadPoll::Ready(None)
                     } else {
-                        RegionalTaggedPayloadPoll::Yielded
+                        RegionalTaggedPayloadPoll::Continue
                     }
                 } else if undefined {
-                    RegionalTaggedPayloadPoll::Yielded
+                    RegionalTaggedPayloadPoll::Continue
                 } else {
                     RegionalTaggedPayloadPoll::Ready(None)
                 }
@@ -130,7 +132,10 @@ impl RegionalTaggedPayload {
             RegionalSemanticUndefinedPoll::Boundary(request) => {
                 RegionalTaggedPayloadPoll::Boundary(request)
             }
-            RegionalSemanticUndefinedPoll::Yielded => RegionalTaggedPayloadPoll::Yielded,
+            RegionalSemanticUndefinedPoll::Continue => RegionalTaggedPayloadPoll::Continue,
+            RegionalSemanticUndefinedPoll::BudgetExhausted => {
+                RegionalTaggedPayloadPoll::BudgetExhausted
+            }
             RegionalSemanticUndefinedPoll::Failed(failure) => {
                 RegionalTaggedPayloadPoll::Failed(failure)
             }
@@ -193,7 +198,9 @@ impl RegionalSemanticUndefined {
             RegionalWhnfStatus::Boundary(request) => {
                 return RegionalSemanticUndefinedPoll::Boundary(request);
             }
-            RegionalWhnfStatus::Yielded => return RegionalSemanticUndefinedPoll::Yielded,
+            RegionalWhnfStatus::BudgetExhausted => {
+                return RegionalSemanticUndefinedPoll::BudgetExhausted;
+            }
             RegionalWhnfStatus::Failed(failure) => {
                 return RegionalSemanticUndefinedPoll::Failed(failure);
             }
@@ -211,7 +218,7 @@ impl RegionalSemanticUndefined {
         if self.remaining.is_empty() {
             RegionalSemanticUndefinedPoll::Ready(true)
         } else {
-            RegionalSemanticUndefinedPoll::Yielded
+            RegionalSemanticUndefinedPoll::Continue
         }
     }
 
@@ -257,7 +264,8 @@ mod tests {
         loop {
             match poll(&mut machine, context) {
                 RegionalTaggedPayloadPoll::Ready(payload) => return payload,
-                RegionalTaggedPayloadPoll::Yielded => {}
+                RegionalTaggedPayloadPoll::Continue
+                | RegionalTaggedPayloadPoll::BudgetExhausted => {}
                 RegionalTaggedPayloadPoll::Boundary(_) => {
                     panic!("strict tagged-payload recognition must not suspend")
                 }
@@ -329,7 +337,8 @@ mod tests {
 
         loop {
             match poll(&mut machine, &context) {
-                RegionalTaggedPayloadPoll::Yielded => {}
+                RegionalTaggedPayloadPoll::Continue
+                | RegionalTaggedPayloadPoll::BudgetExhausted => {}
                 RegionalTaggedPayloadPoll::Boundary(_) => break,
                 RegionalTaggedPayloadPoll::Ready(_) => {
                     panic!("nested promise must suspend tag recognition")
@@ -344,7 +353,8 @@ mod tests {
             .expect_without_debug("nested undefined promise should accept its assignment");
         let payload = loop {
             match poll(&mut machine, &context) {
-                RegionalTaggedPayloadPoll::Yielded => {}
+                RegionalTaggedPayloadPoll::Continue
+                | RegionalTaggedPayloadPoll::BudgetExhausted => {}
                 RegionalTaggedPayloadPoll::Ready(Some(payload)) => break payload,
                 RegionalTaggedPayloadPoll::Ready(None) => {
                     panic!("undefined ignored member must preserve the tag")

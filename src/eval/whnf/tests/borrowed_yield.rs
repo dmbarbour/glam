@@ -68,7 +68,7 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
             RegionalWhnfStep::Delegate(Value::Number(1.into()))
         });
 
-        assert!(matches!(status, RegionalWhnfStatus::Yielded));
+        assert!(matches!(status, RegionalWhnfStatus::BudgetExhausted));
         assert_eq!((budget.spent(), budget.remaining()), (1, 0));
         access
             .values()

@@ -143,7 +143,7 @@ fn unwind_poison_faults_without_reentering_the_reducer() {
             RegionalWhnfStep::Delegate(text("prior"))
         })
     });
-    assert!(matches!(installed, WhnfPoll::Yielded));
+    assert!(matches!(installed, WhnfPoll::BudgetExhausted));
 
     let unwind = catch_unwind(AssertUnwindSafe(|| {
         let mut panic_budget = WhnfStepBudget::new(1);
@@ -198,7 +198,7 @@ fn dropping_a_suspended_computation_retires_its_complete_checkpoint() {
             RegionalWhnfStep::Delegate(text("replacement"))
         })
     });
-    assert!(matches!(yielded, WhnfPoll::Yielded));
+    assert!(matches!(yielded, WhnfPoll::BudgetExhausted));
 
     let suspended = values
         .collect_managed_for_test()
@@ -256,7 +256,7 @@ fn collection_between_polls_preserves_only_the_installed_checkpoint() {
             RegionalWhnfStep::Delegate(Value::Lazy(replacement))
         })
     });
-    assert!(matches!(yielded, WhnfPoll::Yielded));
+    assert!(matches!(yielded, WhnfPoll::BudgetExhausted));
     let replacement_id = replacement_id.expect("the replacement identity should be recorded");
 
     let between = values

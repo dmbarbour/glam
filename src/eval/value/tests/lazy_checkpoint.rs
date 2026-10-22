@@ -379,7 +379,7 @@ fn list_front(context: &EvalContext, list: Value) -> Option<(Value, Value)> {
             ListFrontPoll::Pending(WorkDependency::Test(_)) => {
                 panic!("the fix-list spine exposed a synthetic dependency")
             }
-            ListFrontPoll::Yielded => {}
+            ListFrontPoll::Continue | ListFrontPoll::BudgetExhausted => {}
             ListFrontPoll::Failed(failure) => panic!("fix-list front failed: {failure}"),
         }
         assert_ne!(attempt, 255, "fix-list front exhausted its poll bound");

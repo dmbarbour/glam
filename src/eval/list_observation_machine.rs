@@ -142,7 +142,9 @@ impl RegionalListObservationMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(contextual_index_failure(
                             access,
@@ -162,7 +164,7 @@ impl RegionalListObservationMachine {
                     }
                 };
             self.indices.push(index);
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         if matches!(self.operation, ListObservation::Slice) && self.indices[0] > self.indices[1] {
@@ -196,7 +198,7 @@ impl RegionalListObservationMachine {
                 RegionalWhnfStatus::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
                 RegionalWhnfStatus::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -217,7 +219,7 @@ impl RegionalListObservationMachine {
                         source,
                         self.source_owner,
                     ));
-                    return RegionalBuiltinPoll::Yielded;
+                    return RegionalBuiltinPoll::Continue;
                 }
                 _ => return failure(self.subject_error()),
             }
@@ -424,7 +426,8 @@ impl RegionalListWalk {
             },
             RegionalListFrontPoll::Ready(None) => self.finish_empty(),
             RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-            RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+            RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+            RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
             RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
         }
     }
@@ -448,7 +451,10 @@ impl RegionalListWalk {
                 RegionalListFrontPoll::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalListFrontPoll::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Continue => return RegionalBuiltinPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => {
+                    return RegionalBuiltinPoll::BudgetExhausted;
+                }
                 RegionalListFrontPoll::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -548,7 +554,10 @@ impl RegionalListWalk {
                 RegionalListBackPoll::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalListBackPoll::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalListBackPoll::Continue => return RegionalBuiltinPoll::Continue,
+                RegionalListBackPoll::BudgetExhausted => {
+                    return RegionalBuiltinPoll::BudgetExhausted;
+                }
                 RegionalListBackPoll::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }

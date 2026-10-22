@@ -1065,7 +1065,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 EffectDecodeStep::Blocked(decoding, dependency)
             }
-            WhnfOwnerPoll::Yielded => EffectDecodeStep::Yielded(decoding),
+            WhnfOwnerPoll::BudgetExhausted => EffectDecodeStep::Yielded(decoding),
             WhnfOwnerPoll::Failed(failure) => {
                 let error = decoding.contextualize(
                     TaskHalt::rooted_failure(failure),
@@ -1101,7 +1101,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 WhnfOwnerPoll::Pending(dependency) => {
                     return SpecializationStep::Blocked(specializing, dependency);
                 }
-                WhnfOwnerPoll::Yielded => {
+                WhnfOwnerPoll::BudgetExhausted => {
                     return SpecializationStep::Yielded(specializing);
                 }
                 WhnfOwnerPoll::Failed(failure) => {
@@ -1186,7 +1186,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             WhnfOwnerPoll::Pending(dependency) => {
                 return ScalarDemandStep::Blocked(demanding, dependency);
             }
-            WhnfOwnerPoll::Yielded => return ScalarDemandStep::Yielded(demanding),
+            WhnfOwnerPoll::BudgetExhausted => return ScalarDemandStep::Yielded(demanding),
             WhnfOwnerPoll::Failed(failure) => {
                 return ScalarDemandStep::Failed(demanding, TaskHalt::rooted_failure(failure));
             }
@@ -1332,7 +1332,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         };
                         ControlStep::Blocked(controlling, dependency)
                     }
-                    eval::ConversionPoll::Yielded => {
+                    eval::ConversionPoll::Continue | eval::ConversionPoll::BudgetExhausted => {
                         controlling.operation = ControlOperation::Key {
                             key,
                             stack,
@@ -1931,7 +1931,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     eval::ConversionPoll::Pending(dependency) => {
                         StatePathStep::Blocked(pathing, dependency)
                     }
-                    eval::ConversionPoll::Yielded => StatePathStep::Yielded(pathing),
+                    eval::ConversionPoll::Continue | eval::ConversionPoll::BudgetExhausted => {
+                        StatePathStep::Yielded(pathing)
+                    }
                     eval::ConversionPoll::Failed(failure) => {
                         StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
                     }
@@ -1993,7 +1995,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     StatePathStep::Continue(pathing)
                 }
                 WhnfOwnerPoll::Pending(dependency) => StatePathStep::Blocked(pathing, dependency),
-                WhnfOwnerPoll::Yielded => StatePathStep::Yielded(pathing),
+                WhnfOwnerPoll::BudgetExhausted => StatePathStep::Yielded(pathing),
                 WhnfOwnerPoll::Failed(failure) => {
                     StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
                 }
@@ -2009,7 +2011,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     WhnfOwnerPoll::Pending(dependency) => {
                         StatePathStep::Blocked(pathing, dependency)
                     }
-                    WhnfOwnerPoll::Yielded => StatePathStep::Yielded(pathing),
+                    WhnfOwnerPoll::BudgetExhausted => StatePathStep::Yielded(pathing),
                     WhnfOwnerPoll::Failed(failure) => {
                         StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
                     }
@@ -4703,7 +4705,7 @@ impl ValuePathMachine {
         let current = match poll_whnf_computation(demand, poll_context, context, step_budget) {
             WhnfOwnerPoll::Ready(current) => current,
             WhnfOwnerPoll::Pending(dependency) => return ValuePathPoll::Pending(dependency),
-            WhnfOwnerPoll::Yielded => return ValuePathPoll::Yielded,
+            WhnfOwnerPoll::BudgetExhausted => return ValuePathPoll::Yielded,
             WhnfOwnerPoll::Failed(failure) => {
                 return ValuePathPoll::Failed(TaskHalt::rooted_failure(failure));
             }
@@ -5563,7 +5565,7 @@ impl<R: Clone> RequestDecodeWork<R> {
                         WhnfOwnerPoll::Pending(dependency) => {
                             return RequestDecodePoll::Pending(dependency);
                         }
-                        WhnfOwnerPoll::Yielded => return RequestDecodePoll::Yielded,
+                        WhnfOwnerPoll::BudgetExhausted => return RequestDecodePoll::Yielded,
                         WhnfOwnerPoll::Failed(failure) => {
                             return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
                         }
@@ -5602,7 +5604,9 @@ impl<R: Clone> RequestDecodeWork<R> {
                     eval::ListFrontPoll::Pending(dependency) => {
                         RequestDecodePoll::Pending(dependency)
                     }
-                    eval::ListFrontPoll::Yielded => RequestDecodePoll::Yielded,
+                    eval::ListFrontPoll::Continue | eval::ListFrontPoll::BudgetExhausted => {
+                        RequestDecodePoll::Yielded
+                    }
                     eval::ListFrontPoll::Failed(failure) => {
                         RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure))
                     }
@@ -5659,7 +5663,7 @@ impl<R: Clone> RequestDecodeWork<R> {
                     WhnfOwnerPoll::Pending(dependency) => {
                         return RequestDecodePoll::Pending(dependency);
                     }
-                    WhnfOwnerPoll::Yielded => return RequestDecodePoll::Yielded,
+                    WhnfOwnerPoll::BudgetExhausted => return RequestDecodePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => {
                         return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
                     }
@@ -5776,7 +5780,7 @@ fn poll_request_id(
     let value = match poll_whnf_computation(demand, poll_context, context, step_budget) {
         WhnfOwnerPoll::Ready(value) => value,
         WhnfOwnerPoll::Pending(dependency) => return RequestIdPoll::Pending(dependency),
-        WhnfOwnerPoll::Yielded => return RequestIdPoll::Yielded,
+        WhnfOwnerPoll::BudgetExhausted => return RequestIdPoll::Yielded,
         WhnfOwnerPoll::Failed(failure) => {
             return RequestIdPoll::Failed(TaskHalt::rooted_failure(failure));
         }

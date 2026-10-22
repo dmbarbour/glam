@@ -942,7 +942,7 @@ impl LazyTaskMachine {
                             })
                         }
                         WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-                        WhnfOwnerPoll::Ready(_) | WhnfOwnerPoll::Yielded => {
+                        WhnfOwnerPoll::Ready(_) | WhnfOwnerPoll::BudgetExhausted => {
                             unreachable!("a lazy boundary is pending or refused")
                         }
                     },
@@ -1001,7 +1001,7 @@ impl LazyTaskMachine {
                     error: None,
                 })
             }
-            WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+            WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
             WhnfOwnerPoll::Failed(failure) => {
                 self.fail(context, EvaluationHalt::failure(failure.into_failure()))
             }
@@ -1091,18 +1091,11 @@ impl LazyTaskMachine {
                 return Transition::Replaced(checkpoint.kind());
             }
             match checkpoint.with_access_transition_in(&access, |machine| {
-                ManagedLazyCheckpointEdge::machine_step(
+                ManagedLazyCheckpointEdge::machine_steps(
                     &access,
                     step_budget,
-                    || AccessRegionalPoll::Yielded,
-                    |poll| {
-                        matches!(
-                            poll,
-                            AccessRegionalPoll::Ready(_)
-                                | AccessRegionalPoll::Whnf(_)
-                                | AccessRegionalPoll::Yielded
-                        )
-                    },
+                    || AccessRegionalPoll::BudgetExhausted,
+                    |poll| matches!(poll, AccessRegionalPoll::Continue),
                     |budget| machine.poll_in(&access, budget),
                 )
             }) {
@@ -1127,7 +1120,10 @@ impl LazyTaskMachine {
                         Err(_) => Transition::Moved,
                     }
                 }
-                AccessRegionalPoll::Yielded => Transition::Yielded,
+                AccessRegionalPoll::BudgetExhausted => Transition::Yielded,
+                AccessRegionalPoll::Continue => {
+                    unreachable!("a machine's steps run until it stops")
+                }
                 AccessRegionalPoll::Failed(failure) => {
                     match self.lazy.cache(access.values(), Err(failure)) {
                         Ok(value) => {
@@ -1171,7 +1167,7 @@ impl LazyTaskMachine {
                             error: None,
                         })
                     }
-                    WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("an access boundary cannot produce an immediate value")
@@ -1217,7 +1213,10 @@ impl LazyTaskMachine {
                     }
                 }
                 RegionalObjectFixpointPoll::Boundary(request) => Transition::Boundary(request),
-                RegionalObjectFixpointPoll::Yielded => Transition::Yielded,
+                RegionalObjectFixpointPoll::BudgetExhausted => Transition::Yielded,
+                RegionalObjectFixpointPoll::Continue => {
+                    unreachable!("a machine's steps run until it stops")
+                }
                 RegionalObjectFixpointPoll::Failed(failure) => {
                     match self.lazy.cache(access.values(), Err(failure)) {
                         Ok(value) => {
@@ -1257,7 +1256,7 @@ impl LazyTaskMachine {
                             error: None,
                         })
                     }
-                    WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("an object boundary cannot produce an immediate value")
@@ -1310,7 +1309,10 @@ impl LazyTaskMachine {
                 RegionalListEffectPoll::Boundary(request) => {
                     return Transition::Boundary(request);
                 }
-                RegionalListEffectPoll::Yielded => return Transition::Yielded,
+                RegionalListEffectPoll::BudgetExhausted => return Transition::Yielded,
+                RegionalListEffectPoll::Continue => {
+                    unreachable!("a machine's steps run until it stops")
+                }
                 RegionalListEffectPoll::Failed(failure) => {
                     return match self.lazy.cache(access.values(), Err(failure)) {
                         Ok(value) => Transition::Complete(
@@ -1365,7 +1367,7 @@ impl LazyTaskMachine {
                             error: None,
                         })
                     }
-                    WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("a list-effect boundary cannot produce an immediate value")
@@ -1413,7 +1415,10 @@ impl LazyTaskMachine {
                     Transition::Spark(access.values().root_runtime_value(value))
                 }
                 RegionalBuiltinPoll::Boundary(request) => Transition::Boundary(request),
-                RegionalBuiltinPoll::Yielded => Transition::Yielded,
+                RegionalBuiltinPoll::BudgetExhausted => Transition::Yielded,
+                RegionalBuiltinPoll::Continue => {
+                    unreachable!("a machine's steps run until it stops")
+                }
                 RegionalBuiltinPoll::Failed(failure) => {
                     match self.lazy.cache(access.values(), Err(failure)) {
                         Ok(_) => Transition::Moved,
@@ -1455,7 +1460,7 @@ impl LazyTaskMachine {
                             error: None,
                         })
                     }
-                    WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+                    WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
                     WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("a builtin boundary cannot produce an immediate value")
@@ -1961,7 +1966,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                     error: None,
                 })
             }
-            WhnfOwnerPoll::Yielded => EvaluationMachinePoll::Yielded,
+            WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
             WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
         }
     }

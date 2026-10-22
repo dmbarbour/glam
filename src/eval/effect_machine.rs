@@ -225,7 +225,10 @@ impl RegionalEffectMachine {
                     RegionalConversionPoll::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalConversionPoll::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalConversionPoll::Continue => return RegionalBuiltinPoll::Continue,
+                    RegionalConversionPoll::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalConversionPoll::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -239,7 +242,7 @@ impl RegionalEffectMachine {
                     .with_source_owner(self.source_owner),
                     api: access.values().duplicate_value(api),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             EffectPhase::CallArguments {
                 name,
@@ -259,7 +262,7 @@ impl RegionalEffectMachine {
                     arguments: Vec::new(),
                     api: access.values().duplicate_value(api),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             EffectPhase::CallItems {
                 name,
@@ -270,13 +273,14 @@ impl RegionalEffectMachine {
                 RegionalListFrontPoll::Ready(Some((argument, tail))) => {
                     arguments.push(argument);
                     *items = RegionalListFront::new_in(access, tail, Some(self.source_owner));
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
                 RegionalListFrontPoll::Ready(None) => {
                     RegionalBuiltinPoll::Ready(effect_call_in(access, api, name, arguments))
                 }
                 RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             },
             EffectPhase::Fixpoint { function } => {
@@ -319,7 +323,7 @@ impl RegionalEffectMachine {
                     .with_source_owner(self.source_owner),
                     api: access.values().duplicate_value(api),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             EffectPhase::MapResults {
                 function,
@@ -344,7 +348,7 @@ impl RegionalEffectMachine {
                     results,
                     api: access.values().duplicate_value(api),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             EffectPhase::MapFront {
                 function,
@@ -362,7 +366,8 @@ impl RegionalEffectMachine {
                     std::slice::from_ref(results),
                 )),
                 RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             },
             EffectPhase::MapContinue {
@@ -484,7 +489,7 @@ fn poll_whnf_in(
     match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
         RegionalWhnfStatus::Ready(value) => Ok(value),
         RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
-        RegionalWhnfStatus::Yielded => Err(RegionalBuiltinPoll::Yielded),
+        RegionalWhnfStatus::BudgetExhausted => Err(RegionalBuiltinPoll::BudgetExhausted),
         RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
     }
 }

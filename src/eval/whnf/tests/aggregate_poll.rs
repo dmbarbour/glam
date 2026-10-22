@@ -93,7 +93,7 @@ fn managed_checkpoint_resumes_on_another_worker_after_collection() {
             RegionalWhnfStep::Delegate(Value::Number(3.into()))
         })
     });
-    assert!(matches!(first, WhnfPoll::Yielded));
+    assert!(matches!(first, WhnfPoll::BudgetExhausted));
     values
         .collect_managed_for_test()
         .expect("the suspended checkpoint must survive collection before migration");

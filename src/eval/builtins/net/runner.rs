@@ -24,7 +24,8 @@ use super::netlist::{encode_selected_netlist, interaction_net_from_netlist_in};
 pub(in crate::eval) enum RegionalBuilderEffectPoll {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -69,7 +70,7 @@ impl RegionalBuilderEffectRunner {
                     Drive::Boundary(request) => {
                         return RegionalBuilderEffectPoll::Boundary(request);
                     }
-                    Drive::Yielded => return RegionalBuilderEffectPoll::Yielded,
+                    Drive::BudgetExhausted => return RegionalBuilderEffectPoll::BudgetExhausted,
                     Drive::Failed(failure) => {
                         return RegionalBuilderEffectPoll::Failed(failure);
                     }
@@ -95,7 +96,7 @@ impl RegionalBuilderEffectRunner {
                         Some(self.source_owner),
                     ),
                 );
-                RegionalBuilderEffectPoll::Yielded
+                RegionalBuilderEffectPoll::Continue
             }
             RegionalBuilderEffectPhase::Application(demand) => {
                 match drive(demand, access, step_budget) {
@@ -109,7 +110,7 @@ impl RegionalBuilderEffectRunner {
                         )),
                     )),
                     Drive::Boundary(request) => RegionalBuilderEffectPoll::Boundary(request),
-                    Drive::Yielded => RegionalBuilderEffectPoll::Yielded,
+                    Drive::BudgetExhausted => RegionalBuilderEffectPoll::BudgetExhausted,
                     Drive::Failed(failure) => RegionalBuilderEffectPoll::Failed(failure),
                 }
             }
@@ -132,7 +133,7 @@ impl RegionalBuilderEffectRunner {
 enum Drive {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -144,7 +145,7 @@ fn drive(
     match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
         RegionalWhnfStatus::Ready(value) => Drive::Ready(value),
         RegionalWhnfStatus::Boundary(request) => Drive::Boundary(request),
-        RegionalWhnfStatus::Yielded => Drive::Yielded,
+        RegionalWhnfStatus::BudgetExhausted => Drive::BudgetExhausted,
         RegionalWhnfStatus::Failed(failure) => Drive::Failed(failure),
     }
 }
@@ -152,7 +153,8 @@ fn drive(
 pub(in crate::eval) enum RegionalNetConstructionPoll {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -209,12 +211,15 @@ impl RegionalNetConstruction {
                         results,
                         Some(self.source_owner),
                     ));
-                    RegionalNetConstructionPoll::Yielded
+                    RegionalNetConstructionPoll::Continue
                 }
                 RegionalBuilderEffectPoll::Boundary(request) => {
                     RegionalNetConstructionPoll::Boundary(request)
                 }
-                RegionalBuilderEffectPoll::Yielded => RegionalNetConstructionPoll::Yielded,
+                RegionalBuilderEffectPoll::Continue => RegionalNetConstructionPoll::Continue,
+                RegionalBuilderEffectPoll::BudgetExhausted => {
+                    RegionalNetConstructionPoll::BudgetExhausted
+                }
                 RegionalBuilderEffectPoll::Failed(failure) => {
                     RegionalNetConstructionPoll::Failed(failure)
                 }
@@ -225,7 +230,7 @@ impl RegionalNetConstruction {
                         first,
                         front: RegionalListFront::new_in(access, tail, Some(self.source_owner)),
                     };
-                    RegionalNetConstructionPoll::Yielded
+                    RegionalNetConstructionPoll::Continue
                 }
                 RegionalListFrontPoll::Ready(None) => {
                     RegionalNetConstructionPoll::Failed(Arc::new(EvaluationFailure::message(
@@ -235,7 +240,10 @@ impl RegionalNetConstruction {
                 RegionalListFrontPoll::Boundary(request) => {
                     RegionalNetConstructionPoll::Boundary(request)
                 }
-                RegionalListFrontPoll::Yielded => RegionalNetConstructionPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalNetConstructionPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => {
+                    RegionalNetConstructionPoll::BudgetExhausted
+                }
                 RegionalListFrontPoll::Failed(failure) => {
                     RegionalNetConstructionPoll::Failed(failure)
                 }
@@ -261,12 +269,15 @@ impl RegionalNetConstruction {
                             demand: RegionalWhnfWork::from_focus(access, exposed)
                                 .with_source_owner(self.source_owner),
                         };
-                        RegionalNetConstructionPoll::Yielded
+                        RegionalNetConstructionPoll::Continue
                     }
                     RegionalListFrontPoll::Boundary(request) => {
                         RegionalNetConstructionPoll::Boundary(request)
                     }
-                    RegionalListFrontPoll::Yielded => RegionalNetConstructionPoll::Yielded,
+                    RegionalListFrontPoll::Continue => RegionalNetConstructionPoll::Continue,
+                    RegionalListFrontPoll::BudgetExhausted => {
+                        RegionalNetConstructionPoll::BudgetExhausted
+                    }
                     RegionalListFrontPoll::Failed(failure) => {
                         RegionalNetConstructionPoll::Failed(failure)
                     }
@@ -278,7 +289,7 @@ impl RegionalNetConstruction {
                     Drive::Boundary(request) => {
                         return RegionalNetConstructionPoll::Boundary(request);
                     }
-                    Drive::Yielded => return RegionalNetConstructionPoll::Yielded,
+                    Drive::BudgetExhausted => return RegionalNetConstructionPoll::BudgetExhausted,
                     Drive::Failed(failure) => {
                         return RegionalNetConstructionPoll::Failed(failure);
                     }

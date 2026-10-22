@@ -163,7 +163,9 @@ impl RegionalPatternDictPredicateMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -178,8 +180,11 @@ impl RegionalPatternDictPredicateMachine {
                     super::tagged_machine::RegionalSemanticUndefinedPoll::Boundary(request) => {
                         RegionalBuiltinPoll::Boundary(request)
                     }
-                    super::tagged_machine::RegionalSemanticUndefinedPoll::Yielded => {
-                        RegionalBuiltinPoll::Yielded
+                    super::tagged_machine::RegionalSemanticUndefinedPoll::Continue => {
+                        RegionalBuiltinPoll::Continue
+                    }
+                    super::tagged_machine::RegionalSemanticUndefinedPoll::BudgetExhausted => {
+                        RegionalBuiltinPoll::BudgetExhausted
                     }
                     super::tagged_machine::RegionalSemanticUndefinedPoll::Failed(failure) => {
                         RegionalBuiltinPoll::Failed(failure)
@@ -251,10 +256,11 @@ impl RegionalPatternDictTakeMachine {
                 }
                 RegionalConversionPoll::Ready(keys) => {
                     self.keys = Some(keys);
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
                 RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalConversionPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
@@ -270,8 +276,11 @@ impl RegionalPatternDictTakeMachine {
                 super::tagged_machine::RegionalSemanticUndefinedPoll::Boundary(request) => {
                     RegionalBuiltinPoll::Boundary(request)
                 }
-                super::tagged_machine::RegionalSemanticUndefinedPoll::Yielded => {
-                    RegionalBuiltinPoll::Yielded
+                super::tagged_machine::RegionalSemanticUndefinedPoll::Continue => {
+                    RegionalBuiltinPoll::Continue
+                }
+                super::tagged_machine::RegionalSemanticUndefinedPoll::BudgetExhausted => {
+                    RegionalBuiltinPoll::BudgetExhausted
                 }
                 super::tagged_machine::RegionalSemanticUndefinedPoll::Failed(failure) => {
                     RegionalBuiltinPoll::Failed(failure)
@@ -287,7 +296,9 @@ impl RegionalPatternDictTakeMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -300,7 +311,7 @@ impl RegionalPatternDictTakeMachine {
                     self.source_owner,
                 ));
                 self.selected_value = Some(value);
-                return RegionalBuiltinPoll::Yielded;
+                return RegionalBuiltinPoll::Continue;
             }
             if !matches!(value, Value::Dict(_)) {
                 return pattern_failure_in(access);
@@ -315,7 +326,7 @@ impl RegionalPatternDictTakeMachine {
                 key,
             });
             self.current = Some(value);
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         if self.source.is_some() || self.source_demand.is_some() {
@@ -341,7 +352,7 @@ impl RegionalPatternDictTakeMachine {
                 RegionalWhnfStatus::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
                 RegionalWhnfStatus::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -352,7 +363,7 @@ impl RegionalPatternDictTakeMachine {
             }
             self.original = Some(access.values().duplicate_value(&source));
             self.current = Some(source);
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         let key = &self.keys()[self.next_key];
@@ -376,7 +387,7 @@ impl RegionalPatternDictTakeMachine {
                     RegionalWhnfWork::from_focus(access, value)
                         .with_source_owner(self.source_owner),
                 );
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
         }
     }
@@ -520,7 +531,7 @@ impl RegionalPatternEqualMachine {
                 RegionalWhnfStatus::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
                 RegionalWhnfStatus::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -535,7 +546,7 @@ impl RegionalPatternEqualMachine {
                     access.values().diagnostic_debug(&other)
                 )),
             });
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         if self.actual.is_some() || self.actual_demand.is_some() {
@@ -561,7 +572,7 @@ impl RegionalPatternEqualMachine {
                 RegionalWhnfStatus::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
                 RegionalWhnfStatus::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -608,7 +619,7 @@ impl RegionalPatternEqualMachine {
                         actual,
                         Some(self.source_owner),
                     ));
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
             };
         }
@@ -620,7 +631,9 @@ impl RegionalPatternEqualMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -635,7 +648,7 @@ impl RegionalPatternEqualMachine {
                 return pattern_failure_in(access);
             }
             self.byte_index += 1;
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         let expected_len = self.expected_bytes().len();
@@ -662,10 +675,11 @@ impl RegionalPatternEqualMachine {
                 self.item = Some(
                     RegionalWhnfWork::from_focus(access, item).with_source_owner(self.source_owner),
                 );
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-            RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+            RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+            RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
             RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
         }
     }
@@ -736,10 +750,11 @@ impl RegionalPatternPathMachine {
             return match self.expected.poll_in(access, step_budget) {
                 RegionalConversionPoll::Ready(keys) => {
                     self.expected_keys = Some(keys);
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
                 RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalConversionPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
@@ -751,7 +766,8 @@ impl RegionalPatternPathMachine {
                 }
                 RegionalConversionPoll::Ready(None) => pattern_failure_in(access),
                 RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalConversionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalConversionPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
@@ -777,7 +793,7 @@ impl RegionalPatternPathMachine {
             RegionalWhnfStatus::Boundary(request) => {
                 return RegionalBuiltinPoll::Boundary(request);
             }
-            RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
             RegionalWhnfStatus::Failed(failure) => {
                 return RegionalBuiltinPoll::Failed(failure);
             }
@@ -802,7 +818,7 @@ impl RegionalPatternPathMachine {
                     actual,
                     Some(self.source_owner),
                 ));
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             PatternPathShape::Other => pattern_failure_in(access),
         }
@@ -874,7 +890,8 @@ impl RegionalPatternListMachine {
             return match front.poll_in(access, step_budget) {
                 RegionalListFrontPoll::Ready(item) => self.finish_front(access, item),
                 RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
@@ -882,7 +899,8 @@ impl RegionalPatternListMachine {
             return match back.poll_in(access, step_budget) {
                 RegionalListBackPoll::Ready(item) => self.finish_back(access, item),
                 RegionalListBackPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalListBackPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListBackPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalListBackPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalListBackPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             };
         }
@@ -908,7 +926,7 @@ impl RegionalPatternListMachine {
             RegionalWhnfStatus::Boundary(request) => {
                 return RegionalBuiltinPoll::Boundary(request);
             }
-            RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
             RegionalWhnfStatus::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
         };
         self.source_demand = None;
@@ -922,7 +940,7 @@ impl RegionalPatternListMachine {
                         source,
                         Some(self.source_owner),
                     ));
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
                 PatternListOperation::TryUnsnoc => {
                     self.back = Some(RegionalListBack::new_in(
@@ -930,7 +948,7 @@ impl RegionalPatternListMachine {
                         source,
                         Some(self.source_owner),
                     ));
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
             },
             _ => pattern_failure_in(access),

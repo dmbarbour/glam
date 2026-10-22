@@ -22,9 +22,9 @@ charging whole quanta. Closes holistic review E1 (S1 item 2), open since
   changes, and needs a unit available to start. Observing a value or a
   wait, walking a route, and blocking are free.
 
-"One step per poll" was never the design. The phrase entered
-`architecture/evaluation.md` with `c6373546` (2026-10-05), an agent's
-description of `machine_step` written beside the budget ADR; the
+"One step per poll" was never the design. The architecture docs describe
+what is, and the phrase entered `architecture/evaluation.md` with
+`c6373546` (2026-10-05), describing what `machine_step` then did; the
 step-at-a-time machines it described predate it.
 
 ## Findings
@@ -218,3 +218,17 @@ first.
   dependency without pumping it, and the scheduler halts the task with the
   panic. The pump that `poll_blocked` and `poll_pumping` both run stays
   for `budget-reflection-phases`.
+- `budget-machine-steps` (2026-10-22): the regional machines' polls and the
+  sub-machines beneath them (key and path conversion, list fronts and
+  backs, tagged payloads, object linearization, comparison frames, net
+  construction) report `Continue` after a step of their own and
+  `BudgetExhausted` only when the budget is spent; WHNF's polls only ever
+  exhaust, so they were renamed outright. `machine_steps` loops at the
+  checkpoint, under one access region and one checkpoint transition, until
+  anything but `Continue`. A step needs a unit to start and pays one as it
+  ends, forgiven when its operands spent the last: paying as it started
+  left a one-unit poll nothing for its operands, and three reflection tests
+  that poll one unit at a time spun. Reflection and the spark path still
+  treat a `Continue` from the durable conversions and the strategy machine
+  as a yield, until `budget-reflection-phases` and
+  `budget-exhausted-only`.

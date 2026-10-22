@@ -167,7 +167,7 @@ impl RegionalObjectCompositionMachine {
                         .with_source_owner(self.source_owner),
                     extension_defs: access.values().duplicate_value(extension_defs),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             RegionalCompositionPhase::WithSpec {
                 object,
@@ -202,7 +202,7 @@ impl RegionalObjectCompositionMachine {
                     ),
                     self_value: access.values().duplicate_value(self_value),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             RegionalCompositionPhase::ComposedExtensionPrior {
                 application,
@@ -232,7 +232,7 @@ impl RegionalObjectCompositionMachine {
                     )
                     .with_source_owner(self.source_owner),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             RegionalCompositionPhase::OverrideBase { updates, base } => {
                 let base = match poll_regional_whnf_in(access, base, step_budget) {
@@ -249,7 +249,7 @@ impl RegionalObjectCompositionMachine {
                     Err(message) => return regional_failure(message),
                 };
                 self.phase = RegionalCompositionPhase::Override(machine);
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             RegionalCompositionPhase::Override(machine) => machine.poll_in(access, step_budget),
         }
@@ -365,7 +365,7 @@ impl RegionalObjectOverrideMachine {
                     .expect("pending object override retains its frame")
                     .result = result;
             }
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         let complete = {
@@ -388,7 +388,7 @@ impl RegionalObjectOverrideMachine {
                 .expect("a nested object override retains its parent key");
             parent.result =
                 insert_regional_override_value_in(access, &parent.result, key, &completed.result);
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         let step = {
@@ -419,7 +419,7 @@ impl RegionalObjectOverrideMachine {
                 });
             }
         }
-        RegionalBuiltinPoll::Yielded
+        RegionalBuiltinPoll::Continue
     }
 
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
@@ -525,7 +525,7 @@ fn poll_regional_whnf_in(
     match drive_regional_in_place(access, computation, step_budget, reduce_semantic_shell) {
         RegionalWhnfStatus::Ready(value) => Ok(value),
         RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
-        RegionalWhnfStatus::Yielded => Err(RegionalBuiltinPoll::Yielded),
+        RegionalWhnfStatus::BudgetExhausted => Err(RegionalBuiltinPoll::BudgetExhausted),
         RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
     }
 }

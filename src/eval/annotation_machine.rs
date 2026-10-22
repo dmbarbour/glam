@@ -495,7 +495,7 @@ impl RegionalAnnotationMachine {
                             bytes,
                             item: None,
                         };
-                        return RegionalBuiltinPoll::Yielded;
+                        return RegionalBuiltinPoll::Continue;
                     }
 
                     match front.poll_in(access, step_budget) {
@@ -517,7 +517,7 @@ impl RegionalAnnotationMachine {
                                 bytes,
                                 item,
                             };
-                            return RegionalBuiltinPoll::Yielded;
+                            return RegionalBuiltinPoll::Continue;
                         }
                         RegionalListFrontPoll::Ready(None) => {
                             let result = match kind {
@@ -544,7 +544,7 @@ impl RegionalAnnotationMachine {
                                 poll
                             };
                         }
-                        RegionalListFrontPoll::Yielded => {
+                        RegionalListFrontPoll::Continue => {
                             self.phase = RegionalAnnotationPhase::CollectionItems {
                                 kind,
                                 front,
@@ -552,7 +552,17 @@ impl RegionalAnnotationMachine {
                                 bytes,
                                 item,
                             };
-                            return RegionalBuiltinPoll::Yielded;
+                            return RegionalBuiltinPoll::Continue;
+                        }
+                        RegionalListFrontPoll::BudgetExhausted => {
+                            self.phase = RegionalAnnotationPhase::CollectionItems {
+                                kind,
+                                front,
+                                values,
+                                bytes,
+                                item,
+                            };
+                            return RegionalBuiltinPoll::BudgetExhausted;
                         }
                         RegionalListFrontPoll::Failed(failure) => {
                             let poll = RegionalBuiltinPoll::Failed(failure);
@@ -642,7 +652,7 @@ impl RegionalAnnotationMachine {
                             item_index,
                             item: None,
                         };
-                        return RegionalBuiltinPoll::Yielded;
+                        return RegionalBuiltinPoll::Continue;
                     }
 
                     match front.poll_in(access, step_budget) {
@@ -656,7 +666,7 @@ impl RegionalAnnotationMachine {
                                 item_index,
                                 item,
                             };
-                            return RegionalBuiltinPoll::Yielded;
+                            return RegionalBuiltinPoll::Continue;
                         }
                         RegionalListFrontPoll::Ready(None) => {
                             return RegionalBuiltinPoll::Ready(finish_metadata_update_in(
@@ -674,7 +684,7 @@ impl RegionalAnnotationMachine {
                             };
                             return RegionalBuiltinPoll::Boundary(request);
                         }
-                        RegionalListFrontPoll::Yielded => {
+                        RegionalListFrontPoll::Continue => {
                             self.phase = RegionalAnnotationPhase::MetadataItems {
                                 kind,
                                 function,
@@ -683,7 +693,18 @@ impl RegionalAnnotationMachine {
                                 item_index,
                                 item,
                             };
-                            return RegionalBuiltinPoll::Yielded;
+                            return RegionalBuiltinPoll::Continue;
+                        }
+                        RegionalListFrontPoll::BudgetExhausted => {
+                            self.phase = RegionalAnnotationPhase::MetadataItems {
+                                kind,
+                                function,
+                                front,
+                                metadata,
+                                item_index,
+                                item,
+                            };
+                            return RegionalBuiltinPoll::BudgetExhausted;
                         }
                         RegionalListFrontPoll::Failed(failure) => {
                             return RegionalBuiltinPoll::Failed(failure);
@@ -751,7 +772,7 @@ impl RegionalAnnotationMachine {
                         return RegionalBuiltinPoll::Ready(target);
                     }
                     self.phase = RegionalAnnotationPhase::Normalizing(target);
-                    return RegionalBuiltinPoll::Yielded;
+                    return RegionalBuiltinPoll::Continue;
                 }
                 RegionalAnnotationPhase::Ready(value) => return RegionalBuiltinPoll::Ready(value),
                 RegionalAnnotationPhase::Done => {
@@ -1035,7 +1056,9 @@ fn poll_demand_in(
         RegionalWhnfStatus::Boundary(request) => {
             RegionalDemandResult::Pending(RegionalBuiltinPoll::Boundary(request))
         }
-        RegionalWhnfStatus::Yielded => RegionalDemandResult::Pending(RegionalBuiltinPoll::Yielded),
+        RegionalWhnfStatus::BudgetExhausted => {
+            RegionalDemandResult::Pending(RegionalBuiltinPoll::BudgetExhausted)
+        }
         RegionalWhnfStatus::Failed(failure) => {
             RegionalDemandResult::Pending(RegionalBuiltinPoll::Failed(failure))
         }

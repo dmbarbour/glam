@@ -1496,7 +1496,7 @@ fn drive_original_callable_whnf(
                 Err(error) => CallableWhnfOutcome::Failed(error),
             }
         }
-        crate::eval::whnf::RegionalWhnfDrive::Yielded(work) => {
+        crate::eval::whnf::RegionalWhnfDrive::BudgetExhausted(work) => {
             let state = crate::eval::whnf::NetWhnfState::from_regional(access, work);
             match claim.install_checkpoint_in(access, state) {
                 Ok(_) => CallableWhnfOutcome::Yielded,
@@ -1677,7 +1677,7 @@ fn progress_callable_checkpoint_access(
             let call = claim.publish()?;
             Ok(CheckpointWhnfOutcome::Boundary { call, request })
         }
-        crate::eval::whnf::RegionalWhnfStatus::Yielded => {
+        crate::eval::whnf::RegionalWhnfStatus::BudgetExhausted => {
             claim.publish()?;
             Ok(CheckpointWhnfOutcome::Progressed)
         }

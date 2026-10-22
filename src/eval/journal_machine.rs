@@ -206,7 +206,10 @@ impl RegionalJournalConflictsMachine {
                 RegionalListFrontPoll::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalListFrontPoll::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Continue => return RegionalBuiltinPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => {
+                    return RegionalBuiltinPoll::BudgetExhausted;
+                }
                 RegionalListFrontPoll::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -222,13 +225,16 @@ impl RegionalJournalConflictsMachine {
                 RegionalConversionPoll::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalConversionPoll::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalConversionPoll::Continue => return RegionalBuiltinPoll::Continue,
+                RegionalConversionPoll::BudgetExhausted => {
+                    return RegionalBuiltinPoll::BudgetExhausted;
+                }
                 RegionalConversionPoll::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
             },
         }
-        RegionalBuiltinPoll::Yielded
+        RegionalBuiltinPoll::Continue
     }
 
     fn replay(
@@ -370,7 +376,7 @@ fn drive_in(
                 .into_value_in(access.values()))
         }
         RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
-        RegionalWhnfStatus::Yielded => Err(RegionalBuiltinPoll::Yielded),
+        RegionalWhnfStatus::BudgetExhausted => Err(RegionalBuiltinPoll::BudgetExhausted),
         RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
     }
 }

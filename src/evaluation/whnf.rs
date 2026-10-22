@@ -13,7 +13,7 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 pub(crate) enum WhnfOwnerPoll {
     Ready(RuntimeValueRoot),
     Pending(WorkDependency),
-    Yielded,
+    BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
 
@@ -133,7 +133,7 @@ pub(crate) fn interpret_poll(
                 ))),
             }
         }
-        WhnfPoll::Yielded => WhnfOwnerPoll::Yielded,
+        WhnfPoll::BudgetExhausted => WhnfOwnerPoll::BudgetExhausted,
         WhnfPoll::Failed(failure) => WhnfOwnerPoll::Failed(failure),
     }
 }

@@ -2766,7 +2766,11 @@ maps the short names used here to file names.
   - **Builtins:**
     - applying an immediate builtin costs one unit;
     - a builtin machine step whose operand evaluation cost nothing pays one
-      unit for its own work.
+      unit for its own work. Amended 2026-10-22 (`budget-machine-steps`): a
+      machine runs its steps within a poll while a unit remains, and each
+      step pays one unit as it ends, forgiven when its operands spent the
+      last, as a batch's overrun is. Paying as a step starts left a one-unit
+      poll nothing for its operands, so it never progressed.
   - **Reflection:** steps charge as before, and waiting pumps within the
     caller's budget.
 - **Consequences:**

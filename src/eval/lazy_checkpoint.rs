@@ -243,34 +243,36 @@ impl ManagedLazyCheckpointEdge {
         ))))
     }
 
-    /// Runs one regional machine step under the shared step budget.
-    ///
-    /// A step needs one unit available. Operand evaluation pays per
-    /// delegation; a step whose operands cost nothing pays one unit for the
-    /// machine's own work, unless it only reported a boundary or a failure.
-    pub(in crate::eval) fn machine_step<P>(
+    /// Runs a regional machine's steps under the shared step budget until
+    /// it is ready, reaches a boundary or fails, or the budget is spent
+    /// (`reduction-costs-one-budget-unit`). A step needs a unit to start and
+    /// pays one as it ends, after the operand evaluation within it paid its
+    /// own; when that spent the last unit, the step's own is forgiven, as a
+    /// batch's overrun is, so a one-unit poll still makes progress.
+    pub(in crate::eval) fn machine_steps<P>(
         access: &crate::evaluation::EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-        yielded: impl FnOnce() -> P,
-        advanced: impl FnOnce(&P) -> bool,
-        step: impl FnOnce(&mut crate::evaluation::EvaluationStepBudget) -> P,
+        exhausted: impl Fn() -> P,
+        continues: impl Fn(&P) -> bool,
+        mut step: impl FnMut(&mut crate::evaluation::EvaluationStepBudget) -> P,
     ) -> P {
-        if step_budget.remaining() == 0 {
-            return yielded();
-        }
-        let before = step_budget.remaining();
-        let poll = step(step_budget);
-        if advanced(&poll) {
-            step_budget.charge_if_unchanged(before);
+        loop {
+            if step_budget.remaining() == 0 {
+                return exhausted();
+            }
+            let poll = step(step_budget);
+            let _ = step_budget.try_consume();
             #[cfg(feature = "glam-prof")]
             access
                 .values()
                 .values()
                 .record_reduction(crate::profiling::EvaluationReduction::BuiltinStep);
+            if !continues(&poll) {
+                #[cfg(not(feature = "glam-prof"))]
+                let _ = access;
+                return poll;
+            }
         }
-        #[cfg(not(feature = "glam-prof"))]
-        let _ = access;
-        poll
     }
 
     pub(in crate::eval) fn with_access_transition_in<R>(
@@ -329,17 +331,11 @@ impl ManagedLazyCheckpointEdge {
                 RegionalObjectFixpoint::trace_managed_edges,
                 RegionalObjectFixpoint::trace_managed_edges,
                 |state| {
-                    Self::machine_step(
+                    Self::machine_steps(
                         authority,
                         step_budget,
-                        || RegionalObjectFixpointPoll::Yielded,
-                        |poll| {
-                            matches!(
-                                poll,
-                                RegionalObjectFixpointPoll::Ready(_)
-                                    | RegionalObjectFixpointPoll::Yielded
-                            )
-                        },
+                        || RegionalObjectFixpointPoll::BudgetExhausted,
+                        |poll| matches!(poll, RegionalObjectFixpointPoll::Continue),
                         |budget| state.poll_in(authority, budget),
                     )
                 },
@@ -375,18 +371,11 @@ impl ManagedLazyCheckpointEdge {
                 RegionalListEffect::trace_managed_edges,
                 RegionalListEffect::trace_managed_edges,
                 |state| {
-                    Self::machine_step(
+                    Self::machine_steps(
                         authority,
                         step_budget,
-                        || RegionalListEffectPoll::Yielded,
-                        |poll| {
-                            matches!(
-                                poll,
-                                RegionalListEffectPoll::Ready(_)
-                                    | RegionalListEffectPoll::FixReady { .. }
-                                    | RegionalListEffectPoll::Yielded
-                            )
-                        },
+                        || RegionalListEffectPoll::BudgetExhausted,
+                        |poll| matches!(poll, RegionalListEffectPoll::Continue),
                         |budget| state.poll_in(authority, budget),
                     )
                 },
@@ -422,18 +411,11 @@ impl ManagedLazyCheckpointEdge {
                 RegionalBuiltinMachine::trace_managed_edges,
                 RegionalBuiltinMachine::trace_managed_edges,
                 |state| {
-                    Self::machine_step(
+                    Self::machine_steps(
                         authority,
                         step_budget,
-                        || RegionalBuiltinPoll::Yielded,
-                        |poll| {
-                            matches!(
-                                poll,
-                                RegionalBuiltinPoll::Ready(_)
-                                    | RegionalBuiltinPoll::SparkIntent(_)
-                                    | RegionalBuiltinPoll::Yielded
-                            )
-                        },
+                        || RegionalBuiltinPoll::BudgetExhausted,
+                        |poll| matches!(poll, RegionalBuiltinPoll::Continue),
                         |budget| state.poll_in(authority, budget),
                     )
                 },

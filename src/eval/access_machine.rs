@@ -35,7 +35,8 @@ pub(in crate::eval) enum AccessRegionalPoll {
     Ready(Value),
     Whnf(RegionalWhnfWork),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -59,7 +60,8 @@ enum AccessConversion {
 pub(crate) enum ConversionPoll<T> {
     Ready(T),
     Pending(crate::evaluation::WorkDependency),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
 
@@ -154,14 +156,16 @@ struct RegionalKeyListState {
 pub(in crate::eval) enum RegionalConversionPoll<T> {
     Ready(T),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
 enum DurableConversionPoll<T> {
     Ready(T),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
 
@@ -206,7 +210,7 @@ impl AccessMachine {
                             self.conversion = None;
                             self.next_part += 1;
                             self.begin_key_sequence(access, keys);
-                            AccessRegionalPoll::Yielded
+                            AccessRegionalPoll::Continue
                         }
                         RegionalConversionPoll::Ready(None) => {
                             AccessRegionalPoll::Failed(Arc::new(EvaluationFailure::message(
@@ -216,7 +220,10 @@ impl AccessMachine {
                         RegionalConversionPoll::Boundary(request) => {
                             AccessRegionalPoll::Boundary(request)
                         }
-                        RegionalConversionPoll::Yielded => AccessRegionalPoll::Yielded,
+                        RegionalConversionPoll::Continue => AccessRegionalPoll::Continue,
+                        RegionalConversionPoll::BudgetExhausted => {
+                            AccessRegionalPoll::BudgetExhausted
+                        }
                         RegionalConversionPoll::Failed(failure) => {
                             AccessRegionalPoll::Failed(failure)
                         }
@@ -228,25 +235,26 @@ impl AccessMachine {
                     self.conversion = None;
                     self.next_part += 1;
                     self.begin_key_sequence(access, [key]);
-                    AccessRegionalPoll::Yielded
+                    AccessRegionalPoll::Continue
                 }
                 RegionalConversionPoll::Ready(None) => AccessRegionalPoll::Failed(Arc::new(
                     EvaluationFailure::message("dictionary keys must evaluate to keyable values"),
                 )),
                 RegionalConversionPoll::Boundary(request) => AccessRegionalPoll::Boundary(request),
-                RegionalConversionPoll::Yielded => AccessRegionalPoll::Yielded,
+                RegionalConversionPoll::Continue => AccessRegionalPoll::Continue,
+                RegionalConversionPoll::BudgetExhausted => AccessRegionalPoll::BudgetExhausted,
                 RegionalConversionPoll::Failed(failure) => AccessRegionalPoll::Failed(failure),
             };
         }
 
         if let Some(demand) = &mut self.demand {
             let current = match poll_regional_whnf(demand, access, step_budget) {
-                RegionalConversionPoll::Ready(value) => value,
-                RegionalConversionPoll::Boundary(request) => {
+                RegionalWhnfStatus::Ready(value) => value,
+                RegionalWhnfStatus::Boundary(request) => {
                     return AccessRegionalPoll::Boundary(request);
                 }
-                RegionalConversionPoll::Yielded => return AccessRegionalPoll::Yielded,
-                RegionalConversionPoll::Failed(failure) => {
+                RegionalWhnfStatus::BudgetExhausted => return AccessRegionalPoll::BudgetExhausted,
+                RegionalWhnfStatus::Failed(failure) => {
                     return AccessRegionalPoll::Failed(failure);
                 }
             };
@@ -265,7 +273,7 @@ impl AccessMachine {
                             Some(self.source_owner),
                         ));
                     }
-                    AccessRegionalPoll::Yielded
+                    AccessRegionalPoll::Continue
                 }
                 Err(error) => AccessRegionalPoll::Failed(error.into_permanent_failure()),
             };
@@ -298,7 +306,7 @@ impl AccessMachine {
                 ))));
             }
         }
-        AccessRegionalPoll::Yielded
+        AccessRegionalPoll::Continue
     }
 
     fn next_dynamic_argument(&mut self, access: &EvaluationValueAccess<'_>) -> Value {
@@ -367,7 +375,8 @@ impl KeyConversionMachine {
                 "dictionary keys must evaluate to keyable values",
             )),
             ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
-            ConversionPoll::Yielded => ConversionPoll::Yielded,
+            ConversionPoll::Continue => ConversionPoll::Continue,
+            ConversionPoll::BudgetExhausted => ConversionPoll::BudgetExhausted,
             ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
         }
     }
@@ -561,7 +570,8 @@ impl ManagedKeyConversionRoot {
         match result {
             RegionalConversionPoll::Ready(value) => DurableConversionPoll::Ready(value),
             RegionalConversionPoll::Boundary(request) => DurableConversionPoll::Boundary(request),
-            RegionalConversionPoll::Yielded => DurableConversionPoll::Yielded,
+            RegionalConversionPoll::Continue => DurableConversionPoll::Continue,
+            RegionalConversionPoll::BudgetExhausted => DurableConversionPoll::BudgetExhausted,
             RegionalConversionPoll::Failed(failure) => {
                 DurableConversionPoll::Failed(access.values().root_runtime_failure(failure))
             }
@@ -607,7 +617,8 @@ impl RegionalKeyConversion {
                 EvaluationFailure::message("dictionary keys must evaluate to keyable values"),
             )),
             RegionalConversionPoll::Boundary(request) => RegionalConversionPoll::Boundary(request),
-            RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+            RegionalConversionPoll::Continue => RegionalConversionPoll::Continue,
+            RegionalConversionPoll::BudgetExhausted => RegionalConversionPoll::BudgetExhausted,
             RegionalConversionPoll::Failed(failure) => RegionalConversionPoll::Failed(failure),
         }
     }
@@ -627,16 +638,16 @@ impl RegionalKeyConversion {
         match focus {
             RegionalKeyConversionState::Demand(mut computation) => {
                 let value = match poll_regional_whnf(&mut computation, access, step_budget) {
-                    RegionalConversionPoll::Ready(value) => value,
-                    RegionalConversionPoll::Boundary(request) => {
+                    RegionalWhnfStatus::Ready(value) => value,
+                    RegionalWhnfStatus::Boundary(request) => {
                         self.focus = Some(RegionalKeyConversionState::Demand(computation));
                         return RegionalConversionPoll::Boundary(request);
                     }
-                    RegionalConversionPoll::Yielded => {
+                    RegionalWhnfStatus::BudgetExhausted => {
                         self.focus = Some(RegionalKeyConversionState::Demand(computation));
-                        return RegionalConversionPoll::Yielded;
+                        return RegionalConversionPoll::BudgetExhausted;
                     }
-                    RegionalConversionPoll::Failed(failure) => {
+                    RegionalWhnfStatus::Failed(failure) => {
                         return RegionalConversionPoll::Failed(failure);
                     }
                 };
@@ -652,7 +663,7 @@ impl RegionalKeyConversion {
                                 converted: Vec::new(),
                             },
                         )));
-                        RegionalConversionPoll::Yielded
+                        RegionalConversionPoll::Continue
                     }
                     RegionalClassifiedKeyValue::Dict(members) => {
                         self.focus =
@@ -661,7 +672,7 @@ impl RegionalKeyConversion {
                                 next: 0,
                                 converted: Vec::new(),
                             }));
-                        RegionalConversionPoll::Yielded
+                        RegionalConversionPoll::Continue
                     }
                     RegionalClassifiedKeyValue::Invalid => self.finish(None),
                 }
@@ -678,23 +689,23 @@ impl RegionalKeyConversion {
                     value,
                     self.source_owner,
                 )));
-                RegionalConversionPoll::Yielded
+                RegionalConversionPoll::Continue
             }
             RegionalKeyConversionState::List(mut list) => {
                 if let Some(mut computation) = list.source.take() {
                     let value = match poll_regional_whnf(&mut computation, access, step_budget) {
-                        RegionalConversionPoll::Ready(value) => value,
-                        RegionalConversionPoll::Boundary(request) => {
+                        RegionalWhnfStatus::Ready(value) => value,
+                        RegionalWhnfStatus::Boundary(request) => {
                             list.source = Some(computation);
                             self.focus = Some(RegionalKeyConversionState::List(list));
                             return RegionalConversionPoll::Boundary(request);
                         }
-                        RegionalConversionPoll::Yielded => {
+                        RegionalWhnfStatus::BudgetExhausted => {
                             list.source = Some(computation);
                             self.focus = Some(RegionalKeyConversionState::List(list));
-                            return RegionalConversionPoll::Yielded;
+                            return RegionalConversionPoll::BudgetExhausted;
                         }
-                        RegionalConversionPoll::Failed(failure) => {
+                        RegionalWhnfStatus::Failed(failure) => {
                             return RegionalConversionPoll::Failed(failure);
                         }
                     };
@@ -709,23 +720,23 @@ impl RegionalKeyConversion {
                         };
                     list.lists.push(list_value);
                     self.focus = Some(RegionalKeyConversionState::List(list));
-                    return RegionalConversionPoll::Yielded;
+                    return RegionalConversionPoll::Continue;
                 }
 
                 if let Some(mut computation) = list.chunk.take() {
                     let value = match poll_regional_whnf(&mut computation, access, step_budget) {
-                        RegionalConversionPoll::Ready(value) => value,
-                        RegionalConversionPoll::Boundary(request) => {
+                        RegionalWhnfStatus::Ready(value) => value,
+                        RegionalWhnfStatus::Boundary(request) => {
                             list.chunk = Some(computation);
                             self.focus = Some(RegionalKeyConversionState::List(list));
                             return RegionalConversionPoll::Boundary(request);
                         }
-                        RegionalConversionPoll::Yielded => {
+                        RegionalWhnfStatus::BudgetExhausted => {
                             list.chunk = Some(computation);
                             self.focus = Some(RegionalKeyConversionState::List(list));
-                            return RegionalConversionPoll::Yielded;
+                            return RegionalConversionPoll::BudgetExhausted;
                         }
-                        RegionalConversionPoll::Failed(failure) => {
+                        RegionalWhnfStatus::Failed(failure) => {
                             return RegionalConversionPoll::Failed(failure);
                         }
                     };
@@ -743,7 +754,7 @@ impl RegionalKeyConversion {
                     }
                     list.lists.push(list_value);
                     self.focus = Some(RegionalKeyConversionState::List(list));
-                    return RegionalConversionPoll::Yielded;
+                    return RegionalConversionPoll::Continue;
                 }
 
                 let Some(value) = list.lists.pop() else {
@@ -780,7 +791,7 @@ impl RegionalKeyConversion {
                         self.focus = Some(RegionalKeyConversionState::List(list));
                     }
                 }
-                RegionalConversionPoll::Yielded
+                RegionalConversionPoll::Continue
             }
         }
     }
@@ -808,7 +819,7 @@ impl RegionalKeyConversion {
                 self.focus = Some(RegionalKeyConversionState::List(list));
             }
         }
-        RegionalConversionPoll::Yielded
+        RegionalConversionPoll::Continue
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
@@ -873,7 +884,8 @@ impl RegionalKeyList {
                 EvaluationFailure::message("dictionary keys must evaluate to keyable values"),
             )),
             RegionalConversionPoll::Boundary(request) => RegionalConversionPoll::Boundary(request),
-            RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+            RegionalConversionPoll::Continue => RegionalConversionPoll::Continue,
+            RegionalConversionPoll::BudgetExhausted => RegionalConversionPoll::BudgetExhausted,
             RegionalConversionPoll::Failed(failure) => RegionalConversionPoll::Failed(failure),
         }
     }
@@ -892,7 +904,8 @@ impl RegionalKeyList {
             }
             RegionalConversionPoll::Ready(None) => RegionalConversionPoll::Ready(None),
             RegionalConversionPoll::Boundary(request) => RegionalConversionPoll::Boundary(request),
-            RegionalConversionPoll::Yielded => RegionalConversionPoll::Yielded,
+            RegionalConversionPoll::Continue => RegionalConversionPoll::Continue,
+            RegionalConversionPoll::BudgetExhausted => RegionalConversionPoll::BudgetExhausted,
             RegionalConversionPoll::Failed(failure) => RegionalConversionPoll::Failed(failure),
         }
     }
@@ -975,13 +988,8 @@ fn poll_regional_whnf(
     work: &mut RegionalWhnfWork,
     access: &EvaluationValueAccess<'_>,
     step_budget: &mut crate::evaluation::EvaluationStepBudget,
-) -> RegionalConversionPoll<Value> {
-    match drive_regional_in_place(access, work, step_budget, reduce_semantic_shell) {
-        RegionalWhnfStatus::Ready(value) => RegionalConversionPoll::Ready(value),
-        RegionalWhnfStatus::Boundary(request) => RegionalConversionPoll::Boundary(request),
-        RegionalWhnfStatus::Yielded => RegionalConversionPoll::Yielded,
-        RegionalWhnfStatus::Failed(failure) => RegionalConversionPoll::Failed(failure),
-    }
+) -> RegionalWhnfStatus {
+    drive_regional_in_place(access, work, step_budget, reduce_semantic_shell)
 }
 
 fn interpret_durable_conversion<T>(
@@ -997,14 +1005,15 @@ fn interpret_durable_conversion<T>(
                 poll_context.root_failure(failure)
             }) {
                 WhnfOwnerPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
-                WhnfOwnerPoll::Yielded => ConversionPoll::Yielded,
+                WhnfOwnerPoll::BudgetExhausted => ConversionPoll::BudgetExhausted,
                 WhnfOwnerPoll::Failed(failure) => ConversionPoll::Failed(failure),
                 WhnfOwnerPoll::Ready(_) => {
                     unreachable!("a semantic boundary cannot produce an immediate value")
                 }
             }
         }
-        DurableConversionPoll::Yielded => ConversionPoll::Yielded,
+        DurableConversionPoll::Continue => ConversionPoll::Continue,
+        DurableConversionPoll::BudgetExhausted => ConversionPoll::BudgetExhausted,
         DurableConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
     }
 }
@@ -1180,7 +1189,7 @@ mod tests {
             let first = loop {
                 match root.poll_key_in(&access, &mut EvaluationStepBudget::new(8)) {
                     DurableConversionPoll::Ready(key) => break key,
-                    DurableConversionPoll::Yielded => {}
+                    DurableConversionPoll::Continue | DurableConversionPoll::BudgetExhausted => {}
                     DurableConversionPoll::Boundary(_) => {
                         panic!("strict key conversion must not reach a semantic boundary")
                     }
@@ -1210,7 +1219,7 @@ mod tests {
             let first = loop {
                 match conversion.poll_optional_in(&access, &mut EvaluationStepBudget::new(8)) {
                     RegionalConversionPoll::Ready(key) => break key,
-                    RegionalConversionPoll::Yielded => {}
+                    RegionalConversionPoll::Continue | RegionalConversionPoll::BudgetExhausted => {}
                     RegionalConversionPoll::Boundary(_) => {
                         panic!("strict regional key conversion must not reach a boundary")
                     }
@@ -1245,7 +1254,7 @@ mod tests {
         let result = loop {
             match poll_key(&mut machine, &context, 1) {
                 ConversionPoll::Ready(key) => break key,
-                ConversionPoll::Yielded => {
+                ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {
                     context
                         .values()
                         .collect_managed_for_test()
@@ -1289,7 +1298,7 @@ mod tests {
 
         assert!(matches!(
             poll_key_list(&mut machine, &context, 1),
-            ConversionPoll::Yielded
+            ConversionPoll::Continue
         ));
         assert_eq!(
             context.values().managed_root_registrations_for_test(),
@@ -1304,7 +1313,7 @@ mod tests {
         loop {
             match poll_key_list(&mut machine, &context, 1) {
                 ConversionPoll::Pending(_) => break,
-                ConversionPoll::Yielded => {
+                ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {
                     context
                         .values()
                         .collect_managed_for_test()
@@ -1332,7 +1341,7 @@ mod tests {
         let keys = loop {
             match poll_key_list(&mut machine, &context, 1) {
                 ConversionPoll::Ready(keys) => break keys,
-                ConversionPoll::Yielded => {
+                ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {
                     context
                         .values()
                         .collect_managed_for_test()

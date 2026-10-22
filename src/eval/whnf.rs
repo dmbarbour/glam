@@ -297,7 +297,7 @@ pub(crate) enum RegionalWhnfStep {
 /// Outcome of driving callback-free WHNF work beneath one managed-access
 /// region.
 ///
-/// `Boundary` and `Yielded` deliberately return the exact regional work. The
+/// `Boundary` and `BudgetExhausted` deliberately return the exact regional work. The
 /// caller projects it into a durable checkpoint before the access region
 /// closes and must not store this raw form in a machine.
 pub(crate) enum RegionalWhnfDrive {
@@ -306,14 +306,14 @@ pub(crate) enum RegionalWhnfDrive {
         work: RegionalWhnfWork,
         request: RegionalBoundaryRequest,
     },
-    Yielded(RegionalWhnfWork),
+    BudgetExhausted(RegionalWhnfWork),
     Failed(Arc<EvaluationFailure>),
 }
 
 pub(crate) enum RegionalWhnfStatus {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -336,7 +336,7 @@ pub(crate) fn drive_regional<'scope>(
     match drive_regional_in_place(access, &mut work, budget, reduce) {
         RegionalWhnfStatus::Ready(value) => RegionalWhnfDrive::Ready(value),
         RegionalWhnfStatus::Boundary(request) => RegionalWhnfDrive::Boundary { work, request },
-        RegionalWhnfStatus::Yielded => RegionalWhnfDrive::Yielded(work),
+        RegionalWhnfStatus::BudgetExhausted => RegionalWhnfDrive::BudgetExhausted(work),
         RegionalWhnfStatus::Failed(failure) => RegionalWhnfDrive::Failed(failure),
     }
 }
@@ -366,7 +366,7 @@ fn drive_regional_state_in_place<'scope>(
     // not pay for rather than inside one.
     loop {
         if budget.remaining() == 0 {
-            return RegionalWhnfStatus::Yielded;
+            return RegionalWhnfStatus::BudgetExhausted;
         }
         match reduce(access, work) {
             RegionalWhnfStep::Delegate(focus) => {
@@ -405,12 +405,12 @@ pub(crate) enum WhnfDeferredRequest {
 
 /// Result of one bounded poll of a [`WhnfComputation`].
 ///
-/// `Deferred` and `Yielded` never consume the computation's exact checkpoint;
+/// `Deferred` and `BudgetExhausted` never consume the computation's exact checkpoint;
 /// the outer owner polls the same instance again.
 pub(crate) enum WhnfPoll {
     Ready(RuntimeValueRoot),
     Deferred(WhnfDeferredRequest),
-    Yielded,
+    BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
 
@@ -824,7 +824,7 @@ fn regional_status_poll(
         RegionalWhnfStatus::Boundary(RegionalBoundaryRequest::Deferred(deferred)) => {
             WhnfPoll::Deferred(deferred)
         }
-        RegionalWhnfStatus::Yielded => WhnfPoll::Yielded,
+        RegionalWhnfStatus::BudgetExhausted => WhnfPoll::BudgetExhausted,
         RegionalWhnfStatus::Failed(failure) => {
             WhnfPoll::Failed(access.values().root_runtime_failure(failure))
         }

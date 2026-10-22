@@ -53,7 +53,8 @@ pub(in crate::eval) enum RegionalBuiltinPoll {
     Ready(Value),
     SparkIntent(Value),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -474,7 +475,8 @@ impl RegionalBuiltinMachine {
                 RegionalBuilderEffectPoll::Boundary(request) => {
                     RegionalBuiltinPoll::Boundary(request)
                 }
-                RegionalBuilderEffectPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalBuilderEffectPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalBuilderEffectPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalBuilderEffectPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
             },
             Self::Assertion(machine) => machine.poll_in(access, step_budget),
@@ -557,7 +559,9 @@ impl RegionalConditionalMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -599,7 +603,8 @@ impl RegionalConditionalMachine {
                 }),
             )),
             RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-            RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+            RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+            RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
             RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
         }
     }
@@ -637,7 +642,7 @@ impl RegionalAssertionMachine {
                 RegionalWhnfStatus::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
                 RegionalWhnfStatus::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -661,7 +666,7 @@ impl RegionalAssertionMachine {
                 self.phase = RegionalAssertionPhase::DiagnosticContext {
                     received: access.values().diagnostic_kind_name(&value),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             RegionalAssertionPhase::DiagnosticContext { received } => {
                 let Value::Binary(diagnostic_context) = value else {
@@ -707,7 +712,9 @@ impl RegionalNumericMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -757,7 +764,10 @@ impl RegionalNetMachine {
                     RegionalNetConstructionPoll::Boundary(request) => {
                         RegionalBuiltinPoll::Boundary(request)
                     }
-                    RegionalNetConstructionPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                    RegionalNetConstructionPoll::Continue => RegionalBuiltinPoll::Continue,
+                    RegionalNetConstructionPoll::BudgetExhausted => {
+                        RegionalBuiltinPoll::BudgetExhausted
+                    }
                     RegionalNetConstructionPoll::Failed(failure) => {
                         let failure = EvaluationHalt::failure(failure).with_context(
                             access.values(),
@@ -787,7 +797,9 @@ impl RegionalNetMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         let failure = EvaluationHalt::failure(failure).with_context(
                             access.values(),
@@ -812,7 +824,7 @@ impl RegionalNetMachine {
                     net: RegionalWhnfWork::from_focus(access, access.values().duplicate_value(net))
                         .with_source_owner(self.source_owner),
                 };
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             RegionalNetPhase::Net { arity, net } => {
                 let net = match drive_regional_in_place(
@@ -825,7 +837,9 @@ impl RegionalNetMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
@@ -883,7 +897,7 @@ impl RegionalProvenanceMachine {
             RegionalWhnfStatus::Boundary(request) => {
                 return RegionalBuiltinPoll::Boundary(request);
             }
-            RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
             RegionalWhnfStatus::Failed(failure) => {
                 let failure = EvaluationHalt::failure(failure).with_context(
                     access.values(),
@@ -963,7 +977,7 @@ impl RegionalStrategyMachine {
                 RegionalWhnfStatus::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
-                RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
                 RegionalWhnfStatus::Failed(failure) => {
                     return RegionalBuiltinPoll::Failed(failure);
                 }
@@ -980,7 +994,7 @@ impl RegionalStrategyMachine {
                         .with_source_owner(self.source_owner),
                 );
                 self.phase = RegionalStrategyPhase::Metadata;
-                return RegionalBuiltinPoll::Yielded;
+                return RegionalBuiltinPoll::Continue;
             }
         }
 

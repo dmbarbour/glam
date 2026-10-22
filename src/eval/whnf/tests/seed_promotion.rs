@@ -96,7 +96,7 @@ fn managed_seed_promotion(frame_count: usize) {
             &mut access_entries,
             |_access, _work| panic!("an empty budget must not enter the reducer"),
         ),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     assert_eq!((yield_budget.spent(), yield_budget.remaining()), (0, 0));
     assert_eq!(

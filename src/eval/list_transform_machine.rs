@@ -74,7 +74,9 @@ impl RegionalTextLinesMachine {
                     RegionalWhnfStatus::Boundary(request) => {
                         return RegionalBuiltinPoll::Boundary(request);
                     }
-                    RegionalWhnfStatus::Yielded => return RegionalBuiltinPoll::Yielded,
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
                     RegionalWhnfStatus::Failed(failure) => {
                         return RegionalBuiltinPoll::Failed(contextual_binary_failure_in(
                             access, failure,
@@ -102,7 +104,7 @@ impl RegionalTextLinesMachine {
             };
             self.bytes.push(byte);
             self.item = None;
-            return RegionalBuiltinPoll::Yielded;
+            return RegionalBuiltinPoll::Continue;
         }
 
         if let Some(front) = &mut self.front {
@@ -117,13 +119,14 @@ impl RegionalTextLinesMachine {
                         RegionalWhnfWork::from_focus(access, item)
                             .with_source_owner(self.source_owner),
                     );
-                    RegionalBuiltinPoll::Yielded
+                    RegionalBuiltinPoll::Continue
                 }
                 RegionalListFrontPoll::Ready(None) => RegionalBuiltinPoll::Ready(
                     finish_text_lines_in(access, Bytes::from(std::mem::take(&mut self.bytes))),
                 ),
                 RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-                RegionalListFrontPoll::Yielded => RegionalBuiltinPoll::Yielded,
+                RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => {
                     RegionalBuiltinPoll::Failed(contextual_binary_failure_in(access, failure))
                 }
@@ -141,7 +144,7 @@ impl RegionalTextLinesMachine {
             RegionalSourcePoll::Boundary(request) => {
                 return RegionalBuiltinPoll::Boundary(request);
             }
-            RegionalSourcePoll::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalSourcePoll::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
             RegionalSourcePoll::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
         };
         match source {
@@ -152,7 +155,7 @@ impl RegionalTextLinesMachine {
                     source,
                     Some(self.source_owner),
                 ));
-                RegionalBuiltinPoll::Yielded
+                RegionalBuiltinPoll::Continue
             }
             _ => failure_in("text lines builtin requires a binary-compatible list or binary value"),
         }
@@ -206,7 +209,7 @@ impl RegionalListConcatMachine {
             RegionalSourcePoll::Boundary(request) => {
                 return RegionalBuiltinPoll::Boundary(request);
             }
-            RegionalSourcePoll::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalSourcePoll::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
             RegionalSourcePoll::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
         };
         let Value::List(source) = source else {
@@ -271,7 +274,7 @@ impl RegionalListMapMachine {
             RegionalSourcePoll::Boundary(request) => {
                 return RegionalBuiltinPoll::Boundary(request);
             }
-            RegionalSourcePoll::Yielded => return RegionalBuiltinPoll::Yielded,
+            RegionalSourcePoll::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
             RegionalSourcePoll::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
         };
         let source = match source {
@@ -320,7 +323,7 @@ impl RegionalListMapMachine {
 enum RegionalSourcePoll {
     Ready(Value),
     Boundary(RegionalBoundaryRequest),
-    Yielded,
+    BudgetExhausted,
     Failed(Arc<EvaluationFailure>),
 }
 
@@ -355,7 +358,7 @@ fn poll_regional_source(
             )
         }
         RegionalWhnfStatus::Boundary(request) => RegionalSourcePoll::Boundary(request),
-        RegionalWhnfStatus::Yielded => RegionalSourcePoll::Yielded,
+        RegionalWhnfStatus::BudgetExhausted => RegionalSourcePoll::BudgetExhausted,
         RegionalWhnfStatus::Failed(failure) => RegionalSourcePoll::Failed(failure),
     }
 }

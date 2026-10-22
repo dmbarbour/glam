@@ -33,7 +33,7 @@ fn ready_after_yields(
 ) -> RuntimeValueRoot {
     for _ in 0..limit {
         match poll(context, computation, 1) {
-            WhnfPoll::Yielded => {}
+            WhnfPoll::BudgetExhausted => {}
             WhnfPoll::Ready(value) => return value,
             _ => panic!("the assigned fixture must advance without another boundary"),
         }
@@ -52,7 +52,7 @@ fn builtin_application_batches_only_to_saturation() {
 
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     let WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) = poll(&context, &mut computation, 1)
     else {
@@ -83,7 +83,7 @@ fn partial_builtin_resumes_without_replaying_supplied_arguments() {
 
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     let WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) = poll(&context, &mut computation, 1)
     else {
@@ -124,11 +124,11 @@ fn promised_callable_resumes_at_function_demand_before_applying_arguments() {
         .expect_without_debug("the callable promise should accept its assignment");
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     assert!(matches!(
         poll(&context, &mut computation, 1),
@@ -155,7 +155,7 @@ fn function_application_batches_arguments_without_intermediate_roots() {
 
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     assert_eq!(
         context.values().managed_root_registrations_for_test(),
@@ -252,7 +252,7 @@ fn promised_apply_member_resumes_before_the_original_argument_is_consumed() {
 
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     let WhnfPoll::Deferred(WhnfDeferredRequest::Promise(root)) =
         poll(&context, &mut computation, 1)
@@ -265,11 +265,11 @@ fn promised_apply_member_resumes_before_the_original_argument_is_consumed() {
         .expect_without_debug("the apply member should accept its assignment");
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     assert!(matches!(
         poll(&context, &mut computation, 1),
@@ -292,7 +292,7 @@ fn saturated_result_is_demanded_before_any_extra_argument_is_applied() {
 
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     let WhnfPoll::Deferred(WhnfDeferredRequest::Lazy(lazy)) = poll(&context, &mut computation, 1)
     else {
@@ -311,7 +311,7 @@ fn saturated_result_is_demanded_before_any_extra_argument_is_applied() {
 
     assert!(matches!(
         poll(&context, &mut computation, 1),
-        WhnfPoll::Yielded
+        WhnfPoll::BudgetExhausted
     ));
     let WhnfPoll::Failed(failure) = poll(&context, &mut computation, 1) else {
         panic!("only the demanded saturated result may receive the extra argument")
