@@ -745,7 +745,19 @@ handle API goes.
       pairs, which are well-formed by construction. A twin fails where
       forced on lists of unequal length, a key given twice or a pair of
       another length, and leaves out members already `{}`.
+    - Then (maintainer, 2026-10-22, `dict-keys-listed-by-reflection`): a
+      dict's keys are listed only by reflection, so glam's std gains the
+      constructors alone, as `'dict`'s `from_entries` and `from_pairs`,
+      with `reverse` in `'list`. The reflection API may later list members
+      through `DictPairs`, consistently with client machines.
 19. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
+    (Sketched with the maintainer on 2026-10-22: a runtime-owned compile
+    service, which the compile builtin's opaque compiler operand reaches
+    weakly with its import site, so no worker builds an `Assembler`; its
+    front-end lookup is one place that `compile-bootstrap` later extends,
+    since user-defined syntax has not started. Compilation is a pure
+    function, so its diagnostics are reflection effects, never output of
+    the machine that asked for the compile.)
     compilation builds its context from runtime-side parts, the value
     factory, the front ends, an invocation counter and a diagnostics
     port, so no worker reaches an `Assembler`, a `DeferredAssembler` or a

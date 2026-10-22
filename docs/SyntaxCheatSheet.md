@@ -178,7 +178,7 @@ import "Bar.g" as b         # introduce b
 import "Baz.g" at b         # extend existing b
 import "A/B/C.g"            # subfolders ok; NO "../", absolute, or dot-paths
 import "data.bin" binary as blob    # raw bytes, not compiled
-import 'prelude             # built-in module ('std; also 'math, 'list)
+import 'prelude             # built-in module ('std; also 'math, 'list, 'dict)
 import 'math as m
 
 # Target syntax, not yet in the bootstrap:

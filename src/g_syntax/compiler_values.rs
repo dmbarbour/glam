@@ -35,6 +35,7 @@ struct GCompilerValues {
     runtime: crate::runtime::EvaluationRuntimeId,
     math: RootedBuiltinModule,
     list: RootedBuiltinModule,
+    dict: RootedBuiltinModule,
     std: RootedBuiltinModule,
     empty_object_defs: RuntimeValueRoot,
     constant_object_defs: RuntimeValueRoot,
@@ -59,6 +60,7 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
             runtime: _,
             math,
             list,
+            dict,
             std,
             empty_object_defs,
             constant_object_defs,
@@ -71,6 +73,7 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
         } = self;
         math.visit_runtime_roots(visit);
         list.visit_runtime_roots(visit);
+        dict.visit_runtime_roots(visit);
         std.visit_runtime_roots(visit);
         for root in [
             empty_object_defs,
@@ -241,7 +244,23 @@ impl GCompilerValues {
                     .insert(name_as_key("at"), Value::Builtin(Builtin::ListAt))
                     .insert(name_as_key("head"), Value::Builtin(Builtin::ListHead))
                     .insert(name_as_key("tail"), Value::Builtin(Builtin::ListTail))
+                    .insert(name_as_key("reverse"), Value::Builtin(Builtin::ListReverse))
                     .insert(name_as_key("pure"), Value::Builtin(Builtin::ListEffect)),
+            )
+        });
+        rooted_checkpoint();
+        // Only constructors: a dict's keys are listed only by reflection.
+        let dict = build_module(values, &constant_object_defs, |_| {
+            Value::Dict(
+                Dict::new_sync()
+                    .insert(
+                        name_as_key("from_entries"),
+                        Value::Builtin(Builtin::DictFromEntries),
+                    )
+                    .insert(
+                        name_as_key("from_pairs"),
+                        Value::Builtin(Builtin::DictFromPairs),
+                    ),
             )
         });
         rooted_checkpoint();
@@ -265,6 +284,7 @@ impl GCompilerValues {
                     .insert(name_as_key("could"), project_value(access, &could))
                     .insert(name_as_key("math"), project_value(access, &math.value))
                     .insert(name_as_key("list"), project_value(access, &list.value))
+                    .insert(name_as_key("dict"), project_value(access, &dict.value))
                     .insert(
                         name_as_key("eff"),
                         Value::Dict(
@@ -289,6 +309,7 @@ impl GCompilerValues {
             runtime: values.runtime_id(),
             math,
             list,
+            dict,
             std,
             empty_object_defs,
             constant_object_defs,
@@ -309,6 +330,7 @@ pub(in crate::g_syntax) fn builtin_module(
     with_values(access.values(), |compiler| match name {
         "math" => Some(project_module(access, &compiler.math)),
         "list" => Some(project_module(access, &compiler.list)),
+        "dict" => Some(project_module(access, &compiler.dict)),
         "std" | "prelude" => Some(project_module(access, &compiler.std)),
         _ => None,
     })
@@ -1281,7 +1303,7 @@ mod tests {
             checkpoints += 1;
         });
 
-        assert_eq!(checkpoints, 12);
+        assert_eq!(checkpoints, 13);
         values
             .collect_managed_for_test()
             .expect("the unpublished complete candidate must retain all of its roots");
@@ -1290,7 +1312,7 @@ mod tests {
             assert_eq!(root.runtime_id(), values.runtime_id());
             roots += 1;
         });
-        assert!(roots >= 12);
+        assert!(roots >= 13);
         assert!(matches!(
             project_test_value(&values, &compiler.std.value),
             Value::Dict(_)

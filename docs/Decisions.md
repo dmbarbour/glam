@@ -1299,6 +1299,20 @@ maps the short names used here to file names.
     keeps `hello_elf` within 0.1% of its cost before.
 - **Recorded in:** parser backtracking plan, "Scope analysis 2026-10-17".
 
+### A dict's keys are listed only by reflection
+`dict-keys-listed-by-reflection` · 2026-10-22 · maintainer · accepted
+- **Context:** the runtime API's stack gained `dict_pairs` and
+  `dict_entries` (`api-stack-ops`), which list a dict's keys, on new
+  builtins `DictPairs`, `DictFromEntries` and `DictFromPairs`.
+- **Decision:** a dict's keys are not iterable outside reflection. Glam's
+  standard library gains the constructors only, `dict.from_entries` and
+  `dict.from_pairs`, in a module imported as `'dict` (and `std.dict`);
+  listing keys stays with hosts and reflection. `list.reverse` joins
+  `'list`, as reversing lists nothing hidden.
+- **Consequences:** the reflection API may later list a dict's members
+  through `DictPairs`, consistently with client machines.
+- **Recorded in:** runtime API plan, `api-stack-ops`.
+
 ## Diagnostics
 
 ### Senders never evaluate diagnostics; renderers do

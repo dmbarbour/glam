@@ -442,3 +442,27 @@ fn dicts_from_pairs_and_entries_fail_where_forced_on_ill_formed_input() {
     })
     .expect("the turn should succeed");
 }
+
+const DICTS: &str = "language g0\nimport 'dict as dict\nimport 'list as list\nmade = dict.from_entries ['a, 'b] [1, 2]\npaired = dict.from_pairs [['c, 3]]\nreversed = list.reverse [1, 2, 3]\n";
+
+#[test]
+fn glam_builds_dicts_from_entries_and_pairs_and_reverses_lists() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        m.dict_pack(Vec::<&str>::new())?;
+        m.script_object(["dicts"], "g", DICTS)?;
+        m.dup(1)?;
+        m.dict_get("made")?;
+        m.dict_unpack(["a", "b"])?;
+        assert_eq!(ints(m, 2)?, [1, 2]);
+        m.dup(1)?;
+        m.dict_get("paired")?;
+        m.dict_unpack(["c"])?;
+        assert_eq!(m.int_pop()?, 3);
+        m.dict_get("reversed")?;
+        m.list_unpack(3)?;
+        assert_eq!(ints(m, 3)?, [3, 2, 1]);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
