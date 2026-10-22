@@ -168,18 +168,30 @@ struct RecordPollOrder {
     yield_once: bool,
 }
 
+/// A fixture's poll that ends unfinished spends its whole budget, as any
+/// machine's does (`budget-exhausted-only`).
+fn exhausted(step_budget: &mut EvaluationStepBudget) -> EvaluationMachinePoll {
+    step_budget.consume(step_budget.remaining());
+    EvaluationMachinePoll::BudgetExhausted
+}
+
 impl EvaluationTaskMachine for RecordPollOrder {
     fn poll(
         &mut self,
         context: &mut super::EvaluationPollContext,
-        _step_budget: &mut EvaluationStepBudget,
+        step_budget: &mut EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.polls
             .lock()
             .expect("poll trace was poisoned")
             .push(self.label);
+        // Each poll is a step of work, which pays one unit.
+        assert!(
+            step_budget.try_consume(),
+            "a poll starts with a unit available"
+        );
         if std::mem::take(&mut self.yield_once) {
-            EvaluationMachinePoll::Yielded
+            exhausted(step_budget)
         } else {
             EvaluationMachinePoll::Complete(context.root_unit())
         }

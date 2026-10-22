@@ -311,7 +311,9 @@ pub(crate) enum ClientDemandPoll {
     Complete(RuntimeValueRoot),
     Failed(RuntimeFailureRoot),
     Blocked(WorkDependency),
-    Yielded,
+    /// The poll spent its whole budget; nothing else ends a poll with
+    /// budget left unreported (`budget-exhausted-only`).
+    BudgetExhausted,
     /// Only the scheduler's poll boundary produces this.
     Panicked(EvaluationPanic),
 }
@@ -581,7 +583,7 @@ impl EvaluationWorkCoordinator {
                         claimed.prior_subscription.take(),
                         ClientDemandResult::Panicked(report),
                     )),
-                    ClientDemandPoll::Yielded => {
+                    ClientDemandPoll::BudgetExhausted => {
                         obsolete_subscription = claimed.prior_subscription.take();
                         let record = state
                             .client_demands

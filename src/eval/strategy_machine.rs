@@ -12,7 +12,6 @@ use super::whnf::WhnfComputation;
 pub(crate) enum StrategyDemandPoll {
     Ready,
     Pending(WorkDependency),
-    Continue,
     BudgetExhausted,
     Failed,
 }
@@ -55,37 +54,44 @@ impl StrategyDemandMachine {
         durable_context: &EvalContext,
         step_budget: &mut EvaluationStepBudget,
     ) -> StrategyDemandPoll {
-        if matches!(self.phase, StrategyDemandPhase::Complete) {
+        loop {
+            if matches!(self.phase, StrategyDemandPhase::Complete) {
+                return StrategyDemandPoll::Ready;
+            }
+            let ready = match poll_whnf_computation(
+                &mut self.demand,
+                poll_context,
+                durable_context,
+                step_budget,
+            ) {
+                WhnfOwnerPoll::Ready(value) => value,
+                WhnfOwnerPoll::Pending(dependency) => {
+                    return StrategyDemandPoll::Pending(dependency);
+                }
+                WhnfOwnerPoll::BudgetExhausted => return StrategyDemandPoll::BudgetExhausted,
+                WhnfOwnerPoll::Failed(_) => return StrategyDemandPoll::Failed,
+            };
+
+            if matches!(self.phase, StrategyDemandPhase::Value) {
+                let metadata = context.with_value_access(|access| {
+                    EvaluatedValue::from_whnf_in(access.values(), access.clone_root(&ready))
+                        .expect("strategy demand must produce WHNF")
+                        .into_value_in(access.values())
+                        .associated_metadata(access.values())
+                        .map(|value| access.values().root_runtime_value(value))
+                });
+                if let Some(metadata) = metadata {
+                    // Moving to the metadata is a step of this machine's own,
+                    // which goes on within the poll (`budget-exhausted-only`).
+                    self.demand = WhnfComputation::from_root(metadata);
+                    self.phase = StrategyDemandPhase::Metadata;
+                    let _ = step_budget.try_consume();
+                    continue;
+                }
+            }
+
+            self.phase = StrategyDemandPhase::Complete;
             return StrategyDemandPoll::Ready;
         }
-        let ready = match poll_whnf_computation(
-            &mut self.demand,
-            poll_context,
-            durable_context,
-            step_budget,
-        ) {
-            WhnfOwnerPoll::Ready(value) => value,
-            WhnfOwnerPoll::Pending(dependency) => return StrategyDemandPoll::Pending(dependency),
-            WhnfOwnerPoll::BudgetExhausted => return StrategyDemandPoll::BudgetExhausted,
-            WhnfOwnerPoll::Failed(_) => return StrategyDemandPoll::Failed,
-        };
-
-        if matches!(self.phase, StrategyDemandPhase::Value) {
-            let metadata = context.with_value_access(|access| {
-                EvaluatedValue::from_whnf_in(access.values(), access.clone_root(&ready))
-                    .expect("strategy demand must produce WHNF")
-                    .into_value_in(access.values())
-                    .associated_metadata(access.values())
-                    .map(|value| access.values().root_runtime_value(value))
-            });
-            if let Some(metadata) = metadata {
-                self.demand = WhnfComputation::from_root(metadata);
-                self.phase = StrategyDemandPhase::Metadata;
-                return StrategyDemandPoll::Continue;
-            }
-        }
-
-        self.phase = StrategyDemandPhase::Complete;
-        StrategyDemandPoll::Ready
     }
 }

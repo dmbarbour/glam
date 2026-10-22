@@ -50,7 +50,7 @@ fn lazy_source_result_is_installed_once_before_following_a_promise() {
     assert!(matches!(
         crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
             .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))),
-        EvaluationMachinePoll::Yielded
+        EvaluationMachinePoll::BudgetExhausted
     ));
     let EvaluationMachinePoll::Complete(value) =
         crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {

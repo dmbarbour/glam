@@ -338,7 +338,9 @@ A step pays one unit when it changes state, and observing is free (decision
   own steps within its poll; waiting pumps within the caller's budget.
 
 So a one-unit quantum can always advance some work without hiding a renewed
-sub-budget. The demand pump lends each poll a task quantum from its outer
+sub-budget. A poll that ends with budget left completes, fails, blocks, or
+reports `Contended`; `BudgetExhausted` means only that the budget is spent,
+which debug builds assert where task, client, spark and effect polls end. The demand pump lends each poll a task quantum from its outer
 scalar and takes back what the poll did not reduce, so its
 `BudgetExhausted` result describes exact inner spend. A poll that blocks
 reduces nothing and costs nothing. A lazy's machine runs its phases within

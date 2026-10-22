@@ -538,6 +538,13 @@ fn publish_test_observation(coordinator: &EvaluationWorkCoordinator) -> RuntimeO
 
 struct TestTaskMachine;
 
+/// A fixture's poll that ends unfinished spends its whole budget, as any
+/// machine's does (`budget-exhausted-only`).
+fn exhausted(step_budget: &mut crate::evaluation::EvaluationStepBudget) -> EvaluationMachinePoll {
+    step_budget.consume(step_budget.remaining());
+    EvaluationMachinePoll::BudgetExhausted
+}
+
 impl EvaluationTaskMachine for TestTaskMachine {
     fn poll(
         &mut self,
@@ -554,10 +561,10 @@ impl EvaluationTaskMachine for CountTaskPolls {
     fn poll(
         &mut self,
         _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         self.0.fetch_add(1, Ordering::AcqRel);
-        EvaluationMachinePoll::Yielded
+        exhausted(step_budget)
     }
 }
 
@@ -968,7 +975,7 @@ fn exact_claimed_work_families_publish_release_observations() {
         panic!("the exact reflection route should be claimable")
     };
     let mut reflection_release =
-        coordinator.release_reflection(reflection, ReflectionWorkPoll::Yielded);
+        coordinator.release_reflection(reflection, ReflectionWorkPoll::Runnable);
     assert!(
         coordinator.reconcile_exact_route_release(
             &reflection_wait,
@@ -987,7 +994,7 @@ fn exact_claimed_work_families_publish_release_observations() {
     else {
         panic!("the exact deferred route should be claimable")
     };
-    let mut deferred_release = coordinator.release_deferred(deferred, DeferredWorkPoll::Yielded);
+    let mut deferred_release = coordinator.release_deferred(deferred, DeferredWorkPoll::Runnable);
     assert!(
         coordinator.reconcile_exact_route_release(
             &deferred_wait,
@@ -1015,7 +1022,7 @@ fn exact_claimed_work_families_publish_release_observations() {
     else {
         panic!("the exact lazy route should be claimable")
     };
-    let mut lazy_release = coordinator.release_lazy_route(lazy_claim, DeferredWorkPoll::Yielded);
+    let mut lazy_release = coordinator.release_lazy_route(lazy_claim, DeferredWorkPoll::Runnable);
     assert!(
         coordinator.reconcile_exact_route_release(
             &lazy_wait,
@@ -1087,7 +1094,7 @@ fn a_route_admitted_during_an_inline_claim_is_busy_until_the_claim_ends() {
     else {
         panic!("the released route should be claimable")
     };
-    drop(coordinator.release_lazy_route(claimed, DeferredWorkPoll::Yielded));
+    drop(coordinator.release_lazy_route(claimed, DeferredWorkPoll::Runnable));
 }
 
 #[test]
@@ -1503,7 +1510,7 @@ fn foreground_route_falls_back_after_an_interleaved_release_mutation() {
     });
     let release_coordinator = coordinator.clone();
     let release_thread = thread::spawn(move || {
-        release_coordinator.release_reflection(parent_claim, ReflectionWorkPoll::Yielded)
+        release_coordinator.release_reflection(parent_claim, ReflectionWorkPoll::Runnable)
     });
     release_observed
         .recv()
@@ -2027,7 +2034,7 @@ fn stale_nonterminal_release_cannot_outlive_terminal_retirement() {
     thread::scope(|scope| {
         let releasing = coordinator.clone();
         let first_release = scope
-            .spawn(move || releasing.release_reflection(first_claim, ReflectionWorkPoll::Yielded));
+            .spawn(move || releasing.release_reflection(first_claim, ReflectionWorkPoll::Runnable));
         release_observed
             .recv()
             .expect("first release should publish its queued state");
@@ -2432,7 +2439,6 @@ fn coordinator_owns_the_reflection_lifecycle() {
     };
     let release =
         coordinator.release_reflection(claimed, ReflectionWorkPoll::Blocked(block.clone()));
-    assert!(release.made_progress);
     assert!(release.remains_blocked);
     assert!(!release.terminal);
     assert_eq!(
@@ -2500,7 +2506,6 @@ fn observation_published_before_block_registration_requeues_on_recheck() {
             error: None,
         }),
     );
-    assert!(release.made_progress);
     assert!(!release.remains_blocked);
     assert_eq!(coordinator.ready_task_count(), 1);
 
@@ -2930,7 +2935,6 @@ fn observation_published_during_registration_is_caught_by_recheck() {
     let release = releasing
         .join()
         .expect("observation release thread should finish");
-    assert!(release.made_progress);
     assert!(!release.remains_blocked);
     assert_eq!(coordinator.ready_task_count(), 1);
     let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
@@ -2996,14 +3000,14 @@ fn coordinator_fairness_alternates_ready_tasks_and_sparks() {
     else {
         panic!("task work should receive the first turn")
     };
-    let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Yielded);
+    let release = coordinator.release_reflection(claimed, ReflectionWorkPoll::Runnable);
     assert!(!release.terminal);
     assert!(!release.remains_blocked);
 
     let CoordinatorSelection::Spark(spark) = coordinator.select_worker() else {
         panic!("spark should receive the alternating turn")
     };
-    coordinator.release_spark(spark, SparkWorkPoll::Yielded);
+    coordinator.release_spark(spark, SparkWorkPoll::Runnable);
     assert_eq!(coordinator.spark_work_counts(), (1, 0, 0));
 
     let CoordinatorSelection::Task(ClaimedTaskWork::Reflection(claimed)) =
@@ -3407,8 +3411,7 @@ fn deferred_insertion_is_immediately_dormant_and_promotable() {
     else {
         panic!("the requeued producer should preserve its deferred kind")
     };
-    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Yielded);
-    assert!(release.made_progress);
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Runnable);
     assert!(!release.remains_blocked);
     assert!(
         coordinator
@@ -3674,8 +3677,7 @@ fn exact_deferred_demand_remains_local_across_a_cooperative_yield() {
     else {
         panic!("the exact producer should preserve its deferred kind")
     };
-    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Yielded);
-    assert!(release.made_progress);
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Runnable);
     assert!(!release.remains_blocked);
 
     assert!(
@@ -3731,8 +3733,7 @@ fn dependency_published_while_deferred_runs_survives_its_yield() {
         coordinator.promote_deferred_wait(&wait),
         "publishing a dependency against a running producer must latch demand"
     );
-    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Yielded);
-    assert!(release.made_progress);
+    let release = coordinator.release_deferred(claimed, DeferredWorkPoll::Runnable);
     assert!(!release.remains_blocked);
 
     let ClaimedTaskWork::Deferred(claimed) = coordinator

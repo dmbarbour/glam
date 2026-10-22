@@ -184,7 +184,8 @@ control-flow overview.
   before the new managed owner is installed. Lazy producer checkpoints live
   beneath the lazy itself; client, promise, reflection, and spark computations
   remain owned by their durable machines.
-- Preserve one canonical continuation state across `Pending` and `Yielded`.
+- Preserve one canonical continuation state across `Pending` and
+  `BudgetExhausted`.
   Do not reinitialize focus, continuation frames, followed identities, or
   source-owner/cycle state merely because an outer machine was rescheduled.
   The retired direct evaluator gate and whole-value wrappers must not return;

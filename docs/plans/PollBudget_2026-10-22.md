@@ -282,3 +282,19 @@ first.
   Left as they were: `UnitEffectTask` polls without `poll_pumping`, and
   `poll_blocked` and `poll_pumping` both pump a wait; neither breaks the
   contract.
+- `budget-exhausted-only` (2026-10-22): the scheduler's `Yielded` and the
+  client demand's are `BudgetExhausted`, and the coordinator's records of
+  work that runs again, after a spent budget or contention, are `Runnable`.
+  `assert_spent_when_exhausted` checks the contract where task, client,
+  spark and synchronous effect polls end. The spark path's strategy machine
+  moves to its metadata within the poll. The runtime pump's `.max(1)` and
+  the release's dead `made_progress` went, as did the dead exhaustion arms
+  after a deferred boundary and the "reservation" wording. Test machines
+  that end a poll unfinished spend its whole budget, as real machines do,
+  so two pump tests take one more call.
+  - Not done: contended work without a wake source (a semantic action in
+    flight in another session, or a pass that saw only other threads'
+    changes) is retried rather than blocked. A retrying driver spins at most
+    while the other session's driver finishes one synchronous action, since
+    that driver clears its flag before it would block. A wake source would
+    let it wait instead.

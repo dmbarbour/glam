@@ -196,7 +196,7 @@ fn list_effect_checkpoint_admission_retains_a_source_owned_deferred_chunk() {
     assert!(matches!(
         crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
             .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(0))),
-        EvaluationMachinePoll::Yielded
+        EvaluationMachinePoll::BudgetExhausted
     ));
     assert_list_effect_checkpoint(&context, &machine);
     collect_between_handoffs(&context);
@@ -211,7 +211,7 @@ fn poll_list_effect_until_blocked(
         match crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         }) {
-            EvaluationMachinePoll::Yielded => {
+            EvaluationMachinePoll::BudgetExhausted => {
                 machine = resume_after_list_effect_route_loss(context, retained, machine);
             }
             EvaluationMachinePoll::Blocked(block) => {
@@ -247,7 +247,7 @@ fn drive_list_effect_after_route_loss(
         match crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         }) {
-            EvaluationMachinePoll::Yielded => {
+            EvaluationMachinePoll::BudgetExhausted => {
                 machine = resume_after_list_effect_route_loss(context, retained, machine);
             }
             EvaluationMachinePoll::Blocked(block) => {
@@ -474,7 +474,7 @@ fn function_fixpoint_checkpoint_survives_promise_and_route_loss() {
     assert!(matches!(
         crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
             .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))),
-        EvaluationMachinePoll::Yielded
+        EvaluationMachinePoll::BudgetExhausted
     ));
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
     drop(machine);
@@ -550,7 +550,7 @@ fn immediate_builtin_result_is_installed_before_route_loss() {
     assert!(matches!(
         crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
             .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))),
-        EvaluationMachinePoll::Yielded
+        EvaluationMachinePoll::BudgetExhausted
     ));
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Whnf);
     let machine = resume_after_lazy_route_loss(&context, &retained, machine);
@@ -587,7 +587,7 @@ fn complete_in_one_unit_polls(context: &EvalContext, lazy: LazyValue) -> usize {
         if let EvaluationMachinePoll::Complete(_) = outcome {
             return polls;
         }
-        assert!(matches!(outcome, EvaluationMachinePoll::Yielded));
+        assert!(matches!(outcome, EvaluationMachinePoll::BudgetExhausted));
         assert_eq!(
             one.spent(),
             1,
@@ -842,7 +842,7 @@ fn a_machine_whose_lazy_was_forwarded_meanwhile_follows_the_forward() {
                         access.root_runtime_value(cached.into_value_in(&access))
                     });
                 }
-                Phase::End(EvaluationMachinePoll::Yielded) => {}
+                Phase::End(EvaluationMachinePoll::BudgetExhausted) => {}
                 _ => panic!("a {family} machine must follow the forward to a cached end"),
             }
         };
@@ -1092,7 +1092,7 @@ fn poll_until_blocked_after_route_loss(
         match crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         }) {
-            EvaluationMachinePoll::Yielded => {
+            EvaluationMachinePoll::BudgetExhausted => {
                 machine = resume_after_lazy_route_loss(context, retained, machine);
                 *route_losses += 1;
             }
@@ -1138,7 +1138,7 @@ fn poll_until_stalled_child_wait_after_route_loss(
         match crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         }) {
-            EvaluationMachinePoll::Yielded => {
+            EvaluationMachinePoll::BudgetExhausted => {
                 machine = resume_after_lazy_route_loss(context, retained, machine);
                 *route_losses += 1;
             }
@@ -1187,7 +1187,7 @@ fn drive_after_route_loss(
         match crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         }) {
-            EvaluationMachinePoll::Yielded => {
+            EvaluationMachinePoll::BudgetExhausted => {
                 machine = resume_after_lazy_route_loss(context, retained, machine);
                 *route_losses += 1;
             }
@@ -1233,7 +1233,7 @@ fn drive_failure_after_route_loss(
         match crate::evaluation::EvaluationPollContext::quantum_for_context(context, |poll| {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         }) {
-            EvaluationMachinePoll::Yielded => {
+            EvaluationMachinePoll::BudgetExhausted => {
                 machine = resume_after_lazy_route_loss(context, retained, machine);
                 *route_losses += 1;
             }
@@ -1329,7 +1329,7 @@ fn poll_object_until_blocked(
 ) -> WorkDependency {
     for attempt in 0..128 {
         match machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1)) {
-            EvaluationMachinePoll::Yielded => {}
+            EvaluationMachinePoll::BudgetExhausted => {}
             EvaluationMachinePoll::Blocked(block) => {
                 return block
                     .dependency
@@ -1555,7 +1555,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
             match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
                 machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(256))
             }) {
-                EvaluationMachinePoll::Yielded => {}
+                EvaluationMachinePoll::BudgetExhausted => {}
                 EvaluationMachinePoll::Blocked(block) => {
                     let Some(WorkDependency::Wait(wait)) = block.dependency else {
                         panic!("the blocked callable must publish its subscribed wait")
@@ -1617,7 +1617,7 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
             match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
                 resumed.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(256))
             }) {
-                EvaluationMachinePoll::Yielded => {}
+                EvaluationMachinePoll::BudgetExhausted => {}
                 EvaluationMachinePoll::Complete(value) => break 'resume value,
                 EvaluationMachinePoll::Failed(failure) => panic!("{failure}"),
                 EvaluationMachinePoll::Blocked(block) => {
@@ -1749,7 +1749,7 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
             match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
                 machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
             }) {
-                EvaluationMachinePoll::Yielded => {
+                EvaluationMachinePoll::BudgetExhausted => {
                     machine = resume_after_object_route_loss(&context, &retained, machine);
                 }
                 EvaluationMachinePoll::Complete(value) => break 'complete value,
@@ -3058,7 +3058,7 @@ fn public_construction_checkpoint_cycle_is_reclaimed_after_roots_drop() {
     assert!(matches!(
         crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
             .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))),
-        EvaluationMachinePoll::Yielded
+        EvaluationMachinePoll::BudgetExhausted
     ));
     assert_lazy_checkpoint_kind(&context, &machine, ManagedLazyCheckpointKindTag::Builtin);
 
@@ -3176,7 +3176,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
         match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
         }) {
-            EvaluationMachinePoll::Yielded => collect_between_handoffs(&context),
+            EvaluationMachinePoll::BudgetExhausted => collect_between_handoffs(&context),
             EvaluationMachinePoll::Contended => {
                 panic!("the host-call fixture must not be contended")
             }
@@ -3226,7 +3226,7 @@ fn reflection_source_hands_off_to_an_ordinary_promised_whnf_checkpoint() {
             dependency: Some(WorkDependency::Promise(blocked)),
             ..
         }) => blocked,
-        EvaluationMachinePoll::Yielded => {
+        EvaluationMachinePoll::BudgetExhausted => {
             let EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Promise(blocked)),
                 ..
@@ -3262,7 +3262,7 @@ fn reflection_source_hands_off_to_an_ordinary_promised_whnf_checkpoint() {
     assert!(matches!(
         crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
             .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))),
-        EvaluationMachinePoll::Yielded
+        EvaluationMachinePoll::BudgetExhausted
     ));
     collect_between_handoffs(&context);
     let EvaluationMachinePoll::Complete(value) =

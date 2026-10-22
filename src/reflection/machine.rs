@@ -647,9 +647,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
     ) -> EffectTaskPoll {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
         let eval_context = self.eval_context.clone();
-        EvaluationPollContext::quantum_for_context_under(mutator, &eval_context, |context| {
-            self.poll_pumping(context, &mut budget)
-        })
+        let poll =
+            EvaluationPollContext::quantum_for_context_under(mutator, &eval_context, |context| {
+                self.poll_pumping(context, &mut budget)
+            });
+        crate::evaluation::assert_spent_when_exhausted(
+            matches!(poll, EffectTaskPoll::BudgetExhausted),
+            &budget,
+        );
+        poll
     }
 
     /// Polls this task within one total budget of `steps`, including the work
@@ -657,9 +663,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
     pub(super) fn poll(&mut self, steps: usize) -> EffectTaskPoll {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
         let eval_context = self.eval_context.clone();
-        EvaluationPollContext::quantum_for_context(&eval_context, |context| {
+        let poll = EvaluationPollContext::quantum_for_context(&eval_context, |context| {
             self.poll_pumping(context, &mut budget)
-        })
+        });
+        crate::evaluation::assert_spent_when_exhausted(
+            matches!(poll, EffectTaskPoll::BudgetExhausted),
+            &budget,
+        );
+        poll
     }
 
     /// Polls within `budget`, pumping a dependency it blocks on within the
@@ -3890,7 +3901,7 @@ fn poll_value_effect_task<S: TaskSpecialization>(
 ) -> EvaluationMachinePoll {
     let observed_epoch = task.eval_context.current_observation_epoch();
     match task.poll_pumping(context, step_budget) {
-        EffectTaskPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
+        EffectTaskPoll::BudgetExhausted => EvaluationMachinePoll::BudgetExhausted,
         EffectTaskPoll::Blocked(blocked) => {
             if let Some(error) = blocked
                 .dependency
@@ -3937,7 +3948,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
     ) -> EvaluationMachinePoll {
         let observed_epoch = self.0.eval_context.current_observation_epoch();
         match self.0.poll_with_context(context, step_budget) {
-            EffectTaskPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
+            EffectTaskPoll::BudgetExhausted => EvaluationMachinePoll::BudgetExhausted,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: blocked.dependency,

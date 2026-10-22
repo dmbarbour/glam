@@ -171,7 +171,7 @@ publishing the rooted request.
 
 Every payload demand owns its `WhnfComputation`, and list-front iteration and
 nested WHNF polls borrow the same `EvaluationStepBudget`. `Pending` retains the
-exact dependency and `Yielded` retains the exact decoder state, so neither
+exact dependency and `BudgetExhausted` retains the exact decoder state, so neither
 outcome repeats tag selection, list traversal, or continuation construction.
 Host dispatch begins only after decoding is complete and evaluator access has
 closed. Scalar and specialization

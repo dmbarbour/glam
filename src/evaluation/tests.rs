@@ -95,7 +95,7 @@ fn evaluation_step_budget_reports_exact_zero_one_and_many_spend() {
 /// root/edge policy here.
 fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePoll) {
     match poll {
-        EvaluationMachinePoll::Yielded
+        EvaluationMachinePoll::BudgetExhausted
         | EvaluationMachinePoll::Contended
         | EvaluationMachinePoll::Cancelled => {}
         // A panic report holds no managed edges.
@@ -159,7 +159,7 @@ fn assert_client_demand_boundary_inventory(poll: &ClientDemandPoll, result: &Cli
         ClientDemandPoll::Failed(failure) => {
             let _: &RuntimeFailureRoot = failure;
         }
-        ClientDemandPoll::Blocked(_) | ClientDemandPoll::Yielded => {}
+        ClientDemandPoll::Blocked(_) | ClientDemandPoll::BudgetExhausted => {}
         ClientDemandPoll::Panicked(report) => {
             let _: &crate::core::EvaluationPanic = report;
         }
@@ -555,7 +555,7 @@ fn client_demand_exactly_restarts_after_promise_assignment() {
             &mut crate::evaluation::EvaluationStepBudget::new(1),
         )
     });
-    assert!(matches!(poll, ClientDemandPoll::Yielded));
+    assert!(matches!(poll, ClientDemandPoll::BudgetExhausted));
     coordinator.release_client_demand(claimed, poll);
     assert!(matches!(
         coordinator.client_demand_snapshot(handle.work()),
@@ -2206,10 +2206,10 @@ impl EvaluationTaskMachine for ProbePollOutcomeMachine {
     fn poll(
         &mut self,
         context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         match self.0 {
-            ProbePollOutcome::Yielded => EvaluationMachinePoll::Yielded,
+            ProbePollOutcome::Yielded => exhausted(step_budget),
             ProbePollOutcome::Blocked => EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: None,
                 observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
@@ -2837,6 +2837,13 @@ fn reduce(step_budget: &mut crate::evaluation::EvaluationStepBudget) {
     );
 }
 
+/// A fixture's poll that ends unfinished spends its whole budget, as any
+/// machine's does (`budget-exhausted-only`).
+fn exhausted(step_budget: &mut crate::evaluation::EvaluationStepBudget) -> EvaluationMachinePoll {
+    step_budget.consume(step_budget.remaining());
+    EvaluationMachinePoll::BudgetExhausted
+}
+
 struct AlwaysYields;
 
 impl EvaluationTaskMachine for AlwaysYields {
@@ -2846,7 +2853,7 @@ impl EvaluationTaskMachine for AlwaysYields {
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
         reduce(step_budget);
-        EvaluationMachinePoll::Yielded
+        exhausted(step_budget)
     }
 }
 
@@ -2865,7 +2872,7 @@ impl EvaluationTaskMachine for YieldThenComplete {
         self.polls.fetch_add(1, Ordering::AcqRel);
         if self.yields != 0 {
             self.yields -= 1;
-            EvaluationMachinePoll::Yielded
+            exhausted(step_budget)
         } else {
             EvaluationMachinePoll::Complete(context.root_unit())
         }
@@ -2890,7 +2897,7 @@ impl EvaluationTaskMachine for RecordPollOrder {
             .expect("task-order trace was poisoned")
             .push(self.label);
         if std::mem::take(&mut self.yield_once) {
-            EvaluationMachinePoll::Yielded
+            exhausted(step_budget)
         } else {
             EvaluationMachinePoll::Complete(_context.root_unit())
         }
@@ -2966,7 +2973,7 @@ impl EvaluationTaskMachine for SpawnThenYield {
         self.target
             .schedule_task(move |_| Ok(Box::new(Signal(Some(signal)))))
             .expect("poll-owned test work should be admitted");
-        EvaluationMachinePoll::Yielded
+        exhausted(step_budget)
     }
 }
 
@@ -2992,7 +2999,7 @@ impl EvaluationTaskMachine for SpawnThenYieldAfterRelease {
                 .recv_timeout(Duration::from_secs(2))
                 .expect("mixed-attribution poll should be released")
         });
-        EvaluationMachinePoll::Yielded
+        exhausted(step_budget)
     }
 }
 
@@ -3036,7 +3043,7 @@ impl EvaluationTaskMachine for YieldAfterRelease {
         reduce(step_budget);
         if self.yields_first > 0 {
             self.yields_first -= 1;
-            return EvaluationMachinePoll::Yielded;
+            return exhausted(step_budget);
         }
         let Some(started) = self.started.take() else {
             return EvaluationMachinePoll::Complete(context.root_unit());
@@ -3050,7 +3057,7 @@ impl EvaluationTaskMachine for YieldAfterRelease {
                 .recv_timeout(Duration::from_secs(2))
                 .expect("test should release the yielding task")
         });
-        EvaluationMachinePoll::Yielded
+        exhausted(step_budget)
     }
 }
 
@@ -3218,7 +3225,7 @@ impl EvaluationTaskMachine for AssignPromiseThenYield {
             .expect("assignment fixture should signal exactly once")
             .send(())
             .expect("assignment observer should remain live");
-        EvaluationMachinePoll::Yielded
+        exhausted(step_budget)
     }
 }
 
@@ -3346,9 +3353,9 @@ impl EvaluationTaskMachine for Cancellable {
     fn poll(
         &mut self,
         _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Yielded
+        exhausted(step_budget)
     }
 
     fn cancel(&mut self) {
@@ -3585,8 +3592,10 @@ fn every_poll_outcome_releases_managed_access_before_publication() {
         coordinator.poll_claimed_task_with_probe(work, |poll| {
             let matched = matches!(
                 (expected, poll),
-                (ProbePollOutcome::Yielded, EvaluationMachinePoll::Yielded)
-                    | (ProbePollOutcome::Blocked, EvaluationMachinePoll::Blocked(_))
+                (
+                    ProbePollOutcome::Yielded,
+                    EvaluationMachinePoll::BudgetExhausted
+                ) | (ProbePollOutcome::Blocked, EvaluationMachinePoll::Blocked(_))
                     | (
                         ProbePollOutcome::Complete,
                         EvaluationMachinePoll::Complete(_)
@@ -4919,10 +4928,11 @@ fn a_release_drops_the_last_route_lease_after_its_guard() {
         );
         resume.send(()).expect("the release should still be paused");
         assert!(
-            release
+            !release
                 .join()
                 .expect("the release must not take the gate again")
-                .made_progress
+                .remains_blocked,
+            "the woken release must not leave its task blocked"
         );
     });
     coordinator.settle_terminal_work(
@@ -9566,9 +9576,16 @@ fn bounded_background_pump_obeys_zero_one_and_many_step_budgets() {
     assert_eq!(one.state, crate::api::BackgroundPumpState::Runnable);
     assert_eq!(polls.load(Ordering::Acquire), 1);
 
+    // An unfinished poll spends its whole grant, so the second yield takes
+    // all eight units and the completion a call of its own.
     let many = fixture.runtime.pump_background(8);
-    assert_eq!(many.spent_steps, 2);
-    assert_eq!(many.state, crate::api::BackgroundPumpState::Stable);
+    assert_eq!(many.spent_steps, 8);
+    assert_eq!(many.state, crate::api::BackgroundPumpState::Runnable);
+    assert_eq!(polls.load(Ordering::Acquire), 2);
+
+    let last = fixture.runtime.pump_background(8);
+    assert_eq!(last.spent_steps, 1);
+    assert_eq!(last.state, crate::api::BackgroundPumpState::Stable);
     assert_eq!(polls.load(Ordering::Acquire), 3);
     assert!(matches!(
         context.poll_reflection_task(&task),

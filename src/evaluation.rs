@@ -50,7 +50,7 @@ pub(crate) use executor::EvaluationExecutor;
 #[cfg(test)]
 pub(crate) use executor::WorkerValueHoldProbe;
 pub(crate) use observation::{RuntimeObservationEpoch, RuntimeObservationState};
-pub(crate) use pump::EvaluationPumpOutcome;
+pub(crate) use pump::{EvaluationPumpOutcome, assert_spent_when_exhausted};
 pub(crate) use session::{
     EvalContext, EvaluationSession, EvaluationSessionReport, EvaluationSessionRun,
     PendingReflectionTask, ReflectionTaskReservation,

@@ -46,18 +46,15 @@ impl EvaluationWorkCoordinator {
                 assert_eq!(route.wait, claimed.wait);
                 std::mem::take(&mut route.demand_while_running)
             };
-            let (state_after, block, made_progress, remains_blocked, terminal) = match poll {
-                DeferredWorkPoll::Yielded
+            let (state_after, block, remains_blocked, terminal) = match poll {
+                DeferredWorkPoll::Runnable
                     if (claimed.requeue_on_yield && had_exact_demand) || demand_while_running =>
                 {
-                    (WorkState::Queued, None, true, false, false)
+                    (WorkState::Queued, None, false, false)
                 }
-                DeferredWorkPoll::Yielded => (WorkState::Dormant, None, true, false, false),
-                DeferredWorkPoll::Blocked(block) => {
-                    let unchanged = claimed.prior_block.as_ref() == Some(&block);
-                    (WorkState::Blocked, Some(block), !unchanged, true, false)
-                }
-                DeferredWorkPoll::Terminal => (WorkState::Terminalizing, None, true, false, true),
+                DeferredWorkPoll::Runnable => (WorkState::Dormant, None, false, false),
+                DeferredWorkPoll::Blocked(block) => (WorkState::Blocked, Some(block), true, false),
+                DeferredWorkPoll::Terminal => (WorkState::Terminalizing, None, false, true),
             };
             let mut exact_subscription = if let Some(block) = block {
                 publish_task_block_locked(&mut state, self.runtime, claimed.id, block)
@@ -98,7 +95,6 @@ impl EvaluationWorkCoordinator {
             route_tracker.changed(true);
             (
                 DeferredWorkRelease {
-                    made_progress: made_progress || cycle_terminal,
                     remains_blocked: remains_blocked && !cycle_terminal,
                     terminal: terminal || cycle_terminal,
                     abandoned: false,
@@ -120,7 +116,6 @@ impl EvaluationWorkCoordinator {
             });
         route_tracker.changed(woke);
         if woke {
-            release.made_progress = true;
             release.remains_blocked = false;
         }
         if let Some(wait) = &promoted_wait {
@@ -130,7 +125,6 @@ impl EvaluationWorkCoordinator {
         let observation_woke = release.remains_blocked && self.recheck_observation_wait(claimed.id);
         route_tracker.changed(observation_woke);
         if observation_woke {
-            release.made_progress = true;
             release.remains_blocked = false;
         }
         release.route = Some({
@@ -537,24 +531,21 @@ impl EvaluationWorkCoordinator {
                     Some(WorkCloseReason::DemandSessionClosed)
                 )
             });
-            let (state_after, block, made_progress, remains_blocked, terminal) = if abandoned {
-                (WorkState::Terminalizing, None, true, false, true)
+            let (state_after, block, remains_blocked, terminal) = if abandoned {
+                (WorkState::Terminalizing, None, false, true)
             } else {
                 match poll {
-                    DeferredWorkPoll::Yielded
+                    DeferredWorkPoll::Runnable
                         if (claimed.requeue_on_yield && had_exact_demand)
                             || demand_while_running =>
                     {
-                        (WorkState::Queued, None, true, false, false)
+                        (WorkState::Queued, None, false, false)
                     }
-                    DeferredWorkPoll::Yielded => (WorkState::Dormant, None, true, false, false),
+                    DeferredWorkPoll::Runnable => (WorkState::Dormant, None, false, false),
                     DeferredWorkPoll::Blocked(block) => {
-                        let unchanged = claimed.prior_block.as_ref() == Some(&block);
-                        (WorkState::Blocked, Some(block), !unchanged, true, false)
+                        (WorkState::Blocked, Some(block), true, false)
                     }
-                    DeferredWorkPoll::Terminal => {
-                        (WorkState::Terminalizing, None, true, false, true)
-                    }
+                    DeferredWorkPoll::Terminal => (WorkState::Terminalizing, None, false, true),
                 }
             };
             let mut exact_subscription = if let Some(block) = block {
@@ -607,7 +598,6 @@ impl EvaluationWorkCoordinator {
             route_tracker.changed(true);
             (
                 DeferredWorkRelease {
-                    made_progress: made_progress || cycle_terminal,
                     remains_blocked: remains_blocked && !cycle_terminal,
                     terminal: terminal || cycle_terminal,
                     abandoned,
@@ -629,7 +619,6 @@ impl EvaluationWorkCoordinator {
             });
         route_tracker.changed(woke);
         if woke {
-            release.made_progress = true;
             release.remains_blocked = false;
         }
         if let Some(wait) = &promoted_wait {
@@ -639,7 +628,6 @@ impl EvaluationWorkCoordinator {
         let observation_woke = release.remains_blocked && self.recheck_observation_wait(claimed.id);
         route_tracker.changed(observation_woke);
         if observation_woke {
-            release.made_progress = true;
             release.remains_blocked = false;
         }
         release.route = Some({
@@ -934,7 +922,8 @@ impl ClaimedDeferredWork {
 }
 
 pub(in crate::evaluation) enum DeferredWorkPoll {
-    Yielded,
+    /// The work runs again: it spent its budget, or another thread stopped it.
+    Runnable,
     Blocked(EvaluationTaskBlock),
     Terminal,
 }
@@ -949,7 +938,6 @@ pub(in crate::evaluation) struct DeferredLazyCycleMember {
 }
 
 pub(in crate::evaluation) struct DeferredWorkRelease {
-    pub(in crate::evaluation) made_progress: bool,
     pub(in crate::evaluation) remains_blocked: bool,
     pub(in crate::evaluation) terminal: bool,
     pub(in crate::evaluation) abandoned: bool,

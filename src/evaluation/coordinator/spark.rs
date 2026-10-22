@@ -88,7 +88,8 @@ impl ClaimedSparkWork {
 
 pub(crate) enum SparkWorkPoll {
     Complete,
-    Yielded,
+    /// The spark spent its budget and runs again.
+    Runnable,
     Blocked(WorkDependency),
 }
 
@@ -242,10 +243,10 @@ impl EvaluationWorkCoordinator {
 
             let mut obsolete_dependency = None;
             let mut exact_subscription = None;
-            let yielded = matches!(poll, SparkWorkPoll::Yielded);
+            let yielded = matches!(poll, SparkWorkPoll::Runnable);
             let dependency = match poll {
                 SparkWorkPoll::Complete => None,
-                SparkWorkPoll::Yielded => None,
+                SparkWorkPoll::Runnable => None,
                 SparkWorkPoll::Blocked(dependency) => Some(dependency),
             };
             let retired = if close_requested {

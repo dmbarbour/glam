@@ -4883,7 +4883,7 @@ fn poll_machine_exit(
                 &mut crate::evaluation::EvaluationStepBudget::new(256),
             )
         }) {
-            EvaluationMachinePoll::Yielded => {}
+            EvaluationMachinePoll::BudgetExhausted => {}
             EvaluationMachinePoll::Contended => {
                 panic!("exit fixture was unexpectedly contended")
             }
@@ -5133,7 +5133,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
         match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
             machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(256))
         }) {
-            EvaluationMachinePoll::Yielded => {}
+            EvaluationMachinePoll::BudgetExhausted => {}
             EvaluationMachinePoll::Contended => {
                 panic!("disturbed exit retry was unexpectedly contended")
             }

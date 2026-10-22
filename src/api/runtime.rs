@@ -1303,7 +1303,6 @@ impl EvaluationRuntime {
                     else {
                         break;
                     };
-                    debug_assert_ne!(spent, 0);
                     debug_assert!(spent <= remaining);
                     spent_steps += spent;
                 }

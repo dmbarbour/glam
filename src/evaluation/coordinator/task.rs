@@ -137,7 +137,9 @@ pub(crate) struct EvaluationExitBlock {
 }
 
 pub(crate) enum EvaluationMachinePoll {
-    Yielded,
+    /// The poll spent its whole budget; nothing else ends a poll with
+    /// budget left unreported (`budget-exhausted-only`).
+    BudgetExhausted,
     /// Another thread holds, or is changing, what the poll needs. The poll
     /// ended with budget left, after any wait for that thread, and the work
     /// runs again (`budget-waits-block`).

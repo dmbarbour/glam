@@ -144,7 +144,7 @@ impl EvaluationTaskMachine for WhnfReflectionTask {
                     error: None,
                 })
             }
-            WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
+            WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::BudgetExhausted,
             WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
         }
     }

@@ -2783,10 +2783,13 @@ maps the short names used here to file names.
   - A poll performs at most its budget of reductions. Free observation
     cannot loop, because a poll without a reduction ends in a result,
     handoff, contention or block.
-  - A pump polls blocked and handed-off work for free (2026-10-22). Each
-    handoff advances its machine's phase, so a run of them ends; a machine
-    that yields forever without reducing would spin a pump, so test
-    machines pay a unit for each step of work.
+  - A poll ends only when it completes, fails, blocks, is stopped by
+    another thread (`Contended`), or spends its whole budget, which it
+    reports as `BudgetExhausted` (2026-10-22, `budget-exhausted-only`;
+    debug builds assert it where task, client, spark and effect polls end).
+    Handoffs and phase changes go on within the poll, and a pump charges
+    exactly what its polls reduce. Test machines that stand for work pay
+    for its steps.
   - With no units left, WHNF stops before its next step. A ready result
     after the last paid step is therefore reported by the next poll, where
     nets report it at once.
@@ -2816,7 +2819,8 @@ maps the short names used here to file names.
     quantums drained a pumping budget about six times faster than its
     reductions.
 - **Consequences:** `Yielded` still conflates progress and budget (holistic
-  review E1, open).
+  review E1, open). Resolved 2026-10-22 by the poll budget plan: the
+  outcome is `BudgetExhausted` and means only that.
 - **Rule lives in:** `architecture/evaluation.md` "Context and Session" (not
   yet the per-call poll budget).
 - **Recorded in:** resumable-WHNF plan W7C.0; holistic review R3; commit

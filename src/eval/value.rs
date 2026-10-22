@@ -509,7 +509,7 @@ pub(crate) fn poll_lazy_route(
                 }
                 claims.release(&finished.lazy);
             }
-            poll @ (EvaluationMachinePoll::Yielded
+            poll @ (EvaluationMachinePoll::BudgetExhausted
             | EvaluationMachinePoll::Contended
             | EvaluationMachinePoll::Blocked(_)) => {
                 let (top, below) = stack
@@ -969,7 +969,7 @@ impl LazyTaskMachine {
                     error: None,
                 }))
             }
-            WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+            WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::BudgetExhausted),
             WhnfOwnerPoll::Failed(failure) => {
                 self.fail(context, EvaluationHalt::failure(failure.into_failure()))
             }
@@ -1113,7 +1113,7 @@ impl LazyTaskMachine {
         match transition {
             Transition::Complete(root) => self.report_completion(root),
             Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
-            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::BudgetExhausted),
             Transition::Whnf => {
                 self.work = LazyTaskWork::WhnfCheckpoint;
                 Phase::Next
@@ -1140,12 +1140,11 @@ impl LazyTaskMachine {
                             error: None,
                         }))
                     }
-                    WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
                     WhnfOwnerPoll::Failed(failure) => {
                         Phase::End(EvaluationMachinePoll::Failed(failure))
                     }
-                    WhnfOwnerPoll::Ready(_) => {
-                        unreachable!("an access boundary cannot produce an immediate value")
+                    WhnfOwnerPoll::Ready(_) | WhnfOwnerPoll::BudgetExhausted => {
+                        unreachable!("a deferred boundary is pending or refused")
                     }
                 }
             }
@@ -1208,7 +1207,7 @@ impl LazyTaskMachine {
         match transition {
             Transition::Complete(root) => self.report_completion(root),
             Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
-            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::BudgetExhausted),
             Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
@@ -1231,12 +1230,11 @@ impl LazyTaskMachine {
                             error: None,
                         }))
                     }
-                    WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
                     WhnfOwnerPoll::Failed(failure) => {
                         Phase::End(EvaluationMachinePoll::Failed(failure))
                     }
-                    WhnfOwnerPoll::Ready(_) => {
-                        unreachable!("an object boundary cannot produce an immediate value")
+                    WhnfOwnerPoll::Ready(_) | WhnfOwnerPoll::BudgetExhausted => {
+                        unreachable!("a deferred boundary is pending or refused")
                     }
                 }
             }
@@ -1321,7 +1319,7 @@ impl LazyTaskMachine {
                 self.report_completion(root)
             }
             Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
-            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::BudgetExhausted),
             Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
@@ -1344,12 +1342,11 @@ impl LazyTaskMachine {
                             error: None,
                         }))
                     }
-                    WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
                     WhnfOwnerPoll::Failed(failure) => {
                         Phase::End(EvaluationMachinePoll::Failed(failure))
                     }
-                    WhnfOwnerPoll::Ready(_) => {
-                        unreachable!("a list-effect boundary cannot produce an immediate value")
+                    WhnfOwnerPoll::Ready(_) | WhnfOwnerPoll::BudgetExhausted => {
+                        unreachable!("a deferred boundary is pending or refused")
                     }
                 }
             }
@@ -1421,7 +1418,7 @@ impl LazyTaskMachine {
             }
             Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
             Transition::Moved => self.resume_moved(context),
-            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::BudgetExhausted),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
                 Phase::Next
@@ -1443,12 +1440,11 @@ impl LazyTaskMachine {
                             error: None,
                         }))
                     }
-                    WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
                     WhnfOwnerPoll::Failed(failure) => {
                         Phase::End(EvaluationMachinePoll::Failed(failure))
                     }
-                    WhnfOwnerPoll::Ready(_) => {
-                        unreachable!("a builtin boundary cannot produce an immediate value")
+                    WhnfOwnerPoll::Ready(_) | WhnfOwnerPoll::BudgetExhausted => {
+                        unreachable!("a deferred boundary is pending or refused")
                     }
                 }
             }
@@ -1526,7 +1522,7 @@ impl LazyTaskMachine {
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::Continue)) => {}
                 Transition::Pending(Ok(NetWhnfAccessPoll::BudgetExhausted)) => {
-                    return Phase::End(EvaluationMachinePoll::Yielded);
+                    return Phase::End(EvaluationMachinePoll::BudgetExhausted);
                 }
                 // Another thread changed the net, or another session's driver
                 // holds its semantic action: run again once it has moved on.
@@ -1802,7 +1798,7 @@ impl LazyTaskMachine {
                         }
                         LazySource::Builtin(call) if compiles_at_once(&call) => {
                             if !step_budget.try_consume() {
-                                return Phase::End(EvaluationMachinePoll::Yielded);
+                                return Phase::End(EvaluationMachinePoll::BudgetExhausted);
                             }
                             if self.compile_annotated_target(context, &call, step_budget) {
                                 LazyTaskWork::WhnfCheckpoint
@@ -1815,7 +1811,7 @@ impl LazyTaskMachine {
                         LazySource::Builtin(call) => {
                             // Applying an immediate builtin is a reduction.
                             if !step_budget.try_consume() {
-                                return Phase::End(EvaluationMachinePoll::Yielded);
+                                return Phase::End(EvaluationMachinePoll::BudgetExhausted);
                             }
                             #[cfg(feature = "glam-prof")]
                             context.context().values().record_reduction(
@@ -1984,7 +1980,7 @@ impl EvaluationTaskMachine for PromiseFollower {
                     error: None,
                 })
             }
-            WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
+            WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::BudgetExhausted,
             WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
         }
     }
@@ -2235,7 +2231,7 @@ mod ownership_tests {
             crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
                 follower.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
             }),
-            EvaluationMachinePoll::Yielded
+            EvaluationMachinePoll::BudgetExhausted
         ));
         let EvaluationMachinePoll::Complete(value) =
             crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
@@ -2286,7 +2282,7 @@ mod ownership_tests {
         let pending = |phase: Phase| {
             matches!(
                 phase,
-                Phase::Next | Phase::End(EvaluationMachinePoll::Yielded)
+                Phase::Next | Phase::End(EvaluationMachinePoll::BudgetExhausted)
             )
         };
 
@@ -2316,7 +2312,7 @@ mod ownership_tests {
         );
         let completed = loop {
             match step(&mut stale) {
-                Phase::Next | Phase::End(EvaluationMachinePoll::Yielded) => {}
+                Phase::Next | Phase::End(EvaluationMachinePoll::BudgetExhausted) => {}
                 Phase::End(EvaluationMachinePoll::Complete(value)) => break value,
                 Phase::End(EvaluationMachinePoll::Blocked(_)) => {
                     panic!("the assigned result must not remain blocked")

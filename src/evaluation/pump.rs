@@ -43,7 +43,9 @@ impl ClientDemandOperation {
             super::whnf::WhnfOwnerPoll::Pending(dependency) => {
                 coordinator::ClientDemandPoll::Blocked(dependency)
             }
-            super::whnf::WhnfOwnerPoll::BudgetExhausted => coordinator::ClientDemandPoll::Yielded,
+            super::whnf::WhnfOwnerPoll::BudgetExhausted => {
+                coordinator::ClientDemandPoll::BudgetExhausted
+            }
             super::whnf::WhnfOwnerPoll::Failed(failure) => {
                 coordinator::ClientDemandPoll::Failed(failure)
             }
@@ -83,6 +85,17 @@ pub(super) fn test_reflection_dependency(
 }
 
 pub(super) const TASK_POLL_QUANTUM: usize = 64;
+
+/// A poll that reports its budget exhausted has spent all of it: nothing else
+/// ends a poll with budget left unreported (`budget-exhausted-only`).
+pub(crate) fn assert_spent_when_exhausted(exhausted: bool, budget: &super::EvaluationStepBudget) {
+    debug_assert!(
+        !exhausted || budget.remaining() == 0,
+        "a poll reported its budget exhausted with {} of {} units left",
+        budget.remaining(),
+        budget.granted()
+    );
+}
 
 enum ReleasedTaskMachine {
     DropOnly(Box<dyn EvaluationTaskMachine>),
@@ -227,7 +240,13 @@ impl ClaimedTask {
         // without admission.
         mutator.readmit();
         match polled {
-            Ok((poll, deferred)) => PolledTask { poll, deferred },
+            Ok((poll, deferred)) => {
+                assert_spent_when_exhausted(
+                    matches!(poll, EvaluationMachinePoll::BudgetExhausted),
+                    step_budget,
+                );
+                PolledTask { poll, deferred }
+            }
             Err(payload) => PolledTask {
                 poll: EvaluationMachinePoll::Panicked {
                     report: EvaluationPanic::from_payload(
@@ -286,9 +305,9 @@ impl ClaimedTask {
         let poll = self.finish_polled_under(mutator, polled);
         let yielded = matches!(
             poll,
-            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended
+            EvaluationMachinePoll::BudgetExhausted | EvaluationMachinePoll::Contended
         );
-        let (_, _, released, _) = self.release(mutator, poll);
+        let (released, _) = self.release(mutator, poll);
         if let Some(machine) = released {
             machine.finish_under(mutator);
         }
@@ -302,12 +321,7 @@ impl ClaimedTask {
         self,
         mutator: &mut RuntimeValueMutator<'_, '_>,
         poll: EvaluationMachinePoll,
-    ) -> (
-        bool,
-        bool,
-        Option<ReleasedTaskMachine>,
-        Option<ExactRouteRelease>,
-    ) {
+    ) -> (Option<ReleasedTaskMachine>, Option<ExactRouteRelease>) {
         // The quantum boundary: the poll's result is rooted and the work is
         // still claimed, so readiness stays `Busy` through any collection
         // here.
@@ -382,18 +396,13 @@ fn release_lazy_route(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedLazyRoute,
     poll: EvaluationMachinePoll,
-) -> (
-    bool,
-    bool,
-    Option<ReleasedTaskMachine>,
-    Option<ExactRouteRelease>,
-) {
+) -> (Option<ReleasedTaskMachine>, Option<ExactRouteRelease>) {
     let work = claimed.id();
     let lazy = claimed.lazy().clone();
     let (work_poll, terminal) = match poll {
         // Contended work runs again, as work that spent its budget does.
-        EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended => {
-            (DeferredWorkPoll::Yielded, None)
+        EvaluationMachinePoll::BudgetExhausted | EvaluationMachinePoll::Contended => {
+            (DeferredWorkPoll::Runnable, None)
         }
         EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(_) => unreachable!("lazy route cannot vote to exit"),
@@ -424,10 +433,10 @@ fn release_lazy_route(
             std::mem::take(&mut release.cycle),
             release.cycle_error.take(),
         );
-        return (release.made_progress, false, None, route);
+        return (None, route);
     }
     if !release.terminal {
-        return (release.made_progress, release.remains_blocked, None, route);
+        return (None, route);
     }
     let terminal = terminal.expect("terminal lazy route poll must carry a terminal result");
     let failure = match &terminal {
@@ -438,7 +447,7 @@ fn release_lazy_route(
         EvaluationWaitTerminal::Panicked(report) => {
             coordinator.settle_panicked_work_under(mutator, work, report.clone());
             coordinator.retire_lazy_route(work);
-            return (release.made_progress, false, None, route);
+            return (None, route);
         }
         EvaluationWaitTerminal::Cancelled
         | EvaluationWaitTerminal::Abandoned
@@ -449,7 +458,7 @@ fn release_lazy_route(
     };
     coordinator.settle_terminal_work_under(mutator, work, terminal, failure);
     coordinator.retire_lazy_route(work);
-    (release.made_progress, false, None, route)
+    (None, route)
 }
 
 impl EvaluationDemandState {
@@ -635,32 +644,32 @@ pub(super) fn pump_demand(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     context: &EvalContext,
     target: &EvaluationWaitToken,
-    reservation_allowance: usize,
+    allowance: usize,
 ) -> EvaluationPumpOutcome {
-    let mut reservation_allowance = reservation_allowance;
+    let mut allowance = allowance;
     context.values().with_runtime_value_mutator(|mut mutator| {
         pump_demand_on_route(
             &mut mutator,
             coordinator,
             context,
             target,
-            &mut reservation_allowance,
+            &mut allowance,
             &mut ExactDemandRoute::default(),
         )
     })
 }
 
-/// Pumps work toward `target` under `mutator`, drawing whole poll quanta
-/// from `reservation_allowance`. On return the allowance holds what remains,
-/// so the caller can charge the reserved steps to its own budget. The pumped
-/// polls borrow the mutator, which is the driver's or the pumping quantum's,
-/// and each quantum boundary suspends it.
+/// Pumps work toward `target` under `mutator`, lending each poll a quantum
+/// from `allowance` and taking back what it did not reduce. On return the
+/// allowance holds what remains, so the caller can charge the steps spent to
+/// its own budget. The pumped polls borrow the mutator, which is the driver's
+/// or the pumping quantum's, and each quantum boundary suspends it.
 pub(super) fn pump_demand_on_route(
     mutator: &mut RuntimeValueMutator<'_, '_>,
     coordinator: &Arc<EvaluationWorkCoordinator>,
     context: &EvalContext,
     target: &EvaluationWaitToken,
-    reservation_allowance: &mut usize,
+    allowance: &mut usize,
     route: &mut ExactDemandRoute,
 ) -> EvaluationPumpOutcome {
     if target.terminal_poll().is_some() {
@@ -674,7 +683,7 @@ pub(super) fn pump_demand_on_route(
         if !matches!(context.poll_wait(target), EvaluationWaitPoll::Pending(_)) {
             return EvaluationPumpOutcome::TargetReady;
         }
-        if *reservation_allowance == 0 {
+        if *allowance == 0 {
             return EvaluationPumpOutcome::BudgetExhausted;
         }
 
@@ -713,23 +722,23 @@ pub(super) fn pump_demand_on_route(
 
         let work_id = work.id();
         let mut claimed = ClaimedTask::new(coordinator.clone(), work);
-        let quantum = (*reservation_allowance).min(TASK_POLL_QUANTUM);
-        *reservation_allowance -= quantum;
+        let quantum = (*allowance).min(TASK_POLL_QUANTUM);
+        *allowance -= quantum;
         let mut budget = super::EvaluationStepBudget::new(quantum);
         let polled = claimed.poll_under(mutator, &mut budget);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());
         // The allowance pays for the reductions the poll made; observing
         // and walking the route are free (`reduction-costs-one-budget-unit`),
-        // so the rest of the reservation returns.
-        *reservation_allowance += budget.remaining();
+        // so the rest of the quantum returns.
+        *allowance += budget.remaining();
         // The quantum boundary runs under the mutator, which the release
         // suspends only as it must (`boundary-release-under-mutator`).
         let poll = claimed.finish_polled_under(mutator, polled);
         let yielded = matches!(
             poll,
-            EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended
+            EvaluationMachinePoll::BudgetExhausted | EvaluationMachinePoll::Contended
         );
-        let (_, _, released, route_release) = claimed.release(mutator, poll);
+        let (released, route_release) = claimed.release(mutator, poll);
         if exact_claim {
             if let Some(release) = route_release {
                 let _handed_off = coordinator.reconcile_exact_route_release(target, route, release);
@@ -758,18 +767,13 @@ fn release_reflection_task(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedReflectionWork,
     poll: EvaluationMachinePoll,
-) -> (
-    bool,
-    bool,
-    Option<ReleasedTaskMachine>,
-    Option<ExactRouteRelease>,
-) {
+) -> (Option<ReleasedTaskMachine>, Option<ExactRouteRelease>) {
     let work = claimed.id();
     let mut torn = false;
     let (work_poll, terminal) = match poll {
         // Contended work runs again, as work that spent its budget does.
-        EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended => {
-            (ReflectionWorkPoll::Yielded, None)
+        EvaluationMachinePoll::BudgetExhausted | EvaluationMachinePoll::Contended => {
+            (ReflectionWorkPoll::Runnable, None)
         }
         EvaluationMachinePoll::Blocked(block) => (ReflectionWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(exit) => (ReflectionWorkPoll::Exit(exit), None),
@@ -810,15 +814,10 @@ fn release_reflection_task(
     if !release.terminal {
         if !release.exit_waiting {
             debug_assert!(release.machine.is_none());
-            return (release.made_progress, release.remains_blocked, None, route);
+            return (None, route);
         }
         let released = release.machine.take().map(ReleasedTaskMachine::DropOnly);
-        return (
-            release.made_progress,
-            release.remains_blocked,
-            released,
-            route,
-        );
+        return (released, route);
     }
 
     // A machine's own panic outranks cancellation and session closure. A
@@ -879,7 +878,7 @@ fn release_reflection_task(
             retirement,
         }
     });
-    (release.made_progress, false, released, route)
+    (released, route)
 }
 
 fn release_deferred_task(
@@ -887,18 +886,13 @@ fn release_deferred_task(
     coordinator: &Arc<EvaluationWorkCoordinator>,
     claimed: ClaimedDeferredWork,
     poll: EvaluationMachinePoll,
-) -> (
-    bool,
-    bool,
-    Option<ReleasedTaskMachine>,
-    Option<ExactRouteRelease>,
-) {
+) -> (Option<ReleasedTaskMachine>, Option<ExactRouteRelease>) {
     let work = claimed.id();
     let mut torn = false;
     let (work_poll, terminal) = match poll {
         // Contended work runs again, as work that spent its budget does.
-        EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Contended => {
-            (DeferredWorkPoll::Yielded, None)
+        EvaluationMachinePoll::BudgetExhausted | EvaluationMachinePoll::Contended => {
+            (DeferredWorkPoll::Runnable, None)
         }
         EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
         EvaluationMachinePoll::Exit(exit) => {
@@ -944,11 +938,11 @@ fn release_deferred_task(
             std::mem::take(&mut release.cycle),
             release.cycle_error.take(),
         );
-        return (release.made_progress, false, None, route);
+        return (None, route);
     }
     if !release.terminal {
         debug_assert!(release.machine.is_none());
-        return (release.made_progress, release.remains_blocked, None, route);
+        return (None, route);
     }
 
     // A machine's own panic outranks session closure. A panic propagated
@@ -992,8 +986,6 @@ fn release_deferred_task(
         .expect("terminal deferred release must detach its machine");
     let retirement = WorkRetirement::Deferred(coordinator.clone(), work);
     (
-        release.made_progress,
-        false,
         Some(if torn {
             ReleasedTaskMachine::DropTorn {
                 machine,
@@ -1121,13 +1113,9 @@ impl EvaluationWorkCoordinator {
             return None;
         }
         match self.select_runtime_pump() {
-            // This loop's allowance counts the polls it runs as well as their
-            // reductions, so a run of polls that reduce nothing still ends.
-            coordinator::CoordinatorSelection::Task(work) => Some(
-                self.poll_claimed_task_bounded(mutator, work, step_budget)
-                    .1
-                    .max(1),
-            ),
+            coordinator::CoordinatorSelection::Task(work) => {
+                Some(self.poll_claimed_task_bounded(mutator, work, step_budget).1)
+            }
             coordinator::CoordinatorSelection::Spark(_) => {
                 unreachable!("the runtime pump must not claim best-effort spark work")
             }
@@ -1178,7 +1166,7 @@ impl EvaluationWorkCoordinator {
             // A collection may run at the boundary, with the mutator
             // suspended.
             mutator.suspend(|| probe(&poll));
-            let (_, _, released, _) = claimed.release(&mut mutator, poll);
+            let (released, _) = claimed.release(&mut mutator, poll);
             if let Some(machine) = released {
                 machine.finish_under(&mut mutator);
             }
@@ -1222,6 +1210,12 @@ impl EvaluationWorkCoordinator {
             })
         }));
         mutator.readmit();
+        if let Ok((poll, _)) = &polled {
+            assert_spent_when_exhausted(
+                matches!(poll, coordinator::ClientDemandPoll::BudgetExhausted),
+                &budget,
+            );
+        }
         self.release_polled_client_demand(mutator, claimed, polled);
         budget.spent()
     }
@@ -1289,6 +1283,15 @@ impl EvaluationWorkCoordinator {
             })
         }));
         mutator.readmit();
+        if let Ok((poll, _)) = &result {
+            assert_spent_when_exhausted(
+                matches!(
+                    poll,
+                    crate::eval::strategy_machine::StrategyDemandPoll::BudgetExhausted
+                ),
+                &budget,
+            );
+        }
         let result = result.and_then(|(poll, deferred)| {
             if deferred.is_empty() {
                 return Ok(poll);
@@ -1323,12 +1326,9 @@ impl EvaluationWorkCoordinator {
                     coordinator::SparkWorkPoll::Blocked(dependency)
                 }
             }
-            // Until sparks loop over their own steps (`budget-exhausted-only`),
-            // a step that continues yields as one that spent the budget does.
-            Ok(
-                crate::eval::strategy_machine::StrategyDemandPoll::Continue
-                | crate::eval::strategy_machine::StrategyDemandPoll::BudgetExhausted,
-            ) => coordinator::SparkWorkPoll::Yielded,
+            Ok(crate::eval::strategy_machine::StrategyDemandPoll::BudgetExhausted) => {
+                coordinator::SparkWorkPoll::Runnable
+            }
         };
         drop(context);
         // The quantum boundary, while the spark is still claimed.
@@ -1434,7 +1434,9 @@ impl TestWorkerClaim {
     pub(super) fn yield_back(self) {
         let coordinator = self.0.coordinator.clone();
         coordinator.with_driver_mutator_for_test(|mutator| {
-            let (_, _, released, _) = self.0.release(mutator, EvaluationMachinePoll::Yielded);
+            let (released, _) = self
+                .0
+                .release(mutator, EvaluationMachinePoll::BudgetExhausted);
             if let Some(machine) = released {
                 machine.finish_under(mutator);
             }

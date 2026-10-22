@@ -1138,6 +1138,11 @@ budget left now continues past a family handoff (`inline-lazy-forcing`).
 `step-budget-is-reservation`), and the comparison machine still yields
 after every frame transition.
 
+*Status 2026-10-22:* closed by the
+[poll budget plan](../plans/PollBudget_2026-10-22.md). Machines and phases
+continue within a poll, and the outcome, renamed `BudgetExhausted`, means
+only that the budget is spent.
+
 **E2 — High — Lazy routes rebuild state on every poll.** Reported.
 
 - The route shell is rebuilt each poll and opens three access regions

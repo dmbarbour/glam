@@ -520,7 +520,7 @@ impl EvaluationWorkCoordinator {
         poll: &ReflectionWorkPoll,
     ) -> bool {
         let status = match poll {
-            ReflectionWorkPoll::Yielded => EvaluationTaskStatus::Launched,
+            ReflectionWorkPoll::Runnable => EvaluationTaskStatus::Launched,
             ReflectionWorkPoll::Blocked(_) => EvaluationTaskStatus::Blocked,
             ReflectionWorkPoll::Exit(_) | ReflectionWorkPoll::Terminal => return false,
         };
@@ -545,7 +545,7 @@ impl EvaluationWorkCoordinator {
             id,
             task,
             demand,
-            prior_block,
+            prior_block: _,
             mut machine,
         } = claimed;
         let demand_session = demand.id();
@@ -579,33 +579,22 @@ impl EvaluationWorkCoordinator {
                     ),
                 )
             };
-            let (state_after, block, exit, made_progress, remains_blocked, terminal) =
-                if cancel || abandoned {
-                    (WorkState::Terminalizing, None, None, true, false, true)
-                } else {
-                    match poll {
-                        ReflectionWorkPoll::Yielded => {
-                            (WorkState::Queued, None, None, true, false, false)
-                        }
-                        ReflectionWorkPoll::Blocked(block) => {
-                            let unchanged = prior_block.as_ref() == Some(&block);
-                            (
-                                WorkState::Blocked,
-                                Some(block),
-                                None,
-                                !unchanged,
-                                true,
-                                false,
-                            )
-                        }
-                        ReflectionWorkPoll::Exit(exit) => {
-                            (WorkState::ExitWaiting, None, Some(exit), true, true, false)
-                        }
-                        ReflectionWorkPoll::Terminal => {
-                            (WorkState::Terminalizing, None, None, true, false, true)
-                        }
+            let (state_after, block, exit, remains_blocked, terminal) = if cancel || abandoned {
+                (WorkState::Terminalizing, None, None, false, true)
+            } else {
+                match poll {
+                    ReflectionWorkPoll::Runnable => (WorkState::Queued, None, None, false, false),
+                    ReflectionWorkPoll::Blocked(block) => {
+                        (WorkState::Blocked, Some(block), None, true, false)
                     }
-                };
+                    ReflectionWorkPoll::Exit(exit) => {
+                        (WorkState::ExitWaiting, None, Some(exit), true, false)
+                    }
+                    ReflectionWorkPoll::Terminal => {
+                        (WorkState::Terminalizing, None, None, false, true)
+                    }
+                }
+            };
             let exit_waiting = exit.is_some();
             let retain_machine = !terminal
                 && exit
@@ -659,7 +648,6 @@ impl EvaluationWorkCoordinator {
             route_tracker.changed(true);
             (
                 ReflectionWorkRelease {
-                    made_progress,
                     remains_blocked,
                     exit_waiting,
                     terminal,
@@ -683,7 +671,6 @@ impl EvaluationWorkCoordinator {
             });
         route_tracker.changed(woke);
         if woke {
-            release.made_progress = true;
             release.remains_blocked = false;
         }
         #[cfg(test)]
@@ -695,7 +682,6 @@ impl EvaluationWorkCoordinator {
         let observation_woke = release.remains_blocked && self.recheck_observation_wait(id);
         route_tracker.changed(observation_woke);
         if observation_woke {
-            release.made_progress = true;
             release.remains_blocked = false;
         }
         let status_updates = if !release.terminal && !release.exit_waiting {
@@ -921,14 +907,14 @@ impl ClaimedReflectionWork {
 }
 
 pub(in crate::evaluation) enum ReflectionWorkPoll {
-    Yielded,
+    /// The work runs again: it spent its budget, or another thread stopped it.
+    Runnable,
     Blocked(EvaluationTaskBlock),
     Exit(EvaluationExitBlock),
     Terminal,
 }
 
 pub(in crate::evaluation) struct ReflectionWorkRelease {
-    pub(in crate::evaluation) made_progress: bool,
     pub(in crate::evaluation) remains_blocked: bool,
     pub(in crate::evaluation) exit_waiting: bool,
     pub(in crate::evaluation) terminal: bool,
