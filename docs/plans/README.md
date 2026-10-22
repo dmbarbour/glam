@@ -69,6 +69,13 @@ flags a step for discussion when work reaches it, not a decision.
   failure explicit as in glam; the
   ownership plan merged in; and a CLI prelude in glam is an experiment,
   `api-cli-prelude`.
+- [`EffectWith_2026-10-22.md`](EffectWith_2026-10-22.md): `effect-with-`
+  steps for `.with Mixin Op`, an effect API extended by an object mixin:
+  open recursion through the API in scope, layers delimited with
+  `.reset`/`.shift` as dynamic bindings, `.fix` keeping them visible.
+  Drafted 2026-10-22 at the maintainer's request; open questions wait for
+  the maintainer, and the build waits for a use case or the end of the
+  runtime API transition.
 - [`PollBudget_2026-10-22.md`](PollBudget_2026-10-22.md): `budget-` steps
   from an audit of how polls spend and report their budget: coarse-grained
   steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`
