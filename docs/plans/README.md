@@ -74,7 +74,8 @@ flags a step for discussion when work reaches it, not a decision.
   steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`
   and meaning only that, the administrative charges and repoll caps it
   needed removed, and the artificial limits on efficient evaluation.
-  Closes holistic review E1. Drafted 2026-10-22.
+  Closes holistic review E1. Drafted and built 2026-10-22; a wake source
+  for contended work stays open.
 - [`ReflectionModel_2026-10-21.md`](ReflectionModel_2026-10-21.md): the
   runtime API plan's `api-reflection-model`, decided 2026-10-21
   (`reflection-tasks-are-machine-tasks`): reflection tasks as tasks on

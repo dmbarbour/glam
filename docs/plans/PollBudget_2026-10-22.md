@@ -306,3 +306,24 @@ first.
   batch sees the unit it was admitted with; the totals are unchanged.
   Applying a compiled function and invoking a host call each pay a unit,
   forgiven when none is left (open question 3, as recommended).
+- `budget-quantum` (2026-10-22): the task quantum, which bounds a poll of
+  task or client work so a waiting collection can join and other work get
+  its turn, went from 64 to 256 steps. Over the 84 profiling workloads,
+  against 64:
+
+  | Quantum | Instructions | CPU time |
+  |---|---|---|
+  | 256 | -1.7% | -2.9% |
+  | 1,024 | -2.0% | -4.4% |
+  | 4,096 | -2.1% | -4.5% |
+
+  At 256 no workload rose and `append_walk` fell up to 8%; from 1,024,
+  `sum` rose up to 3% with the same evaluation counters, so a collection's
+  longer wait for its boundary likely cost it. The fairness tests' chains
+  now scale with the quantum. The 4,096-step grants of the turn's await,
+  the client driver's pump, the runtime's drain and the reflection run
+  loop only split work into calls that loop at once, so they stay.
+
+The plan's steps are built (2026-10-22). Open: a wake source for contended
+work (above), and `anno 'normalize` re-walking from its root, on the
+performance roadmap's side of the line.

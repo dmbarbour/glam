@@ -84,7 +84,14 @@ pub(super) fn test_reflection_dependency(
     wait
 }
 
-pub(super) const TASK_POLL_QUANTUM: usize = 64;
+/// The most steps one poll of task or client work takes before its quantum
+/// boundary, where a waiting collection joins and other work gets its turn.
+/// Measured (`budget-quantum`, 2026-10-22): from 64, a quantum of 256 cut
+/// instructions over the profiling workloads by 1.7% and none rose; 1,024
+/// and 4,096 cut 2.0 and 2.1% but slowed `sum` by up to 3%, with the same
+/// evaluation counters, so a collection's longer wait for its boundary
+/// likely cost it.
+pub(super) const TASK_POLL_QUANTUM: usize = 256;
 
 /// A poll that reports its budget exhausted has spent all of it: nothing else
 /// ends a poll with budget left unreported (`budget-exhausted-only`).

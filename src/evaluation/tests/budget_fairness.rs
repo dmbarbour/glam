@@ -21,8 +21,10 @@ use crate::core::{
 use crate::number::Number;
 use crate::runtime::{RuntimeIds, RuntimeValueRoot, allocate_evaluation_runtime_id};
 
-const CHECKPOINT_DEPTH: usize = 96;
-const FIFO_CHECKPOINT_DEPTH: usize = 192;
+/// Chains longer than a poll's quantum, so that a poll ends with its budget
+/// spent: one and a half quanta, and three.
+const CHECKPOINT_DEPTH: usize = super::pump::TASK_POLL_QUANTUM * 3 / 2;
+const FIFO_CHECKPOINT_DEPTH: usize = super::pump::TASK_POLL_QUANTUM * 3;
 
 fn context() -> OwnedEvalContext {
     EvalContext::isolated(CoreValueFactory::new(
