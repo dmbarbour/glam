@@ -69,6 +69,12 @@ flags a step for discussion when work reaches it, not a decision.
   failure explicit as in glam; the
   ownership plan merged in; and a CLI prelude in glam is an experiment,
   `api-cli-prelude`.
+- [`PollBudget_2026-10-22.md`](PollBudget_2026-10-22.md): `budget-` steps
+  from an audit of how polls spend and report their budget: coarse-grained
+  steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`
+  and meaning only that, the administrative charges and repoll caps it
+  needed removed, and the artificial limits on efficient evaluation.
+  Closes holistic review E1. Drafted 2026-10-22.
 - [`ReflectionModel_2026-10-21.md`](ReflectionModel_2026-10-21.md): the
   runtime API plan's `api-reflection-model`, decided 2026-10-21
   (`reflection-tasks-are-machine-tasks`): reflection tasks as tasks on

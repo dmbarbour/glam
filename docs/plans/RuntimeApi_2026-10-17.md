@@ -871,6 +871,11 @@ Later, beyond this plan (2026-10-21):
 - Candidate (maintainer): default effects served from the root's outputs,
   as imports are, such as stderr and the fallback diagnostics renderer,
   rather than callbacks.
+- `api-fresh-review` — once the API steps land, a fresh holistic review,
+  starting with an audit of what the 2026-10-03 pre-performance reviews
+  left open. They were thought closed before performance work began, but
+  E1 was found open on 2026-10-22 (maintainer, 2026-10-22; see the
+  [poll budget plan](PollBudget_2026-10-22.md)).
 
 Two steps from the ownership plan stand beside these, under their names:
 - `lifecycle-audits` grows with each step: a source audit or compile-fail
