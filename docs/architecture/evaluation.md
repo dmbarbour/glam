@@ -334,10 +334,16 @@ A step pays one unit when it changes state, and observing is free (decision
 So a one-unit quantum can always advance some work without hiding a renewed
 sub-budget. The demand pump lends each poll a task quantum from its outer
 scalar and takes back what the poll did not reduce, so its
-`BudgetExhausted` result describes exact inner spend. A poll that blocks or
-hands off reduces nothing and costs nothing; handoffs advance their
-machine's phase, so a run of them ends. The runtime background pump
-likewise translates exact inner spend into its public report.
+`BudgetExhausted` result describes exact inner spend. A poll that blocks
+reduces nothing and costs nothing. A lazy's machine runs its phases within
+one poll: a family handoff, a replaced or moved checkpoint, or a host call's
+invocation moves it to its next phase, and each advances it, so a run of
+them ends. Its route forces lazies inline when a phase asks, and an inline
+lazy's completion returns to its parent within the same poll. The net
+driver restarts from its request root within the poll after progress of
+its own; a pass that only saw other threads' changes ends the poll. The
+runtime background pump likewise translates exact inner spend into its
+public report.
 
 ## Collector Boundary
 

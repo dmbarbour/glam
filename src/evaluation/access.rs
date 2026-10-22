@@ -455,12 +455,6 @@ impl EvaluationPollContext<'_, '_> {
         self.mutator.suspend(operation)
     }
 
-    /// Whether this quantum has deferred work, so it should end rather than
-    /// poll on.
-    pub(crate) fn has_deferred_work(&self) -> bool {
-        !self.shared.after_admission.borrow().is_empty()
-    }
-
     pub(crate) fn assert_context(&self, context: &EvalContext) {
         self.shared.assert_context(context);
     }
@@ -831,7 +825,6 @@ mod tests {
                     log.borrow_mut().push(name);
                 });
             }
-            assert!(quantum.has_deferred_work());
             log.borrow_mut().push("poll");
             7
         });

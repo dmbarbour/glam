@@ -136,12 +136,27 @@ struct LazyTaskMachine {
     /// This machine's depth on its route's inline stack, the claimed lazy's
     /// being zero; `None` when no route loop drives it, so it never inlines.
     inline_depth: Option<usize>,
-    /// A lazy this machine claimed for inline forcing at its last poll,
-    /// which returned `Yielded`.
-    inline_request: Option<ManagedLazyRoot>,
-    /// Whether this inline child's lazy completed at its last poll, which
-    /// returned `Yielded`: its parent finds the value in the lazy's cache.
-    inline_completed: bool,
+}
+
+/// How one phase of a lazy's production ends (`budget-lazy-route`). The
+/// machine runs its phases within one poll until one ends it; the route
+/// loop handles the inline requests.
+enum Phase {
+    /// The machine moved to its next phase.
+    Next,
+    /// The route forces this lazy, which this machine claimed, inline, then
+    /// polls this machine again.
+    ForceInline(ManagedLazyRoot),
+    /// This inline child cached its value, where its parent finds it.
+    InlineCompleted,
+    /// The poll ends with this outcome.
+    End(EvaluationMachinePoll),
+}
+
+impl From<EvaluationMachinePoll> for Phase {
+    fn from(poll: EvaluationMachinePoll) -> Self {
+        Self::End(poll)
+    }
 }
 
 impl LazyTaskMachine {
@@ -160,20 +175,18 @@ impl LazyTaskMachine {
             lazy,
             work: LazyTaskWork::Produce,
             inline_depth,
-            inline_request: None,
-            inline_completed: false,
         }
     }
 
     /// Claims a lazy this machine waits on for inline forcing by its route
-    /// loop, if eligible, and returns `Yielded` for the loop to push it.
-    /// Returns any other request, or an ineligible lazy, for the machine's
-    /// own interpretation: a wait on the lazy's route.
+    /// loop, if eligible, for the loop to push it. Returns any other
+    /// request, or an ineligible lazy, for the machine's own interpretation:
+    /// a wait on the lazy's route.
     fn offer_inline(
         &mut self,
         context: &EvaluatorStepContext<'_>,
         request: super::whnf::WhnfDeferredRequest,
-    ) -> Result<EvaluationMachinePoll, super::whnf::WhnfDeferredRequest> {
+    ) -> Result<Phase, super::whnf::WhnfDeferredRequest> {
         let super::whnf::WhnfDeferredRequest::Lazy(lazy) = &request else {
             return Err(request);
         };
@@ -186,22 +199,7 @@ impl LazyTaskMachine {
         {
             return Err(request);
         }
-        self.inline_request = Some(lazy.clone());
-        Ok(EvaluationMachinePoll::Yielded)
-    }
-
-    /// One poll, including the host-call permit's immediate second poll.
-    fn poll_route_step(
-        &mut self,
-        poll_context: &mut crate::evaluation::EvaluationPollContext,
-        budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
-        let poll = self.poll(poll_context, budget);
-        if matches!(self.work, LazyTaskWork::HostCallInvoke) {
-            debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
-            return self.poll(poll_context, budget);
-        }
-        poll
+        Ok(Phase::ForceInline(lazy.clone()))
     }
 }
 
@@ -308,11 +306,6 @@ fn fail_forward_cycle(
 /// which bounds the work a later poll repeats.
 const INLINE_LAZY_DEPTH: usize = 32;
 
-/// Consecutive polls that may yield with budget left but none consumed, at
-/// family handoffs, before the top lazy suspends instead of being polled
-/// again.
-const IDLE_YIELD_REPOLLS: usize = 8;
-
 /// Whether a route may force `lazy` inline: it has a source or checkpoint
 /// that a later route can resume if the inline poll is abandoned. Host calls
 /// and reflection tasks run exactly once, under their own route; a cached or
@@ -403,16 +396,14 @@ fn spill_inline(
 
 /// Polls the authoritative lazy checkpoint through a transient route shell.
 /// The shell never survives the claim. The only transition which requires
-/// shell-local authority is the one-shot host-call permit, consumed before
-/// releasing the claim even when its installation returned `Yielded`.
+/// shell-local authority is the one-shot host-call permit, consumed by the
+/// same run of phases that installed it.
 ///
 /// **Inline forcing.** When the claimed lazy needs another uncached lazy that
 /// has no route, the route claims it inline and forces it on an explicit
 /// stack, instead of admitting a route and waiting:
 /// - a completed inline lazy is cached and popped, and its parent is polled
 ///   again, finding the value cached;
-/// - a lazy that yields at a family handoff is polled again, up to
-///   [`IDLE_YIELD_REPOLLS`] times in a row without consuming budget;
 /// - an inline lazy that suspends, because the budget ran out or it blocks,
 ///   spills: it gets a route, and the claimed lazy blocks on that route (see
 ///   [`spill_inline`]);
@@ -441,19 +432,17 @@ pub(crate) fn poll_lazy_route(
         context: &context,
         lazies: Vec::new(),
     };
-    let mut idle_yields = 0;
     loop {
         let inline = stack.len() > 1;
         let top = stack
             .last_mut()
             .expect("the claimed lazy stays at the base");
-        let before = budget.remaining();
-        let poll = if inline {
+        let phase = if inline {
             let polled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                top.poll_route_step(poll_context, budget)
+                top.run(poll_context, budget)
             }));
             match polled {
-                Ok(poll) => poll,
+                Ok(phase) => phase,
                 Err(payload) => {
                     let report =
                         crate::core::EvaluationPanic::from_payload(payload.as_ref(), origin);
@@ -467,60 +456,43 @@ pub(crate) fn poll_lazy_route(
                 }
             }
         } else {
-            top.poll_route_step(poll_context, budget)
+            top.run(poll_context, budget)
         };
-        if std::mem::take(&mut top.inline_completed) {
-            debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
-            let finished = stack.pop().expect("an inline lazy sits above the base");
-            claims.release(&finished.lazy);
-            idle_yields = 0;
-            continue;
-        }
-        if let Some(child) = top.inline_request.take() {
-            debug_assert!(matches!(poll, EvaluationMachinePoll::Yielded));
-            claims.lazies.push(child.clone());
-            let top_forwards = matches!(top.work, LazyTaskWork::Forward);
-            // A tail call: the top forwards to `child`. A forwarder below
-            // that pointed at the top can point at `child` instead, and the
-            // top leaves the stack, so tail calls do not deepen it.
-            if top_forwards
-                && let [.., below, replaced] = stack.as_slice()
-                && forwards_past(poll_context, &context, below, replaced, &child)
-            {
-                let replaced = stack.pop().expect("the replaced forwarder is the top");
-                claims.release(&replaced.lazy);
+        let poll = match phase {
+            Phase::InlineCompleted => {
+                let finished = stack.pop().expect("an inline lazy sits above the base");
+                claims.release(&finished.lazy);
+                continue;
             }
-            let depth = stack.len();
-            stack.push(LazyTaskMachine::at_inline_depth(
-                context.clone(),
-                child,
-                Some(depth),
-            ));
-            idle_yields = 0;
-            continue;
-        }
-        // Work deferred until the poll's heap admission ends, such as a wait
-        // for another thread, ends the quantum instead of a repoll.
-        let deferred = poll_context.has_deferred_work();
+            Phase::ForceInline(child) => {
+                claims.lazies.push(child.clone());
+                let top_forwards = matches!(top.work, LazyTaskWork::Forward);
+                // A tail call: the top forwards to `child`. A forwarder below
+                // that pointed at the top can point at `child` instead, and the
+                // top leaves the stack, so tail calls do not deepen it.
+                if top_forwards
+                    && let [.., below, replaced] = stack.as_slice()
+                    && forwards_past(poll_context, &context, below, replaced, &child)
+                {
+                    let replaced = stack.pop().expect("the replaced forwarder is the top");
+                    claims.release(&replaced.lazy);
+                }
+                let depth = stack.len();
+                stack.push(LazyTaskMachine::at_inline_depth(
+                    context.clone(),
+                    child,
+                    Some(depth),
+                ));
+                continue;
+            }
+            Phase::Next => unreachable!("a machine runs its phases until one ends the poll"),
+            Phase::End(poll) => poll,
+        };
         match poll {
-            // A family handoff: poll again rather than suspend.
-            EvaluationMachinePoll::Yielded
-                if !deferred && budget.remaining() > 0 && budget.remaining() < before =>
-            {
-                idle_yields = 0;
-                continue;
-            }
-            EvaluationMachinePoll::Yielded
-                if !deferred && budget.remaining() > 0 && idle_yields < IDLE_YIELD_REPOLLS =>
-            {
-                idle_yields += 1;
-                continue;
-            }
             poll if !inline => return poll,
             EvaluationMachinePoll::Complete(_) => {
                 let finished = stack.pop().expect("an inline lazy sits above the base");
                 claims.release(&finished.lazy);
-                idle_yields = 0;
             }
             EvaluationMachinePoll::Failed(failure) => {
                 let finished = stack.pop().expect("an inline lazy sits above the base");
@@ -536,7 +508,6 @@ pub(crate) fn poll_lazy_route(
                     return EvaluationMachinePoll::Failed(failure);
                 }
                 claims.release(&finished.lazy);
-                idle_yields = 0;
             }
             poll @ (EvaluationMachinePoll::Yielded | EvaluationMachinePoll::Blocked(_)) => {
                 let (top, below) = stack
@@ -779,17 +750,11 @@ impl LazyTaskMachine {
     }
 
     /// Reports completion with the root [`Self::completion_root_in`] made,
-    /// or, for an inline child, by `inline_completed`.
-    fn report_completion(
-        &mut self,
-        root: Option<crate::runtime::RuntimeValueRoot>,
-    ) -> EvaluationMachinePoll {
+    /// or, for an inline child, which needs none, as its phase.
+    fn report_completion(&mut self, root: Option<crate::runtime::RuntimeValueRoot>) -> Phase {
         match root {
-            Some(root) => EvaluationMachinePoll::Complete(root),
-            None => {
-                self.inline_completed = true;
-                EvaluationMachinePoll::Yielded
-            }
+            Some(root) => Phase::End(EvaluationMachinePoll::Complete(root)),
+            None => Phase::InlineCompleted,
         }
     }
 
@@ -798,7 +763,7 @@ impl LazyTaskMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
         value: crate::core::EvaluatedValue,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         let root = (!self.is_inline_child())
             .then(|| context.root_value(|access| value.into_value_in(access.values())));
         self.report_completion(root)
@@ -816,16 +781,12 @@ impl LazyTaskMachine {
         })
     }
 
-    fn complete(
-        &mut self,
-        context: &EvaluatorStepContext<'_>,
-        value: EvaluatedValue,
-    ) -> EvaluationMachinePoll {
+    fn complete(&mut self, context: &EvaluatorStepContext<'_>, value: EvaluatedValue) -> Phase {
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Ok(value)));
         match result {
             Ok(value) => self.report_complete(context, value),
-            Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
+            Err(error) => Phase::End(EvaluationMachinePoll::Failed(context.root_failure(error))),
         }
     }
 
@@ -833,7 +794,7 @@ impl LazyTaskMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
         value: &crate::runtime::RuntimeValueRoot,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         self.complete(
             context,
             context
@@ -850,17 +811,17 @@ impl LazyTaskMachine {
     /// published its result, replaced its checkpoint, or forwarded it
     /// meanwhile. Rederives this machine's work from the lazy, as `Produce`
     /// does.
-    fn resume_moved(&mut self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
+    fn resume_moved(&mut self, context: &EvaluatorStepContext<'_>) -> Phase {
         match self.checkpoint_work(context) {
             Some(work) => {
                 self.work = work;
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
             None => self.cached_poll(context),
         }
     }
 
-    fn cached_poll(&mut self, context: &EvaluatorStepContext<'_>) -> EvaluationMachinePoll {
+    fn cached_poll(&mut self, context: &EvaluatorStepContext<'_>) -> Phase {
         let result = context.with_value_access(|access| access.lazy_root(&self.lazy).cached());
         let Some(result) = result else {
             // A lazy whose own evaluation panicked released its source
@@ -873,7 +834,7 @@ impl LazyTaskMachine {
         };
         match result {
             Ok(value) => self.report_complete(context, value),
-            Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
+            Err(error) => Phase::End(EvaluationMachinePoll::Failed(context.root_failure(error))),
         }
     }
 
@@ -908,21 +869,23 @@ impl LazyTaskMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
         rooted_target: Option<ManagedLazyRoot>,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         let followed =
             context.with_value_access(|access| follow_forwards(&access, &self.lazy, rooted_target));
         match followed {
             ForwardEnd::NotForward => {
                 // The lazy was cached, or its forward was replaced, meanwhile.
                 self.work = LazyTaskWork::Produce;
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
             ForwardEnd::Cached(result) => {
                 let result =
                     context.with_value_access(|access| self.lazy.cache(access.values(), result));
                 match result {
                     Ok(value) => self.report_complete(context, value),
-                    Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
+                    Err(error) => {
+                        Phase::End(EvaluationMachinePoll::Failed(context.root_failure(error)))
+                    }
                 }
             }
             ForwardEnd::Uncached(end) => {
@@ -935,13 +898,15 @@ impl LazyTaskMachine {
                         |failure| context.root_failure(failure),
                     ) {
                         WhnfOwnerPoll::Pending(dependency) => {
-                            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                            Phase::End(EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                                 dependency: Some(dependency),
                                 observed_epoch: None,
                                 error: None,
-                            })
+                            }))
                         }
-                        WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                        WhnfOwnerPoll::Failed(failure) => {
+                            Phase::End(EvaluationMachinePoll::Failed(failure))
+                        }
                         WhnfOwnerPoll::Ready(_) | WhnfOwnerPoll::BudgetExhausted => {
                             unreachable!("a lazy boundary is pending or refused")
                         }
@@ -953,7 +918,9 @@ impl LazyTaskMachine {
                     .with_value_access(|access| self.lazy.cache(access.values(), Err(failure)));
                 match result {
                     Ok(value) => self.report_complete(context, value),
-                    Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
+                    Err(error) => {
+                        Phase::End(EvaluationMachinePoll::Failed(context.root_failure(error)))
+                    }
                 }
             }
         }
@@ -965,7 +932,7 @@ impl LazyTaskMachine {
         poll_context: &crate::evaluation::EvaluationPollContext,
         durable_context: &EvalContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         let Some(poll) =
             poll_lazy_checkpoint(&self.lazy, poll_context, durable_context, step_budget)
         else {
@@ -974,7 +941,7 @@ impl LazyTaskMachine {
         let poll = match poll {
             LazyCheckpointPoll::Cached(Ok(value)) => return self.report_complete(context, value),
             LazyCheckpointPoll::Cached(Err(error)) => {
-                return EvaluationMachinePoll::Failed(context.root_failure(error));
+                return Phase::End(EvaluationMachinePoll::Failed(context.root_failure(error)));
             }
             LazyCheckpointPoll::Owner(poll) => poll,
             LazyCheckpointPoll::Inline { lazy, tail } => {
@@ -995,23 +962,20 @@ impl LazyTaskMachine {
         match poll {
             WhnfOwnerPoll::Ready(value) => self.complete_root(context, &value),
             WhnfOwnerPoll::Pending(dependency) => {
-                EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                Phase::End(EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: Some(dependency),
                     observed_epoch: None,
                     error: None,
-                })
+                }))
             }
-            WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
+            WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
             WhnfOwnerPoll::Failed(failure) => {
                 self.fail(context, EvaluationHalt::failure(failure.into_failure()))
             }
         }
     }
 
-    fn poll_host_call_checkpoint(
-        &mut self,
-        context: &EvaluatorStepContext<'_>,
-    ) -> EvaluationMachinePoll {
+    fn poll_host_call_checkpoint(&mut self, context: &EvaluatorStepContext<'_>) -> Phase {
         enum Transition {
             Interrupted,
             Whnf,
@@ -1057,12 +1021,12 @@ impl LazyTaskMachine {
             }
             Transition::Whnf => {
                 self.work = LazyTaskWork::WhnfCheckpoint;
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
             Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
         }
     }
@@ -1071,14 +1035,14 @@ impl LazyTaskMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         enum Transition {
             Complete(Option<crate::runtime::RuntimeValueRoot>),
             Failed(crate::runtime::RuntimeFailureRoot),
             Whnf,
             Moved,
             Boundary(super::whnf::RegionalBoundaryRequest),
-            Yielded,
+            BudgetExhausted,
             Replaced(ManagedLazyCheckpointKindTag),
         }
 
@@ -1120,7 +1084,7 @@ impl LazyTaskMachine {
                         Err(_) => Transition::Moved,
                     }
                 }
-                AccessRegionalPoll::BudgetExhausted => Transition::Yielded,
+                AccessRegionalPoll::BudgetExhausted => Transition::BudgetExhausted,
                 AccessRegionalPoll::Continue => {
                     unreachable!("a machine's steps run until it stops")
                 }
@@ -1139,16 +1103,16 @@ impl LazyTaskMachine {
 
         match transition {
             Transition::Complete(root) => self.report_completion(root),
-            Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-            Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
+            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
             Transition::Whnf => {
                 self.work = LazyTaskWork::WhnfCheckpoint;
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
             Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
             Transition::Boundary(request) => {
                 let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
@@ -1161,14 +1125,16 @@ impl LazyTaskMachine {
                     context.root_failure(failure)
                 }) {
                     WhnfOwnerPoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                        Phase::End(EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
                             observed_epoch: None,
                             error: None,
-                        })
+                        }))
                     }
-                    WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+                    WhnfOwnerPoll::Failed(failure) => {
+                        Phase::End(EvaluationMachinePoll::Failed(failure))
+                    }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("an access boundary cannot produce an immediate value")
                     }
@@ -1181,12 +1147,12 @@ impl LazyTaskMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         enum Transition {
             Complete(Option<crate::runtime::RuntimeValueRoot>),
             Failed(crate::runtime::RuntimeFailureRoot),
             Boundary(super::whnf::RegionalBoundaryRequest),
-            Yielded,
+            BudgetExhausted,
             Moved,
             Replaced(ManagedLazyCheckpointKindTag),
         }
@@ -1213,7 +1179,7 @@ impl LazyTaskMachine {
                     }
                 }
                 RegionalObjectFixpointPoll::Boundary(request) => Transition::Boundary(request),
-                RegionalObjectFixpointPoll::BudgetExhausted => Transition::Yielded,
+                RegionalObjectFixpointPoll::BudgetExhausted => Transition::BudgetExhausted,
                 RegionalObjectFixpointPoll::Continue => {
                     unreachable!("a machine's steps run until it stops")
                 }
@@ -1232,12 +1198,12 @@ impl LazyTaskMachine {
 
         match transition {
             Transition::Complete(root) => self.report_completion(root),
-            Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-            Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
+            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
             Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
             Transition::Boundary(request) => {
                 let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
@@ -1250,14 +1216,16 @@ impl LazyTaskMachine {
                     context.root_failure(failure)
                 }) {
                     WhnfOwnerPoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                        Phase::End(EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
                             observed_epoch: None,
                             error: None,
-                        })
+                        }))
                     }
-                    WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+                    WhnfOwnerPoll::Failed(failure) => {
+                        Phase::End(EvaluationMachinePoll::Failed(failure))
+                    }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("an object boundary cannot produce an immediate value")
                     }
@@ -1270,7 +1238,7 @@ impl LazyTaskMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         enum Transition {
             Complete(
                 Option<crate::runtime::RuntimeValueRoot>,
@@ -1278,7 +1246,7 @@ impl LazyTaskMachine {
             ),
             Failed(crate::runtime::RuntimeFailureRoot),
             Boundary(super::whnf::RegionalBoundaryRequest),
-            Yielded,
+            BudgetExhausted,
             Moved,
             Replaced(ManagedLazyCheckpointKindTag),
         }
@@ -1309,7 +1277,7 @@ impl LazyTaskMachine {
                 RegionalListEffectPoll::Boundary(request) => {
                     return Transition::Boundary(request);
                 }
-                RegionalListEffectPoll::BudgetExhausted => return Transition::Yielded,
+                RegionalListEffectPoll::BudgetExhausted => return Transition::BudgetExhausted,
                 RegionalListEffectPoll::Continue => {
                     unreachable!("a machine's steps run until it stops")
                 }
@@ -1343,12 +1311,12 @@ impl LazyTaskMachine {
                 }
                 self.report_completion(root)
             }
-            Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
-            Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
+            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
             Transition::Moved => self.resume_moved(context),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
             Transition::Boundary(request) => {
                 let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
@@ -1361,14 +1329,16 @@ impl LazyTaskMachine {
                     context.root_failure(failure)
                 }) {
                     WhnfOwnerPoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                        Phase::End(EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
                             observed_epoch: None,
                             error: None,
-                        })
+                        }))
                     }
-                    WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+                    WhnfOwnerPoll::Failed(failure) => {
+                        Phase::End(EvaluationMachinePoll::Failed(failure))
+                    }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("a list-effect boundary cannot produce an immediate value")
                     }
@@ -1381,14 +1351,14 @@ impl LazyTaskMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         enum Transition {
             Whnf,
             Spark(crate::runtime::RuntimeValueRoot),
             Failed(crate::runtime::RuntimeFailureRoot),
             Moved,
             Boundary(super::whnf::RegionalBoundaryRequest),
-            Yielded,
+            BudgetExhausted,
             Replaced(ManagedLazyCheckpointKindTag),
         }
 
@@ -1415,7 +1385,7 @@ impl LazyTaskMachine {
                     Transition::Spark(access.values().root_runtime_value(value))
                 }
                 RegionalBuiltinPoll::Boundary(request) => Transition::Boundary(request),
-                RegionalBuiltinPoll::BudgetExhausted => Transition::Yielded,
+                RegionalBuiltinPoll::BudgetExhausted => Transition::BudgetExhausted,
                 RegionalBuiltinPoll::Continue => {
                     unreachable!("a machine's steps run until it stops")
                 }
@@ -1433,15 +1403,15 @@ impl LazyTaskMachine {
         match transition {
             Transition::Whnf => {
                 self.work = LazyTaskWork::WhnfCheckpoint;
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
-            Transition::Spark(value) => EvaluationMachinePoll::ScheduleSpark(value),
-            Transition::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+            Transition::Spark(value) => Phase::End(EvaluationMachinePoll::ScheduleSpark(value)),
+            Transition::Failed(failure) => Phase::End(EvaluationMachinePoll::Failed(failure)),
             Transition::Moved => self.resume_moved(context),
-            Transition::Yielded => EvaluationMachinePoll::Yielded,
+            Transition::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
             Transition::Replaced(kind) => {
                 self.work = Self::work_for_checkpoint_kind(kind);
-                EvaluationMachinePoll::Yielded
+                Phase::Next
             }
             Transition::Boundary(request) => {
                 let super::whnf::RegionalBoundaryRequest::Deferred(deferred) = request;
@@ -1454,14 +1424,16 @@ impl LazyTaskMachine {
                     context.root_failure(failure)
                 }) {
                     WhnfOwnerPoll::Pending(dependency) => {
-                        EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+                        Phase::End(EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                             dependency: Some(dependency),
                             observed_epoch: None,
                             error: None,
-                        })
+                        }))
                     }
-                    WhnfOwnerPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
-                    WhnfOwnerPoll::Failed(failure) => EvaluationMachinePoll::Failed(failure),
+                    WhnfOwnerPoll::BudgetExhausted => Phase::End(EvaluationMachinePoll::Yielded),
+                    WhnfOwnerPoll::Failed(failure) => {
+                        Phase::End(EvaluationMachinePoll::Failed(failure))
+                    }
                     WhnfOwnerPoll::Ready(_) => {
                         unreachable!("a builtin boundary cannot produce an immediate value")
                     }
@@ -1474,7 +1446,7 @@ impl LazyTaskMachine {
         &mut self,
         context: &EvaluatorStepContext<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
+    ) -> Phase {
         enum Transition {
             Pending(Result<NetWhnfAccessPoll, EvaluationHalt>),
             Whnf,
@@ -1532,24 +1504,29 @@ impl LazyTaskMachine {
             match transition {
                 Transition::Whnf => {
                     self.work = LazyTaskWork::WhnfCheckpoint;
-                    return EvaluationMachinePoll::Yielded;
+                    return Phase::Next;
                 }
                 Transition::Moved => return self.resume_moved(context),
                 Transition::Replaced(kind) => {
                     self.work = Self::work_for_checkpoint_kind(kind);
-                    return EvaluationMachinePoll::Yielded;
+                    return Phase::Next;
                 }
-                Transition::Pending(Ok(NetWhnfAccessPoll::Yielded)) => {
-                    return EvaluationMachinePoll::Yielded;
+                Transition::Pending(Ok(NetWhnfAccessPoll::Continue)) => {}
+                Transition::Pending(Ok(NetWhnfAccessPoll::BudgetExhausted)) => {
+                    return Phase::End(EvaluationMachinePoll::Yielded);
+                }
+                // Until it blocks on another thread (`budget-waits-block`).
+                Transition::Pending(Ok(NetWhnfAccessPoll::Disturbed)) => {
+                    return Phase::End(EvaluationMachinePoll::Yielded);
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::SemanticInFlight)) => {
-                    return EvaluationMachinePoll::Yielded;
+                    return Phase::End(EvaluationMachinePoll::Yielded);
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::Contended(contention))) => {
                     // The wait is for another thread, which a collection may
                     // be waiting on, so it runs once heap admission ends.
                     context.after_admission(move || contention.wait_for_disturbance());
-                    return EvaluationMachinePoll::Yielded;
+                    return Phase::End(EvaluationMachinePoll::Yielded);
                 }
                 Transition::Pending(Ok(NetWhnfAccessPoll::Semantic(action))) => {
                     let result = drive_net_semantic_action(context, action, step_budget);
@@ -1642,6 +1619,38 @@ impl EvaluationTaskMachine for LazyTaskMachine {
         poll_context: &mut crate::evaluation::EvaluationPollContext,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        match self.run(poll_context, step_budget) {
+            Phase::End(poll) => poll,
+            Phase::Next | Phase::ForceInline(_) | Phase::InlineCompleted => {
+                unreachable!("only a route's inline stack forces or completes lazies inline")
+            }
+        }
+    }
+}
+
+impl LazyTaskMachine {
+    /// Runs this lazy's production phase after phase within one poll, until
+    /// one completes, fails, blocks or spends the budget, or asks its route
+    /// to force a lazy inline (`budget-lazy-route`).
+    fn run(
+        &mut self,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> Phase {
+        loop {
+            match self.phase(poll_context, step_budget) {
+                Phase::Next => {}
+                phase => return phase,
+            }
+        }
+    }
+
+    /// One phase of this lazy's production.
+    fn phase(
+        &mut self,
+        poll_context: &mut crate::evaluation::EvaluationPollContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> Phase {
         let durable_context = self.context.clone();
         if matches!(self.work, LazyTaskWork::HostCallInvoke) {
             // Retire the sole invocation permit before entering arbitrary
@@ -1650,10 +1659,10 @@ impl EvaluationTaskMachine for LazyTaskMachine {
             self.work = LazyTaskWork::HostCallCheckpoint;
             // Host code may block or call out, so it runs with the poll's
             // mutator suspended: a collection must not wait for it. The
-            // route's claim stays held, and the next poll of this quantum
-            // performs the host-to-WHNF family handoff from its result.
+            // route's claim stays held, and the next phase performs the
+            // host-to-WHNF family handoff from its result.
             poll_context.suspend(|| invoke_host_call(&durable_context, &self.lazy));
-            return EvaluationMachinePoll::Yielded;
+            return Phase::Next;
         }
         poll_context.evaluate(&durable_context, |context| {
             // Only `Produce` reads the lazy's state up front, in one access
@@ -1689,7 +1698,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         return self.report_complete(context, value);
                     }
                     ProduceStart::Cached(Err(error)) => {
-                        return EvaluationMachinePoll::Failed(context.root_failure(error));
+                        return Phase::End(EvaluationMachinePoll::Failed(context.root_failure(error)));
                     }
                     ProduceStart::Released => return self.cached_poll(context),
                     ProduceStart::Work(work) => {
@@ -1780,7 +1789,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         }
                         LazySource::Builtin(call) if compiles_at_once(&call) => {
                             if !step_budget.try_consume() {
-                                return EvaluationMachinePoll::Yielded;
+                                return Phase::End(EvaluationMachinePoll::Yielded);
                             }
                             if self.compile_annotated_target(context, &call, step_budget) {
                                 LazyTaskWork::WhnfCheckpoint
@@ -1793,7 +1802,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                         LazySource::Builtin(call) => {
                             // Applying an immediate builtin is a reduction.
                             if !step_budget.try_consume() {
-                                return EvaluationMachinePoll::Yielded;
+                                return Phase::End(EvaluationMachinePoll::Yielded);
                             }
                             #[cfg(feature = "glam-prof")]
                             context.context().values().record_reduction(
@@ -1862,7 +1871,7 @@ impl EvaluationTaskMachine for LazyTaskMachine {
                     };
                 }
                 if matches!(self.work, LazyTaskWork::HostCallInvoke) {
-                    return EvaluationMachinePoll::Yielded;
+                    return Phase::Next;
                 }
             }
 
@@ -1903,39 +1912,35 @@ impl EvaluationTaskMachine for LazyTaskMachine {
 }
 
 impl LazyTaskMachine {
-    fn fail(
-        &mut self,
-        context: &EvaluatorStepContext<'_>,
-        error: EvaluationHalt,
-    ) -> EvaluationMachinePoll {
+    fn fail(&mut self, context: &EvaluatorStepContext<'_>, error: EvaluationHalt) -> Phase {
         if let Some(wait) = error.blocked_on() {
-            return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            return Phase::End(EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Wait(wait.0)),
                 observed_epoch: None,
                 error: None,
-            });
+            }));
         }
         if let Some(promise) = error.unassigned_promise_root() {
             let wait = match promise_root_wait(context.context(), promise) {
                 Ok(wait) => wait,
                 Err(error) => {
-                    return EvaluationMachinePoll::Failed(
+                    return Phase::End(EvaluationMachinePoll::Failed(
                         context.root_failure(Arc::new(EvaluationFailure::message(error.as_ref()))),
-                    );
+                    ));
                 }
             };
-            return EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
+            return Phase::End(EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                 dependency: Some(WorkDependency::Wait(wait)),
                 observed_epoch: None,
                 error: None,
-            });
+            }));
         }
         let failure = error.into_permanent_failure();
         let result =
             context.with_value_access(|access| self.lazy.cache(access.values(), Err(failure)));
         match result {
             Ok(value) => self.report_complete(context, value),
-            Err(error) => EvaluationMachinePoll::Failed(context.root_failure(error)),
+            Err(error) => Phase::End(EvaluationMachinePoll::Failed(context.root_failure(error))),
         }
     }
 }
@@ -2160,15 +2165,11 @@ mod ownership_tests {
             lazy: lazy_root,
             work,
             inline_depth,
-            inline_request,
-            inline_completed,
         } = lazy;
         let _: &EvalContext = context;
         let _: &ManagedLazyRoot = lazy_root;
         let _: &LazyTaskWork = work;
         let _: &Option<usize> = inline_depth;
-        let _: &Option<ManagedLazyRoot> = inline_request;
-        let _: &bool = inline_completed;
 
         let PromiseFollower {
             context,
@@ -2256,37 +2257,40 @@ mod ownership_tests {
             lazy: source.root(context.values()),
             work: LazyTaskWork::Produce,
             inline_depth: None,
-            inline_request: None,
-            inline_completed: false,
         };
         let mut stale = LazyTaskMachine {
             context: (*context).clone(),
             lazy: source.root(context.values()),
             work: LazyTaskWork::Produce,
             inline_depth: None,
-            inline_request: None,
-            inline_completed: false,
         };
         let step = |machine: &mut LazyTaskMachine| {
             crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
-                machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
+                machine.phase(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))
             })
         };
+        // A phase that hands off or spends its unit leaves the lazy pending.
+        let pending = |phase: Phase| {
+            matches!(
+                phase,
+                Phase::Next | Phase::End(EvaluationMachinePoll::Yielded)
+            )
+        };
 
-        assert!(matches!(step(&mut first), EvaluationMachinePoll::Yielded));
+        assert!(pending(step(&mut first)));
         assert!(matches!(first.work, LazyTaskWork::AccessCheckpoint));
-        assert!(matches!(step(&mut stale), EvaluationMachinePoll::Yielded));
+        assert!(pending(step(&mut stale)));
         assert!(matches!(stale.work, LazyTaskWork::AccessCheckpoint));
 
         for _ in 0..8 {
-            assert!(matches!(step(&mut first), EvaluationMachinePoll::Yielded));
+            assert!(pending(step(&mut first)));
             if matches!(first.work, LazyTaskWork::WhnfCheckpoint) {
                 break;
             }
         }
         assert!(matches!(first.work, LazyTaskWork::WhnfCheckpoint));
         assert!(matches!(stale.work, LazyTaskWork::AccessCheckpoint));
-        assert!(matches!(step(&mut stale), EvaluationMachinePoll::Yielded));
+        assert!(pending(step(&mut stale)));
         assert!(matches!(stale.work, LazyTaskWork::WhnfCheckpoint));
         context
             .values()
@@ -2299,18 +2303,13 @@ mod ownership_tests {
         );
         let completed = loop {
             match step(&mut stale) {
-                EvaluationMachinePoll::Yielded => {}
-                EvaluationMachinePoll::Complete(value) => break value,
-                EvaluationMachinePoll::Blocked(_) => {
+                Phase::Next | Phase::End(EvaluationMachinePoll::Yielded) => {}
+                Phase::End(EvaluationMachinePoll::Complete(value)) => break value,
+                Phase::End(EvaluationMachinePoll::Blocked(_)) => {
                     panic!("the assigned result must not remain blocked")
                 }
-                EvaluationMachinePoll::Failed(failure) => panic!("{failure}"),
-                EvaluationMachinePoll::ScheduleSpark(_)
-                | EvaluationMachinePoll::Exit(_)
-                | EvaluationMachinePoll::Cancelled
-                | EvaluationMachinePoll::Panicked { .. } => {
-                    panic!("computed access must complete without orchestration")
-                }
+                Phase::End(EvaluationMachinePoll::Failed(failure)) => panic!("{failure}"),
+                _ => panic!("computed access must complete without orchestration"),
             }
         };
         context.values().assert_same_representation_for_test(
@@ -2338,8 +2337,6 @@ mod ownership_tests {
             lazy: source.root(context.values()),
             work: LazyTaskWork::NetWhnfCheckpoint,
             inline_depth: None,
-            inline_request: None,
-            inline_completed: false,
         };
         let result = crate::core::cache_test_lazy(
             context.values(),
@@ -2356,10 +2353,12 @@ mod ownership_tests {
             .expect("stale checkpoint storage should be collectible");
 
         context.evaluate_test_step(|evaluator| {
-            let EvaluationMachinePoll::Complete(value) = machine.poll_net_whnf_checkpoint(
-                evaluator,
-                &mut crate::evaluation::EvaluationStepBudget::new(1),
-            ) else {
+            let Phase::End(EvaluationMachinePoll::Complete(value)) = machine
+                .poll_net_whnf_checkpoint(
+                    evaluator,
+                    &mut crate::evaluation::EvaluationStepBudget::new(1),
+                )
+            else {
                 panic!("the stale net route must observe the winning terminal cache")
             };
             evaluator.with_value_access(|access| {

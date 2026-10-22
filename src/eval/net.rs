@@ -49,7 +49,12 @@ pub(super) enum NetWhnfPoll {
 
 pub(in crate::eval) enum NetWhnfAccessPoll {
     Ready(Value),
-    Yielded,
+    /// The driver's own progress emptied its worklist, and it restarted from
+    /// the request root: poll again within the same poll.
+    Continue,
+    BudgetExhausted,
+    /// Only another thread changed the net since the driver's last pass.
+    Disturbed,
     SemanticInFlight,
     Contended(NetContention),
     Semantic(NetSemanticAction),
@@ -132,7 +137,10 @@ impl NetWhnfMachine {
                 context.with_value_access(|access| self.poll_in(context, &access, step_budget))?;
             match outcome {
                 NetWhnfAccessPoll::Ready(value) => return Ok(NetWhnfPoll::Ready(value)),
-                NetWhnfAccessPoll::Yielded | NetWhnfAccessPoll::SemanticInFlight => {
+                NetWhnfAccessPoll::Continue => {}
+                NetWhnfAccessPoll::BudgetExhausted
+                | NetWhnfAccessPoll::Disturbed
+                | NetWhnfAccessPoll::SemanticInFlight => {
                     return Ok(NetWhnfPoll::Yielded);
                 }
                 NetWhnfAccessPoll::Contended(contention) => {
@@ -166,12 +174,19 @@ impl NetWhnfMachine {
                 context.context().values().record_net_driver(
                     crate::interaction_net::profiling::DriverEvent::RequestRootRestart,
                 );
+                // Its own progress lets the driver go on within the poll; a
+                // pass that only saw other threads' changes waits on them.
+                let progressed = self.driver.progressed;
                 self.driver.restart_from_request_root(access.values());
-                Ok(NetWhnfAccessPoll::Yielded)
+                Ok(if progressed {
+                    NetWhnfAccessPoll::Continue
+                } else {
+                    NetWhnfAccessPoll::Disturbed
+                })
             }
             #[cfg(all(test, feature = "glam-prof"))]
-            NetDriverOutcome::ProbeBudgetExhausted => Ok(NetWhnfAccessPoll::Yielded),
-            NetDriverOutcome::BudgetExhausted => Ok(NetWhnfAccessPoll::Yielded),
+            NetDriverOutcome::ProbeBudgetExhausted => Ok(NetWhnfAccessPoll::BudgetExhausted),
+            NetDriverOutcome::BudgetExhausted => Ok(NetWhnfAccessPoll::BudgetExhausted),
             NetDriverOutcome::Root(InterfaceDemand::Data) => {
                 let runtime = self.driver.request.root.duplicate_in(access.values());
                 let value = access.net(&runtime).with(|runtime| {
@@ -436,7 +451,10 @@ enum NetDriverOutcome {
 struct NetDriver {
     request: NormalizationRequest,
     worklist: NetDriverWorklist,
+    /// This pass reduced, moved a cursor or resolved a dependency.
     progressed: bool,
+    /// Another thread changed the net under this pass.
+    disturbed: bool,
     /// This evaluation's demand stack into the request's root net, which
     /// each root poll resumes. It outlives a restart from the request root:
     /// the stack stays valid while its nodes live.
@@ -452,6 +470,7 @@ impl NetDriver {
             request,
             worklist,
             progressed: false,
+            disturbed: false,
             root_route: InterfaceRoute::default(),
         }
     }
@@ -459,6 +478,7 @@ impl NetDriver {
     fn restart_from_request_root(&mut self, access: &RuntimeValueAccess<'_>) {
         self.worklist.reset(self.request.root_work(access));
         self.progressed = false;
+        self.disturbed = false;
     }
 
     fn trace_managed_edges(&self, visitor: &mut glam_gc::Visitor<'_>) {
@@ -562,7 +582,7 @@ fn drive_net_driver_work_with_budget_access(
         }
     }
     assert!(
-        driver.progressed,
+        driver.progressed || driver.disturbed,
         "request driver exhausted without progress or a root result"
     );
     Ok(NetDriverOutcome::Progressed)
@@ -627,7 +647,7 @@ fn drive_net_batch(
         }
         let Some(next) = driver.worklist.pop() else {
             assert!(
-                driver.progressed,
+                driver.progressed || driver.disturbed,
                 "request driver exhausted without progress or a root result"
             );
             return Ok(NetBatchOutcome::Driver(NetDriverOutcome::Progressed));
@@ -695,7 +715,7 @@ fn drive_net_work_item(
                     #[cfg(feature = "glam-prof")]
                     access
                         .record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
-                    driver.progressed = true;
+                    driver.disturbed = true;
                 }
                 CursorStep::Dependency(dependency) => {
                     #[cfg(feature = "glam-prof")]
@@ -742,7 +762,7 @@ fn drive_net_work_item(
                     #[cfg(feature = "glam-prof")]
                     access
                         .record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
-                    driver.progressed = true;
+                    driver.disturbed = true;
                 }
                 CursorStep::Dependency(dependency) => {
                     #[cfg(feature = "glam-prof")]
@@ -818,7 +838,7 @@ fn drive_net_work_item(
             CursorDependencyResolution::Disturbed | CursorDependencyResolution::Gone => {
                 #[cfg(feature = "glam-prof")]
                 access.record_driver(crate::interaction_net::profiling::DriverEvent::Disturbance);
-                driver.progressed = true;
+                driver.disturbed = true;
                 #[cfg(feature = "glam-prof")]
                 access.record_driver(
                     crate::interaction_net::profiling::DriverEvent::RequestRootRestart,
@@ -888,7 +908,7 @@ fn prepare_active_pair_step(
                 contention,
             ))));
         }
-        ActivePairStep::Disturbed | ActivePairStep::Gone => driver.progressed = true,
+        ActivePairStep::Disturbed | ActivePairStep::Gone => driver.disturbed = true,
     }
     Ok(None)
 }
@@ -2118,11 +2138,13 @@ mod driver_tests {
             request,
             worklist,
             progressed,
+            disturbed,
             root_route,
         } = driver;
         let _: &NormalizationRequest = request;
         let _: &NetDriverWorklist = worklist;
         let _: &bool = progressed;
+        let _: &bool = disturbed;
         let _: &InterfaceRoute = root_route;
     }
 

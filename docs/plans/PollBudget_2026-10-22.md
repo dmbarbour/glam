@@ -232,3 +232,21 @@ first.
   treat a `Continue` from the durable conversions and the strategy machine
   as a yield, until `budget-reflection-phases` and
   `budget-exhausted-only`.
+  Instructions over the 84 profiling workloads fell 0.3%: `list_map` 5 to
+  6%, `do_chain` 1.4 to 2.2%, `escape_*` about 1%. `sum` and `countdown`
+  rose 0.4 to 1.6%: their arithmetic steps now always pay a unit, so a
+  64-unit poll quantum holds fewer of them (`budget-quantum`).
+- `budget-lazy-route` (2026-10-22): the lazy task machine's phases report a
+  private `Phase`: `Next` for a handoff (a family's result handed to WHNF,
+  a replaced or moved checkpoint, a forward found gone, the host call's
+  invocation), `ForceInline` and `InlineCompleted` for its route, or `End`
+  with the poll's outcome. `run` loops on `Next`, so a lazy runs its phases
+  within one poll; the route loop handles the inline requests, and its
+  repoll rules, `IDLE_YIELD_REPOLLS`, the two sentinel fields and
+  `has_deferred_work` went. The net driver now tells its own progress from
+  other threads' disturbances: a pass with progress of its own restarts
+  within the poll, and one that only saw disturbances ends it, for
+  `budget-waits-block` to make a wait. The profiling probe still drains its
+  budget: it stands in for exhaustion, so that the assertion of
+  `budget-exhausted-only` holds of it too. Tests that walk a host call or a
+  stale route through each handoff step `phase` by phase.
