@@ -37,7 +37,8 @@ use super::runtime::{
     ShareJournal, Wire, WireEnd,
 };
 use super::{
-    Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value, ValueKind,
+    Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value as HandleValue,
+    ValueKind,
 };
 use crate::compiler::{import_source_in, source_record_in};
 use crate::core::{Builtin, Dict, Key, Value as CoreValue};
@@ -271,9 +272,9 @@ impl MachineWiring {
 
 #[derive(Clone, Default)]
 struct MachineState {
-    stack: Vec<Value>,
-    stash: Vec<Value>,
-    locals: HashMap<Key, Value>,
+    stack: Vec<HandleValue>,
+    stash: Vec<HandleValue>,
+    locals: HashMap<Key, HandleValue>,
     children: HashMap<Key, Child>,
     /// Whether the machine is in error: a turn on it ended in an error or a
     /// panic. Until a recovering entry clears it, nothing enters the machine
@@ -617,6 +618,31 @@ impl Runtime {
             .find(path.into().keys())
             .expect("no machine is forked between turns")
             .is_some_and(|state| state.failed)
+    }
+}
+
+/// A glam value that a turn popped from a machine's stack: a handle rooted
+/// for as long as the turn's scope, `'scope`, which it cannot outlive. A
+/// turn may push it again, as may the turns within it.
+///
+/// It cannot leave its turn:
+///
+/// ```compile_fail
+/// let mut rt = glam::Runtime::open(glam::RuntimeConfig::new()).unwrap();
+/// let escaped = rt.run("m", |m| {
+///     m.int_push(1);
+///     m.value_pop()
+/// });
+/// ```
+#[derive(Clone)]
+pub struct Value<'scope> {
+    value: HandleValue,
+    _scope: PhantomData<&'scope ()>,
+}
+
+impl std::fmt::Debug for Value<'_> {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("Value(..)")
     }
 }
 
@@ -1199,7 +1225,7 @@ impl CutTransaction {
 /// cut.
 struct Hook {
     machine: Vec<Key>,
-    items: Vec<Value>,
+    items: Vec<HandleValue>,
     run: Box<HookFn>,
 }
 
@@ -1229,6 +1255,22 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// How many values the stash holds.
     pub fn stash_depth(&self) -> usize {
         self.state.stash.len()
+    }
+
+    /// Pushes a value that a turn popped, in this turn or one enclosing it.
+    pub fn value_push(&mut self, value: &Value<'scope>) -> Result<(), Error> {
+        self.runtime.assembler.values().require(&value.value)?;
+        self.push(value.value.clone());
+        Ok(())
+    }
+
+    /// Pops the top value, without evaluating it, as a handle rooted for
+    /// as long as this turn's scope.
+    pub fn value_pop(&mut self) -> Result<Value<'scope>, Error> {
+        Ok(Value {
+            value: self.pop()?,
+            _scope: PhantomData,
+        })
     }
 
     pub fn unit_push(&mut self) {
@@ -1690,7 +1732,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     pub fn anno(&mut self) -> Result<(), Error> {
         let values = self.runtime.assembler.values();
         self.replace_top(2, |items| {
-            let [annotation, target] = <[Value; 2]>::try_from(items)
+            let [annotation, target] = <[HandleValue; 2]>::try_from(items)
                 .unwrap_or_else(|_| unreachable!("the top two values"));
             values.anno(annotation, target)
         })
@@ -1722,7 +1764,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     fn replace_top(
         &mut self,
         n: usize,
-        build: impl FnOnce(Vec<Value>) -> Result<Value, Error>,
+        build: impl FnOnce(Vec<HandleValue>) -> Result<HandleValue, Error>,
     ) -> Result<(), Error> {
         let depth = self.require(n)?;
         let built = build(self.state.stack[depth - n..].to_vec())?;
@@ -1779,7 +1821,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// As [`Self::pop_evaluated`], leaving the top value in place.
     fn peek_evaluated<T>(
         &mut self,
-        prepare: impl FnOnce(Value) -> Result<Value, Error>,
+        prepare: impl FnOnce(HandleValue) -> Result<HandleValue, Error>,
         convert: impl FnOnce(crate::api::EvaluatedValue) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let value = prepare(self.peek()?.clone())?;
@@ -1794,7 +1836,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// [`ErrorKind::Retry`], which the outermost cut waits out.
     fn pop_evaluated<T>(
         &mut self,
-        prepare: impl FnOnce(Value) -> Result<Value, Error>,
+        prepare: impl FnOnce(HandleValue) -> Result<HandleValue, Error>,
         convert: impl FnOnce(crate::api::EvaluatedValue) -> Result<T, Error>,
     ) -> Result<T, Error> {
         let value = prepare(self.peek()?.clone())?;
@@ -1835,8 +1877,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let requester = self.runtime.assembler.source_requester();
         let values = self.runtime.assembler.values();
         self.replace_top(1, |items| {
-            let [key] =
-                <[Value; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            let [key] = <[HandleValue; 1]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top value"));
             values.with_access(|scoped| {
                 let key = scoped.clone_core(&key)?;
                 Ok(scoped.wrap(import_source_in(scoped.runtime_access(), requester, key)))
@@ -1856,8 +1898,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let compiler = self.runtime.assembler.source_compiler(None);
         let values = self.runtime.assembler.values();
         self.replace_top(1, |items| {
-            let [record] =
-                <[Value; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            let [record] = <[HandleValue; 1]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top value"));
             values.with_access(|scoped| {
                 let record = scoped.clone_core(&record)?;
                 let compiler = CoreValue::Opaque(crate::core::OpaqueValue::new(
@@ -1884,7 +1926,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     pub fn instantiate(&mut self) -> Result<(), Error> {
         let values = self.runtime.assembler.values();
         self.replace_top(2, |items| {
-            let [base, mixin] = <[Value; 2]>::try_from(items)
+            let [base, mixin] = <[HandleValue; 2]>::try_from(items)
                 .unwrap_or_else(|_| unreachable!("the top two values"));
             values.with_access(|scoped| {
                 let access = scoped.runtime_access();
@@ -1993,8 +2035,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let requester = self.runtime.assembler.source_requester();
         let values = self.runtime.assembler.values();
         self.replace_top(1, |items| {
-            let [package] =
-                <[Value; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            let [package] = <[HandleValue; 1]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top value"));
             values.with_access(|scoped| {
                 let access = scoped.runtime_access();
                 let key = || -> Result<CoreValue, Error> {
@@ -2056,8 +2098,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         &mut self,
         module_path: I,
         inputs: impl IntoIterator<Item = ModuleInput>,
-        definitions: Option<Value>,
-    ) -> Result<(Value, Vec<Diagnostic>), Error>
+        definitions: Option<HandleValue>,
+    ) -> Result<(HandleValue, Vec<Diagnostic>), Error>
     where
         I: IntoIterator<Item = S>,
         S: Into<String>,
@@ -2100,10 +2142,13 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let values = self.runtime.assembler.values();
         let composed = crate::g_syntax::composed_environment_root(
             values.core(),
-            mixins.into_iter().map(Value::into_runtime_root).collect(),
+            mixins
+                .into_iter()
+                .map(HandleValue::into_runtime_root)
+                .collect(),
             None,
         );
-        self.push(Value::from_runtime_root(composed));
+        self.push(HandleValue::from_runtime_root(composed));
     }
 
     /// Sets the top value, an object, as this machine's mixin of the
@@ -2141,7 +2186,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         };
         let mixin = mixin.unwrap_or_else(|| {
             let values = self.runtime.assembler.values();
-            Value::from_runtime_root(crate::g_syntax::composed_environment_root(
+            HandleValue::from_runtime_root(crate::g_syntax::composed_environment_root(
                 values.core(),
                 Vec::new(),
                 None,
@@ -2165,20 +2210,12 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// Pushes `value`, which must belong to this runtime, for the CLI's
-    /// transition (`crate::transition`).
-    pub(crate) fn push_value(&mut self, value: Value) -> Result<(), Error> {
-        self.runtime.assembler.values().require(&value)?;
-        self.push(value);
-        Ok(())
-    }
-
     /// The reflection environment of `role` as this machine sees it, its
     /// shares as they stand over the role's sealed environment, for the
     /// CLI's transition (`crate::transition`).
-    pub(crate) fn reflection_environment(&self, role: &str) -> Value {
+    pub(crate) fn reflection_environment(&self, role: &str) -> HandleValue {
         let base = self.runtime.assembler.reflection_environment_for_role(role);
-        Value::from_runtime_root(environment::committed_environment(
+        HandleValue::from_runtime_root(environment::committed_environment(
             &self.resources(),
             &self.path,
             &base.into_runtime_root(),
@@ -2221,7 +2258,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// The promise that `resolver`, evaluated, resolves.
-    fn resolver_promise(&self, resolver: &Value) -> Result<u64, Error> {
+    fn resolver_promise(&self, resolver: &HandleValue) -> Result<u64, Error> {
         self.runtime
             .assembler
             .values()
@@ -2437,7 +2474,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// below it, popping both once it has.
     fn volume_edit(
         &mut self,
-        edit: impl Fn(&mut StoreJournal, &RuntimeValueAccess<'_>, VolumeCellView<'_>, Value),
+        edit: impl Fn(&mut StoreJournal, &RuntimeValueAccess<'_>, VolumeCellView<'_>, HandleValue),
     ) -> Result<(), Error> {
         let depth = self.require(2)?;
         let value = self.state.stack[depth - 1].clone();
@@ -2463,7 +2500,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// The handle `n` values down, evaluated, where it names a volume; the
     /// handle stays. Volume operations reach the volume through a view of
     /// its cell, which the handle gives (`api-volume-cells`).
-    fn volume_handle_at(&mut self, n: usize) -> Result<Value, Error> {
+    fn volume_handle_at(&mut self, n: usize) -> Result<HandleValue, Error> {
         let depth = self.require(n)?;
         let handle = self.state.stack[depth - n].clone();
         let evaluated = self.runtime.assembler.evaluator().eval(&handle);
@@ -2541,7 +2578,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Sends `values`, in order, from this machine's output `port` to every
     /// buffer its wiring reaches.
-    fn send(&mut self, port: Key, values: &[Value]) -> Result<(), Error> {
+    fn send(&mut self, port: Key, values: &[HandleValue]) -> Result<(), Error> {
         for value in values {
             self.runtime.assembler.values().require(value)?;
         }
@@ -3074,7 +3111,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Runs a hook on a stack of its captured values and an empty stash.
-    fn run_hook(&mut self, items: Vec<Value>, run: Box<HookFn>) {
+    fn run_hook(&mut self, items: Vec<HandleValue>, run: Box<HookFn>) {
         let stack = std::mem::replace(&mut self.state.stack, items);
         let stash = std::mem::take(&mut self.state.stash);
         run(self);
@@ -3239,18 +3276,18 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
-    fn push(&mut self, value: Value) {
+    fn push(&mut self, value: HandleValue) {
         self.state.stack.push(value);
     }
 
-    pub(crate) fn pop(&mut self) -> Result<Value, Error> {
+    pub(crate) fn pop(&mut self) -> Result<HandleValue, Error> {
         self.state
             .stack
             .pop()
             .ok_or_else(|| underflow("stack", 1, 0))
     }
 
-    fn peek(&self) -> Result<&Value, Error> {
+    fn peek(&self) -> Result<&HandleValue, Error> {
         self.state
             .stack
             .last()

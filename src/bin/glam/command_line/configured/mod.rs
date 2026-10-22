@@ -4,7 +4,7 @@ pub(super) mod path;
 mod search;
 mod token;
 
-use glam::{Assembler, Error, Value, Values};
+use glam::{Assembler, Error, HandleValue, Values};
 
 use super::completion::{CliCompletion, CompletionRequest};
 use super::model::{CliArguments, CliError, CliExpansion};
@@ -15,7 +15,7 @@ use search::{run_cli_completion, run_cli_search};
 /// execute it or activate worker threads.
 pub(crate) fn expand_configured(
     assembler: &Assembler,
-    configuration: &Value,
+    configuration: &HandleValue,
     arguments: CliArguments,
 ) -> Result<CliExpansion, CliError> {
     let values = assembler.values();
@@ -35,7 +35,7 @@ pub(crate) fn expand_configured(
 /// Missing `conf.cli` behaves like `.fail` and returns no candidates.
 pub(crate) fn complete_configured(
     assembler: &Assembler,
-    configuration: &Value,
+    configuration: &HandleValue,
     request: CompletionRequest,
 ) -> Result<CliCompletion, CliError> {
     let values = assembler.values();
@@ -50,7 +50,11 @@ pub(crate) fn complete_configured(
     run_cli_completion(assembler, &effect, request)
 }
 
-fn with_path_lookup_context(values: &Values, value: Value, path: &str) -> Result<Value, Error> {
+fn with_path_lookup_context(
+    values: &Values,
+    value: HandleValue,
+    path: &str,
+) -> Result<HandleValue, Error> {
     let frame = values.record([(
         "eval",
         values.record([

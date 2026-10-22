@@ -6,7 +6,7 @@ use glam::reflection::{
     RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
     SpecializationRequestWork, TaskHalt, TaskSpecialization,
 };
-use glam::{EvaluationRuntime, Value};
+use glam::{EvaluationRuntime, HandleValue};
 
 const ECHO_TAG: [&str; 4] = ["embedding_test", "v0", "request", "echo"];
 
@@ -28,7 +28,7 @@ enum TestRequest {
 }
 
 enum TestRequestWork {
-    EchoStart(Option<Value>),
+    EchoStart(Option<HandleValue>),
     EchoWaiting,
 }
 
@@ -82,11 +82,15 @@ impl TaskSpecialization for TestEffects {
         vec![echo_spec()]
     }
 
-    fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<HandleValue>,
+    ) -> Self::RequestWork {
         match request {
             TestRequest::Echo => {
                 self.counts.starts.fetch_add(1, Ordering::SeqCst);
-                let [value]: [Value; 1] = arguments
+                let [value]: [HandleValue; 1] = arguments
                     .try_into()
                     .expect("effect decoding validates echo request arity");
                 TestRequestWork::EchoStart(Some(value))

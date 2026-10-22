@@ -1,7 +1,7 @@
 use std::sync::Arc;
 
 use glam::reflection::{IsolatedEffectSearch, IsolatedSearchBranch, IsolatedSearchPoll};
-use glam::{Assembler, Diagnostic, Value};
+use glam::{Assembler, Diagnostic, HandleValue};
 
 use super::super::completion::{
     CliCompletion, CompletionCandidate, CompletionExpectation, CompletionRequest, Frontier,
@@ -19,12 +19,12 @@ pub(super) struct CliSearchResult {
 
 struct SuccessfulBranch {
     result: CliSearchResult,
-    explanations: Vec<Value>,
+    explanations: Vec<HandleValue>,
 }
 
 pub(super) fn run_cli_search(
     assembler: &Assembler,
-    effect: &Value,
+    effect: &HandleValue,
     arguments: CliArguments,
 ) -> Result<CliSearchResult, CliError> {
     let branches = run_search(
@@ -37,7 +37,7 @@ pub(super) fn run_cli_search(
 
 pub(super) fn run_cli_completion(
     assembler: &Assembler,
-    effect: &Value,
+    effect: &HandleValue,
     request: CompletionRequest,
 ) -> Result<CliCompletion, CliError> {
     let Some(active_argument) = request.active_argument() else {
@@ -136,7 +136,7 @@ pub(super) fn run_cli_completion(
 
 fn run_search(
     assembler: &Assembler,
-    effect: &Value,
+    effect: &HandleValue,
     invocation: CliInvocation,
 ) -> Result<Arc<[IsolatedSearchBranch<CliEffects>]>, CliError> {
     let values = assembler.values();
@@ -189,7 +189,7 @@ fn run_search(
 
 fn completion_candidate_viable(
     assembler: &Assembler,
-    effect: &Value,
+    effect: &HandleValue,
     arguments: &[std::ffi::OsString],
     active: usize,
     replacement: &std::ffi::OsStr,
@@ -392,7 +392,7 @@ fn expectation_detail(assembler: &Assembler, journal: &CliJournal) -> String {
     )
 }
 
-fn failure_explanations(assembler: &Assembler, journal: &CliJournal) -> Vec<Value> {
+fn failure_explanations(assembler: &Assembler, journal: &CliJournal) -> Vec<HandleValue> {
     let frontier = journal_frontier(journal);
     let explanations = unique_values(
         assembler,
@@ -411,7 +411,10 @@ fn failure_explanations(assembler: &Assembler, journal: &CliJournal) -> Vec<Valu
     Vec::new()
 }
 
-fn unique_values(assembler: &Assembler, values: impl IntoIterator<Item = Value>) -> Vec<Value> {
+fn unique_values(
+    assembler: &Assembler,
+    values: impl IntoIterator<Item = HandleValue>,
+) -> Vec<HandleValue> {
     let mut unique = Vec::new();
     for value in values {
         if !unique.iter().any(|prior| {
@@ -426,7 +429,7 @@ fn unique_values(assembler: &Assembler, values: impl IntoIterator<Item = Value>)
     unique
 }
 
-fn render_explanation_detail(assembler: &Assembler, explanations: &[Value]) -> String {
+fn render_explanation_detail(assembler: &Assembler, explanations: &[HandleValue]) -> String {
     explanations
         .iter()
         .map(|explanation| {
@@ -438,7 +441,7 @@ fn render_explanation_detail(assembler: &Assembler, explanations: &[Value]) -> S
         .collect()
 }
 
-fn render_explanation(assembler: &Assembler, explanation: &Value) -> String {
+fn render_explanation(assembler: &Assembler, explanation: &HandleValue) -> String {
     let explanation = match assembler.evaluator().eval(explanation) {
         Ok(value) => value,
         Err(error) => return format!("explanation unavailable ({error})"),
@@ -467,7 +470,11 @@ fn render_explanation(assembler: &Assembler, explanation: &Value) -> String {
     }
 }
 
-fn explanation_field(assembler: &Assembler, explanation: &Value, field: &str) -> Option<String> {
+fn explanation_field(
+    assembler: &Assembler,
+    explanation: &HandleValue,
+    field: &str,
+) -> Option<String> {
     let values = assembler.values();
     let value = values.access_names(explanation, [field]).ok()?;
     let value = assembler.evaluator().eval(&value).ok()?;

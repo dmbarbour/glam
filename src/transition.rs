@@ -30,13 +30,6 @@ pub fn reflection_environment(machine: &Machine<'_, '_>, role: &str) -> Value {
     machine.reflection_environment(role)
 }
 
-/// Pushes a value the handle API built onto a machine's stack. Used by the
-/// CLI's `configuration` module for the process environment's variables,
-/// whose keys are byte strings that a machine's dicts do not build.
-pub fn push_value(machine: &mut Machine<'_, '_>, value: Value) -> Result<(), Error> {
-    machine.push_value(value)
-}
-
 /// Compiles `inputs` at `module_path`, eagerly, through the handle API's
 /// assembler, pushing the module and returning its warnings, as the turn
 /// API's compile did before `api-compile-ops`. Used by the CLI's

@@ -287,21 +287,29 @@ fn inspect_g_source_command(path: &Path, verbosity: command_line::ParseVerbosity
 #[cfg(test)]
 mod tests {
     use super::*;
-    use glam::{Assembler, SourceSystem, Value};
+    use glam::{Assembler, HandleValue, SourceSystem};
     use rendering::rendered_text_for_test;
 
     trait TestValueFacade {
-        fn get(&self, root: &Value, path: &str) -> Result<Value, Error>;
-        fn get_evaluated(&self, root: &Value, path: &str) -> Result<glam::EvaluatedValue, Error>;
+        fn get(&self, root: &HandleValue, path: &str) -> Result<HandleValue, Error>;
+        fn get_evaluated(
+            &self,
+            root: &HandleValue,
+            path: &str,
+        ) -> Result<glam::EvaluatedValue, Error>;
     }
 
     impl TestValueFacade for Assembler {
-        fn get(&self, root: &Value, path: &str) -> Result<Value, Error> {
+        fn get(&self, root: &HandleValue, path: &str) -> Result<HandleValue, Error> {
             self.get_evaluated(root, path)
                 .map(glam::EvaluatedValue::into_value)
         }
 
-        fn get_evaluated(&self, root: &Value, path: &str) -> Result<glam::EvaluatedValue, Error> {
+        fn get_evaluated(
+            &self,
+            root: &HandleValue,
+            path: &str,
+        ) -> Result<glam::EvaluatedValue, Error> {
             let value = self.values().access_names(root, path.split('.'))?;
             self.evaluator().eval(&value)
         }
@@ -622,7 +630,9 @@ mod tests {
     /// leaving a delivery failure for settlement to report.
     fn fail_a_delivery(runtime: &EvaluationRuntime, message: &'static str) {
         let failed_output = runtime
-            .output_endpoint(Ok::<Value, Error>, move |_value| Err(Error::new(message)))
+            .output_endpoint(Ok::<HandleValue, Error>, move |_value| {
+                Err(Error::new(message))
+            })
             .expect("failed output endpoint should register");
         let capability = runtime.task_capability();
         let (_generation, store, snapshot) = capability.transaction_snapshot();

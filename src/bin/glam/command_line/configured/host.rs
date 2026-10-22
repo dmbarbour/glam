@@ -2,7 +2,7 @@ use std::ffi::OsString;
 use std::sync::Arc;
 
 use glam::reflection::{IsolatedTaskHost, ReflectionJournal, ReflectionTransaction};
-use glam::{EffectTokenDomain, Value, Values};
+use glam::{EffectTokenDomain, HandleValue, Values};
 
 use super::super::completion::{CompletionEvidence, ExpectationEvidence};
 use super::super::model::CommandEdit;
@@ -71,10 +71,10 @@ pub(super) struct CliJournal {
     pub(super) candidates: Vec<CompletionEvidence>,
     /// Cases currently enclosing the effect being interpreted. Failed reader
     /// evidence captures this stack before the branch terminates.
-    pub(super) active_cases: Vec<Value>,
+    pub(super) active_cases: Vec<HandleValue>,
     /// Cases entered by this branch, retained for ambiguity explanations after
     /// successful scopes have closed.
-    pub(super) visited_cases: Vec<Value>,
+    pub(super) visited_cases: Vec<HandleValue>,
 }
 
 impl ReflectionTransaction for CliJournal {
@@ -103,8 +103,8 @@ mod owner_tests {
             active_cases,
             visited_cases,
         } = journal;
-        let _: &Vec<Value> = active_cases;
-        let _: &Vec<Value> = visited_cases;
+        let _: &Vec<HandleValue> = active_cases;
+        let _: &Vec<HandleValue> = visited_cases;
     }
 
     #[test]

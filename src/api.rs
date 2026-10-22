@@ -39,7 +39,7 @@ use runtime::publish_runtime_observation;
 pub use runtime::*;
 pub use turn::{
     DiagnosticsWiring, Endpoint, Fork, Machine, MachinePath, MachineStatus, MachineWiring,
-    PromiseStatus, Runtime, RuntimeConfig,
+    PromiseStatus, Runtime, RuntimeConfig, Value as TurnValue,
 };
 pub(crate) use value::EffectTokenKey;
 #[cfg(test)]

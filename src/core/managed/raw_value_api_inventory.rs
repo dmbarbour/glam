@@ -190,8 +190,10 @@ fn initial_raw_names(
                     && source
                         .first()
                         .is_some_and(|name| matches!(name.as_str(), "self" | "super")));
-            if imports_api_value && local == "Value" {
-                imports_public_value = true;
+            // The public API's value is no raw value under any local name,
+            // such as `HandleValue` beside a turn's own `Value`.
+            if imports_api_value {
+                imports_public_value |= local == "Value";
             } else if is_raw_value_path(
                 &source,
                 core_child,

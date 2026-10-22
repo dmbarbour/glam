@@ -3,9 +3,9 @@
 use std::sync::Arc;
 
 use glam::{
-    Diagnostic, Error, QuiescenceReport, RuntimeDeadlockWork, RuntimeDeliveryFailure,
+    Diagnostic, Error, HandleValue, QuiescenceReport, RuntimeDeadlockWork, RuntimeDeliveryFailure,
     RuntimeDependency, RuntimeDisposition, RuntimeDispositionKind, RuntimeMaintenanceFailure,
-    RuntimeWorkKind, RuntimeWorkState, Severity, Value, Values,
+    RuntimeWorkKind, RuntimeWorkState, Severity, Values,
 };
 
 /// The reports of a settlement that are still to be rendered.
@@ -194,15 +194,15 @@ fn maintenance_failure_diagnostic(
     Diagnostic::new(values, Severity::Error, message).with_context(values, context)
 }
 
-fn report_id(values: &Values, id: u64) -> Result<Value, Error> {
+fn report_id(values: &Values, id: u64) -> Result<HandleValue, Error> {
     values.number_from_text(id.to_string())
 }
 
 fn runtime_report_context(
     values: &Values,
     operation: &str,
-    args: Vec<(&str, Value)>,
-) -> Result<Value, Error> {
+    args: Vec<(&str, HandleValue)>,
+) -> Result<HandleValue, Error> {
     values.record([(
         "runtime",
         values.record([
@@ -233,7 +233,7 @@ fn runtime_work_state_name(state: RuntimeWorkState) -> &'static str {
 fn runtime_dependency_value(
     values: &Values,
     dependency: &RuntimeDependency,
-) -> Result<Value, Error> {
+) -> Result<HandleValue, Error> {
     match dependency {
         RuntimeDependency::TaskWait {
             wait_id,

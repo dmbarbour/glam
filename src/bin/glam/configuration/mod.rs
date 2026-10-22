@@ -4,9 +4,10 @@ use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use bytes::Bytes;
 use glam::{
-    Assembler, Error, EvaluationRuntime, FileSourceSystem, Machine, ModuleInput, Runtime, Value,
-    ValueKind, Values,
+    Assembler, Error, EvaluationRuntime, FileSourceSystem, HandleValue, Key, Machine, ModuleInput,
+    Runtime, ValueKind, Values,
 };
 
 use crate::command_line::{CliArguments, CommandPlanParts};
@@ -35,7 +36,7 @@ impl PreparedAssembly {
     }
 
     /// The configuration module, for what has not moved to turns.
-    pub(super) fn configuration(&mut self) -> Value {
+    pub(super) fn configuration(&mut self) -> HandleValue {
         self.runtime
             .run(CLI, |m| {
                 m.local_get("configuration");
@@ -109,16 +110,18 @@ pub(super) fn prepare(
     })
 }
 
-/// The process's environment variables, by name, as byte strings.
-fn environment_variables(values: &Values) -> Value {
-    values
-        .dictionary(env::vars_os().map(|(name, value)| {
-            (
-                values.bytes(name.as_encoded_bytes().to_vec()),
-                values.bytes(value.as_encoded_bytes().to_vec()),
-            )
-        }))
-        .expect("OS environment names must be keyable binary values")
+/// Pushes the process's environment variables as a dict, by name, as byte
+/// strings.
+fn push_environment_variables(m: &mut Machine<'_, '_>) -> Result<(), Error> {
+    let (names, values): (Vec<_>, Vec<_>) = env::vars_os().unzip();
+    for value in &values {
+        m.bytes_push(value.as_encoded_bytes().to_vec());
+    }
+    m.dict_pack(
+        names
+            .iter()
+            .map(|name| Key::Binary(Bytes::copy_from_slice(name.as_encoded_bytes()))),
+    )
 }
 
 /// Pushes `arguments` as a list of byte strings.
@@ -134,14 +137,10 @@ fn push_arguments(m: &mut Machine<'_, '_>, arguments: &[std::ffi::OsString]) -> 
 /// `env`, and, at `args` and `refl_args`, promised values that the CLI
 /// fulfills once `conf.cli`'s expansion settles them, through the resolvers
 /// the root keeps at `args_resolver` and `refl_args_resolver`.
-fn bind_process(
-    root: &mut Machine<'_, '_>,
-    values: &Values,
-    cli_arguments: &CliArguments,
-) -> Result<(), Error> {
+fn bind_process(root: &mut Machine<'_, '_>, cli_arguments: &CliArguments) -> Result<(), Error> {
     root.promise_new();
     root.local_set("args_resolver")?;
-    glam::transition::push_value(root, environment_variables(values))?;
+    push_environment_variables(root)?;
     root.promise_new();
     root.local_set("refl_args_resolver")?;
     push_arguments(root, cli_arguments.args())?;
@@ -179,13 +178,12 @@ fn load(
     cli_arguments: &CliArguments,
     initial_environment: Option<&InitialCliEnvironment>,
 ) -> Result<(), Error> {
-    let values = glam::transition::assembler(runtime).values();
     runtime.run((), |root| {
         root.run(CLI, |m| {
             glam::transition::compile(m, ["glam_cli"], [ModuleInput::script("g", PRELUDE)])?;
             m.local_set("prelude")
         })?;
-        bind_process(root, &values, cli_arguments)?;
+        bind_process(root, cli_arguments)?;
         if let Some((args, refl_args)) = initial_environment {
             fulfill_process(root, args, refl_args)?;
         }
@@ -234,7 +232,7 @@ pub(super) fn selects_nothing(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
     Ok(m.int_pop()? == 0)
 }
 
-pub(super) fn entry_context(values: &Values, entry: &str) -> Result<Value, Error> {
+pub(super) fn entry_context(values: &Values, entry: &str) -> Result<HandleValue, Error> {
     values.record([("conf", values.record([("entry", values.text(entry))])?)])
 }
 

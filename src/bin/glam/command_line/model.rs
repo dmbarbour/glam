@@ -3,7 +3,7 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
-use glam::{Diagnostic, Error, ModuleInput, Severity, Value, Values};
+use glam::{Diagnostic, Error, HandleValue, ModuleInput, Severity, Values};
 
 use super::completion::{CliCaseExplanation, CompletionRequest};
 
@@ -59,7 +59,7 @@ impl CliError {
 
     pub(super) fn with_explanations(
         mut self,
-        explanations: impl IntoIterator<Item = Value>,
+        explanations: impl IntoIterator<Item = HandleValue>,
     ) -> Self {
         self.explanations = explanations
             .into_iter()
@@ -109,7 +109,7 @@ impl CliError {
     }
 }
 
-fn configuration_entry_context(values: &Values) -> Result<Value, Error> {
+fn configuration_entry_context(values: &Values) -> Result<HandleValue, Error> {
     values.record([("conf", values.record([("entry", values.text("cli"))])?)])
 }
 

@@ -3,11 +3,13 @@ use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 
 use bytes::Bytes;
-use glam::{Assembler, Diagnostic, DiagnosticEvent, DiagnosticSubscriber, Error, Severity, Value};
+use glam::{
+    Assembler, Diagnostic, DiagnosticEvent, DiagnosticSubscriber, Error, HandleValue, Severity,
+};
 
 pub(super) struct DefaultLogger {
     evaluator: Assembler,
-    formatter: Value,
+    formatter: HandleValue,
     working_directory: PathBuf,
 }
 
@@ -57,7 +59,7 @@ impl DefaultLogger {
         self.format_message(message)
     }
 
-    fn format_message(&self, message: Value) -> Result<Bytes, Error> {
+    fn format_message(&self, message: HandleValue) -> Result<Bytes, Error> {
         let values = self.evaluator.values();
         let rendered = values.apply(&self.formatter, [message])?;
         let binary = values.anno_binary(rendered)?;
@@ -67,7 +69,7 @@ impl DefaultLogger {
             .ok_or_else(|| Error::new("diagnostic formatter did not return binary data"))
     }
 
-    fn viewer_updates(&self, diagnostic: &Diagnostic, terminal: &TerminalContext) -> Value {
+    fn viewer_updates(&self, diagnostic: &Diagnostic, terminal: &TerminalContext) -> HandleValue {
         let header = format!(
             "{}{}",
             self.location(diagnostic),
@@ -87,7 +89,7 @@ impl DefaultLogger {
         header: String,
         location: String,
         source: Option<String>,
-    ) -> Value {
+    ) -> HandleValue {
         let values = self.evaluator.values();
         let mut viewer = vec![
             ("kind", values.text("terminal")),
@@ -138,7 +140,7 @@ impl DefaultLogger {
 
     fn context_lines(
         &self,
-        message: &Value,
+        message: &HandleValue,
         terminal: &TerminalContext,
         base_indent: usize,
     ) -> Vec<String> {
@@ -183,7 +185,7 @@ impl DefaultLogger {
 
     fn render_context_frame(
         &self,
-        frame: &Value,
+        frame: &HandleValue,
         terminal: &TerminalContext,
         frame_indent: usize,
     ) -> String {
@@ -228,7 +230,7 @@ impl DefaultLogger {
 
     fn render_context_message(
         &self,
-        message: &Value,
+        message: &HandleValue,
         terminal: &TerminalContext,
         frame_indent: usize,
     ) -> Result<String, Error> {
@@ -257,7 +259,7 @@ impl DefaultLogger {
         Ok(format!("{}{rendered}", " ".repeat(frame_indent)))
     }
 
-    fn context_message_header(&self, message: &Value, terminal: &TerminalContext) -> String {
+    fn context_message_header(&self, message: &HandleValue, terminal: &TerminalContext) -> String {
         let values = self.evaluator.values();
         let Ok(severity) = values
             .access_names(message, ["msg", "severity"])
@@ -276,7 +278,7 @@ impl DefaultLogger {
         }
     }
 
-    fn viewer_header_update(&self, header: String) -> Value {
+    fn viewer_header_update(&self, header: String) -> HandleValue {
         let values = self.evaluator.values();
         values
             .record([(
@@ -288,7 +290,7 @@ impl DefaultLogger {
             .expect("viewer update is local")
     }
 
-    fn context_lines_update(&self, lines: Vec<String>) -> Value {
+    fn context_lines_update(&self, lines: Vec<String>) -> HandleValue {
         let values = self.evaluator.values();
         let lines = values
             .list(lines.into_iter().map(|line| values.text(line)))
@@ -303,7 +305,7 @@ impl DefaultLogger {
             .expect("viewer update is local")
     }
 
-    fn summarize_context_frame(&self, frame: &Value) -> String {
+    fn summarize_context_frame(&self, frame: &HandleValue) -> String {
         let reflection = self.evaluator.reflection();
         let Ok(entries) = reflection.dictionary_items(frame) else {
             return diagnostic_value_kind(&self.evaluator, frame).to_owned();
@@ -359,7 +361,7 @@ impl DefaultLogger {
             .unwrap_or_else(|| diagnostic_value_kind(&self.evaluator, frame).to_owned())
     }
 
-    fn eval_context_summary(&self, payload: &Value) -> String {
+    fn eval_context_summary(&self, payload: &HandleValue) -> String {
         let operation = self
             .context_field_tag_text(payload, &["op"])
             .map(|operation| operation.replace('_', " "));
@@ -372,7 +374,7 @@ impl DefaultLogger {
         }
     }
 
-    fn g_context_summary(&self, payload: &Value) -> String {
+    fn g_context_summary(&self, payload: &HandleValue) -> String {
         let definition = self.context_field_text(payload, &["definition"]);
         let line = self.context_field_text(payload, &["line"]);
         match (definition, line) {
@@ -385,7 +387,7 @@ impl DefaultLogger {
         }
     }
 
-    fn import_context_summary(&self, payload: &Value) -> String {
+    fn import_context_summary(&self, payload: &HandleValue) -> String {
         self.context_field_text(payload, &["request", "file"])
             .map_or_else(
                 || "import".to_owned(),
@@ -393,21 +395,21 @@ impl DefaultLogger {
             )
     }
 
-    fn asm_context_summary(&self, payload: &Value) -> String {
+    fn asm_context_summary(&self, payload: &HandleValue) -> String {
         self.context_field_text(payload, &["result"]).map_or_else(
             || "asm".to_owned(),
             |result| format!("asm: result `{result}`"),
         )
     }
 
-    fn conf_context_summary(&self, payload: &Value) -> String {
+    fn conf_context_summary(&self, payload: &HandleValue) -> String {
         self.context_field_text(payload, &["entry"]).map_or_else(
             || "conf".to_owned(),
             |entry| format!("conf: entry `{entry}`"),
         )
     }
 
-    fn task_context_summary(&self, payload: &Value) -> String {
+    fn task_context_summary(&self, payload: &HandleValue) -> String {
         let operation = self.context_field_tag_text(payload, &["operation"]);
         let id = self.context_field_text(payload, &["id"]);
         match (operation, id) {
@@ -418,7 +420,7 @@ impl DefaultLogger {
         }
     }
 
-    fn runtime_context_summary(&self, payload: &Value) -> String {
+    fn runtime_context_summary(&self, payload: &HandleValue) -> String {
         let operation = self
             .context_field_tag_text(payload, &["op"])
             .map(|operation| operation.replace('_', " "));
@@ -459,7 +461,7 @@ impl DefaultLogger {
         }
     }
 
-    fn context_field_text(&self, value: &Value, path: &[&str]) -> Option<String> {
+    fn context_field_text(&self, value: &HandleValue, path: &[&str]) -> Option<String> {
         self.evaluator
             .values()
             .access_names(value, path.iter().copied())
@@ -467,7 +469,7 @@ impl DefaultLogger {
             .and_then(|value| diagnostic_text(&self.evaluator, &value))
     }
 
-    fn context_field_tag_text(&self, value: &Value, path: &[&str]) -> Option<String> {
+    fn context_field_tag_text(&self, value: &HandleValue, path: &[&str]) -> Option<String> {
         self.evaluator
             .values()
             .access_names(value, path.iter().copied())
@@ -475,7 +477,7 @@ impl DefaultLogger {
             .and_then(|value| self.context_tag_text(&value))
     }
 
-    fn context_tag_text(&self, tag: &Value) -> Option<String> {
+    fn context_tag_text(&self, tag: &HandleValue) -> Option<String> {
         diagnostic_text(&self.evaluator, tag).or_else(|| {
             self.evaluator
                 .reflection()
@@ -557,7 +559,7 @@ pub(crate) fn rendered_text_for_test(assembler: &Assembler, diagnostic: &Diagnos
     diagnostic_text(assembler, &text).expect("a test diagnostic's text should evaluate")
 }
 
-fn diagnostic_text(assembler: &Assembler, value: &Value) -> Option<String> {
+fn diagnostic_text(assembler: &Assembler, value: &HandleValue) -> Option<String> {
     let value = assembler.evaluator().eval(value).ok()?;
     value
         .as_bytes()
@@ -567,7 +569,7 @@ fn diagnostic_text(assembler: &Assembler, value: &Value) -> Option<String> {
         .or_else(|| value.number_text().ok().flatten())
 }
 
-fn diagnostic_value_kind(assembler: &Assembler, value: &Value) -> &'static str {
+fn diagnostic_value_kind(assembler: &Assembler, value: &HandleValue) -> &'static str {
     let values = assembler.values();
     if assembler
         .reflection()
@@ -689,7 +691,7 @@ mod tests {
             formatter,
             working_directory: _,
         } = logger;
-        let _: &Value = formatter;
+        let _: &HandleValue = formatter;
     }
 
     #[test]
@@ -715,31 +717,39 @@ mod tests {
     }
 
     trait TestValueFacade {
-        fn get(&self, root: &Value, path: &str) -> Result<Value, Error>;
-        fn get_evaluated(&self, root: &Value, path: &str) -> Result<glam::EvaluatedValue, Error>;
+        fn get(&self, root: &HandleValue, path: &str) -> Result<HandleValue, Error>;
+        fn get_evaluated(
+            &self,
+            root: &HandleValue,
+            path: &str,
+        ) -> Result<glam::EvaluatedValue, Error>;
     }
 
     impl TestValueFacade for Assembler {
-        fn get(&self, root: &Value, path: &str) -> Result<Value, Error> {
+        fn get(&self, root: &HandleValue, path: &str) -> Result<HandleValue, Error> {
             self.get_evaluated(root, path)
                 .map(glam::EvaluatedValue::into_value)
         }
 
-        fn get_evaluated(&self, root: &Value, path: &str) -> Result<glam::EvaluatedValue, Error> {
+        fn get_evaluated(
+            &self,
+            root: &HandleValue,
+            path: &str,
+        ) -> Result<glam::EvaluatedValue, Error> {
             let value = self.values().access_names(root, path.split('.'))?;
             self.evaluator().eval(&value)
         }
     }
 
-    fn record<I, S>(values: &glam::Values, entries: I) -> Value
+    fn record<I, S>(values: &glam::Values, entries: I) -> HandleValue
     where
-        I: IntoIterator<Item = (S, Value)>,
+        I: IntoIterator<Item = (S, HandleValue)>,
         S: AsRef<str>,
     {
         values.record(entries).expect("test record should be local")
     }
 
-    fn list(values: &glam::Values, items: impl IntoIterator<Item = Value>) -> Value {
+    fn list(values: &glam::Values, items: impl IntoIterator<Item = HandleValue>) -> HandleValue {
         values.list(items).expect("test list should be local")
     }
 

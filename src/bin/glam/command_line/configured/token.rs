@@ -4,7 +4,7 @@ mod effects;
 
 use std::sync::Arc;
 
-use glam::Value;
+use glam::HandleValue;
 use glam::reflection::{IsolatedSearchPoll, IsolatedTaskHost, RequestContext, TaskSpecialization};
 
 pub(super) use effects::request_specs;
@@ -37,7 +37,7 @@ pub(super) struct TokenCandidate {
 }
 
 pub(super) struct TokenRun {
-    pub(super) values: Vec<Value>,
+    pub(super) values: Vec<HandleValue>,
     pub(super) furthest: usize,
     pub(super) expectations: Vec<TokenExpectation>,
     pub(super) candidates: Vec<TokenCandidate>,
@@ -46,7 +46,7 @@ pub(super) struct TokenRun {
 pub(super) type TokenHost = IsolatedTaskHost<TokenSnapshot>;
 
 pub(super) fn run<S>(
-    parser: &Value,
+    parser: &HandleValue,
     input: Arc<str>,
     completion_offset: Option<usize>,
     context: &RequestContext<'_, S>,
@@ -168,7 +168,7 @@ mod owner_tests {
             expectations: _,
             candidates: _,
         } = run;
-        let _: &Vec<Value> = values;
+        let _: &Vec<HandleValue> = values;
     }
 
     #[test]

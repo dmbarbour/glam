@@ -1,7 +1,7 @@
 use bytes::Bytes;
-use glam::{Assembler, Error, Value};
+use glam::{Assembler, Error, HandleValue};
 
-fn compile(source: &str, module: &str) -> (Assembler, Value) {
+fn compile(source: &str, module: &str) -> (Assembler, HandleValue) {
     let assembler = Assembler::default();
     let built = assembler
         .module(["macro_protocol", module])
@@ -11,7 +11,7 @@ fn compile(source: &str, module: &str) -> (Assembler, Value) {
     (assembler, built.into_value())
 }
 
-fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, Error> {
+fn binary_at(assembler: &Assembler, root: &HandleValue, path: &str) -> Result<Bytes, Error> {
     let values = assembler.values();
     let mut value = root.clone();
     for part in path.split('.') {

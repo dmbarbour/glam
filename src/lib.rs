@@ -32,6 +32,9 @@ mod trusted_hash;
 mod walk_cycle;
 
 pub use crate::core::Key;
+/// The handle API's unscoped value, under a transitional name until that
+/// API retires (`api-handle-retirement`); [`Value`] is a turn's.
+pub use api::Value as HandleValue;
 pub use api::{
     Assembler, AssemblerBuilder, BackgroundPumpReport, BackgroundPumpState, BuiltModule,
     DeadlockSnapshot, Diagnostic, DiagnosticBus, DiagnosticCounts, DiagnosticEvent,
@@ -47,7 +50,7 @@ pub use api::{
     RuntimeMaintenanceReport, RuntimeMaintenanceSnapshot, RuntimeMaintenanceState,
     RuntimeOutputDelivery, RuntimeOutputEndpoint, RuntimeOutputEndpointId, RuntimeOutputWriter,
     RuntimeReadiness, RuntimeReadinessStamp, RuntimeSettlementError, RuntimeTaskCapability,
-    RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, Value, ValueEvaluator, ValueKind, Values,
+    RuntimeTaskWait, RuntimeWorkKind, RuntimeWorkState, ValueEvaluator, ValueKind, Values,
 };
 #[cfg(feature = "glam-prof")]
 pub use api::{
@@ -58,7 +61,7 @@ pub use api::{
 };
 pub use api::{
     DiagnosticsWiring, Endpoint, Fork, Machine, MachinePath, MachineStatus, MachineWiring,
-    PromiseStatus, Runtime, RuntimeConfig,
+    PromiseStatus, Runtime, RuntimeConfig, TurnValue as Value,
 };
 pub use diagnostic::Severity;
 pub use g_source::{

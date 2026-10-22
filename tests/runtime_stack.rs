@@ -260,3 +260,30 @@ fn abstract_paths_push_and_pop_as_twins() {
         .expect("the turn should succeed");
     assert_eq!(parts, ["glam", "stack"]);
 }
+
+#[test]
+fn a_popped_value_returns_to_this_turn_and_the_turns_within_it() {
+    let mut rt = runtime();
+    let (twice, below) = rt
+        .run("m", |m| {
+            m.int_push(20);
+            m.int_push(1);
+            m.list_pack(1)?;
+            m.list_len()?;
+            let lazy = m.value_pop()?;
+            let twenty = m.value_pop()?;
+            m.value_push(&lazy)?;
+            assert_eq!(m.kind()?, ValueKind::Lazy, "pushing evaluates nothing");
+            m.value_push(&twenty)?;
+            m.value_push(&twenty)?;
+            let twice = m.int_pop()? + m.int_pop()?;
+            m.discard(1)?;
+            let below = m.run("child", |c| {
+                c.value_push(&twenty)?;
+                c.int_pop()
+            })?;
+            Ok((twice, below))
+        })
+        .expect("the turn should succeed");
+    assert_eq!((twice, below), (40, 20));
+}

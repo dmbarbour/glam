@@ -6,7 +6,7 @@ use glam::reflection::{
     SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork, TaskHalt,
     TaskSpecialization, environment_diagnostic_request_specs,
 };
-use glam::{EvaluatedValue, ModuleInput, Value};
+use glam::{EvaluatedValue, HandleValue, ModuleInput};
 
 use super::super::completion::{CompletionEvidence, CompletionKind, ExpectationEvidence, Frontier};
 use super::super::model::CommandEdit;
@@ -41,28 +41,28 @@ pub(super) enum CliRequestWork {
     Reflection(ReflectionRequestWork),
     TextStart {
         request: CliTextRequest,
-        arguments: Vec<Value>,
+        arguments: Vec<HandleValue>,
     },
     TextValue {
         request: CliTextRequest,
-        retained: Vec<Value>,
+        retained: Vec<HandleValue>,
     },
-    PathStart(Vec<Value>),
-    PathKind(Value),
+    PathStart(Vec<HandleValue>),
+    PathKind(HandleValue),
     PathAccess(PathKind),
     PathWriterStart {
         writer: PathWriter,
-        arguments: Vec<Value>,
+        arguments: Vec<HandleValue>,
     },
     PathWriterValue(PathWriter),
-    ScriptStart(Vec<Value>),
-    ScriptExtension(Value),
+    ScriptStart(Vec<HandleValue>),
+    ScriptExtension(HandleValue),
     ScriptBody(String),
-    WorkerCountStart(Vec<Value>),
+    WorkerCountStart(Vec<HandleValue>),
     WorkerCountValue,
     Immediate {
         request: CliRequest,
-        arguments: Vec<Value>,
+        arguments: Vec<HandleValue>,
     },
     Poisoned,
 }
@@ -149,7 +149,11 @@ impl TaskSpecialization for CliEffects {
             .collect()
     }
 
-    fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<HandleValue>,
+    ) -> Self::RequestWork {
         match request {
             CliRequest::Reflection(request) => {
                 CliRequestWork::Reflection(ReflectionRequestWork::new(request, arguments))
@@ -216,7 +220,7 @@ impl SpecializationRequestWork<CliEffects> for CliRequestWork {
                     CliTextRequest::ReadKeyword => read_keyword_value(text, context),
                     CliTextRequest::ReadText => read_text_value(text, context),
                     CliTextRequest::ReadToken => {
-                        let [parser]: [Value; 1] = retained.try_into().unwrap();
+                        let [parser]: [HandleValue; 1] = retained.try_into().unwrap();
                         read_token_value(text, parser, context)
                     }
                     CliTextRequest::WriteReflectionArgument => {
@@ -230,7 +234,7 @@ impl SpecializationRequestWork<CliEffects> for CliRequestWork {
             }
             Self::PathStart(arguments) => {
                 assert!(input.is_none(), "new CLI path request cannot have input");
-                let [kind, access]: [Value; 2] = arguments.try_into().map_err(|_| {
+                let [kind, access]: [HandleValue; 2] = arguments.try_into().map_err(|_| {
                     TaskHalt::new("`.read.path` received the wrong number of arguments")
                 })?;
                 *self = Self::PathKind(access);
@@ -270,7 +274,7 @@ impl SpecializationRequestWork<CliEffects> for CliRequestWork {
             }
             Self::PathWriterStart { writer, arguments } => {
                 assert!(input.is_none(), "new CLI path writer cannot have input");
-                let [handle]: [Value; 1] = arguments.try_into().map_err(|_| {
+                let [handle]: [HandleValue; 1] = arguments.try_into().map_err(|_| {
                     TaskHalt::new("CLI path writer received the wrong number of arguments")
                 })?;
                 *self = Self::PathWriterValue(writer);
@@ -281,7 +285,7 @@ impl SpecializationRequestWork<CliEffects> for CliRequestWork {
             )),
             Self::ScriptStart(arguments) => {
                 assert!(input.is_none(), "new CLI script writer cannot have input");
-                let [extension, body]: [Value; 2] = arguments.try_into().map_err(|_| {
+                let [extension, body]: [HandleValue; 2] = arguments.try_into().map_err(|_| {
                     TaskHalt::new("`.write.script` received the wrong number of arguments")
                 })?;
                 *self = Self::ScriptExtension(body);
@@ -318,7 +322,7 @@ impl SpecializationRequestWork<CliEffects> for CliRequestWork {
                     input.is_none(),
                     "new CLI worker-count writer cannot have input"
                 );
-                let [count]: [Value; 1] = arguments.try_into().map_err(|_| {
+                let [count]: [HandleValue; 1] = arguments.try_into().map_err(|_| {
                     TaskHalt::new("`.write.worker_count` received the wrong number of arguments")
                 })?;
                 *self = Self::WorkerCountValue;
@@ -348,7 +352,7 @@ impl SpecializationRequestWork<CliEffects> for CliRequestWork {
 
 fn handle_immediate_cli_request(
     request: CliRequest,
-    arguments: Vec<Value>,
+    arguments: Vec<HandleValue>,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
     match request {
@@ -410,17 +414,17 @@ fn evaluated_atom<'a>(
 
 fn cli_text_arguments(
     request: CliTextRequest,
-    arguments: Vec<Value>,
-) -> Result<(Value, Vec<Value>), TaskHalt> {
+    arguments: Vec<HandleValue>,
+) -> Result<(HandleValue, Vec<HandleValue>), TaskHalt> {
     match request {
         CliTextRequest::ReadToken => {
-            let [text, parser]: [Value; 2] = arguments.try_into().map_err(|_| {
+            let [text, parser]: [HandleValue; 2] = arguments.try_into().map_err(|_| {
                 TaskHalt::new("`.read.token` received the wrong number of arguments")
             })?;
             Ok((text, vec![parser]))
         }
         _ => {
-            let [text]: [Value; 1] = arguments.try_into().map_err(|_| {
+            let [text]: [HandleValue; 1] = arguments.try_into().map_err(|_| {
                 TaskHalt::new(format!(
                     "{} received the wrong number of arguments",
                     cli_text_request_name(request)
@@ -457,10 +461,10 @@ fn request(
 }
 
 fn enter_case(
-    arguments: Vec<Value>,
+    arguments: Vec<HandleValue>,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let [explanation, parse]: [Value; 2] = arguments
+    let [explanation, parse]: [HandleValue; 2] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("`.case` received the wrong number of arguments"))?;
     let mut transaction = context
@@ -476,10 +480,10 @@ fn enter_case(
 }
 
 fn exit_case(
-    arguments: Vec<Value>,
+    arguments: Vec<HandleValue>,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let []: [Value; 0] = arguments
+    let []: [HandleValue; 0] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("internal CLI case close received arguments"))?;
     let mut transaction = context
@@ -497,7 +501,7 @@ fn case_exit_spec() -> EffectRequestSpec<CliRequest> {
     EffectRequestSpec::hidden(CASE_EXIT_TAG, 0, CliRequest::CaseExit)
 }
 
-fn case_exit_effect(context: &RequestContext<'_, CliEffects>) -> Result<Value, TaskHalt> {
+fn case_exit_effect(context: &RequestContext<'_, CliEffects>) -> Result<HandleValue, TaskHalt> {
     case_exit_spec()
         .effect(&context.values(), [])
         .map_err(TaskHalt::from)
@@ -594,7 +598,7 @@ fn read_text_value(
 
 fn read_token_value(
     expectation: String,
-    parser: Value,
+    parser: HandleValue,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
     let (argument_index, argument, completion_offset) = {
@@ -692,10 +696,10 @@ fn read_token_value(
 }
 
 fn read_end(
-    arguments: Vec<Value>,
+    arguments: Vec<HandleValue>,
     context: &mut RequestContext<'_, CliEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let []: [Value; 0] = arguments
+    let []: [HandleValue; 0] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("`.read.end` received the wrong number of arguments"))?;
     let mut transaction = context

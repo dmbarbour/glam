@@ -2,7 +2,7 @@ use glam::reflection::{
     EffectRequestSpec, RequestContext, RequestResult, SpecializationRequestInput,
     SpecializationRequestPoll, SpecializationRequestWork, TaskHalt, TaskSpecialization,
 };
-use glam::{TextPattern, Value, Values};
+use glam::{HandleValue, TextPattern, Values};
 
 use super::{TokenHost, TokenJournal, literal_completion, record_expectation};
 #[derive(Clone, Copy)]
@@ -20,11 +20,11 @@ pub(in crate::command_line) enum TokenRequest {
 pub(super) enum TokenRequestWork {
     Immediate {
         request: TokenRequest,
-        arguments: Vec<Value>,
+        arguments: Vec<HandleValue>,
     },
     TextStart {
         request: TokenRequest,
-        arguments: Vec<Value>,
+        arguments: Vec<HandleValue>,
     },
     TextValue(TokenRequest),
     Poisoned,
@@ -45,7 +45,11 @@ impl TaskSpecialization for TokenEffects {
         request_specs()
     }
 
-    fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<HandleValue>,
+    ) -> Self::RequestWork {
         match request {
             TokenRequest::Text | TokenRequest::Regex => {
                 TokenRequestWork::TextStart { request, arguments }
@@ -82,7 +86,7 @@ impl SpecializationRequestWork<TokenEffects> for TokenRequestWork {
             Self::TextStart { request, arguments } => {
                 assert!(input.is_none(), "new token text request cannot have input");
                 let name = token_text_request_name(request);
-                let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+                let [value]: [HandleValue; 1] = arguments.try_into().map_err(|_| {
                     TaskHalt::new(format!("`.{name}` received the wrong number of arguments"))
                 })?;
                 *self = Self::TextValue(request);
@@ -219,10 +223,10 @@ fn regex_pattern(
 }
 
 fn text_span(
-    arguments: Vec<Value>,
+    arguments: Vec<HandleValue>,
     context: &mut RequestContext<'_, TokenEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let []: [Value; 0] = arguments
+    let []: [HandleValue; 0] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("`.token.text_span` received arguments"))?;
     let values = context.values();
@@ -251,10 +255,10 @@ fn text_span(
 }
 
 fn any(
-    arguments: Vec<Value>,
+    arguments: Vec<HandleValue>,
     context: &mut RequestContext<'_, TokenEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let []: [Value; 0] = arguments
+    let []: [HandleValue; 0] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("`.token.any` received the wrong number of arguments"))?;
     let mut transaction = context
@@ -278,17 +282,17 @@ fn any(
     ))
 }
 
-fn span_value(values: &Values, span: &str) -> Value {
+fn span_value(values: &Values, span: &str) -> HandleValue {
     values
         .record([("span", values.text(span))])
         .expect("token span values share one runtime")
 }
 
 fn end(
-    arguments: Vec<Value>,
+    arguments: Vec<HandleValue>,
     context: &mut RequestContext<'_, TokenEffects>,
 ) -> Result<RequestResult, TaskHalt> {
-    let []: [Value; 0] = arguments
+    let []: [HandleValue; 0] = arguments
         .try_into()
         .map_err(|_| TaskHalt::new("`.token.end` received the wrong number of arguments"))?;
     let mut transaction = context

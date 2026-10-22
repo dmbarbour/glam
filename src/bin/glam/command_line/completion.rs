@@ -1,7 +1,7 @@
 use std::ffi::{OsStr, OsString};
 use std::sync::Arc;
 
-use glam::{Diagnostic, Value};
+use glam::{Diagnostic, HandleValue};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CompletionRequest {
@@ -116,7 +116,7 @@ impl CompletionCandidate {
     pub(super) fn with_explanations(
         replacement: impl Into<OsString>,
         kind: CompletionKind,
-        explanations: impl IntoIterator<Item = Value>,
+        explanations: impl IntoIterator<Item = HandleValue>,
     ) -> Self {
         let replacement = replacement.into();
         Self {
@@ -146,7 +146,7 @@ impl CompletionCandidate {
     pub(super) fn merge_explanations(
         &mut self,
         other: &Self,
-        mut same: impl FnMut(&Value, &Value) -> bool,
+        mut same: impl FnMut(&HandleValue, &HandleValue) -> bool,
     ) {
         for explanation in &other.explanations {
             if !self
@@ -163,15 +163,15 @@ impl CompletionCandidate {
 /// One lazy, structured explanation supplied to `.case` by configuration.
 #[derive(Debug, Clone)]
 pub(crate) struct CliCaseExplanation {
-    value: Value,
+    value: HandleValue,
 }
 
 impl CliCaseExplanation {
-    pub(super) fn new(value: Value) -> Self {
+    pub(super) fn new(value: HandleValue) -> Self {
         Self { value }
     }
 
-    pub(crate) fn value(&self) -> &Value {
+    pub(crate) fn value(&self) -> &HandleValue {
         &self.value
     }
 }
@@ -246,7 +246,7 @@ impl CompletionExpectation {
     pub(super) fn merge_explanations(
         &mut self,
         other: &Self,
-        mut same: impl FnMut(&Value, &Value) -> bool,
+        mut same: impl FnMut(&HandleValue, &HandleValue) -> bool,
     ) {
         for explanation in &other.explanations {
             if !self
@@ -270,7 +270,7 @@ pub(super) struct Frontier {
 pub(super) struct ExpectationEvidence {
     pub(super) frontier: Frontier,
     pub(super) label: String,
-    pub(super) explanations: Vec<Value>,
+    pub(super) explanations: Vec<HandleValue>,
 }
 
 impl ExpectationEvidence {
@@ -302,7 +302,7 @@ impl CompletionEvidence {
         replacement: OsString,
         kind: CompletionKind,
         complete_reader: bool,
-        explanations: Vec<Value>,
+        explanations: Vec<HandleValue>,
     ) -> Self {
         Self {
             frontier,
@@ -329,7 +329,7 @@ mod owner_tests {
             explanations: _,
         } = candidate;
         let CliCaseExplanation { value } = explanation;
-        let _: &Value = value;
+        let _: &HandleValue = value;
         let CliCompletion {
             candidates: _,
             expectations: _,
@@ -346,7 +346,7 @@ mod owner_tests {
             label: _,
             explanations,
         } = evidence;
-        let _: &Vec<Value> = explanations;
+        let _: &Vec<HandleValue> = explanations;
     }
 
     #[test]

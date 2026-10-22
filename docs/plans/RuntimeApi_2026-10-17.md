@@ -705,6 +705,14 @@ handle API goes.
       right}` halves), `ListLen`, `DictUpdate` (whose `{}` removes) and
       `DictUnion`; `dict_unpack` and `list_unpack` evaluate, to check
       their shape. The CLI tells an empty list by `list_len`.
+    - As built, second slice (2026-10-21): `Value<'scope>`, a handle that
+      `value_pop` returns and `value_push` takes, covariant in the turn's
+      scope, so a turn within may push its enclosing turn's values and none
+      leaves its turn (a compile-fail doc test). The handle API's value is
+      exported as `glam::HandleValue` until it retires. The CLI builds its
+      environment's dict with `dict_pack` over byte-string keys, so
+      `transition::push_value` goes, and the bridge's uses in the CLI fall
+      from 16 to 14.
 19. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
     compilation builds its context from runtime-side parts, the value
     factory, the front ends, an invocation counter and a diagnostics

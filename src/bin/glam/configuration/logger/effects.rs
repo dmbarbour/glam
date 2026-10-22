@@ -10,9 +10,9 @@ use glam::reflection::{
     TaskValidation, ValidationResult, reflection_request_specs,
 };
 use glam::{
-    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, RuntimeDeliveryOutcome,
+    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, HandleValue, RuntimeDeliveryOutcome,
     RuntimeEventJournal, RuntimeEventSnapshot, RuntimeOutputDelivery, RuntimeOutputWriter,
-    RuntimeTaskCapability, Value, Values,
+    RuntimeTaskCapability, Values,
 };
 
 use super::{DIAGNOSTICS, LOGGER};
@@ -41,8 +41,8 @@ pub(crate) enum MainRequest {
 
 pub(crate) enum MainRequestWork {
     Reflection(ReflectionRequestWork),
-    ReadLog(Vec<Value>),
-    WriteStderrStart(Vec<Value>),
+    ReadLog(Vec<HandleValue>),
+    WriteStderrStart(Vec<HandleValue>),
     WriteStderrValue,
     Poisoned,
 }
@@ -105,7 +105,11 @@ impl TaskSpecialization for MainEffects {
             .collect()
     }
 
-    fn start_request(&self, request: Self::Request, arguments: Vec<Value>) -> Self::RequestWork {
+    fn start_request(
+        &self,
+        request: Self::Request,
+        arguments: Vec<HandleValue>,
+    ) -> Self::RequestWork {
         match request {
             MainRequest::Reflection(request) => {
                 MainRequestWork::Reflection(ReflectionRequestWork::new(request, arguments))
@@ -131,7 +135,7 @@ impl SpecializationRequestWork<MainEffects> for MainRequestWork {
             }
             Self::ReadLog(arguments) => {
                 assert!(input.is_none(), "new `.read_log` request cannot have input");
-                let []: [Value; 0] = arguments.try_into().map_err(|_| {
+                let []: [HandleValue; 0] = arguments.try_into().map_err(|_| {
                     TaskHalt::new("`.read_log` received the wrong number of arguments")
                 })?;
                 Ok(SpecializationRequestPoll::Complete(read_log(context)?))
@@ -141,7 +145,7 @@ impl SpecializationRequestWork<MainEffects> for MainRequestWork {
                     input.is_none(),
                     "new `.write_stderr` request cannot have input"
                 );
-                let [value]: [Value; 1] = arguments.try_into().map_err(|_| {
+                let [value]: [HandleValue; 1] = arguments.try_into().map_err(|_| {
                     TaskHalt::new("`.write_stderr` received the wrong number of arguments")
                 })?;
                 let binary = specialization
@@ -245,7 +249,7 @@ pub(crate) struct LoggerTaskHost {
     /// publish.
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     failures: Mutex<Vec<Error>>,
-    reflection_environment: Value,
+    reflection_environment: HandleValue,
     diagnostic_writer: RuntimeOutputWriter,
     diagnostic_delivery: RuntimeOutputDelivery<Diagnostic>,
     stderr_writer: RuntimeOutputWriter,
@@ -256,7 +260,7 @@ impl LoggerTaskHost {
     pub(crate) fn new(
         runtime: &EvaluationRuntime,
         diagnostics: DiagnosticBus,
-        reflection_environment: Value,
+        reflection_environment: HandleValue,
     ) -> Self {
         diagnostics
             .bind_runtime(runtime)
@@ -278,7 +282,7 @@ impl LoggerTaskHost {
             .output_endpoint(
                 // `.write_stderr` writes only evaluated binary data, so the
                 // decoder needs no evaluation, nor the runtime it would own.
-                move |value: Value| {
+                move |value: HandleValue| {
                     stderr_values
                         .evaluated_bytes(&value)?
                         .ok_or_else(|| Error::new("stderr output requires binary data"))
@@ -391,7 +395,7 @@ impl LoggerTaskHost {
 }
 
 impl TaskEnvironment for LoggerTaskHost {
-    fn reflection_environment(&self) -> Value {
+    fn reflection_environment(&self) -> HandleValue {
         self.reflection_environment.clone()
     }
 }
@@ -504,7 +508,7 @@ mod tests {
             stderr_writer: _,
             stderr_delivery: _,
         } = host;
-        let _: &glam::Value = reflection_environment;
+        let _: &glam::HandleValue = reflection_environment;
         let MainJournal {
             reflection: _,
             events: _,

@@ -5,8 +5,8 @@ use glam::reflection::{
     EffectLifecycle, EffectLifecycleStatus, EffectRun, ScheduledEffectRun, TaskOutcome,
 };
 use glam::{
-    Assembler, Diagnostic, DiagnosticBus, DiagnosticSubscription, Endpoint, Error, Fork, Machine,
-    Runtime, Severity, Value, Values,
+    Assembler, Diagnostic, DiagnosticBus, DiagnosticSubscription, Endpoint, Error, Fork,
+    HandleValue, Machine, Runtime, Severity, Values,
 };
 
 use crate::DiagnosticBusLocal;
@@ -256,7 +256,7 @@ pub(crate) fn render_unread(
 }
 
 /// The logger `conf.log` selects, evaluated, or none.
-fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<Value>, Error> {
+fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<HandleValue>, Error> {
     m.list_pack(0)?;
     m.local_get("configuration");
     m.dict_get_path(["conf", "log"])?;

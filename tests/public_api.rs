@@ -5,30 +5,37 @@ use std::sync::{Arc, Mutex};
 use bytes::Bytes;
 use glam::{
     Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, Diagnostic,
-    DiagnosticEvent, EvaluatedValue, EvaluationRuntime, ImportResolver, ModuleInput,
+    DiagnosticEvent, EvaluatedValue, EvaluationRuntime, HandleValue, ImportResolver, ModuleInput,
     QuiescenceReport, RelativeSourcePath, RuntimeDispositionKind, RuntimeReadiness, Severity,
-    SourceArtifact, SourceError, SourceIdentity, SourceSystem, Value, ValueKind,
+    SourceArtifact, SourceError, SourceIdentity, SourceSystem, ValueKind,
 };
 
-fn record<I, S>(values: &glam::Values, entries: I) -> Value
+fn record<I, S>(values: &glam::Values, entries: I) -> HandleValue
 where
-    I: IntoIterator<Item = (S, Value)>,
+    I: IntoIterator<Item = (S, HandleValue)>,
     S: AsRef<str>,
 {
     values.record(entries).expect("test record should be local")
 }
 
-fn list(values: &glam::Values, items: impl IntoIterator<Item = Value>) -> Value {
+fn list(values: &glam::Values, items: impl IntoIterator<Item = HandleValue>) -> HandleValue {
     values.list(items).expect("test list should be local")
 }
 
-fn dictionary(values: &glam::Values, entries: impl IntoIterator<Item = (Value, Value)>) -> Value {
+fn dictionary(
+    values: &glam::Values,
+    entries: impl IntoIterator<Item = (HandleValue, HandleValue)>,
+) -> HandleValue {
     values
         .dictionary(entries)
         .expect("test dictionary should be local and keyable")
 }
 
-fn access_path(assembler: &Assembler, root: &Value, path: &str) -> Result<Value, glam::Error> {
+fn access_path(
+    assembler: &Assembler,
+    root: &HandleValue,
+    path: &str,
+) -> Result<HandleValue, glam::Error> {
     let values = assembler.values();
     let mut value = root.clone();
     for part in path.split('.') {
@@ -37,19 +44,19 @@ fn access_path(assembler: &Assembler, root: &Value, path: &str) -> Result<Value,
     Ok(value)
 }
 
-fn binary_at(assembler: &Assembler, root: &Value, path: &str) -> Result<Bytes, glam::Error> {
+fn binary_at(assembler: &Assembler, root: &HandleValue, path: &str) -> Result<Bytes, glam::Error> {
     binary_value(assembler, access_path(assembler, root, path)?)
 }
 
-fn evaluate(assembler: &Assembler, value: &Value) -> Result<EvaluatedValue, glam::Error> {
+fn evaluate(assembler: &Assembler, value: &HandleValue) -> Result<EvaluatedValue, glam::Error> {
     assembler.evaluator().eval(value)
 }
 
-fn evaluated_value(assembler: &Assembler, value: &Value) -> Result<Value, glam::Error> {
+fn evaluated_value(assembler: &Assembler, value: &HandleValue) -> Result<HandleValue, glam::Error> {
     evaluate(assembler, value).map(EvaluatedValue::into_value)
 }
 
-fn binary_value(assembler: &Assembler, value: Value) -> Result<Bytes, glam::Error> {
+fn binary_value(assembler: &Assembler, value: HandleValue) -> Result<Bytes, glam::Error> {
     let values = assembler.values();
     let binary = values.anno_binary(value)?;
     evaluate(assembler, &binary).and_then(|binary| {
@@ -59,7 +66,11 @@ fn binary_value(assembler: &Assembler, value: Value) -> Result<Bytes, glam::Erro
     })
 }
 
-fn required_access(assembler: &Assembler, root: &Value, path: &str) -> Result<Value, glam::Error> {
+fn required_access(
+    assembler: &Assembler,
+    root: &HandleValue,
+    path: &str,
+) -> Result<HandleValue, glam::Error> {
     let values = assembler.values();
     let candidate = access_path(assembler, root, path)?;
     let required = values.apply(
@@ -78,14 +89,14 @@ fn rendered_text(assembler: &Assembler, diagnostic: &Diagnostic) -> String {
     String::from_utf8_lossy(&bytes).into_owned()
 }
 
-fn same_representation(assembler: &Assembler, left: &Value, right: &Value) -> bool {
+fn same_representation(assembler: &Assembler, left: &HandleValue, right: &HandleValue) -> bool {
     assembler
         .reflection()
         .same_representation(left, right)
         .expect("compared values should belong to the assembler runtime")
 }
 
-fn is_logically_undefined(assembler: &Assembler, value: Value) -> Result<bool, glam::Error> {
+fn is_logically_undefined(assembler: &Assembler, value: HandleValue) -> Result<bool, glam::Error> {
     let values = assembler.values();
     let marker = values.atom_from_text("public_api.undefined_marker");
     let selected = values.apply(&values.defined_or_function(), [marker.clone(), value])?;
@@ -187,7 +198,7 @@ fn absolute_path_text(path: impl AsRef<Path>) -> String {
         .to_string()
 }
 
-fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<Value> {
+fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<HandleValue> {
     let values = assembler.values();
     let contexts = required_access(assembler, diagnostic.emission(), "msg.context")
         .expect("structured evaluation failure should define msg.context");
@@ -203,7 +214,11 @@ fn diagnostic_contexts(assembler: &Assembler, diagnostic: &Diagnostic) -> Vec<Va
         .expect("array annotation should produce a strict value array")
 }
 
-fn import_context<'a>(assembler: &Assembler, contexts: &'a [Value], request: &str) -> &'a Value {
+fn import_context<'a>(
+    assembler: &Assembler,
+    contexts: &'a [HandleValue],
+    request: &str,
+) -> &'a HandleValue {
     contexts
         .iter()
         .find(|context| {
@@ -611,7 +626,11 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
     assert_eq!(repeated.message(), diagnostic.message());
 }
 
-fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) -> Value {
+fn volume_write_annotation(
+    assembler: &Assembler,
+    effects: HandleValue,
+    value: HandleValue,
+) -> HandleValue {
     let values = assembler.values();
     let set = access_path(assembler, &effects, "set").expect("volume capability should expose set");
     let effect = values
@@ -620,7 +639,7 @@ fn volume_write_annotation(assembler: &Assembler, effects: Value, value: Value) 
     reflection_annotation(assembler, effect)
 }
 
-fn reflection_annotation(assembler: &Assembler, effect: Value) -> Value {
+fn reflection_annotation(assembler: &Assembler, effect: HandleValue) -> HandleValue {
     let values = assembler.values();
     values
         .after_reflection(effect, values.text("done"))

@@ -3,7 +3,7 @@ use std::fs;
 use std::path::Path;
 
 use bytes::Bytes;
-use glam::{Assembler, Error, EvaluatedValue, Value};
+use glam::{Assembler, Error, EvaluatedValue, HandleValue};
 
 use super::{
     CompletionKind, CompletionRequest, CompletionRoute, ParseVerbosity, TopLevelCommand,
@@ -16,7 +16,7 @@ fn dispatch(arguments: &[&str]) -> Result<TopLevelCommand, String> {
 }
 
 trait TestValueFacade {
-    fn get<'a>(&'a self, root: &Value, path: &str) -> Result<TestEvaluated<'a>, Error>;
+    fn get<'a>(&'a self, root: &HandleValue, path: &str) -> Result<TestEvaluated<'a>, Error>;
 }
 
 struct TestEvaluated<'a> {
@@ -25,7 +25,7 @@ struct TestEvaluated<'a> {
 }
 
 impl TestValueFacade for Assembler {
-    fn get<'a>(&'a self, root: &Value, path: &str) -> Result<TestEvaluated<'a>, Error> {
+    fn get<'a>(&'a self, root: &HandleValue, path: &str) -> Result<TestEvaluated<'a>, Error> {
         let value = self.values().access_names(root, path.split('.'))?;
         Ok(TestEvaluated {
             assembler: self,
@@ -41,7 +41,7 @@ impl TestEvaluated<'_> {
             .expect("test value should belong to its assembler")
     }
 
-    fn into_value(self) -> Value {
+    fn into_value(self) -> HandleValue {
         self.value.into_value()
     }
 
@@ -349,7 +349,7 @@ fn completion_script_dispatch_has_exact_arity() {
     assert!(dispatch(&["--completion_script", "bash", "extra"]).is_err());
 }
 
-fn configuration(source: &str) -> (Assembler, Value) {
+fn configuration(source: &str) -> (Assembler, HandleValue) {
     let assembler = Assembler::new();
     let module = assembler
         .module(["configuration"])
