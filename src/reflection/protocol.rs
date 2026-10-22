@@ -17,7 +17,7 @@ use crate::core::{
 use crate::diagnostic::Severity;
 use crate::eval;
 use crate::evaluation::{EvalContext, EvaluationWaitToken};
-use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot};
+use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 /// One additional effect constructor contributed by a task specialization.
 #[derive(Clone)]
@@ -176,18 +176,20 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
     type Journal: Clone + Default + Send + Sync + 'static;
 
     /// Controls whether the shared `.heap.*` family is installed in this
-    /// task's effect API, where the effect machine serves the standard
+    /// task's effect API, where the effect machine serves the host
     /// families.
     fn exposes_shared_heap(&self) -> bool {
         true
     }
 
-    /// Whether the effect machine serves the standard families itself:
-    /// search, state, the heap and volumes, and promises. One that does not
-    /// keeps only the pure core, `.r`, `.seq`, `.fix`, `.reset` and
-    /// `.shift`, and leaves the rest to the specialization's own requests
-    /// (`effect-families-pass-through`).
-    fn serves_standard_families(&self) -> bool {
+    /// Whether the effect machine serves the host families itself: the heap
+    /// and its volumes, and promises. One that does not leaves them to the
+    /// specialization's own requests, and keeps the pure effects: `.r`,
+    /// `.seq`, `.fix`, `.get`, `.set`, `.reset` and `.shift`
+    /// (`effect-families-pass-through`). Since the machine could not undo
+    /// the host effects of a failed alternative, it has no search either,
+    /// until the host checkpoints its alternatives.
+    fn serves_host_families(&self) -> bool {
         true
     }
 
@@ -759,6 +761,7 @@ pub struct RequestContext<'a, S: TaskSpecialization> {
     pub(super) eval_context: &'a EvalContext,
     pub(super) host: &'a Arc<S::Host>,
     pub(super) transaction: Option<&'a mut Transaction<S>>,
+    pub(super) state: &'a mut RuntimeValueRoot,
     pub(super) activity: &'a mut RequestActivity,
 }
 
@@ -794,6 +797,23 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
 
     pub fn host(&self) -> &S::Host {
         self.host.as_ref()
+    }
+
+    /// The current branch's state: the dictionary that `.get []` reads,
+    /// which holds the reset stack under its private key.
+    pub fn state(&self) -> PublicValue {
+        PublicValue::from_runtime_root(self.state.clone())
+    }
+
+    /// Replaces the current branch's state, as `.set [] state` does, with
+    /// `state` evaluated, which must be a dictionary.
+    pub fn set_state(&mut self, state: EvaluatedValue) -> Result<(), TaskHalt> {
+        self.values().require(state.as_value())?;
+        if !state.with_core_access(|value, _| matches!(value, Value::Dict(_)))? {
+            return Err(TaskHalt::new("an effect's state must be a dictionary"));
+        }
+        *self.state = state.into_value().into_runtime_root();
+        Ok(())
     }
 
     pub fn transaction(&mut self) -> Option<TransactionContext<'_, S>> {
@@ -1007,9 +1027,10 @@ mod root_inventory_tests {
             eval_context,
             host,
             transaction,
+            state,
             activity,
         } = request;
-        let _ = (eval_context, host, transaction, activity);
+        let _ = (eval_context, host, transaction, state, activity);
         let TransactionContext { transaction } = transaction_context;
         let _ = transaction;
     }

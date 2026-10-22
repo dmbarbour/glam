@@ -336,22 +336,64 @@ impl<S: TaskSpecialization> EffectTask<S> {
         retain_all: bool,
         exposes_exit: bool,
     ) -> Result<Self, TaskHalt> {
+        Self::new_rooted_with_state(
+            effect,
+            None,
+            specialization,
+            host,
+            eval_context,
+            retain_all,
+            exposes_exit,
+        )
+    }
+
+    /// An isolated search of `effect` that starts from `state`.
+    pub(super) fn new_isolated_with_state_in_context(
+        effect: RuntimeValueRoot,
+        state: RuntimeValueRoot,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+    ) -> Result<Self, TaskHalt> {
+        Self::new_rooted_with_state(
+            effect,
+            Some(state),
+            specialization,
+            host,
+            eval_context,
+            true,
+            false,
+        )
+    }
+
+    /// A task of `effect` whose state starts as `state`, or `{}`.
+    fn new_rooted_with_state(
+        effect: RuntimeValueRoot,
+        state: Option<RuntimeValueRoot>,
+        specialization: S,
+        host: Arc<S::Host>,
+        eval_context: EvalContext,
+        retain_all: bool,
+        exposes_exit: bool,
+    ) -> Result<Self, TaskHalt> {
         let eval_context = eval_context.for_effect_task();
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(
             eval_context.values(),
             &tags,
             specialization.requests(),
-            specialization.serves_standard_families(),
+            specialization.serves_host_families(),
             specialization.exposes_shared_heap(),
             exposes_exit,
         )?;
         let id = eval_context
             .task_id()
             .map_err(|error| TaskHalt::new(error.as_ref()))?;
-        let initial_state = eval_context
-            .values()
-            .construct_runtime_value_root(|_| Value::Dict(Dict::new_sync()));
+        let initial_state = state.unwrap_or_else(|| {
+            eval_context
+                .values()
+                .construct_runtime_value_root(|_| Value::Dict(Dict::new_sync()))
+        });
         let root = Branch::new_rooted(effect, initial_state);
         let (search, branch) = if retain_all {
             let mut branch = root.clone();
@@ -1153,6 +1195,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     eval_context: &self.eval_context,
                     host: &self.host,
                     transaction: work.branch.transaction.as_mut(),
+                    state: &mut work.branch.state,
                     activity: &mut activity,
                 },
             )
@@ -3312,6 +3355,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let transaction = Self::isolated_transaction(&mut completed);
                 self.search.retain(IsolatedSearchBranch::complete(
                     PublicValue::from_runtime_root(value),
+                    PublicValue::from_runtime_root(completed.state.clone()),
                     transaction,
                 ));
                 Ok(restarted
@@ -5997,7 +6041,7 @@ fn effect_api<R: Clone>(
     values: &CoreValueFactory,
     tags: &Tags,
     specs: Vec<EffectRequestSpec<R>>,
-    serve_standard_families: bool,
+    serve_host_families: bool,
     expose_shared_heap: bool,
     expose_exit: bool,
 ) -> Result<(RuntimeValueRoot, Vec<SpecializedRequest<R>>), TaskHalt> {
@@ -6072,7 +6116,7 @@ fn effect_api<R: Clone>(
                 dict.insert(key, value)
             }),
         );
-        // The pure core, which every effect machine serves.
+        // The pure effects, which every effect machine serves.
         let mut entries = vec![
             entry(
                 "r",
@@ -6087,6 +6131,14 @@ fn effect_api<R: Clone>(
                 request_function_in(access, tags.fix.clone(), 1, Vec::new(), false),
             ),
             entry(
+                "get",
+                request_function_in(access, tags.get.clone(), 1, Vec::new(), false),
+            ),
+            entry(
+                "set",
+                request_function_in(access, tags.set.clone(), 2, Vec::new(), false),
+            ),
+            entry(
                 "reset",
                 request_function_in(access, tags.reset.clone(), 2, Vec::new(), false),
             ),
@@ -6095,7 +6147,7 @@ fn effect_api<R: Clone>(
                 request_function_in(access, tags.shift.clone(), 2, Vec::new(), false),
             ),
         ];
-        if serve_standard_families {
+        if serve_host_families {
             entries.extend([
                 entry(
                     "alt",
@@ -6105,14 +6157,6 @@ fn effect_api<R: Clone>(
                 entry(
                     "cut",
                     request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
-                ),
-                entry(
-                    "get",
-                    request_function_in(access, tags.get.clone(), 1, Vec::new(), false),
-                ),
-                entry(
-                    "set",
-                    request_function_in(access, tags.set.clone(), 2, Vec::new(), false),
                 ),
                 entry("promise", promise_api),
             ]);

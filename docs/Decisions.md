@@ -2674,37 +2674,48 @@ maps the short names used here to file names.
   `api-settlement` reports accepted promises in place of obligation sets.
 - **Recorded in:** reflection model plan, Obligations.
 
-### A turn runs an effect; its provider says which families pass through
+### A turn runs an effect; its provider says which host families pass through
 `effect-families-pass-through` · 2026-10-22 · maintainer · accepted
 - **Context:** `api-effect-providers` replaces `TaskSpecialization` for
   turns. A turn runs a monadic effect by evaluation on its own thread
-  (2026-10-18), so the effect has the machine at hand.
+  (2026-10-18), so the effect has the machine at hand. State and delimited
+  control are interdefinable: `.reset`/`.shift` can model state, and the
+  reset stack lives under an unforgeable key of the state, which
+  `.get []` captures and `.set [] checkpoint` restores (Design.md,
+  "Flexible Monoliths"). Neither may be served apart from the other.
 - **Decision:**
-  - `m.effect_run(&mut provider)` (`effect -- result`) runs the effect on
-    the turn's thread. Only the pure core, `.r`, `.seq`, `.reset`,
-    `.shift` and `.fix`, stays inside the effect machine; every other
-    request returns to the turn.
-  - Effects come in families: search (`.alt`, `.fail`, `.cut`), state
-    (`.get`, `.set`), the heap, `.log`, `.env`, `.promise.*`. The provider
-    declares, as a set of flags, which families pass through to the
-    machine: search to the turn's cuts, state to the machine's local
-    state, the heap to the turn's heap, `.log` to its diagnostics output,
-    `.env` to `env_get`, promises to the turn's promises. A family not
-    passed through is the provider's to define, as is any unique request,
-    a standard one such as `.get` included.
-  - The provider answers through the machine's stack: a request's
-    arguments on top, and its `Answer` returns a value, resumes once per
-    alternative in a nested cut, or runs an operation in the request's
+  - `m.effect_run(&mut provider)` (`state effect -- state' result`) runs
+    the effect on the turn's thread from `state`, a dict. The pure
+    effects, `.r`, `.seq`, `.fix`, `.get`, `.set`, `.reset`, `.shift` and
+    search, stay inside the effect machine, state and the reset stack
+    together in the branch's state; the host's requests return to the
+    turn. The turn chooses where the state lives between runs.
+  - The host effects come in families: the heap and volumes, promises,
+    `.log`, `.env`. The provider declares, as a set of flags, which
+    families pass through to the machine: the heap to the turn's heap,
+    promises to the turn's promises, `.log` to its diagnostics output,
+    `.env` to `env_get`. A family not passed through is the provider's to
+    define, as is any unique request.
+  - The provider answers its own requests through the machine's stack,
+    `State Args -- State Response`: the effect's state below the request's
+    arguments, so what a provider keeps per branch it keeps in that state,
+    under its own key, and keeps no journals. Its `Answer` returns a value,
+    resumes once per alternative, or runs an operation in the request's
     place with a closing request (`Scoped`). Failure and pushback are
     `m.fail()` and `m.retry()`. It is borrowed for one run and receives
     the machine per call, so it holds no runtime owner (L7), and it runs
     only on the turn's thread (L8).
-  - Per-branch state lives in the machine, which a failed alternative's
-    cut restores, so providers keep no journals.
-- **Consequences:** the effect machine, run by a turn, hands branch points
-  to the turn's cuts rather than searching itself. `TokenEffects` and
-  `CliEffects` become providers, and `IsolatedEffectSearch` and
-  `IsolatedTaskHost` leave the public API.
+  - Branches carry their state, so a failed alternative restores state
+    and the reset stack itself; the turn's cuts checkpoint alternatives
+    only for the host effects they ran.
+  - A provider whose effects all live in the effect's state is a pure
+    handler, better written in glam than in Rust: providers are for what
+    needs the host.
+- **Consequences:** `TokenEffects` and `CliEffects` become providers or
+  glam libraries with thin host providers, and `IsolatedEffectSearch` and
+  `IsolatedTaskHost` leave the public API. Revised the same day from a
+  first draft that sent `.get`/`.set` to the machine's local state, which
+  parted state from the reset stack.
 - **Recorded in:** runtime API plan, `api-effect-providers`.
 
 ### Resumable WHNF through bounded regional quanta and durable checkpoints

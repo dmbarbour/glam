@@ -13,8 +13,8 @@ enum Ask {
     Calls,
 }
 
-/// Answers `.next n` with `n + 1`, counting its calls in the machine's
-/// local state, and `.calls` with the count; a negative `n` fails.
+/// Answers `.next n` with `n + 1`, counting its calls in the effect's state,
+/// and `.calls` with the count; a negative `n` fails.
 struct Counter;
 
 impl EffectProvider for Counter {
@@ -38,7 +38,8 @@ impl EffectProvider for Counter {
                 }
                 let calls = calls(m)?;
                 m.int_push(calls + 1);
-                m.local_set("calls")?;
+                m.swap()?;
+                m.dict_insert_path(["calls"])?;
                 m.int_push(n + 1);
             }
             Ask::Calls => {
@@ -50,9 +51,11 @@ impl EffectProvider for Counter {
     }
 }
 
-/// The calls counted in the machine's local state.
+/// The calls counted in the state on top of the stack, which stays.
 fn calls(m: &mut Machine<'_, '_>) -> Result<i64, Error> {
-    m.local_get("calls");
+    m.dup(1)?;
+    m.dict_get("calls")?;
+    m.eval()?;
     if m.kind()? == ValueKind::Dict {
         m.discard(1)?;
         return Ok(0);
@@ -60,7 +63,8 @@ fn calls(m: &mut Machine<'_, '_>) -> Result<i64, Error> {
     m.int_pop()
 }
 
-fn effect(m: &mut Machine<'_, '_>, source: &str) -> Result<(), Error> {
+/// Pushes the effect that `source` describes.
+fn compile(m: &mut Machine<'_, '_>, source: &str) -> Result<(), Error> {
     m.dict_pack(Vec::<&str>::new())?;
     m.script_object(
         ["effects"],
@@ -70,22 +74,48 @@ fn effect(m: &mut Machine<'_, '_>, source: &str) -> Result<(), Error> {
     m.dict_get("effect")
 }
 
+/// Pushes `{}`, the state the effect starts from, and the effect.
+fn effect(m: &mut Machine<'_, '_>, source: &str) -> Result<(), Error> {
+    m.dict_pack(Vec::<&str>::new())?;
+    compile(m, source)
+}
+
+/// Runs the effect from `{}`, leaving only its result.
+fn run(
+    m: &mut Machine<'_, '_>,
+    source: &str,
+    provider: &mut impl EffectProvider,
+) -> Result<(), Error> {
+    effect(m, source)?;
+    m.effect_run(provider)?;
+    m.swap()?;
+    m.discard(1)
+}
+
 #[test]
 fn a_provider_answers_an_effects_requests_on_the_turns_thread() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
-    let (result, calls) = rt
+    let (result, calls, seen, state) = rt
         .run("m", |m| {
             effect(
                 m,
-                ".next 41 >>= (\\x -> .next x) >>= (\\y -> .calls >>= (\\n -> .r [y, n]))",
+                ".next 41 >>= (\\x -> .next x) >>= (\\y -> .calls >>= (\\n -> .get ['calls] >>= (\\seen -> .r [y, n, seen])))",
             )?;
             m.effect_run(&mut Counter)?;
-            m.list_unpack(2)?;
+            m.list_unpack(3)?;
+            let seen = m.int_pop()?;
             let calls = m.int_pop()?;
-            Ok((m.int_pop()?, calls))
+            let result = m.int_pop()?;
+            m.dict_get("calls")?;
+            Ok((result, calls, seen, m.int_pop()?))
         })
         .expect("the turn should succeed");
-    assert_eq!((result, calls), (43, 2), "two requests, answered in order");
+    assert_eq!(result, 43, "two requests, answered in order");
+    assert_eq!(
+        (calls, seen, state),
+        (2, 2, 2),
+        "the provider keeps its count in the effect's state"
+    );
 }
 
 #[test]
@@ -100,7 +130,7 @@ fn a_failed_request_fails_the_effect_as_a_backtrack() {
     .expect("the turn should succeed");
 }
 
-/// Passes every standard family through and answers nothing itself.
+/// Passes every host family through and answers nothing itself.
 struct Standard;
 
 impl EffectProvider for Standard {
@@ -116,57 +146,59 @@ impl EffectProvider for Standard {
 }
 
 #[test]
-fn state_passes_through_to_the_machine_s_locals() {
+fn state_is_the_effect_s_own() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
-    let (seen, deep, count) = rt
+    let (read, count, seen, local) = rt
         .run("m", |m| {
             m.int_push(1);
-            m.local_set("seen")?;
-            effect(
+            m.dict_pack(["seen"])?;
+            compile(
                 m,
                 ".get ['seen] >>= (\\seen -> .set ['count] 5 =>> .set ['nested, 'deep] seen =>> .get ['nested, 'deep] >>= (\\deep -> .r [seen, deep]))",
             )?;
             m.effect_run(&mut Standard)?;
             m.list_unpack(2)?;
             let deep = m.int_pop()?;
+            let read = (m.int_pop()?, deep);
+            m.dict_unpack(["count", "nested", "seen"])?;
             let seen = m.int_pop()?;
+            m.discard(1)?;
+            let count = m.int_pop()?;
             m.local_get("count");
-            Ok((seen, deep, m.int_pop()?))
+            Ok((read, count, seen, m.kind()?))
         })
         .expect("the turn should succeed");
-    assert_eq!((seen, deep, count), (1, 1, 5));
+    assert_eq!(read, (1, 1), "the effect reads the state it was given");
+    assert_eq!((count, seen), (5, 1), "and returns the state it left");
+    assert_eq!(local, ValueKind::Dict, "the machine's locals are untouched");
 }
 
 #[test]
-fn the_empty_path_names_the_whole_of_the_locals() {
+fn the_whole_of_the_state_holds_the_reset_stack() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
-    let (restored, seen) = rt
-        .run("m", |m| {
-            m.int_push(1);
-            m.local_set("seen")?;
-            effect(
-                m,
-                ".get [] >>= (\\whole -> .set [] { restored:whole.seen } =>> .r ())",
-            )?;
-            m.effect_run(&mut Standard)?;
-            m.discard(1)?;
-            m.local_get("restored");
-            let restored = m.int_pop()?;
-            m.local_get("seen");
-            Ok((restored, m.kind()?))
-        })
-        .expect("the turn should succeed");
-    assert_eq!(
-        (restored, seen),
-        (1, ValueKind::Dict),
-        "the set replaced every local"
-    );
+    rt.run("m", |m| {
+        run(
+            m,
+            ".reset 'p (.get [] >>= (\\saved -> .set [] {} =>> .set [] saved =>> .shift 'p (\\k -> k 7)))",
+            &mut Standard,
+        )?;
+        assert_eq!(m.int_pop()?, 7, "restoring the state restores the reset");
+        let cleared = run(
+            m,
+            ".reset 'p (.set [] {} =>> .shift 'p (\\k -> k 7))",
+            &mut Standard,
+        )
+        .expect_err("clearing the state clears the reset");
+        assert!(cleared.to_string().contains("reset scope"), "{cleared}");
+        Ok(())
+    })
+    .expect("the turn should succeed");
 }
 
-/// Defines `.get` itself, passing only the heap through.
-struct OwnGet;
+/// Defines `.env` itself, passing only the heap through.
+struct OwnEnv;
 
-impl EffectProvider for OwnGet {
+impl EffectProvider for OwnEnv {
     type Request = ();
 
     fn passes_through(&self) -> EffectFamilies {
@@ -175,8 +207,8 @@ impl EffectProvider for OwnGet {
 
     fn requests(&self) -> Vec<EffectRequestSpec<()>> {
         vec![EffectRequestSpec::new(
-            "get",
-            ["own_get_test", "request", "get"],
+            "env",
+            ["own_env_test", "request", "env"],
             1,
             (),
         )]
@@ -192,18 +224,13 @@ impl EffectProvider for OwnGet {
 #[test]
 fn a_provider_defines_a_family_it_does_not_pass_through() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
-    let (got, seen) = rt
+    let got = rt
         .run("m", |m| {
-            m.int_push(1);
-            m.local_set("seen")?;
-            effect(m, ".heap.set ['k] 2 =>> .get ['seen]")?;
-            m.effect_run(&mut OwnGet)?;
-            let got = m.int_pop()?;
-            m.local_get("seen");
-            Ok((got, m.int_pop()?))
+            run(m, ".heap.set ['k] 2 =>> .env ['anything]", &mut OwnEnv)?;
+            m.int_pop()
         })
         .expect("the turn should succeed");
-    assert_eq!((got, seen), (7, 1), "the provider's `.get`, not the locals");
+    assert_eq!(got, 7, "the provider's `.env`, not the machine's");
 }
 
 #[test]
@@ -211,11 +238,11 @@ fn the_heap_passes_through_to_the_shared_heap() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     let (read, shared) = rt
         .run("m", |m| {
-            effect(
+            run(
                 m,
                 ".heap.set ['shared, 'n] 3 =>> .heap.rewrite ['shared, 'n] (\\n -> [n, n]) =>> .heap.get ['shared, 'n]",
+                &mut Standard,
             )?;
-            m.effect_run(&mut Standard)?;
             m.list_unpack(2)?;
             m.discard(1)?;
             let read = m.int_pop()?;
@@ -233,11 +260,11 @@ fn promises_pass_through_to_the_runtime_s_promises() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     let (before, after, value) = rt
         .run("m", |m| {
-            effect(
+            run(
                 m,
                 ".promise.new >>= (\\p -> .promise.status p.resolver >>= (\\before -> .promise.fulfill p.resolver 4 =>> .promise.status p.resolver >>= (\\after -> .r [before, after, p.promise])))",
+                &mut Standard,
             )?;
-            m.effect_run(&mut Standard)?;
             m.list_unpack(3)?;
             let value = m.int_pop()?;
             let after = m.atom_pop()?;
@@ -257,8 +284,7 @@ fn a_log_goes_to_the_machine_s_diagnostics_output() {
         .run((), |root| Ok(root.port_available("diagnostics")))
         .expect("a turn");
     rt.run("m", |m| {
-        effect(m, ".log 'warn { msg:{ text:\"careful\" } }")?;
-        m.effect_run(&mut Standard)?;
+        run(m, ".log 'warn { msg:{ text:\"careful\" } }", &mut Standard)?;
         m.discard(1)
     })
     .expect("the turn should succeed");
@@ -286,8 +312,7 @@ fn the_environment_passes_through_to_the_machine_s() {
             )?;
             m.dict_get("share")?;
             m.env_mixin_set()?;
-            effect(m, ".env ['greeting]")?;
-            m.effect_run(&mut Standard)?;
+            run(m, ".env ['greeting]", &mut Standard)?;
             m.text_pop()
         })
         .expect("the turn should succeed");

@@ -817,32 +817,40 @@ handle API goes.
       (maintainer, 2026-10-21).
     - Sketched with the maintainer (2026-10-22,
       `effect-families-pass-through`): `m.effect_run(&mut provider)` runs
-      `effect -- result`; only `.r`, `.seq`, `.reset`, `.shift` and `.fix`
-      stay in the effect machine, and every other request returns to the
-      turn. The provider's flags say which families pass through to the
-      machine (search to cuts, state to local state, the heap, `.log` to
-      the diagnostics output, `.env`, promises), and it defines the rest,
-      standard or unique. It answers on the stack: `Return`,
-      `Alternatives(n)`, each resumed in a nested cut, or `Scoped { close }`.
-      Slices: `effect_run` with returns and failure; families passing
-      through by flags; branching through cuts; `TokenEffects` as a
-      provider; then `CliEffects`.
+      `state effect -- state' result`; the pure effects, state and the
+      reset stack among them, stay in the effect machine, and the host's
+      requests return to the turn. The provider's flags say which host
+      families pass through to the machine (the heap, promises, `.log` to
+      the diagnostics output, `.env`), and it defines the rest. It answers
+      `State Args -- State Response` on the stack: `Return`,
+      `Alternatives(n)`, or `Scoped { close }`. Slices: `effect_run` with
+      returns and failure; host families passing through by flags; state
+      kept pure with the reset stack (below); search, with the turn's cuts
+      checkpointing alternatives for their host effects; `TokenEffects`;
+      then `CliEffects`, each a provider or a glam library over a thin one.
     - Built (2026-10-22): `effect_run` with returns and failure. The
       effect machine runs on the turn's thread; a provider's request parks
       on a promise the turn fulfills once the provider has answered on the
       machine's stack, and `m.fail()` fails the request within the effect.
-    - Built (2026-10-22): families passing through by flags. A turn's
-      effect machine serves only the pure core
-      (`TaskSpecialization::serves_standard_families`), and the turn
+    - Built (2026-10-22): families passing through by flags. The turn
       serves each family in the provider's `EffectFamilies` (all, by
-      default) as the machine's own methods do: `.get`/`.set` on local
-      state, a path's first key naming a local and the empty path the
-      whole of them as a dict; `.heap.*` and `.vol.*`; `.promise.*`;
-      `.log` to the diagnostics output; `.env`. The effect machine converts
-      a path argument to keys before the request parks. A provider may
-      define a family it does not pass through, `.get` included. Search
-      waits for the next slice, so until then an effect a turn runs has no
-      `.alt`, `.fail` or `.cut`.
+      default) as the machine's own methods do: `.heap.*` and `.vol.*`;
+      `.promise.*`; `.log` to the diagnostics output; `.env`. The effect
+      machine converts a path argument to keys before the request parks. A
+      provider may define a family it does not pass through.
+    - Built (2026-10-22): state kept pure, as the maintainer chose.
+      The first draft sent `.get`/`.set` to the machine's locals, parting
+      state from the reset stack, which `.get []` must capture. Now the
+      effect machine serves `.get`/`.set` as it does `.reset`/`.shift`,
+      and `effect_run` takes and returns the state. A provider's request
+      receives it below its arguments (`RequestContext::state`) and
+      answers with the state to continue from, which the request demands
+      to a dict before installing (`set_state`). A turn's effect machine
+      leaves the host families to the turn
+      (`TaskSpecialization::serves_host_families`) and, unable to undo
+      their effects in a failed alternative, has no search until the next
+      slice: until then an effect a turn runs has no `.alt`, `.fail` or
+      `.cut`.
 21. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`

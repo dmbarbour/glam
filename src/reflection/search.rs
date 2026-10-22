@@ -187,13 +187,19 @@ pub(super) struct AllResults<B, R> {
 #[doc(hidden)]
 pub struct IsolatedSearchBranch<S: TaskSpecialization> {
     value: Option<PublicValue>,
+    state: Option<PublicValue>,
     transaction: TaskCommit<S>,
 }
 
 impl<S: TaskSpecialization> IsolatedSearchBranch<S> {
-    pub(super) fn complete(value: PublicValue, transaction: TaskCommit<S>) -> Self {
+    pub(super) fn complete(
+        value: PublicValue,
+        state: PublicValue,
+        transaction: TaskCommit<S>,
+    ) -> Self {
         Self {
             value: Some(value),
+            state: Some(state),
             transaction,
         }
     }
@@ -201,12 +207,18 @@ impl<S: TaskSpecialization> IsolatedSearchBranch<S> {
     pub(super) fn failed(transaction: TaskCommit<S>) -> Self {
         Self {
             value: None,
+            state: None,
             transaction,
         }
     }
 
     pub fn value(&self) -> Option<&PublicValue> {
         self.value.as_ref()
+    }
+
+    /// The state a completed branch ended with.
+    pub(crate) fn state(&self) -> Option<&PublicValue> {
+        self.state.as_ref()
     }
 
     pub fn journal(&self) -> &S::Journal {
@@ -283,6 +295,29 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         EffectTask::new_isolated_in_context(effect, specialization, host, context)
             .map(|task| Self { task, _owner: None })
             .map_err(|error| error.root_for_values(values.core()))
+    }
+
+    /// As [`Self::new_in_context`], the search starting from `state` rather
+    /// than `{}`.
+    pub(crate) fn new_with_state_in_context(
+        effect: &PublicValue,
+        state: &PublicValue,
+        specialization: S,
+        host: Arc<S::Host>,
+        context: EvalContext,
+    ) -> Result<Self, TaskHalt> {
+        let values = Values::from_core_factory(context.values().clone());
+        values.require(effect)?;
+        values.require(state)?;
+        EffectTask::new_isolated_with_state_in_context(
+            effect.clone().into_runtime_root(),
+            state.clone().into_runtime_root(),
+            specialization,
+            host,
+            context,
+        )
+        .map(|task| Self { task, _owner: None })
+        .map_err(|error| error.root_for_values(values.core()))
     }
 
     fn root_poll_error(&self, error: TaskHalt) -> TaskHalt {
@@ -409,8 +444,13 @@ mod tests {
         block: &IsolatedSearchBlock,
         poll: &IsolatedSearchPoll<SearchRootTestEffects>,
     ) {
-        let IsolatedSearchBranch { value, transaction } = branch;
+        let IsolatedSearchBranch {
+            value,
+            state,
+            transaction,
+        } = branch;
         let _: &Option<PublicValue> = value;
+        let _: &Option<PublicValue> = state;
         let _: &TaskCommit<SearchRootTestEffects> = transaction;
 
         let IsolatedSearchBlock {
@@ -492,17 +532,20 @@ mod tests {
         assert!(retained_extra.upgrade().is_none());
 
         let (result, retained_result) = retained_search_value(&domain);
+        let (state, retained_state) = retained_search_value(&domain);
         let (snapshot, retained_snapshot) = retained_search_value(&domain);
         let (journal, retained_journal) = retained_search_value(&domain);
         let branch =
-            IsolatedSearchBranch::complete(result, search_commit(&store, snapshot, journal));
+            IsolatedSearchBranch::complete(result, state, search_commit(&store, snapshot, journal));
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_result.upgrade().is_some());
+        assert!(retained_state.upgrade().is_some());
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(branch);
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_result.upgrade().is_none());
+        assert!(retained_state.upgrade().is_none());
         assert!(retained_snapshot.upgrade().is_none());
         assert!(retained_journal.upgrade().is_none());
 

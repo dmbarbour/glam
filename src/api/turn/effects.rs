@@ -1,17 +1,17 @@
 //! Effects a turn runs (`api-effect-providers`,
 //! `effect-families-pass-through`): a monadic effect evaluates on the turn's
-//! thread, keeping only the pure core, and each other request it makes
-//! returns to the turn. The machine serves the standard families that the
-//! provider passes through, and the provider answers the rest outside any
-//! evaluation, so it may evaluate too. Branching through cuts follows.
+//! thread, serving its pure effects itself, state and delimited control
+//! among them, and each host request it makes returns to the turn. The
+//! machine serves the host families that the provider passes through, and
+//! the provider answers the rest outside any evaluation, so it may evaluate
+//! too. Branching, with the host checkpointing its alternatives, follows.
 
-use std::collections::HashMap;
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex, PoisonError};
 
 use super::{DIAGNOSTICS, Machine};
 use crate::api::{Diagnostic, Error, ErrorKind, PromiseResolver, Value as HandleValue};
-use crate::core::{Dict, EvaluationHalt, Key, Value as CoreValue};
+use crate::core::{EvaluationHalt, Key};
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{EvaluationPumpOutcome, EvaluationWaitToken, ExactDemandRoute};
 use crate::reflection::{
@@ -24,30 +24,26 @@ use crate::reflection::{
 /// Steps the effect's evaluation takes between looks at what it asked for.
 const STEP_BUDGET: usize = 4_096;
 
-/// Families of the standard effects, which an [`EffectProvider`] passes
+/// Families of the standard host effects, which an [`EffectProvider`] passes
 /// through to the machine, or leaves for itself to define
-/// (`effect-families-pass-through`).
+/// (`effect-families-pass-through`). The pure effects, state among them,
+/// belong to no family: the effect serves them itself.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub struct EffectFamilies(u8);
 
 impl EffectFamilies {
     /// No family.
     pub const NONE: Self = Self(0);
-    /// `.get path` and `.set path value`, on the machine's local state: a
-    /// path's first key names a local, and the empty path names them all,
-    /// as a dict.
-    pub const STATE: Self = Self(1);
     /// `.heap.*` and `.vol.*`, on the shared heap and its volumes.
-    pub const HEAP: Self = Self(1 << 1);
+    pub const HEAP: Self = Self(1);
     /// `.promise.*`, on the runtime's promises.
-    pub const PROMISES: Self = Self(1 << 2);
+    pub const PROMISES: Self = Self(1 << 1);
     /// `.log severity message`, to the machine's diagnostics output.
-    pub const LOG: Self = Self(1 << 3);
+    pub const LOG: Self = Self(1 << 2);
     /// `.env path`, from the machine's environment.
-    pub const ENV: Self = Self(1 << 4);
+    pub const ENV: Self = Self(1 << 3);
     /// Every family.
-    pub const ALL: Self =
-        Self(Self::STATE.0 | Self::HEAP.0 | Self::PROMISES.0 | Self::LOG.0 | Self::ENV.0);
+    pub const ALL: Self = Self(Self::HEAP.0 | Self::PROMISES.0 | Self::LOG.0 | Self::ENV.0);
 
     /// Whether these families include all of `families`.
     pub const fn contains(self, families: Self) -> bool {
@@ -70,8 +66,8 @@ pub trait EffectProvider {
     /// What the provider calls one of its requests.
     type Request: Clone;
 
-    /// The standard families the machine serves; the provider may define
-    /// the others' requests itself. All of them, by default.
+    /// The host families the machine serves; the provider may define the
+    /// others' requests itself. All of them, by default.
     fn passes_through(&self) -> EffectFamilies {
         EffectFamilies::ALL
     }
@@ -81,27 +77,28 @@ pub trait EffectProvider {
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>>;
 
     /// Answers `request`, whose arguments are on top of `m`'s stack, the
-    /// last on top: it pops them and leaves what [`Answer`] says. Failing,
-    /// `Err(m.fail())`, fails the request within the effect; any other error
-    /// ends the run.
+    /// last on top, above the effect's state: `state args -- state' result`,
+    /// as [`Answer`] says. The state is the effect's own, which `.get []`
+    /// reads, so what the provider keeps there each branch keeps for itself.
+    /// Failing, `Err(m.fail())`, fails the request within the effect; any
+    /// other error ends the run.
     fn answer(&mut self, m: &mut Machine<'_, '_>, request: &Self::Request)
     -> Result<Answer, Error>;
 }
 
-/// What a provider's answer leaves on the stack in place of the request's
-/// arguments.
+/// What a provider's answer leaves on the stack in place of the effect's
+/// state and the request's arguments.
 #[non_exhaustive]
 pub enum Answer {
-    /// `args -- result`: the request returns `result`.
+    /// `state args -- state' result`: the request returns `result`, and the
+    /// effect continues from `state'`.
     Return,
 }
 
-/// A standard request, which the machine serves where its family passes
-/// through.
+/// A standard host request, which the machine serves where its family
+/// passes through.
 #[derive(Clone, Copy)]
 enum Standard {
-    Get,
-    Set,
     HeapGet,
     HeapSet,
     HeapRewrite,
@@ -128,9 +125,7 @@ struct Shape {
 }
 
 impl Standard {
-    const ALL: [Self; 16] = [
-        Self::Get,
-        Self::Set,
+    const ALL: [Self; 14] = [
         Self::HeapGet,
         Self::HeapSet,
         Self::HeapRewrite,
@@ -156,8 +151,6 @@ impl Standard {
         };
         use EffectFamilies as F;
         match self {
-            Self::Get => shape(F::STATE, &["get"], 1, Some(0)),
-            Self::Set => shape(F::STATE, &["set"], 2, Some(0)),
             Self::HeapGet => shape(F::HEAP, &["heap", "get"], 1, Some(0)),
             Self::HeapSet => shape(F::HEAP, &["heap", "set"], 2, Some(0)),
             Self::HeapRewrite => shape(F::HEAP, &["heap", "rewrite"], 2, Some(0)),
@@ -213,17 +206,23 @@ impl TurnRequest {
 }
 
 /// A request the effect made, which waits for the turn's answer: its
-/// arguments, with a path argument converted to `path`.
+/// arguments, with a path argument converted to `path`, and for the
+/// provider's own requests, the branch's state.
 struct Parked {
     request: TurnRequest,
+    state: Option<HandleValue>,
     path: Vec<Key>,
     arguments: Vec<HandleValue>,
     resolver: PromiseResolver,
 }
 
-/// What the turn answered a parked request.
+/// What the turn answered a parked request: a result, and for the
+/// provider's own requests, the branch's state after it.
 enum Answered {
-    Return(HandleValue),
+    Return {
+        state: Option<HandleValue>,
+        result: HandleValue,
+    },
     Fail,
 }
 
@@ -253,7 +252,7 @@ impl TaskSpecialization for TurnEffects {
     type Snapshot = ();
     type Journal = ();
 
-    fn serves_standard_families(&self) -> bool {
+    fn serves_host_families(&self) -> bool {
         false
     }
 
@@ -285,6 +284,9 @@ enum TurnRequestWork {
     },
     /// Waiting on the promise the turn fulfills once it has answered.
     Parked(SharedSlot),
+    /// Evaluating the state the provider answered with, which the branch
+    /// continues from once it is a dict.
+    Settling(HandleValue),
     Done,
 }
 
@@ -300,8 +302,10 @@ impl TurnRequestWork {
         slot: SharedSlot,
     ) -> SpecializationRequestPoll {
         let (promised, resolver) = context.values().promise("effect request");
+        let state = matches!(request, TurnRequest::Provider(_)).then(|| context.state());
         slot.lock().unwrap_or_else(PoisonError::into_inner).parked = Some(Parked {
             request,
+            state,
             path,
             arguments,
             resolver,
@@ -374,27 +378,53 @@ impl SpecializationRequestWork<TurnEffects> for TurnRequestWork {
                     .answered
                     .take()
                     .expect("the turn answers a request before fulfilling its promise");
-                Ok(SpecializationRequestPoll::Complete(match answered {
-                    Answered::Return(value) => RequestResult::Return(value),
-                    Answered::Fail => RequestResult::Fail,
-                }))
+                match answered {
+                    Answered::Return {
+                        state: Some(state),
+                        result,
+                    } => {
+                        *self = Self::Settling(result);
+                        Ok(SpecializationRequestPoll::Demand(state))
+                    }
+                    Answered::Return {
+                        state: None,
+                        result,
+                    } => Ok(SpecializationRequestPoll::Complete(RequestResult::Return(
+                        result,
+                    ))),
+                    Answered::Fail => Ok(SpecializationRequestPoll::Complete(RequestResult::Fail)),
+                }
             }
+            Self::Settling(result) => match input {
+                Some(SpecializationRequestInput::Value(state)) => {
+                    context.set_state(state)?;
+                    Ok(SpecializationRequestPoll::Complete(RequestResult::Return(
+                        result,
+                    )))
+                }
+                Some(SpecializationRequestInput::Failed(halt)) => Err(halt),
+                None => panic!("an effect's state settles once it is evaluated"),
+            },
             Self::Done => panic!("an answered effect request was polled again"),
         }
     }
 }
 
 impl Machine<'_, '_> {
-    /// `effect -- result`: runs the effect on top of the stack on this turn's
-    /// thread (`effect-families-pass-through`). The machine serves the
-    /// standard families that `provider` passes through, as its own methods
-    /// do, and `provider` answers its own requests. An effect that fails
+    /// `state effect -- state' result`: runs the effect on top of the stack
+    /// on this turn's thread, from `state`, a dict
+    /// (`effect-families-pass-through`). The effect serves its pure effects
+    /// itself, `.get` and `.set` on its state among them; the machine serves
+    /// the host families that `provider` passes through, as its own methods
+    /// do; and `provider` answers its own requests. An effect that fails
     /// fails as [`Self::fail`] does; one whose evaluation waits is pushback.
     ///
-    /// Branching, the search family, comes with a later slice of
-    /// `api-effect-providers`.
+    /// Branching, with this machine's cuts checkpointing the alternatives,
+    /// comes with a later slice of `api-effect-providers`.
     pub fn effect_run<P: EffectProvider>(&mut self, provider: &mut P) -> Result<(), Error> {
+        self.require(2)?;
         let effect = self.pop()?;
+        let state = self.pop()?;
         let (names, provided): (Vec<_>, Vec<_>) = provider
             .requests()
             .into_iter()
@@ -422,9 +452,14 @@ impl Machine<'_, '_> {
         });
         let host = Arc::new(IsolatedTaskHost::new(&values, environment, ())?);
         let context = self.runtime.assembler.eval_context();
-        let mut search =
-            IsolatedEffectSearch::new_in_context(&effect, effects, host, context.clone())
-                .map_err(|halt| Error::new(halt.to_string()))?;
+        let mut search = IsolatedEffectSearch::new_with_state_in_context(
+            &effect,
+            &state,
+            effects,
+            host,
+            context.clone(),
+        )
+        .map_err(|halt| Error::new(halt.to_string()))?;
         let mut route = ExactDemandRoute::default();
         let branches = loop {
             match search.poll(STEP_BUDGET) {
@@ -437,13 +472,14 @@ impl Machine<'_, '_> {
                         .take();
                     if let Some(Parked {
                         request,
+                        state,
                         path,
                         arguments,
                         resolver,
                     }) = parked
                     {
                         let answered =
-                            self.answer_parked(provider, &names, request, path, arguments)?;
+                            self.answer_parked(provider, &names, request, state, path, arguments)?;
                         slot.lock().unwrap_or_else(PoisonError::into_inner).answered =
                             Some(answered);
                         resolver.resolve(values.unit())?;
@@ -471,8 +507,12 @@ impl Machine<'_, '_> {
                 }
             }
         };
-        match branches.iter().find_map(|branch| branch.value()) {
-            Some(result) => {
+        let completed = branches
+            .iter()
+            .find_map(|branch| Some((branch.state()?, branch.value()?)));
+        match completed {
+            Some((state, result)) => {
+                self.push(state.clone());
                 self.push(result.clone());
                 Ok(())
             }
@@ -480,19 +520,22 @@ impl Machine<'_, '_> {
         }
     }
 
-    /// Answers `request` with `arguments` on the stack, serving a standard
-    /// request or handing it to `provider`, and reads the answer off the
-    /// stack.
+    /// Answers `request` with `arguments` on the stack, above `state` for
+    /// the provider's own requests, serving a standard request or handing it
+    /// to `provider`, and reads the answer off the stack.
     fn answer_parked<P: EffectProvider>(
         &mut self,
         provider: &mut P,
         names: &[P::Request],
         request: TurnRequest,
+        state: Option<HandleValue>,
         path: Vec<Key>,
         arguments: Vec<HandleValue>,
     ) -> Result<Answered, Error> {
         let depth = self.depth();
         let arity = arguments.len();
+        let stateful = state.is_some();
+        self.state.stack.extend(state);
         for argument in arguments {
             self.push(argument);
         }
@@ -504,14 +547,16 @@ impl Machine<'_, '_> {
         };
         match answer {
             Ok(Answer::Return) => {
-                if self.depth() != depth + 1 {
+                if self.depth() != depth + usize::from(stateful) + 1 {
                     self.state.stack.truncate(depth);
                     return Err(Error::new(format!(
-                        "an effect provider's return must replace its request's {arity} \
-                         arguments with one result"
+                        "an effect provider's return must replace the effect's state and its \
+                         request's {arity} arguments with a state and a result"
                     )));
                 }
-                Ok(Answered::Return(self.pop()?))
+                let result = self.pop()?;
+                let state = if stateful { Some(self.pop()?) } else { None };
+                Ok(Answered::Return { state, result })
             }
             Err(error) if error.kind() == ErrorKind::Backtrack => {
                 self.state.stack.truncate(depth);
@@ -528,27 +573,6 @@ impl Machine<'_, '_> {
     /// stack, as this machine's own methods do, leaving its result.
     fn serve_standard(&mut self, standard: Standard, path: &[Key]) -> Result<(), Error> {
         match standard {
-            Standard::Get => match path.split_first() {
-                None => self.locals_push()?,
-                Some((local, rest)) => {
-                    self.local_get(local.clone());
-                    if !rest.is_empty() {
-                        self.dict_get_path(rest.iter().cloned())?;
-                    }
-                }
-            },
-            Standard::Set => {
-                match path.split_first() {
-                    None => self.locals_set()?,
-                    Some((local, [])) => self.local_set(local.clone())?,
-                    Some((local, rest)) => {
-                        self.local_get(local.clone());
-                        self.dict_insert_path(rest.iter().cloned())?;
-                        self.local_set(local.clone())?;
-                    }
-                }
-                self.unit_push();
-            }
             Standard::HeapGet => self.heap_get(path.iter().cloned()),
             Standard::HeapSet => {
                 self.heap_set(path.iter().cloned())?;
@@ -605,38 +629,6 @@ impl Machine<'_, '_> {
                 }
             }
         }
-        Ok(())
-    }
-
-    /// Pushes the machine's local state as a dict, each local under its key.
-    fn locals_push(&mut self) -> Result<(), Error> {
-        let locals = &self.state.locals;
-        let dict = self.runtime.assembler.values().with_access(|scoped| {
-            let dict = locals
-                .iter()
-                .try_fold(Dict::new_sync(), |dict, (key, value)| {
-                    Ok::<_, Error>(dict.insert(key.clone(), scoped.clone_core(value)?))
-                })?;
-            Ok::<_, Error>(scoped.wrap(CoreValue::Dict(dict)))
-        })?;
-        self.push(dict);
-        Ok(())
-    }
-
-    /// Evaluates the top value to a dict and pops it as the machine's local
-    /// state, each of its members a local under its key.
-    fn locals_set(&mut self) -> Result<(), Error> {
-        let locals = self.peek_core_evaluated(|access, scoped, value| {
-            let CoreValue::Dict(dict) = value else {
-                return Err(Error::new("the whole of the state must be a dict"));
-            };
-            Ok(dict
-                .iter()
-                .map(|(key, value)| (key.clone(), scoped.wrap(access.duplicate_value(value))))
-                .collect::<HashMap<_, _>>())
-        })?;
-        self.pop()?;
-        self.state.locals = locals;
         Ok(())
     }
 
