@@ -195,11 +195,14 @@ Taken as recommended unless the maintainer says otherwise; the maintainer's
 answer on 2026-10-22 ("coarse-grained steps bounded by budget") fits the
 first.
 
-1. **What a machine step costs.** Recommended: one unit per step, always,
-   paid at its start; delegations within it pay their own. Today a step
-   pays only when its operands cost nothing. Walking evaluated data stays a
-   paid step rather than free observation, because the budget is what
-   bounds how long a poll holds its mutator (`coarse-grained-mutator`).
+1. **What a machine step costs.** A step that changes its machine's state
+   pays one unit; delegations within it pay their own. A walk over
+   evaluated data pays insofar as it is made of such steps, such as popping
+   a list's element or pushing a comparison frame, and observation within
+   a step, such as reading a value's shape, stays free (maintainer,
+   2026-10-22). As built: a step needs a unit to start and pays as it ends,
+   forgiven when its operands spent the last; reporting a boundary or a
+   failure is free.
 2. **How a poll ends for work it must wait out.** Contention, an in-flight
    semantic action, and work deferred past admission each need another
    thread or the mutator's release. Options: report each as `Blocked` on a
@@ -250,3 +253,8 @@ first.
   budget: it stands in for exhaustion, so that the assertion of
   `budget-exhausted-only` holds of it too. Tests that walk a host call or a
   stale route through each handoff step `phase` by phase.
+  Instructions moved 0.1% (no workload by 1% or more): the handoffs were
+  already cheap, so this step is about the contract, not speed.
+- `budget-machine-steps`, refined (2026-10-22): only a step that changes
+  its machine's state pays its unit, as the maintainer framed it; one that
+  only reports a boundary or a failure is free again, as the ADR has it.

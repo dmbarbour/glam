@@ -2768,9 +2768,12 @@ maps the short names used here to file names.
     - a builtin machine step whose operand evaluation cost nothing pays one
       unit for its own work. Amended 2026-10-22 (`budget-machine-steps`): a
       machine runs its steps within a poll while a unit remains, and each
-      step pays one unit as it ends, forgiven when its operands spent the
-      last, as a batch's overrun is. Paying as a step starts left a one-unit
-      poll nothing for its operands, so it never progressed.
+      step that changes the machine's state pays one unit as it ends,
+      forgiven when its operands spent the last, as a batch's overrun is.
+      A walk over evaluated data pays insofar as it is made of such steps,
+      such as popping a list's element (maintainer). Paying as a step
+      starts left a one-unit poll nothing for its operands, so it never
+      progressed.
   - **Reflection:** steps charge as before, and waiting pumps within the
     caller's budget.
 - **Consequences:**

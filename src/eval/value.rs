@@ -1060,6 +1060,14 @@ impl LazyTaskMachine {
                     step_budget,
                     || AccessRegionalPoll::BudgetExhausted,
                     |poll| matches!(poll, AccessRegionalPoll::Continue),
+                    |poll| {
+                        matches!(
+                            poll,
+                            AccessRegionalPoll::Continue
+                                | AccessRegionalPoll::Ready(_)
+                                | AccessRegionalPoll::Whnf(_)
+                        )
+                    },
                     |budget| machine.poll_in(&access, budget),
                 )
             }) {

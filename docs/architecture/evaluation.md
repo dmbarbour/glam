@@ -324,8 +324,9 @@ A step pays one unit when it changes state, and observing is free (decision
   machine runs its steps within one poll, under one access region, until it
   is ready, reaches a boundary or fails, or the budget is spent
   (`ManagedLazyCheckpointEdge::machine_steps`). A step reports `Continue`
-  to go on; it needs a unit to start and pays one as it ends, forgiven when
-  its operand evaluation spent the last.
+  to go on. It needs a unit to start, and one that changes the machine's
+  state pays one as it ends, forgiven when its operand evaluation spent the
+  last; reporting a boundary or a failure is free.
 - **Nets:** each rule application is charged at its claim; see
   [`interaction_nets.md`](interaction_nets.md) "The Net Driver".
 - **Reflection:** delegating phases charge an administrative unit only when

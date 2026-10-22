@@ -245,15 +245,18 @@ impl ManagedLazyCheckpointEdge {
 
     /// Runs a regional machine's steps under the shared step budget until
     /// it is ready, reaches a boundary or fails, or the budget is spent
-    /// (`reduction-costs-one-budget-unit`). A step needs a unit to start and
-    /// pays one as it ends, after the operand evaluation within it paid its
-    /// own; when that spent the last unit, the step's own is forgiven, as a
-    /// batch's overrun is, so a one-unit poll still makes progress.
+    /// (`reduction-costs-one-budget-unit`). A step needs a unit to start. One
+    /// that `advanced` its machine's state pays one unit as it ends, after
+    /// the operand evaluation within it paid its own; when that spent the
+    /// last unit, the step's own is forgiven, as a batch's overrun is, so a
+    /// one-unit poll still makes progress. Reporting a boundary or a failure
+    /// is free.
     pub(in crate::eval) fn machine_steps<P>(
         access: &crate::evaluation::EvaluationValueAccess<'_>,
         step_budget: &mut crate::evaluation::EvaluationStepBudget,
         exhausted: impl Fn() -> P,
         continues: impl Fn(&P) -> bool,
+        advanced: impl Fn(&P) -> bool,
         mut step: impl FnMut(&mut crate::evaluation::EvaluationStepBudget) -> P,
     ) -> P {
         loop {
@@ -261,12 +264,14 @@ impl ManagedLazyCheckpointEdge {
                 return exhausted();
             }
             let poll = step(step_budget);
-            let _ = step_budget.try_consume();
-            #[cfg(feature = "glam-prof")]
-            access
-                .values()
-                .values()
-                .record_reduction(crate::profiling::EvaluationReduction::BuiltinStep);
+            if advanced(&poll) {
+                let _ = step_budget.try_consume();
+                #[cfg(feature = "glam-prof")]
+                access
+                    .values()
+                    .values()
+                    .record_reduction(crate::profiling::EvaluationReduction::BuiltinStep);
+            }
             if !continues(&poll) {
                 #[cfg(not(feature = "glam-prof"))]
                 let _ = access;
@@ -336,6 +341,13 @@ impl ManagedLazyCheckpointEdge {
                         step_budget,
                         || RegionalObjectFixpointPoll::BudgetExhausted,
                         |poll| matches!(poll, RegionalObjectFixpointPoll::Continue),
+                        |poll| {
+                            matches!(
+                                poll,
+                                RegionalObjectFixpointPoll::Continue
+                                    | RegionalObjectFixpointPoll::Ready(_)
+                            )
+                        },
                         |budget| state.poll_in(authority, budget),
                     )
                 },
@@ -376,6 +388,14 @@ impl ManagedLazyCheckpointEdge {
                         step_budget,
                         || RegionalListEffectPoll::BudgetExhausted,
                         |poll| matches!(poll, RegionalListEffectPoll::Continue),
+                        |poll| {
+                            matches!(
+                                poll,
+                                RegionalListEffectPoll::Continue
+                                    | RegionalListEffectPoll::Ready(_)
+                                    | RegionalListEffectPoll::FixReady { .. }
+                            )
+                        },
                         |budget| state.poll_in(authority, budget),
                     )
                 },
@@ -416,6 +436,14 @@ impl ManagedLazyCheckpointEdge {
                         step_budget,
                         || RegionalBuiltinPoll::BudgetExhausted,
                         |poll| matches!(poll, RegionalBuiltinPoll::Continue),
+                        |poll| {
+                            matches!(
+                                poll,
+                                RegionalBuiltinPoll::Continue
+                                    | RegionalBuiltinPoll::Ready(_)
+                                    | RegionalBuiltinPoll::SparkIntent(_)
+                            )
+                        },
                         |budget| state.poll_in(authority, budget),
                     )
                 },
