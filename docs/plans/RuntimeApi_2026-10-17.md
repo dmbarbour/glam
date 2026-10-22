@@ -854,6 +854,15 @@ handle API goes.
       their effects in a failed alternative, has no search until the next
       slice: until then an effect a turn runs has no `.alt`, `.fail` or
       `.cut`.
+    - Decided with the maintainer (2026-10-22,
+      `alt-cuts-its-first-operand`): `.alt a b` means `.alt (.cut a) b`
+      for machines and reflection tasks, an effect's cuts scope its
+      choices, and waiting answers only a failure nothing handles. An
+      effect's `.cut` is a turn transaction: the outermost one outside
+      `m.cut`, nested within it. Built first for reflection tasks: a choice
+      within a cut leaves its second operand among the cut's alternatives
+      and enters a cut for its first; outside every cut, the first
+      operand's cut takes the second as its fallback.
 21. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`

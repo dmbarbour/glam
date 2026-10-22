@@ -2587,38 +2587,50 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 }
             }
+            // A choice's first operand is atomic: `.alt a b` means
+            // `.alt (.cut a) b` (`alt-cuts-its-first-operand`). Isolated
+            // search keeps every branch instead.
             Request::Alt(left, right) => {
-                if (scope_depth > 0 || self.search.retains_all()) && !branch.active_fixes.is_empty()
-                {
+                let retains_all = self.search.retains_all();
+                if (scope_depth > 0 || retains_all) && !branch.active_fixes.is_empty() {
                     let inherited_restarts = branch.fix_restarts.clone();
                     let active = branch
                         .active_fixes
                         .first_mut()
                         .expect("checked nonempty fixpoint stack");
-                    if let Some(choice) = active.choices.get(active.next_choice).copied() {
+                    let choice = if let Some(choice) = active.choices.get(active.next_choice) {
                         active.next_choice += 1;
-                        branch.set_effect_root(match choice {
-                            FixChoice::Left => left,
-                            FixChoice::Right => right,
-                        });
+                        *choice
                     } else {
                         let root = active.root.clone();
                         let mut right_choices = active.choices.clone();
                         right_choices.push(FixChoice::Right);
                         active.choices.push(FixChoice::Left);
                         active.next_choice += 1;
-                        branch.set_effect_root(left);
                         branch.fix_restarts.push(FixRestart {
                             root,
                             choices: right_choices,
                             inherited_restarts,
                         });
+                        FixChoice::Left
+                    };
+                    match choice {
+                        FixChoice::Left if !retains_all => {
+                            return Ok(MachineStep::Continue(self.enter_cut(
+                                context,
+                                left,
+                                branch,
+                                scope_depth,
+                            )));
+                        }
+                        FixChoice::Left => branch.set_effect_root(left),
+                        FixChoice::Right => branch.set_effect_root(right),
                     }
                     MachineWork::Drive {
                         branch,
                         scope_depth,
                     }
-                } else {
+                } else if retains_all {
                     MachineWork::Outcome {
                         outcome: BranchOutcome::Fork(
                             Box::new(branch.with_effect_root(left)),
@@ -2626,6 +2638,35 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         ),
                         scope_depth,
                     }
+                } else if scope_depth > 0 {
+                    // Within a cut, the second operand stays open to the
+                    // cut's later failures.
+                    let alternative = branch.with_effect_root(right);
+                    let frame = self
+                        .execution
+                        .cuts
+                        .last_mut()
+                        .expect("a branch within a cut runs in its frame");
+                    debug_assert_eq!(frame.scope_depth, scope_depth);
+                    frame.alternatives.push(alternative);
+                    return Ok(MachineStep::Continue(self.enter_cut(
+                        context,
+                        left,
+                        branch,
+                        scope_depth,
+                    )));
+                } else {
+                    // Outside every cut, nothing reconsiders the choice once
+                    // its first operand succeeds: the second is a fallback
+                    // for that operand's failure alone.
+                    let fallback = branch.with_effect_root(right);
+                    let work = self.enter_cut(context, left, branch, scope_depth);
+                    self.execution
+                        .cuts
+                        .last_mut()
+                        .expect("the cut was just entered")
+                        .fallback = Some(fallback);
+                    return Ok(MachineStep::Continue(work));
                 }
             }
             Request::Fail => MachineWork::Outcome {
@@ -3084,6 +3125,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             scope_depth: parent_scope_depth + 1,
             owns_transaction: false,
             alternatives: Vec::new(),
+            fallback: None,
             retry: None,
             observed_failure: false,
         };
@@ -3263,6 +3305,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 scope_depth: frame.parent_scope_depth,
             }));
         }
+        // A failed cut is a failure, which its choice handles by falling
+        // back; only a failure nothing handles waits for a change.
+        if let Some(fallback) = frame.fallback {
+            return Ok(MachineStep::Continue(MachineWork::Drive {
+                branch: fallback,
+                scope_depth: frame.parent_scope_depth,
+            }));
+        }
         if !frame.owns_transaction {
             return Ok(MachineStep::Continue(MachineWork::Outcome {
                 outcome: failed.into_failure(),
@@ -3312,7 +3362,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 TaskHalt::new("reflection task failed permanently"),
             ))),
             BranchOutcome::Fork(_, _) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
-                TaskHalt::new("`.alt` requires an enclosing `.cut`"),
+                TaskHalt::new("a choice forked outside every cut"),
             ))),
             BranchOutcome::Retry(mut failed) => {
                 if let Some(restarted) =
@@ -4985,6 +5035,9 @@ struct CutFrame<S: TaskSpecialization> {
     scope_depth: usize,
     owns_transaction: bool,
     alternatives: Vec<Branch<S>>,
+    /// The second operand of a choice made outside every cut, whose first
+    /// operand this cut is: it runs in the cut's place should the cut fail.
+    fallback: Option<Branch<S>>,
     retry: Option<Branch<S>>,
     observed_failure: bool,
 }

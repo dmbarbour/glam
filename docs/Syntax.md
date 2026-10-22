@@ -1638,9 +1638,11 @@ whose failure should permit reconsidering an alternative:
 ```
 
 This differs from `(.cut (X or Y)) =>> LaterGuard`, which commits to `X` or
-`Y` before learning whether `LaterGuard` succeeds. Whether a raw top-level
-`or` is accepted is handler policy: a branching handler such as `list.pure`
-supports it, while a general effect handler may require an enclosing `.cut`.
+`Y` before learning whether `LaterGuard` succeeds. A raw top-level `or`
+means what its handler makes of it: a branching handler such as `list.pure`
+continues once per success, while machines and reflection tasks make its
+first operand atomic and the choice final once that operand succeeds
+(`alt-cuts-its-first-operand`).
 
 Conditional forms such as `if` and `match` supply the correctly placed outer
 cut around their entire generated choice tree. They therefore return at most

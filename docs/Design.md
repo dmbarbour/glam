@@ -339,7 +339,10 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.r Result` - pass result to next step
 - `.seq op k` - equivalent to `op >>= k`
 - `.alt A B` - run `A`; on fail, backtrack then run `B`
-  - invalid outside `.cut` scope in general usage
+  - for machines and reflection tasks, `A` is atomic: `.alt A B` means
+    `.alt (.cut A) B`; a choice is scoped by the enclosing `.cut`, and
+    outside every cut it is final once `A` succeeds
+    (`alt-cuts-its-first-operand`)
   - ordered and deterministic: if `A` blocks on a lazy value, suspend rather
     than allowing readiness to select `B`
 - `.fail` - failure for `.alt`, does not continue

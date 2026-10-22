@@ -1548,9 +1548,11 @@ fn assert_execution_root_inventory(
         scope_depth,
         owns_transaction,
         alternatives,
+        fallback,
         retry,
         observed_failure,
     } = cut;
+    let _: &Option<Branch<TestEffects>> = fallback;
     let _: &RuntimeValueRoot = operation;
     let _ = (
         outer,
@@ -3554,6 +3556,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
         scope_depth: 1,
         owns_transaction: false,
         alternatives: Vec::new(),
+        fallback: None,
         retry: None,
         observed_failure: false,
     };
@@ -9149,25 +9152,80 @@ fn standalone_heap_reads_do_not_make_later_failure_retryable() {
     assert_eq!(local_host.wait_count(), 0);
 }
 
+/// The value a completed task returned.
+fn completed_value(values: &CoreValueFactory, outcome: TaskOutcome, expected: Value) {
+    let TaskOutcome::Complete(result) = outcome else {
+        panic!("the task should complete");
+    };
+    assert_public_core_value(values, &result, expected);
+}
+
 #[test]
-fn top_level_alternative_and_unmatched_shift_are_rejected() {
-    let (alternative_assembler, alternative) = compile_effect(".alt (.r 1) (.r 2)");
-    assert!(
-        run_standard_test(&alternative_assembler, &alternative)
-            .unwrap_err_without_debug()
-            .to_string()
-            .contains("requires an enclosing `.cut`")
-    );
+fn a_choice_cuts_its_first_operand_and_falls_back_to_its_second() {
+    // `alt-cuts-its-first-operand`: `.alt a b` means `.alt (.cut a) b`.
+    for (source, expected) in [
+        (".alt (.r 1) (.r 2)", 1),
+        (".alt (.fail) (.r 2)", 2),
+        (".fix (\\_loop -> .alt (.r 1) (.r 2))", 1),
+        (".fix (\\_loop -> .alt (.fail) (.r 2))", 2),
+        // Within a cut, a later failure still reaches the second operand.
+        (
+            ".cut ((.alt (.r 1) (.r 2)) >>= (\\x -> (x == 2) =>> .r x))",
+            2,
+        ),
+    ] {
+        let (assembler, effect) = compile_effect(source);
+        let outcome = run_standard_test(&assembler, &effect).unwrap_or_else(|error| {
+            panic!("`{source}` should complete: {error}");
+        });
+        completed_value(
+            &assembler.core_values(),
+            outcome,
+            Value::Number(Number::from_usize(expected)),
+        );
+    }
+}
 
-    let (fixpoint_assembler, fixpoint_alternative) =
-        compile_effect(".fix (\\_loop -> .alt (.r 1) (.r 2))");
-    assert!(
-        run_standard_test(&fixpoint_assembler, &fixpoint_alternative)
-            .unwrap_err_without_debug()
-            .to_string()
-            .contains("requires an enclosing `.cut`")
-    );
+#[test]
+fn a_choice_outside_every_cut_is_final_once_its_first_operand_succeeds() {
+    // Nothing scopes the choice, so the continuation's failure is the
+    // task's, not the choice's.
+    let (assembler, effect) = compile_effect("(.alt (.r 1) (.r 2)) >>= (\\x -> (x == 2) =>> .r x)");
+    let error = run_standard_test(&assembler, &effect).unwrap_err_without_debug();
+    assert!(error.to_string().contains("failed permanently"), "{error}");
 
+    // The first operand is cut, so its own choice commits to its first
+    // success: the later failure skips `.r 2` for `.r 3`.
+    let (assembler, effect) =
+        compile_effect(".cut ((.alt (.alt (.r 1) (.r 2)) (.r 3)) >>= (\\x -> (x == 2) =>> .r x))");
+    let error = run_standard_test(&assembler, &effect).unwrap_err_without_debug();
+    assert!(error.to_string().contains("failed permanently"), "{error}");
+}
+
+#[test]
+fn a_failed_first_operand_rolls_back_and_gives_way_without_waiting() {
+    let (assembler, effect) = compile_effect(
+        ".alt ((.heap.set ['written] 1) =>> .heap.get ['never] >>= (\\_ -> .fail)) (.heap.get ['written])",
+    );
+    let host = Arc::new(TestHost::with_wake_heap(
+        assembler.core_values(),
+        assembler.values().empty_dict(),
+    ));
+    run_standard_on(&assembler, &effect, host.clone()).expect("the second operand should run");
+    assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
+    assert_eq!(host.wait_count(), 0, "a handled failure never waits");
+
+    let (assembler, effect) = compile_effect(".alt (.heap.set ['written] \"yes\") (.r ())");
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    run_standard_on(&assembler, &effect, host.clone()).expect("the first operand should commit");
+    let written = assembler
+        .get(&host.heap(), "written")
+        .expect("the first operand's write should commit");
+    assert_eq!(assembler.to_binary(&written).unwrap(), b"yes".as_slice());
+}
+
+#[test]
+fn an_unmatched_shift_is_rejected() {
     let (shift_assembler, shift) =
         compile_effect(".shift \"missing\" (\\continuation -> .r continuation)");
     assert!(

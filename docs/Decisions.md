@@ -2721,6 +2721,41 @@ maps the short names used here to file names.
   parted state from the reset stack.
 - **Recorded in:** runtime API plan, `api-effect-providers`.
 
+### A choice's first operand is atomic, and its cuts scope it
+`alt-cuts-its-first-operand` · 2026-10-22 · maintainer · accepted
+- **Context:** `.alt` was invalid outside `.cut` "in general usage"
+  (Design.md), and reflection tasks rejected it. Effects that turns run
+  need search, and `.cut` is how an effect asks for a transaction: a
+  logger or an IDE asks for one by it, so an effect's `.cut` opens one even
+  outside `m.cut`.
+- **Decision:** for machines and reflection tasks (other handlers, such as
+  `list.pure`, define their own):
+  - `.alt a b` means `.alt (.cut a) b`. The first operand is atomic: if it
+    fails, its effects roll back and `b` runs, in the context around the
+    `.alt`.
+  - An effect's own cuts scope its choices. Within a cut, a later failure
+    still reaches `b`; outside every cut, nothing reconsiders the choice
+    once `a` succeeds. A turn's `m.cut` does not scope an effect's choices.
+  - Failure is a signal. `.alt` handles its first operand's failure by
+    falling back to the second, and a cut whose every path fails is a
+    failure (`.cut .fail` means `.fail`).
+  - Waiting answers a failure that nothing handles. A reflection task's
+    unhandled failure or divergence waits for a change in what it observed
+    and retries the failed atomic step: the outermost cut as a whole, or
+    outside every cut, from the last committed effect. With nothing
+    observed, no change could come, and the divergence is reported as a
+    permanent failure. A turn's effect run returns an unhandled failure to
+    the turn.
+  - Isolated search, which keeps every branch, keeps its semantics until it
+    leaves the public API.
+- **Consequences:** a bare `.alt` no longer fails a reflection task. A
+  choice nested in a first operand commits to its first success, so under
+  a later failure `(x or y) or z` differs from `x or (y or z)`; `or` is
+  right-associative, so chains keep every alternative. Transactions should
+  make `.cut (.cut a)` and `.cut (.alt a b)` cheap. Partial rollback, for
+  incremental computing, is a later opportunity.
+- **Recorded in:** runtime API plan, `api-effect-providers`.
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable
