@@ -36,8 +36,9 @@ pub use crate::core::Key;
 /// API retires (`api-handle-retirement`); [`Value`] is a turn's.
 pub use api::Value as HandleValue;
 pub use api::{
-    Answer, DiagnosticsWiring, EffectProvider, Endpoint, Fork, Machine, MachinePath, MachineStatus,
-    MachineWiring, PromiseStatus, Runtime, RuntimeConfig, TurnValue as Value,
+    Answer, DiagnosticsWiring, EffectFamilies, EffectProvider, Endpoint, Fork, Machine,
+    MachinePath, MachineStatus, MachineWiring, PromiseStatus, Runtime, RuntimeConfig,
+    TurnValue as Value,
 };
 pub use api::{
     Assembler, AssemblerBuilder, BackgroundPumpReport, BackgroundPumpState, BuiltModule,

@@ -342,6 +342,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             eval_context.values(),
             &tags,
             specialization.requests(),
+            specialization.serves_standard_families(),
             specialization.exposes_shared_heap(),
             exposes_exit,
         )?;
@@ -5996,6 +5997,7 @@ fn effect_api<R: Clone>(
     values: &CoreValueFactory,
     tags: &Tags,
     specs: Vec<EffectRequestSpec<R>>,
+    serve_standard_families: bool,
     expose_shared_heap: bool,
     expose_exit: bool,
 ) -> Result<(RuntimeValueRoot, Vec<SpecializedRequest<R>>), TaskHalt> {
@@ -6070,6 +6072,7 @@ fn effect_api<R: Clone>(
                 dict.insert(key, value)
             }),
         );
+        // The pure core, which every effect machine serves.
         let mut entries = vec![
             entry(
                 "r",
@@ -6080,25 +6083,8 @@ fn effect_api<R: Clone>(
                 request_function_in(access, tags.seq.clone(), 2, Vec::new(), false),
             ),
             entry(
-                "alt",
-                request_function_in(access, tags.alt.clone(), 2, Vec::new(), false),
-            ),
-            entry("fail", nullary_request(access, tags.fail.clone())),
-            entry(
-                "cut",
-                request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
-            ),
-            entry(
                 "fix",
                 request_function_in(access, tags.fix.clone(), 1, Vec::new(), false),
-            ),
-            entry(
-                "get",
-                request_function_in(access, tags.get.clone(), 1, Vec::new(), false),
-            ),
-            entry(
-                "set",
-                request_function_in(access, tags.set.clone(), 2, Vec::new(), false),
             ),
             entry(
                 "reset",
@@ -6109,10 +6095,31 @@ fn effect_api<R: Clone>(
                 request_function_in(access, tags.shift.clone(), 2, Vec::new(), false),
             ),
         ];
-        entries.push(entry("promise", promise_api));
-        if expose_shared_heap {
-            entries.push(entry("heap", heap_api));
-            entries.push(entry("vol", volume_api));
+        if serve_standard_families {
+            entries.extend([
+                entry(
+                    "alt",
+                    request_function_in(access, tags.alt.clone(), 2, Vec::new(), false),
+                ),
+                entry("fail", nullary_request(access, tags.fail.clone())),
+                entry(
+                    "cut",
+                    request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
+                ),
+                entry(
+                    "get",
+                    request_function_in(access, tags.get.clone(), 1, Vec::new(), false),
+                ),
+                entry(
+                    "set",
+                    request_function_in(access, tags.set.clone(), 2, Vec::new(), false),
+                ),
+                entry("promise", promise_api),
+            ]);
+            if expose_shared_heap {
+                entries.push(entry("heap", heap_api));
+                entries.push(entry("vol", volume_api));
+            }
         }
         if expose_exit {
             entries.push(entry(

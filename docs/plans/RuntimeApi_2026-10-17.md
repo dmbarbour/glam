@@ -831,8 +831,18 @@ handle API goes.
       effect machine runs on the turn's thread; a provider's request parks
       on a promise the turn fulfills once the provider has answered on the
       machine's stack, and `m.fail()` fails the request within the effect.
-      Until the flags come, the effect machine still serves the standard
-      families itself, searching and keeping state as it does for tasks.
+    - Built (2026-10-22): families passing through by flags. A turn's
+      effect machine serves only the pure core
+      (`TaskSpecialization::serves_standard_families`), and the turn
+      serves each family in the provider's `EffectFamilies` (all, by
+      default) as the machine's own methods do: `.get`/`.set` on local
+      state, a path's first key naming a local and the empty path the
+      whole of them as a dict; `.heap.*` and `.vol.*`; `.promise.*`;
+      `.log` to the diagnostics output; `.env`. The effect machine converts
+      a path argument to keys before the request parks. A provider may
+      define a family it does not pass through, `.get` included. Search
+      waits for the next slice, so until then an effect a turn runs has no
+      `.alt`, `.fail` or `.cut`.
 21. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`

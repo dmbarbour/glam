@@ -176,8 +176,18 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
     type Journal: Clone + Default + Send + Sync + 'static;
 
     /// Controls whether the shared `.heap.*` family is installed in this
-    /// task's effect API. Task-local state and control effects remain standard.
+    /// task's effect API, where the effect machine serves the standard
+    /// families.
     fn exposes_shared_heap(&self) -> bool {
+        true
+    }
+
+    /// Whether the effect machine serves the standard families itself:
+    /// search, state, the heap and volumes, and promises. One that does not
+    /// keeps only the pure core, `.r`, `.seq`, `.fix`, `.reset` and
+    /// `.shift`, and leaves the rest to the specialization's own requests
+    /// (`effect-families-pass-through`).
+    fn serves_standard_families(&self) -> bool {
         true
     }
 
