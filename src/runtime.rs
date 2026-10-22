@@ -59,6 +59,10 @@ pub(crate) struct RuntimeMutationAdmission {
     /// evaluation. See `gc_pressure_requested`.
     #[cfg(feature = "aggressive-gc-verification")]
     aggressive_promoted_allocations: AtomicU64,
+    /// Runs once, at the next attempt to take the settlement guard without
+    /// waiting, so a test can hold the guard just then.
+    #[cfg(test)]
+    settlement_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl RuntimeMutationAdmission {
@@ -68,6 +72,8 @@ impl RuntimeMutationAdmission {
             activity: RuntimeActivityState::new(),
             poisoned: AtomicBool::new(false),
             cores: Mutex::new(Vec::new()),
+            #[cfg(test)]
+            settlement_probe: Mutex::new(None),
             #[cfg(feature = "aggressive-gc-verification")]
             aggressive_promoted_allocations: AtomicU64::new(0),
         })
@@ -99,6 +105,15 @@ impl RuntimeMutationAdmission {
     }
 
     pub(crate) fn try_settlement_guard(&self) -> Option<RuntimeSettlementGuard<'_>> {
+        #[cfg(test)]
+        if let Some(probe) = self
+            .settlement_probe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+        {
+            probe();
+        }
         let guard = self.gate.try_write().ok()?;
         #[cfg(debug_assertions)]
         self.record_gate_held();
@@ -156,6 +171,16 @@ impl RuntimeMutationAdmission {
             self.gate.try_read(),
             Err(std::sync::TryLockError::WouldBlock)
         )
+    }
+
+    /// Runs `probe` once, at the next attempt to take the settlement guard
+    /// without waiting.
+    #[cfg(test)]
+    pub(crate) fn set_settlement_probe_for_test(&self, probe: impl FnOnce() + Send + 'static) {
+        *self
+            .settlement_probe
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(probe));
     }
 
     pub(crate) fn settlement_guard(&self) -> RuntimeSettlementGuard<'_> {
@@ -652,6 +677,10 @@ impl Drop for RuntimeSettlementGuard<'_> {
         if std::thread::panicking() {
             let _ = self.admission.is_poisoned();
         }
+        // A pump that found this guard held parks until the activity
+        // changes, so releasing it is a change too; without it, two pumps at
+        // once could leave one parked for good.
+        self.admission.activity.advance();
     }
 }
 

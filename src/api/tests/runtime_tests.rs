@@ -1793,6 +1793,53 @@ fn output_callback_response_reenters_as_later_admitted_input() {
     );
 }
 
+/// A pump that finds the settlement guard held parks until the runtime's
+/// activity changes, which releasing that guard must change: two pumps at
+/// once, as two waiting cuts make, otherwise leave one parked for good.
+#[test]
+fn releasing_a_settlement_wakes_a_pump_that_found_it_held() {
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let admission = runtime.state.shared_resources.mutation_admission.clone();
+    let activity = admission.activity();
+    let (want, wanted) = std::sync::mpsc::channel();
+    let (held, holding) = std::sync::mpsc::channel();
+    let (release, released) = std::sync::mpsc::channel::<()>();
+    // Just as the pump tries the guard, another thread takes it.
+    admission.set_settlement_probe_for_test(move || {
+        want.send(()).expect("the holder waits for the pump");
+        holding.recv().expect("the holder takes the guard");
+    });
+    let holder_admission = admission.clone();
+    let holder = std::thread::spawn(move || {
+        wanted.recv().expect("the pump reaches the guard");
+        let guard = holder_admission.settlement_guard();
+        held.send(()).expect("the pump waits for the holder");
+        released.recv().expect("the test releases the guard");
+        drop(guard);
+    });
+    let parked = activity.wait_count();
+    let (done, finished) = std::sync::mpsc::channel();
+    let pumper = runtime.clone();
+    let pump = std::thread::spawn(move || {
+        pumper.pump_until_stable();
+        done.send(()).expect("the test keeps its receiver");
+    });
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    while activity.wait_count() == parked {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "the pump should park on the held settlement guard"
+        );
+        std::thread::yield_now();
+    }
+    release.send(()).expect("the holder waits to release");
+    holder.join().expect("the holder should finish");
+    finished
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .expect("releasing the settlement guard must wake the parked pump");
+    pump.join().expect("the pump should finish");
+}
+
 #[test]
 fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
     struct DeliveryLease {
