@@ -37,6 +37,27 @@ impl ValueEvaluator<'_> {
         self.assembler.publish_unrecognized_annotation_warnings();
         evaluated
     }
+
+    /// As [`Self::eval`], spending at most `budget` steps of this thread's
+    /// evaluation, which it reduces by what it spent. Once the budget is
+    /// spent, it returns pushback ([`crate::ErrorKind::Retry`]); what it
+    /// evaluated stays, so a later evaluation continues.
+    pub(crate) fn eval_within(
+        &self,
+        value: &Value,
+        budget: &mut usize,
+    ) -> Result<EvaluatedValue, Error> {
+        let values = self.assembler.values();
+        values.require(value)?;
+        let evaluated = self
+            .assembler
+            .eval_context()
+            .evaluate_root_whnf_within(value.0.clone(), budget)
+            .map(|value| EvaluatedValue::from_whnf(&values, Value::from_runtime_root(value)))
+            .map_err(|error| self.assembler.evaluation_error(error));
+        self.assembler.publish_unrecognized_annotation_warnings();
+        evaluated
+    }
 }
 
 impl ReflectionInspector<'_> {

@@ -287,3 +287,52 @@ fn a_popped_value_returns_to_this_turn_and_the_turns_within_it() {
         .expect("the turn should succeed");
     assert_eq!((twice, below), (40, 20));
 }
+
+const SUM: &str =
+    "language g0\nsum_to n = if n == 0 then 0 else n + sum_to (n - 1)\nresult = sum_to 300\n";
+
+#[test]
+fn a_budgeted_evaluation_spends_what_it_needs_and_reports_the_rest() {
+    let mut rt = runtime();
+    let (result, remaining) = rt
+        .run("m", |m| {
+            m.dict_pack(Vec::<&str>::new())?;
+            m.script_object(["sum"], "g", SUM)?;
+            m.dict_get("result")?;
+            let mut steps = 1_000_000;
+            m.eval_budget(&mut steps)?;
+            Ok((m.int_pop()?, steps))
+        })
+        .expect("the turn should succeed");
+    assert_eq!(result, 45_150);
+    assert!(remaining < 1_000_000, "the evaluation spent steps");
+}
+
+#[test]
+fn a_spent_budget_is_pushback_and_what_it_evaluated_stays() {
+    let mut rt = runtime();
+    let (result, attempts) = rt
+        .run("m", |m| {
+            m.dict_pack(Vec::<&str>::new())?;
+            m.script_object(["sum"], "g", SUM)?;
+            m.dict_get("result")?;
+            let mut attempts = 0;
+            loop {
+                attempts += 1;
+                assert!(attempts < 1_000, "each attempt continues the last");
+                let mut steps = 1_000;
+                match m.eval_budget(&mut steps) {
+                    Ok(()) => break,
+                    Err(error) => {
+                        assert_eq!(error.kind(), ErrorKind::Retry, "{error}");
+                        assert_eq!(steps, 0, "only a spent budget stops it");
+                        assert_eq!(m.depth(), 1, "the value stays in place");
+                    }
+                }
+            }
+            Ok((m.int_pop()?, attempts))
+        })
+        .expect("the turn should succeed");
+    assert_eq!(result, 45_150);
+    assert!(attempts > 1, "a thousand steps were too few at once");
+}

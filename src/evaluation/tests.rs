@@ -2169,8 +2169,9 @@ impl EvaluationTaskMachine for Complete {
     fn poll(
         &mut self,
         _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         EvaluationMachinePoll::Complete(_context.root_unit())
     }
 }
@@ -2181,8 +2182,9 @@ impl EvaluationTaskMachine for CompleteWithValue {
     fn poll(
         &mut self,
         context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         EvaluationMachinePoll::Complete(
             context.root_value(
                 self.0
@@ -2830,14 +2832,25 @@ impl EvaluationTaskMachine for CountedBlocked {
     }
 }
 
+/// A fixture's step of work stands for a reduction, so it pays one unit as a
+/// real machine's state change does (`reduction-costs-one-budget-unit`);
+/// blocking only observes, so blocking fixtures pay nothing.
+fn reduce(step_budget: &mut crate::evaluation::EvaluationStepBudget) {
+    assert!(
+        step_budget.try_consume(),
+        "a poll starts with a unit available"
+    );
+}
+
 struct AlwaysYields;
 
 impl EvaluationTaskMachine for AlwaysYields {
     fn poll(
         &mut self,
         _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         EvaluationMachinePoll::Yielded
     }
 }
@@ -2851,8 +2864,9 @@ impl EvaluationTaskMachine for YieldThenComplete {
     fn poll(
         &mut self,
         context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         self.polls.fetch_add(1, Ordering::AcqRel);
         if self.yields != 0 {
             self.yields -= 1;
@@ -2873,8 +2887,9 @@ impl EvaluationTaskMachine for RecordPollOrder {
     fn poll(
         &mut self,
         _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         self.polls
             .lock()
             .expect("task-order trace was poisoned")
@@ -2917,8 +2932,9 @@ impl EvaluationTaskMachine for Signal {
     fn poll(
         &mut self,
         _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         if let Some(signal) = self.0.take() {
             signal.send(()).expect("test receiver should remain open");
         }
@@ -2946,8 +2962,9 @@ impl EvaluationTaskMachine for SpawnThenYield {
     fn poll(
         &mut self,
         context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         let Some(signal) = self.signal.take() else {
             return EvaluationMachinePoll::Complete(context.root_unit());
         };
@@ -2962,8 +2979,9 @@ impl EvaluationTaskMachine for SpawnThenYieldAfterRelease {
     fn poll(
         &mut self,
         context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         let Some(started) = self.started.take() else {
             return EvaluationMachinePoll::Complete(context.root_unit());
         };
@@ -2987,8 +3005,9 @@ impl EvaluationTaskMachine for SpawnSignal {
     fn poll(
         &mut self,
         _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         let signal = self
             .signal
             .take()
@@ -3006,6 +3025,9 @@ struct CompleteAfterRelease {
 }
 
 struct YieldAfterRelease {
+    /// Plain steps before the latched poll, so a bounded pump can reach this
+    /// task, and retain its route, before the poll that waits on the test.
+    yields_first: usize,
     started: Option<mpsc::Sender<()>>,
     release: mpsc::Receiver<()>,
 }
@@ -3014,8 +3036,13 @@ impl EvaluationTaskMachine for YieldAfterRelease {
     fn poll(
         &mut self,
         context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
+        if self.yields_first > 0 {
+            self.yields_first -= 1;
+            return EvaluationMachinePoll::Yielded;
+        }
         let Some(started) = self.started.take() else {
             return EvaluationMachinePoll::Complete(context.root_unit());
         };
@@ -3055,8 +3082,9 @@ impl EvaluationTaskMachine for CompleteAfterRelease {
     fn poll(
         &mut self,
         _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         if let Some(started) = self.started.take() {
             started
                 .send(())
@@ -3178,8 +3206,9 @@ impl EvaluationTaskMachine for AssignPromiseThenYield {
     fn poll(
         &mut self,
         context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EvaluationMachinePoll {
+        reduce(step_budget);
         let promise = self
             .promise
             .take()
@@ -3598,7 +3627,7 @@ fn every_poll_outcome_releases_managed_access_before_publication() {
 }
 
 #[test]
-fn budgeted_route_pump_charges_its_reserved_quantum() {
+fn budgeted_route_pump_charges_the_reductions_it_runs() {
     let context = EvalContext::standalone();
     let task = context
         .schedule_task(|_| Ok(Box::new(Complete)))
@@ -3612,9 +3641,9 @@ fn budgeted_route_pump_charges_its_reserved_quantum() {
             context.pump_wait_on_route_within(quantum, &task.wait, &mut budget, &mut route)
         });
     assert_eq!(pumped, EvaluationPumpOutcome::TargetReady);
-    // The pump reserved one poll quantum for the task and charged it to the
-    // caller, so a caller's total budget bounds everything it pumps.
-    assert!(budget.remaining() < 1_000);
+    // The task's one step is charged to the caller, so a caller's total
+    // budget bounds everything it pumps.
+    assert_eq!(budget.remaining(), 999);
 
     let mut exhausted = crate::evaluation::EvaluationStepBudget::new(0);
     let pending = context
@@ -3689,9 +3718,12 @@ fn causal_child_runs_before_unrelated_same_session_task_without_exact_wait() {
     );
     let mut route = ExactDemandRoute::default();
 
+    // Blocking is free, so one step's budget publishes the parent's promise
+    // wait and runs the causal child.
     assert_eq!(
         context.pump_wait_on_route(parent.wait(), 1, &mut route),
-        EvaluationPumpOutcome::BudgetExhausted
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the causal child should run though its parent publishes no child wait"
     );
     assert!(matches!(
         context
@@ -3700,14 +3732,6 @@ fn causal_child_runs_before_unrelated_same_session_task_without_exact_wait() {
             .task_dependency(parent.id()),
         Some(WorkDependency::Promise(_))
     ));
-    assert!(child_observer.try_recv().is_err());
-    assert!(unrelated_observer.try_recv().is_err());
-
-    assert_eq!(
-        context.pump_wait_on_route(parent.wait(), 1, &mut route),
-        EvaluationPumpOutcome::BudgetExhausted,
-        "the causal child should run before its parent publishes a child wait"
-    );
     child_observer
         .try_recv()
         .expect("the causal pump should have run the child");
@@ -3763,7 +3787,7 @@ fn claimed_cross_session_child_keeps_parent_wait_busy_until_release() {
 
     assert_eq!(
         parent_context.pump_wait(parent.wait(), 1),
-        EvaluationPumpOutcome::BudgetExhausted,
+        EvaluationPumpOutcome::NoProgress,
         "the parent must publish its external promise wait before child activation"
     );
     let coordinator = parent_context
@@ -3843,13 +3867,9 @@ fn published_child_wait_reaches_child_activated_after_subscription() {
 
     assert_eq!(
         parent_context.pump_wait(parent.wait(), 1),
-        EvaluationPumpOutcome::BudgetExhausted,
-        "the parent should publish its exact wait while the child is reserved"
-    );
-    assert_eq!(
-        parent_context.pump_wait(parent.wait(), 1),
         EvaluationPumpOutcome::Busy,
-        "a reserved exact child must remain pending until activation"
+        "the parent should publish its exact wait, and the reserved child stay \
+         pending until activation"
     );
     assert!(child_observer.try_recv().is_err());
 
@@ -3930,21 +3950,22 @@ fn causal_pump_reaches_grandchild_of_blocked_child() {
     assert!(coordinator.activate_reflection_with_parent(child.work, Some(parent.id())));
     assert!(coordinator.activate_reflection_with_parent(grandchild.work, Some(child.id())));
 
-    assert_eq!(
-        parent_context.pump_wait(parent.wait(), 1),
-        EvaluationPumpOutcome::BudgetExhausted,
-        "the parent should publish its own external wait"
-    );
-    assert_eq!(
-        parent_context.pump_wait(parent.wait(), 1),
-        EvaluationPumpOutcome::BudgetExhausted,
-        "the launched child should publish its external wait"
-    );
+    // The parent and its launched child each publish an external wait for
+    // free, so one step's budget reaches the grandchild.
     assert_eq!(
         parent_context.pump_wait(parent.wait(), 1),
         EvaluationPumpOutcome::BudgetExhausted,
         "the causal traversal should reach the grandchild"
     );
+    for (blocked, label) in [(parent.id(), "parent"), (child.id(), "child")] {
+        assert!(
+            matches!(
+                coordinator.task_dependency(blocked),
+                Some(WorkDependency::Promise(_))
+            ),
+            "the {label} should publish its external wait"
+        );
+    }
     grandchild_observer
         .recv_timeout(Duration::from_secs(2))
         .expect("grandchild should run once");
@@ -4000,10 +4021,6 @@ fn causal_pump_keeps_grandchild_reachable_after_child_retires() {
 
     assert_eq!(
         parent_context.pump_wait(parent.wait(), 1),
-        EvaluationPumpOutcome::BudgetExhausted
-    );
-    assert_eq!(
-        parent_context.pump_wait(parent.wait(), 1),
         EvaluationPumpOutcome::BudgetExhausted,
         "child should complete and retire before its grandchild runs"
     );
@@ -4056,9 +4073,12 @@ fn published_child_wait_claims_exact_cross_session_child_before_unrelated_work()
         .set(child.wait().clone())
         .expect("the parent's child wait should publish once");
 
+    // Blocking is free, so one step's budget publishes the exact wait and
+    // runs the child it names.
     assert_eq!(
         parent_context.pump_wait(parent.wait(), 1),
-        EvaluationPumpOutcome::BudgetExhausted
+        EvaluationPumpOutcome::BudgetExhausted,
+        "the published exact wait should claim its cross-session child"
     );
     assert!(matches!(
         parent_context
@@ -4067,14 +4087,6 @@ fn published_child_wait_claims_exact_cross_session_child_before_unrelated_work()
             .task_dependency(parent.id()),
         Some(WorkDependency::Wait(wait)) if wait == *child.wait()
     ));
-    assert!(child_observer.try_recv().is_err());
-    assert!(unrelated_observer.try_recv().is_err());
-
-    assert_eq!(
-        parent_context.pump_wait(parent.wait(), 1),
-        EvaluationPumpOutcome::BudgetExhausted,
-        "the published exact wait should claim its cross-session child"
-    );
     child_observer
         .try_recv()
         .expect("the exact child should run before unrelated same-session work");
@@ -6626,11 +6638,11 @@ fn bounded_pump_retains_exact_route_across_budget_returns() {
             complete_searches: 1,
             edges_visited: 1,
             maximum_depth: 1,
-            fast_handoffs: 4,
-            o1_accepted_releases: 4,
+            fast_handoffs: 6,
+            o1_accepted_releases: 6,
             ..ExactDemandRouteProfile::default()
         },
-        "two block handoffs and two leaf yields should avoid root rediscovery"
+        "two block handoffs and four leaf yields should avoid root rediscovery"
     );
 
     drop(route);
@@ -6648,8 +6660,8 @@ fn bounded_pump_retains_exact_route_across_budget_returns() {
             complete_searches: 2,
             edges_visited: 4,
             maximum_depth: 3,
-            fast_handoffs: 5,
-            o1_accepted_releases: 5,
+            fast_handoffs: 7,
+            o1_accepted_releases: 7,
             ..ExactDemandRouteProfile::default()
         },
         "discarding orchestration state should cause one cold rebuild, not alter semantics"
@@ -6717,6 +6729,7 @@ fn exact_route_accepts_latched_unrelated_neutral_poll_mutation() {
     let task = source
         .schedule_task(move |_| {
             Ok(Box::new(YieldAfterRelease {
+                yields_first: 0,
                 started: Some(started_sender),
                 release: release_receiver,
             }))
@@ -6773,6 +6786,7 @@ fn exact_route_validates_frames_after_an_unrelated_hazard() {
     let task = source
         .schedule_task(move |_| {
             Ok(Box::new(YieldAfterRelease {
+                yields_first: 0,
                 started: Some(started_sender),
                 release: release_receiver,
             }))
@@ -6873,6 +6887,7 @@ fn exact_route_rejects_latched_ancestor_cancellation_and_retirement() {
     let child = context
         .schedule_task(move |_| {
             Ok(Box::new(YieldAfterRelease {
+                yields_first: 1,
                 started: Some(started_sender),
                 release: release_receiver,
             }))
@@ -6891,7 +6906,7 @@ fn exact_route_rejects_latched_ancestor_cancellation_and_retirement() {
     assert_eq!(
         context.pump_wait_on_route(parent.wait(), 1, &mut route),
         EvaluationPumpOutcome::BudgetExhausted,
-        "the first quantum should retain the parent-to-child route"
+        "the first call should reach the child, retaining the parent-to-child route"
     );
 
     let parent_wait = parent.wait().clone();
@@ -6932,6 +6947,7 @@ fn exact_route_rejects_latched_observation_wake_of_an_ancestor() {
     let child = context
         .schedule_task(move |_| {
             Ok(Box::new(YieldAfterRelease {
+                yields_first: 1,
                 started: Some(started_sender),
                 release: release_receiver,
             }))
@@ -6951,7 +6967,7 @@ fn exact_route_rejects_latched_observation_wake_of_an_ancestor() {
     assert_eq!(
         context.pump_wait_on_route(parent.wait(), 1, &mut route),
         EvaluationPumpOutcome::BudgetExhausted,
-        "the first quantum should retain the observing parent-to-child route"
+        "the first call should reach the child, retaining the observing parent-to-child route"
     );
 
     let parent_wait = parent.wait().clone();

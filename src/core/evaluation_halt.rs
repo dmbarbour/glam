@@ -33,6 +33,8 @@ enum EvaluationHaltKind {
     },
     /// Scheduled work this demand waited on was interrupted by a panic.
     Panicked(EvaluationPanic),
+    /// A budgeted demand spent its budget first; what it evaluated stays.
+    BudgetSpent,
 }
 
 /// Direct semantic payload retained by one halted evaluation.
@@ -44,6 +46,7 @@ pub(crate) enum EvaluationHaltPayload<'payload> {
     Blocked,
     UnassignedPromise,
     Panicked,
+    BudgetSpent,
 }
 
 impl EvaluationHalt {
@@ -59,6 +62,14 @@ impl EvaluationHalt {
     pub(crate) fn failure(failure: Arc<EvaluationFailure>) -> Self {
         Self {
             kind: EvaluationHaltKind::Failure(failure),
+        }
+    }
+
+    /// A budgeted demand's halt once it has spent its budget: pushback,
+    /// never a failure.
+    pub(crate) fn budget_spent() -> Self {
+        Self {
+            kind: EvaluationHaltKind::BudgetSpent,
         }
     }
 
@@ -80,6 +91,7 @@ impl EvaluationHalt {
                 kind: EvaluationHaltKind::UnassignedPromise { root },
             },
             EvaluationHaltKind::Panicked(report) => Self::panicked(report),
+            EvaluationHaltKind::BudgetSpent => Self::budget_spent(),
         }
     }
 
@@ -94,7 +106,8 @@ impl EvaluationHalt {
             EvaluationHaltKind::Panicked(report) => Some(report),
             EvaluationHaltKind::Failure(_)
             | EvaluationHaltKind::Blocked(_)
-            | EvaluationHaltKind::UnassignedPromise { .. } => None,
+            | EvaluationHaltKind::UnassignedPromise { .. }
+            | EvaluationHaltKind::BudgetSpent => None,
         }
     }
 
@@ -107,7 +120,8 @@ impl EvaluationHalt {
             EvaluationHaltKind::Failure(failure) => failure,
             EvaluationHaltKind::Panicked(report) => report.resume(),
             other @ (EvaluationHaltKind::Blocked(_)
-            | EvaluationHaltKind::UnassignedPromise { .. }) => {
+            | EvaluationHaltKind::UnassignedPromise { .. }
+            | EvaluationHaltKind::BudgetSpent) => {
                 Arc::new(EvaluationFailure::message(Self { kind: other }.to_string()))
             }
         }
@@ -118,7 +132,8 @@ impl EvaluationHalt {
             EvaluationHaltKind::Failure(failure) => Some(failure),
             EvaluationHaltKind::Blocked(_)
             | EvaluationHaltKind::UnassignedPromise { .. }
-            | EvaluationHaltKind::Panicked(_) => None,
+            | EvaluationHaltKind::Panicked(_)
+            | EvaluationHaltKind::BudgetSpent => None,
         }
     }
 
@@ -127,7 +142,8 @@ impl EvaluationHalt {
             EvaluationHaltKind::Blocked(wait) => Some(wait.clone()),
             EvaluationHaltKind::Failure(_)
             | EvaluationHaltKind::UnassignedPromise { .. }
-            | EvaluationHaltKind::Panicked(_) => None,
+            | EvaluationHaltKind::Panicked(_)
+            | EvaluationHaltKind::BudgetSpent => None,
         }
     }
 
@@ -136,7 +152,8 @@ impl EvaluationHalt {
             EvaluationHaltKind::UnassignedPromise { root } => Some(root),
             EvaluationHaltKind::Failure(_)
             | EvaluationHaltKind::Blocked(_)
-            | EvaluationHaltKind::Panicked(_) => None,
+            | EvaluationHaltKind::Panicked(_)
+            | EvaluationHaltKind::BudgetSpent => None,
         }
     }
 
@@ -158,6 +175,7 @@ impl EvaluationHalt {
                 EvaluationHaltPayload::UnassignedPromise
             }
             EvaluationHaltKind::Panicked(_) => EvaluationHaltPayload::Panicked,
+            EvaluationHaltKind::BudgetSpent => EvaluationHaltPayload::BudgetSpent,
         }
     }
 }
@@ -177,6 +195,9 @@ impl fmt::Display for EvaluationHalt {
                 formatter.write_str("promised value was observed before initialization")
             }
             EvaluationHaltKind::Panicked(report) => report.fmt(formatter),
+            EvaluationHaltKind::BudgetSpent => {
+                formatter.write_str("evaluation spent its budget before weak-head normal form")
+            }
         }
     }
 }

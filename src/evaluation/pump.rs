@@ -82,7 +82,7 @@ pub(super) fn test_reflection_dependency(
     wait
 }
 
-const TASK_POLL_QUANTUM: usize = 64;
+pub(super) const TASK_POLL_QUANTUM: usize = 64;
 
 enum ReleasedTaskMachine {
     DropOnly(Box<dyn EvaluationTaskMachine>),
@@ -732,6 +732,10 @@ pub(super) fn pump_demand_on_route(
         let mut budget = super::EvaluationStepBudget::new(quantum);
         let polled = claimed.poll_under(mutator, &mut budget);
         debug_assert_eq!(budget.spent() + budget.remaining(), budget.granted());
+        // The allowance pays for the reductions the poll made; observing
+        // and walking the route are free (`reduction-costs-one-budget-unit`),
+        // so the rest of the reservation returns.
+        *reservation_allowance += budget.remaining();
         // The quantum boundary runs under the mutator, which the release
         // suspends only as it must (`boundary-release-under-mutator`).
         let poll = claimed.finish_polled_under(mutator, polled);
@@ -1131,9 +1135,13 @@ impl EvaluationWorkCoordinator {
             return None;
         }
         match self.select_runtime_pump() {
-            coordinator::CoordinatorSelection::Task(work) => {
-                Some(self.poll_claimed_task_bounded(mutator, work, step_budget).1)
-            }
+            // This loop's allowance counts the polls it runs as well as their
+            // reductions, so a run of polls that reduce nothing still ends.
+            coordinator::CoordinatorSelection::Task(work) => Some(
+                self.poll_claimed_task_bounded(mutator, work, step_budget)
+                    .1
+                    .max(1),
+            ),
             coordinator::CoordinatorSelection::Spark(_) => {
                 unreachable!("the runtime pump must not claim best-effort spark work")
             }
@@ -1152,7 +1160,7 @@ impl EvaluationWorkCoordinator {
             .0
     }
 
-    fn poll_claimed_task_bounded(
+    pub(super) fn poll_claimed_task_bounded(
         self: &Arc<Self>,
         mutator: &mut RuntimeValueMutator<'_, '_>,
         work: ClaimedTaskWork,
@@ -1161,9 +1169,7 @@ impl EvaluationWorkCoordinator {
         debug_assert_ne!(step_budget, 0);
         let mut claimed = ClaimedTask::new(self.clone(), work);
         let mut budget = super::EvaluationStepBudget::new(step_budget.min(TASK_POLL_QUANTUM));
-        let before = budget.remaining();
         let polled = claimed.poll_under(mutator, &mut budget);
-        budget.charge_if_unchanged(before);
         let yielded = claimed.cross_boundary(mutator, polled);
         (yielded, budget.spent())
     }
@@ -1196,21 +1202,34 @@ impl EvaluationWorkCoordinator {
     /// Polls a claimed client demand under a driver's `mutator`, behind the
     /// scheduler's panic boundary, as [`ClaimedTask::poll_under`] does for
     /// task work, and crosses its quantum boundary under the mutator too.
+    #[cfg(test)]
     pub(super) fn poll_claimed_client_demand(
         self: &Arc<Self>,
         mutator: &mut RuntimeValueMutator<'_, '_>,
-        mut claimed: coordinator::ClaimedClientDemand,
+        claimed: coordinator::ClaimedClientDemand,
     ) {
+        self.poll_claimed_client_demand_bounded(mutator, claimed, TASK_POLL_QUANTUM);
+    }
+
+    /// As [`Self::poll_claimed_client_demand`], within `step_budget` steps,
+    /// returning the reductions it made.
+    pub(super) fn poll_claimed_client_demand_bounded(
+        self: &Arc<Self>,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        mut claimed: coordinator::ClaimedClientDemand,
+        step_budget: usize,
+    ) -> usize {
+        debug_assert_ne!(step_budget, 0);
         if let Some(report) = claimed.prior_dependency_panic() {
             self.release_client_demand_under(
                 mutator,
                 claimed,
                 coordinator::ClientDemandPoll::Panicked(report),
             );
-            return;
+            return 0;
         }
         let demand = claimed.demand.demand();
-        let mut budget = super::EvaluationStepBudget::new(TASK_POLL_QUANTUM);
+        let mut budget = super::EvaluationStepBudget::new(step_budget.min(TASK_POLL_QUANTUM));
         let polled = catch_unwind(AssertUnwindSafe(|| {
             EvaluationPollContext::quantum_under(mutator, demand, |context| {
                 claimed.poll(context, &mut budget)
@@ -1218,6 +1237,7 @@ impl EvaluationWorkCoordinator {
         }));
         mutator.readmit();
         self.release_polled_client_demand(mutator, claimed, polled);
+        budget.spent()
     }
 
     /// The quantum boundary of a client demand poll, under the driver's

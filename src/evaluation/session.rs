@@ -1007,6 +1007,31 @@ impl EvalContext {
         }
     }
 
+    /// As [`Self::evaluate_root_whnf`], spending at most `budget` steps of
+    /// this thread's evaluation, which it reduces by what it spent. Once the
+    /// budget is spent, the demand is abandoned and the halt is pushback;
+    /// what it evaluated stays, so a later demand continues.
+    pub(crate) fn evaluate_root_whnf_within(
+        &self,
+        value: RuntimeValueRoot,
+        budget: &mut usize,
+    ) -> Result<RuntimeValueRoot, crate::core::EvaluationHalt> {
+        let handle = self
+            .demand_whnf(value)
+            .map_err(|error| crate::core::EvaluationHalt::new(error.as_ref()))?;
+        match self.drive_client_demand_within(handle, Some(budget))? {
+            ClientDemandResult::Complete(value) => Ok(value),
+            ClientDemandResult::Abandoned => unreachable!(
+                "WHNF client demand must return a value or a propagated evaluation failure"
+            ),
+            ClientDemandResult::Failed(_)
+            | ClientDemandResult::Killed(_)
+            | ClientDemandResult::Panicked(_) => {
+                unreachable!("client failures and panics are returned by drive_client_demand")
+            }
+        }
+    }
+
     /// Constructs one semantic builtin call inside a callback-free value
     /// access region. The returned value is durable, but the access carrier
     /// and its mutator cannot escape the higher-ranked callback.
@@ -1049,7 +1074,20 @@ impl EvalContext {
 
     fn drive_client_demand(
         &self,
+        handle: ClientDemandHandle,
+    ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
+        self.drive_client_demand_within(handle, None)
+    }
+
+    /// Drives a client demand to its result. With a `budget`, the driver
+    /// charges it for the reductions of the polls and pumps it runs on this
+    /// thread, never for waiting on others, and once it is spent, abandons the
+    /// demand: what the polls evaluated stays memoized, so a later demand
+    /// continues, and the halt is pushback.
+    fn drive_client_demand_within(
+        &self,
         mut handle: ClientDemandHandle,
+        mut budget: Option<&mut usize>,
     ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
         let coordinator = self
             .coordinator_for_admission()
@@ -1064,8 +1102,17 @@ impl EvalContext {
                 if let Some(result) = handle.poll() {
                     return Ok(result);
                 }
+                if budget.as_deref() == Some(&0) {
+                    return Err(None);
+                }
                 if let Some(claimed) = coordinator.claim_client_demand(handle.work) {
-                    coordinator.poll_claimed_client_demand(&mut mutator, claimed);
+                    let quantum = quantum_within(budget.as_deref(), super::pump::TASK_POLL_QUANTUM);
+                    let spent = coordinator.poll_claimed_client_demand_bounded(
+                        &mut mutator,
+                        claimed,
+                        quantum,
+                    );
+                    charge(&mut budget, spent);
                     continue;
                 }
 
@@ -1090,12 +1137,16 @@ impl EvalContext {
                     } => {
                         let producer_wait = dependency.producer_wait();
                         if let Some(wait) = producer_wait.as_ref() {
-                            match self.pump_wait_on_route_under(
+                            let granted = quantum_within(budget.as_deref(), 4_096);
+                            let mut allowance = granted;
+                            let pumped = self.pump_wait_on_route_charged(
                                 &mut mutator,
                                 wait,
-                                4_096,
+                                &mut allowance,
                                 &mut exact_demand_route,
-                            ) {
+                            );
+                            charge(&mut budget, granted - allowance);
+                            match pumped {
                                 EvaluationPumpOutcome::TargetReady
                                 | EvaluationPumpOutcome::BudgetExhausted => {
                                     continue;
@@ -1126,7 +1177,16 @@ impl EvalContext {
                             match coordinator.claim_causal_child_work(None, self.causal_task_ids())
                             {
                                 CausalChildSelection::Claimed(work) => {
-                                    coordinator.poll_claimed_task(&mut mutator, work);
+                                    let quantum = quantum_within(
+                                        budget.as_deref(),
+                                        super::pump::TASK_POLL_QUANTUM,
+                                    );
+                                    let (_, spent) = coordinator.poll_claimed_task_bounded(
+                                        &mut mutator,
+                                        work,
+                                        quantum,
+                                    );
+                                    charge(&mut budget, spent);
                                     continue;
                                 }
                                 CausalChildSelection::Busy => {
@@ -1151,7 +1211,7 @@ impl EvalContext {
                             )
                         });
                         if let Some(dependency) = abandoned {
-                            return Err(dependency);
+                            return Err(Some(dependency));
                         }
                     }
                 }
@@ -1159,7 +1219,11 @@ impl EvalContext {
         });
         match driven {
             Ok(result) => terminal_client_demand_result(result),
-            Err(dependency) => Err(client_demand_halt(dependency)),
+            Err(Some(dependency)) => Err(client_demand_halt(dependency)),
+            Err(None) => {
+                handle.abandon();
+                Err(crate::core::EvaluationHalt::budget_spent())
+            }
         }
     }
 
@@ -2241,8 +2305,28 @@ impl EvalContext {
         )
     }
 
-    /// Pumps toward `wait` within `budget`, charging it for every poll
-    /// quantum the pump reserves. The pumped polls borrow `quantum`'s
+    /// As [`Self::pump_wait_on_route_under`], reducing `allowance` by the
+    /// reductions the pump's polls made.
+    fn pump_wait_on_route_charged(
+        &self,
+        mutator: &mut RuntimeValueMutator<'_, '_>,
+        wait: &EvaluationWaitToken,
+        allowance: &mut usize,
+        route: &mut ExactDemandRoute,
+    ) -> EvaluationPumpOutcome {
+        let Some(coordinator) = self.coordinator() else {
+            return if wait.terminal_poll().is_some() {
+                EvaluationPumpOutcome::TargetReady
+            } else {
+                EvaluationPumpOutcome::NoProgress
+            };
+        };
+        pump_demand_on_route(mutator, &coordinator, self, wait, allowance, route)
+    }
+
+    /// Pumps toward `wait` within `budget`, charging it for the reductions
+    /// its polls make, never for observing or walking the route
+    /// (`reduction-costs-one-budget-unit`). The pumped polls borrow `quantum`'s
     /// mutator, and their boundaries suspend it; for another runtime, the
     /// pump runs suspended under a mutator of its own. The pump itself never
     /// waits.
@@ -2468,6 +2552,18 @@ fn terminal_client_demand_result(
         )),
         ClientDemandResult::Panicked(report) => Err(crate::core::EvaluationHalt::panicked(report)),
         complete @ ClientDemandResult::Complete(_) => Ok(complete),
+    }
+}
+
+/// A quantum of at most `limit` steps, within what a budget has left.
+fn quantum_within(budget: Option<&usize>, limit: usize) -> usize {
+    budget.map_or(limit, |remaining| (*remaining).min(limit))
+}
+
+/// Charges `spent` steps to a budget, where there is one.
+fn charge(budget: &mut Option<&mut usize>, spent: usize) {
+    if let Some(remaining) = budget.as_deref_mut() {
+        *remaining = remaining.saturating_sub(spent);
     }
 }
 

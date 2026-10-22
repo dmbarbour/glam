@@ -713,6 +713,26 @@ handle API goes.
       environment's dict with `dict_pack` over byte-string keys, so
       `transition::push_value` goes, and the bridge's uses in the CLI fall
       from 16 to 14.
+    - As built, third slice (2026-10-22): `eval_budget(&mut steps)` drives
+      its client demand with a budget, charged for the reductions of the
+      client's polls, its pumps and the causal children it polls, never
+      for observing, walking a route or waiting on other threads
+      (`reduction-costs-one-budget-unit`). Once spent, the demand is
+      abandoned with a new halt, `BudgetSpent`, which the API reports as
+      pushback; what it evaluated stays, so another call continues.
+    - Fixed on the way: the pump charged each poll its whole reserved
+      quantum of 64 steps, whatever it reduced, so every step budget that
+      pumps drained about six times too fast: a sum over thirty levels
+      made 1,566 reductions in its pump's 148 polls and was charged 9,472.
+      It now charges the reductions and returns the rest; the scheduler's
+      own fairness loop still counts each poll it runs, so a run of polls
+      that reduce nothing ends. A sum over three hundred levels costs
+      about 10.8k steps, and budgets of 16, 100 and 1,000 finish it in
+      681, 108 and 11 calls; a budget of one step may not, since each call
+      spends a step to resume.
+      Pump tests that stepped one poll per unit of budget now step one
+      reduction: their fixture machines pay a unit for each step of work,
+      and blocking stays free.
 19. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
     compilation builds its context from runtime-side parts, the value
     factory, the front ends, an invocation counter and a diagnostics

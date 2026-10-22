@@ -2773,6 +2773,10 @@ maps the short names used here to file names.
   - A poll performs at most its budget of reductions. Free observation
     cannot loop, because a poll without a reduction ends in a result,
     handoff, contention or block.
+  - A pump polls blocked and handed-off work for free (2026-10-22). Each
+    handoff advances its machine's phase, so a run of them ends; a machine
+    that yields forever without reducing would spin a pump, so test
+    machines pay a unit for each step of work.
   - With no units left, WHNF stops before its next step. A ready result
     after the last paid step is therefore reported by the next poll, where
     nets report it at once.
@@ -2797,6 +2801,10 @@ maps the short names used here to file names.
     allowance.
   - `EffectTask::poll(steps)` keeps one budget for the whole call and
     charges the caller for every pumped quantum (2026-10-05).
+  - Amended 2026-10-22: the pump returns what a poll did not reduce, so it
+    charges exact spend (`reduction-costs-one-budget-unit`). Charging whole
+    quantums drained a pumping budget about six times faster than its
+    reductions.
 - **Consequences:** `Yielded` still conflates progress and budget (holistic
   review E1, open).
 - **Rule lives in:** `architecture/evaluation.md` "Context and Session" (not

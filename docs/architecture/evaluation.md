@@ -330,13 +330,12 @@ A step pays one unit when it changes state, and observing is free (decision
   their child consumed none, and waiting pumps within the caller's budget.
 
 So a one-unit quantum can always advance some work without hiding a renewed
-sub-budget. The current demand pump deliberately
-interprets its outer scalar as a reservation allowance: it reserves a whole
-task quantum before polling and does not refund unused units. Its
-`BudgetExhausted` result therefore describes exhausted reservation, not exact
-inner spend. The runtime background pump instead translates exact inner spend
-into its public report. Finer foreground accounting remains observational
-until scheduler policy is revisited.
+sub-budget. The demand pump lends each poll a task quantum from its outer
+scalar and takes back what the poll did not reduce, so its
+`BudgetExhausted` result describes exact inner spend. A poll that blocks or
+hands off reduces nothing and costs nothing; handoffs advance their
+machine's phase, so a run of them ends. The runtime background pump
+likewise translates exact inner spend into its public report.
 
 ## Collector Boundary
 

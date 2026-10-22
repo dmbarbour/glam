@@ -31,6 +31,7 @@ pub(crate) fn trace_halt_managed_edges(halt: &EvaluationHalt, visitor: &mut Visi
         EvaluationHaltPayload::UnassignedPromise => {}
         // A panic report holds no managed edges.
         EvaluationHaltPayload::Panicked => {}
+        EvaluationHaltPayload::BudgetSpent => {}
     }
 }
 

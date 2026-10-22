@@ -44,8 +44,8 @@ use crate::compiler::{import_source_in, source_record_in};
 use crate::core::{Builtin, Dict, Key, Value as CoreValue};
 use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute, WorkDependency};
 
-/// How many polls a cut whose evaluation waited reserves each time it pumps
-/// the work it waits on.
+/// How many reductions a cut whose evaluation waited lets each pump of the
+/// work it waits on make.
 const AWAIT_PUMP_ALLOWANCE: usize = 4_096;
 use crate::core::{RuntimeValueAccess, VolumeCellView};
 use crate::reflection::{
@@ -1749,6 +1749,28 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .unwrap_or_else(|| unreachable!("a function, then its arguments"));
             values.apply(function, arguments.to_vec())
         })
+    }
+
+    /// As [`Self::eval`], spending at most `steps` of this thread's
+    /// evaluation, which it reduces by what it spent: waiting on work other
+    /// threads run costs nothing. Once the steps are spent it returns
+    /// [`ErrorKind::Retry`], leaving the value in place, so a caller that
+    /// finds `steps` at zero knows why; what it evaluated stays, so another
+    /// call continues. Only reductions cost steps; reaching the work again is
+    /// free, but each call spends a step to resume it, so a budget of one
+    /// step may make no progress. Within a cut, returning that pushback
+    /// waits for a change, as any pushback does.
+    pub fn eval_budget(&mut self, steps: &mut usize) -> Result<(), Error> {
+        let value = self.peek()?.clone();
+        let evaluated = self
+            .runtime
+            .assembler
+            .evaluator()
+            .eval_within(&value, steps);
+        let evaluated = self.note_evaluation(evaluated)?.into_value();
+        self.pop()?;
+        self.push(evaluated);
+        Ok(())
     }
 
     /// Evaluates the top value to weak-head normal form, in place.
