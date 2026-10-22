@@ -84,7 +84,8 @@ pub(super) fn apply_builtin_in(
         | Builtin::ListSplitEnd
         | Builtin::ListAt
         | Builtin::ListHead
-        | Builtin::ListTail => Ok(deferred(arguments)),
+        | Builtin::ListTail
+        | Builtin::ListReverse => Ok(deferred(arguments)),
         Builtin::PatternIsList
         | Builtin::PatternListTryUncons
         | Builtin::PatternListTryUnsnoc
@@ -155,6 +156,9 @@ pub(super) fn apply_builtin_in(
         Builtin::DictSingleton
         | Builtin::DictUnion
         | Builtin::DictUpdate
+        | Builtin::DictPairs
+        | Builtin::DictFromEntries
+        | Builtin::DictFromPairs
         | Builtin::MergeDuplicate
         | Builtin::Default => Ok(deferred(arguments)),
         Builtin::ObjectSpec

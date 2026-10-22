@@ -724,15 +724,27 @@ handle API goes.
       quantum of 64 steps, whatever it reduced, so every step budget that
       pumps drained about six times too fast: a sum over thirty levels
       made 1,566 reductions in its pump's 148 polls and was charged 9,472.
-      It now charges the reductions and returns the rest; the scheduler's
-      own fairness loop still counts each poll it runs, so a run of polls
-      that reduce nothing ends. A sum over three hundred levels costs
+      It now charges the reductions and returns the rest. (The scheduler's
+      fairness loop then still counted each poll it ran; the poll budget
+      plan removed that, with the yields that needed it.) A sum over three hundred levels costs
       about 10.8k steps, and budgets of 16, 100 and 1,000 finish it in
       681, 108 and 11 calls; a budget of one step may not, since each call
       spends a step to resume.
       Pump tests that stepped one poll per unit of budget now step one
       reduction: their fixture machines pay a unit for each step of work,
       and blocking stays free.
+    - As built, fourth slice (2026-10-22): `list_reverse` (`xs -- ys`);
+      `dict_pairs` (`d -- [[k, v]…]`, in key order) and its twin
+      `dict_from_pairs`; `dict_entries` (`d -- keys values`) and its twin
+      `dict_from_entries`. All are lazy, on three new builtins, kept from
+      glam's std since listing a dict's keys bears on abstract and
+      scope-unique keys: `ListReverse`, a walk of the list observation
+      machine; `DictPairs`; and `DictFromEntries` with `DictFromPairs`,
+      which walks the pairs, each to exactly two items, before the shared
+      key conversion. `dict_entries` maps `ListHead` and `ListAt 1` over the
+      pairs, which are well-formed by construction. A twin fails where
+      forced on lists of unequal length, a key given twice or a pair of
+      another length, and leaves out members already `{}`.
 19. `api-runtime-compile` — split from `api-import-requests` (2026-10-21):
     compilation builds its context from runtime-side parts, the value
     factory, the front ends, an invocation counter and a diagnostics

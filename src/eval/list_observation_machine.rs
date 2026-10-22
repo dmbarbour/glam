@@ -50,6 +50,7 @@ enum ListObservation {
     At,
     Head,
     Tail,
+    Reverse,
 }
 
 struct RegionalListWalk {
@@ -72,6 +73,7 @@ enum ListWalkOperation {
     At { index: usize },
     Head,
     Tail,
+    Reverse,
 }
 
 impl RegionalListObservationMachine {
@@ -85,6 +87,7 @@ impl RegionalListObservationMachine {
                 | Builtin::ListAt
                 | Builtin::ListHead
                 | Builtin::ListTail
+                | Builtin::ListReverse
         )
     }
 
@@ -102,6 +105,7 @@ impl RegionalListObservationMachine {
             Builtin::ListAt => ListObservation::At,
             Builtin::ListHead => ListObservation::Head,
             Builtin::ListTail => ListObservation::Tail,
+            Builtin::ListReverse => ListObservation::Reverse,
             _ => unreachable!("list observation machine received another builtin"),
         };
         let (source, indices) = arguments
@@ -245,7 +249,10 @@ impl RegionalListObservationMachine {
             ListObservation::Split => "split",
             ListObservation::SplitEnd => "split_end",
             ListObservation::At => "list at",
-            ListObservation::Len | ListObservation::Head | ListObservation::Tail => {
+            ListObservation::Len
+            | ListObservation::Head
+            | ListObservation::Tail
+            | ListObservation::Reverse => {
                 unreachable!("this list observation has no index")
             }
         }
@@ -260,6 +267,7 @@ impl RegionalListObservationMachine {
             ListObservation::At => "list at builtin requires a list or binary value",
             ListObservation::Head => "list head builtin requires a list or binary value",
             ListObservation::Tail => "list tail builtin requires a list or binary value",
+            ListObservation::Reverse => "list reverse builtin requires a list or binary value",
         }
     }
 
@@ -281,6 +289,7 @@ impl RegionalListObservationMachine {
             },
             ListObservation::Head => ListWalkOperation::Head,
             ListObservation::Tail => ListWalkOperation::Tail,
+            ListObservation::Reverse => ListWalkOperation::Reverse,
         }
     }
 
@@ -335,6 +344,9 @@ impl RegionalListObservationMachine {
                     return failure("list tail builtin requires a non-empty list or binary");
                 }
                 Value::Binary(bytes.slice(1..bytes.len()))
+            }
+            ListObservation::Reverse => {
+                Value::Binary(Bytes::from(bytes.iter().rev().copied().collect::<Vec<_>>()))
             }
         };
         RegionalBuiltinPoll::Ready(result)
@@ -404,7 +416,8 @@ impl RegionalListWalk {
             ListWalkOperation::Slice { .. }
             | ListWalkOperation::Len
             | ListWalkOperation::Split { .. }
-            | ListWalkOperation::At { .. } => self.poll_front_leaves_in(access, step_budget),
+            | ListWalkOperation::At { .. }
+            | ListWalkOperation::Reverse => self.poll_front_leaves_in(access, step_budget),
         }
     }
 
@@ -424,7 +437,7 @@ impl RegionalListWalk {
                 ListWalkOperation::Tail => RegionalBuiltinPoll::Ready(tail),
                 _ => unreachable!("only head and tail take one item"),
             },
-            RegionalListFrontPoll::Ready(None) => self.finish_empty(),
+            RegionalListFrontPoll::Ready(None) => self.finish_empty(access),
             RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
             RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
             RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
@@ -447,7 +460,7 @@ impl RegionalListWalk {
                 .poll_leaf_in(access, step_budget)
             {
                 RegionalListFrontPoll::Ready(Some(step)) => step,
-                RegionalListFrontPoll::Ready(None) => return self.finish_empty(),
+                RegionalListFrontPoll::Ready(None) => return self.finish_empty(access),
                 RegionalListFrontPoll::Boundary(request) => {
                     return RegionalBuiltinPoll::Boundary(request);
                 }
@@ -520,6 +533,7 @@ impl RegionalListWalk {
                 }
             }
             ListWalkOperation::At { .. } | ListWalkOperation::Len => {}
+            ListWalkOperation::Reverse => self.taken.push(Value::List(leaf)),
             ListWalkOperation::Head
             | ListWalkOperation::Tail
             | ListWalkOperation::SplitEnd { .. } => {
@@ -600,10 +614,26 @@ impl RegionalListWalk {
         List::join_strict_pieces(pieces, &mut |value| access.values().duplicate_value(value))
     }
 
-    fn finish_empty(&self) -> RegionalBuiltinPoll {
+    fn finish_empty(&mut self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
         match self.operation {
             ListWalkOperation::Len => {
                 RegionalBuiltinPoll::Ready(Value::Number(Number::from_usize(self.position)))
+            }
+            ListWalkOperation::Reverse => {
+                let mut items = Vec::with_capacity(self.position);
+                for leaf in self.taken.drain(..).rev() {
+                    let Value::List(leaf) = leaf else {
+                        unreachable!("taken pieces are lists")
+                    };
+                    let len = leaf.known_len().expect("a strict leaf knows its length");
+                    for index in (0..len).rev() {
+                        let item = leaf.leaf_item_at_by(index, &mut |value| {
+                            access.values().duplicate_value(value)
+                        });
+                        items.push(item_value_in(access, item));
+                    }
+                }
+                RegionalBuiltinPoll::Ready(Value::List(List::from_values(items)))
             }
             ListWalkOperation::SplitEnd { .. } => {
                 unreachable!("split-end empty results are handled by back traversal")

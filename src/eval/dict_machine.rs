@@ -13,6 +13,7 @@ use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 
 use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion, RegionalKeyList};
 use super::builtin_machine::RegionalBuiltinPoll;
+use super::list_machine::{RegionalListFront, RegionalListFrontPoll, item_value_in};
 use super::tagged_machine::{RegionalSemanticUndefined, RegionalSemanticUndefinedPoll};
 use super::value::{
     format_name_part, is_deferred_value, is_error_lazy_value, is_undefined_dict_value,
@@ -43,6 +44,40 @@ enum RegionalDictBuiltinState {
         value: Value,
         undefined: RegionalSemanticUndefined,
     },
+    Pairs(RegionalWhnfWork),
+    FromEntries(Box<RegionalDictFromEntries>),
+}
+
+/// `dict_from_entries keys values`: the keys converted, then the values'
+/// spine walked a strict leaf at a time, leaving each value as it is. For
+/// `dict_from_pairs`, a walk of the pairs first finds the keys and values.
+struct RegionalDictFromEntries {
+    pairs: Option<Box<RegionalPairsWalk>>,
+    keys: Option<Box<RegionalKeyList>>,
+    converted: Vec<Key>,
+    values: Option<Value>,
+    values_demand: Option<RegionalWhnfWork>,
+    front: Option<RegionalListFront>,
+    items: Vec<Value>,
+    source_owner: LazyId,
+}
+
+/// Walks a list of `[key, value]` lists, a pair per step, each to exactly
+/// two items.
+struct RegionalPairsWalk {
+    list: Option<RegionalWhnfWork>,
+    outer: Option<RegionalListFront>,
+    pair_demand: Option<RegionalWhnfWork>,
+    pair: Option<RegionalListFront>,
+    pair_items: Vec<Value>,
+    keys: Vec<Value>,
+    values: Vec<Value>,
+    source_owner: LazyId,
+}
+
+enum RegionalPairsPoll {
+    Ready,
+    Pending(RegionalBuiltinPoll),
 }
 
 struct RegionalSequentialDemands {
@@ -120,6 +155,64 @@ impl RegionalDictBuiltinMachine {
                     ),
                 }
             }
+            Builtin::DictPairs => {
+                let [dict] = arguments else {
+                    unreachable!("dictionary pairs retain one operand")
+                };
+                RegionalDictBuiltinState::Pairs(
+                    RegionalWhnfWork::from_focus(access, access.values().duplicate_value(dict))
+                        .with_source_owner(source_owner),
+                )
+            }
+            Builtin::DictFromEntries => {
+                let [keys, values] = arguments else {
+                    unreachable!("dictionary from entries retains two operands")
+                };
+                RegionalDictBuiltinState::FromEntries(Box::new(RegionalDictFromEntries {
+                    pairs: None,
+                    keys: Some(Box::new(RegionalKeyList::new(
+                        access,
+                        access.values().duplicate_value(keys),
+                        Some(source_owner),
+                    ))),
+                    converted: Vec::new(),
+                    values: Some(access.values().duplicate_value(values)),
+                    values_demand: None,
+                    front: None,
+                    items: Vec::new(),
+                    source_owner,
+                }))
+            }
+            Builtin::DictFromPairs => {
+                let [pairs] = arguments else {
+                    unreachable!("dictionary from pairs retains one operand")
+                };
+                RegionalDictBuiltinState::FromEntries(Box::new(RegionalDictFromEntries {
+                    pairs: Some(Box::new(RegionalPairsWalk {
+                        list: Some(
+                            RegionalWhnfWork::from_focus(
+                                access,
+                                access.values().duplicate_value(pairs),
+                            )
+                            .with_source_owner(source_owner),
+                        ),
+                        outer: None,
+                        pair_demand: None,
+                        pair: None,
+                        pair_items: Vec::new(),
+                        keys: Vec::new(),
+                        values: Vec::new(),
+                        source_owner,
+                    })),
+                    keys: None,
+                    converted: Vec::new(),
+                    values: None,
+                    values_demand: None,
+                    front: None,
+                    items: Vec::new(),
+                    source_owner,
+                }))
+            }
             _ => unreachable!("dictionary machine received another builtin"),
         };
         Self { state }
@@ -131,6 +224,40 @@ impl RegionalDictBuiltinMachine {
         step_budget: &mut EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
         match &mut self.state {
+            RegionalDictBuiltinState::Pairs(dict) => {
+                let dict =
+                    match drive_regional_in_place(access, dict, step_budget, reduce_semantic_shell)
+                    {
+                        RegionalWhnfStatus::Ready(value) => {
+                            EvaluatedValue::from_whnf_in(access.values(), value)
+                                .expect("dictionary demand must reach WHNF")
+                                .into_value_in(access.values())
+                        }
+                        RegionalWhnfStatus::Boundary(request) => {
+                            return RegionalBuiltinPoll::Boundary(request);
+                        }
+                        RegionalWhnfStatus::BudgetExhausted => {
+                            return RegionalBuiltinPoll::BudgetExhausted;
+                        }
+                        RegionalWhnfStatus::Failed(failure) => {
+                            return RegionalBuiltinPoll::Failed(failure);
+                        }
+                    };
+                let Value::Dict(dict) = dict else {
+                    return failure("dict pairs builtin requires a dictionary");
+                };
+                RegionalBuiltinPoll::Ready(Value::List(List::from_values(
+                    dict.iter()
+                        .map(|(key, value)| {
+                            Value::List(List::from_values(vec![
+                                access.values().key_value(key),
+                                access.values().duplicate_value(value),
+                            ]))
+                        })
+                        .collect(),
+                )))
+            }
+            RegionalDictBuiltinState::FromEntries(entries) => entries.poll_in(access, step_budget),
             RegionalDictBuiltinState::Singleton { key, value } => {
                 match key.poll_in(access, step_budget) {
                     RegionalConversionPoll::Ready(key) => {
@@ -273,6 +400,8 @@ impl RegionalDictBuiltinMachine {
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match &self.state {
+            RegionalDictBuiltinState::Pairs(dict) => dict.trace_managed_edges(visitor),
+            RegionalDictBuiltinState::FromEntries(entries) => entries.trace_managed_edges(visitor),
             RegionalDictBuiltinState::Singleton { key, value } => {
                 key.trace_managed_edges(visitor);
                 trace_compatibility_value_managed_edges(value, visitor);
@@ -303,6 +432,281 @@ impl RegionalDictBuiltinMachine {
                 undefined.trace_managed_edges(visitor);
             }
         }
+    }
+}
+
+impl RegionalDictFromEntries {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        if let Some(pairs) = &mut self.pairs {
+            match pairs.poll_in(access, step_budget) {
+                RegionalPairsPoll::Ready => {}
+                RegionalPairsPoll::Pending(poll) => return poll,
+            }
+            let keys = Value::List(List::from_values(std::mem::take(&mut pairs.keys)));
+            self.items = std::mem::take(&mut pairs.values);
+            self.pairs = None;
+            self.keys = Some(Box::new(RegionalKeyList::new(
+                access,
+                keys,
+                Some(self.source_owner),
+            )));
+            return RegionalBuiltinPoll::Continue;
+        }
+        if let Some(keys) = &mut self.keys {
+            return match keys.poll_in(access, step_budget) {
+                RegionalConversionPoll::Ready(keys) => {
+                    self.converted = keys;
+                    self.keys = None;
+                    RegionalBuiltinPoll::Continue
+                }
+                RegionalConversionPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+                RegionalConversionPoll::Continue => RegionalBuiltinPoll::Continue,
+                RegionalConversionPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
+                RegionalConversionPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
+            };
+        }
+        if self.front.is_none() && (self.values.is_some() || self.values_demand.is_some()) {
+            if let Some(values) = self.values.take() {
+                self.values_demand = Some(
+                    RegionalWhnfWork::from_focus(access, values)
+                        .with_source_owner(self.source_owner),
+                );
+            }
+            let demand = self
+                .values_demand
+                .as_mut()
+                .expect("dictionary entries demand their values once");
+            let values =
+                match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
+                    RegionalWhnfStatus::Ready(value) => {
+                        EvaluatedValue::from_whnf_in(access.values(), value)
+                            .expect("dictionary entry values must reach WHNF")
+                            .into_value_in(access.values())
+                    }
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
+                    }
+                };
+            self.values_demand = None;
+            let values = match values {
+                Value::Binary(bytes) => Value::List(List::from_bytes(bytes)),
+                values @ Value::List(_) => values,
+                _ => return failure("dict from entries builtin requires a list of values"),
+            };
+            self.front = Some(RegionalListFront::new_in(
+                access,
+                values,
+                Some(self.source_owner),
+            ));
+            return RegionalBuiltinPoll::Continue;
+        }
+        let Some(front) = &mut self.front else {
+            // `dict_from_pairs` found its values with its keys.
+            return self.finish_in(access);
+        };
+        loop {
+            let (leaf, tail) = match front.poll_leaf_in(access, step_budget) {
+                RegionalListFrontPoll::Ready(Some(step)) => step,
+                RegionalListFrontPoll::Ready(None) => return self.finish_in(access),
+                RegionalListFrontPoll::Boundary(request) => {
+                    return RegionalBuiltinPoll::Boundary(request);
+                }
+                RegionalListFrontPoll::Continue => return RegionalBuiltinPoll::Continue,
+                RegionalListFrontPoll::BudgetExhausted => {
+                    return RegionalBuiltinPoll::BudgetExhausted;
+                }
+                RegionalListFrontPoll::Failed(failure) => {
+                    return RegionalBuiltinPoll::Failed(failure);
+                }
+            };
+            let len = leaf.known_len().expect("a strict leaf knows its length");
+            for index in 0..len {
+                let item = leaf
+                    .leaf_item_at_by(index, &mut |value| access.values().duplicate_value(value));
+                self.items.push(item_value_in(access, item));
+            }
+            *front = RegionalListFront::new_in(access, tail, Some(self.source_owner));
+        }
+    }
+
+    fn finish_in(&mut self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
+        if self.converted.len() != self.items.len() {
+            return failure("dict from entries builtin requires as many values as keys");
+        }
+        let mut dict = Dict::new_sync();
+        let mut seen = std::collections::BTreeSet::new();
+        for (key, value) in self.converted.drain(..).zip(self.items.drain(..)) {
+            if !seen.insert(key.clone()) {
+                return failure("dict from entries builtin requires distinct keys");
+            }
+            if !is_undefined_dict_value(access.values(), &value) {
+                dict = dict.insert(key, value);
+            }
+        }
+        RegionalBuiltinPoll::Ready(Value::Dict(dict))
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(pairs) = &self.pairs {
+            pairs.trace_managed_edges(visitor);
+        }
+        if let Some(keys) = &self.keys {
+            keys.trace_managed_edges(visitor);
+        }
+        if let Some(values) = &self.values {
+            trace_compatibility_value_managed_edges(values, visitor);
+        }
+        if let Some(demand) = &self.values_demand {
+            demand.trace_managed_edges(visitor);
+        }
+        if let Some(front) = &self.front {
+            front.trace_managed_edges(visitor);
+        }
+        for item in &self.items {
+            trace_compatibility_value_managed_edges(item, visitor);
+        }
+    }
+}
+
+impl RegionalPairsWalk {
+    /// Walks the pairs, a pair per step: `Ready` once each gave its key and
+    /// value.
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalPairsPoll {
+        use RegionalPairsPoll::Pending;
+        const TWO: &str = "dict from pairs builtin requires two items in each pair";
+        if let Some(list) = &mut self.list {
+            let list = match demand_list_in(
+                access,
+                list,
+                step_budget,
+                "dict from pairs builtin requires a list of pairs",
+            ) {
+                Ok(list) => list,
+                Err(poll) => return Pending(poll),
+            };
+            self.list = None;
+            self.outer = Some(RegionalListFront::new_in(
+                access,
+                list,
+                Some(self.source_owner),
+            ));
+            return Pending(RegionalBuiltinPoll::Continue);
+        }
+        if let Some(demand) = &mut self.pair_demand {
+            let pair = match demand_list_in(access, demand, step_budget, TWO) {
+                Ok(pair) => pair,
+                Err(poll) => return Pending(poll),
+            };
+            self.pair_demand = None;
+            self.pair = Some(RegionalListFront::new_in(
+                access,
+                pair,
+                Some(self.source_owner),
+            ));
+        }
+        if let Some(pair) = &mut self.pair {
+            loop {
+                match pair.poll_in(access, step_budget) {
+                    RegionalListFrontPoll::Ready(Some((item, tail))) => {
+                        if self.pair_items.len() == 2 {
+                            return Pending(failure(TWO));
+                        }
+                        self.pair_items.push(item);
+                        *pair = RegionalListFront::new_in(access, tail, Some(self.source_owner));
+                    }
+                    RegionalListFrontPoll::Ready(None) => break,
+                    poll => return Pending(front_pending(poll)),
+                }
+            }
+            let mut items = std::mem::take(&mut self.pair_items);
+            let (Some(value), Some(key), None) = (items.pop(), items.pop(), items.pop()) else {
+                return Pending(failure(TWO));
+            };
+            self.keys.push(key);
+            self.values.push(value);
+            self.pair = None;
+            return Pending(RegionalBuiltinPoll::Continue);
+        }
+        let outer = self.outer.as_mut().expect("the pairs walk their list");
+        match outer.poll_in(access, step_budget) {
+            RegionalListFrontPoll::Ready(Some((pair, tail))) => {
+                *outer = RegionalListFront::new_in(access, tail, Some(self.source_owner));
+                self.pair_demand = Some(
+                    RegionalWhnfWork::from_focus(access, pair).with_source_owner(self.source_owner),
+                );
+                Pending(RegionalBuiltinPoll::Continue)
+            }
+            RegionalListFrontPoll::Ready(None) => RegionalPairsPoll::Ready,
+            poll => Pending(front_pending(poll)),
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(list) = &self.list {
+            list.trace_managed_edges(visitor);
+        }
+        if let Some(outer) = &self.outer {
+            outer.trace_managed_edges(visitor);
+        }
+        if let Some(demand) = &self.pair_demand {
+            demand.trace_managed_edges(visitor);
+        }
+        if let Some(pair) = &self.pair {
+            pair.trace_managed_edges(visitor);
+        }
+        for value in self.pair_items.iter().chain(&self.keys).chain(&self.values) {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
+    }
+}
+
+/// A list front's pause, passed up.
+fn front_pending<T>(poll: RegionalListFrontPoll<T>) -> RegionalBuiltinPoll {
+    match poll {
+        RegionalListFrontPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
+        RegionalListFrontPoll::Continue => RegionalBuiltinPoll::Continue,
+        RegionalListFrontPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
+        RegionalListFrontPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
+        RegionalListFrontPoll::Ready(_) => unreachable!("a list front's result is its caller's"),
+    }
+}
+
+/// Demands `demand` to a list, a binary being the list of its bytes, or
+/// fails with `message`.
+fn demand_list_in(
+    access: &EvaluationValueAccess<'_>,
+    demand: &mut RegionalWhnfWork,
+    step_budget: &mut EvaluationStepBudget,
+    message: &str,
+) -> Result<Value, RegionalBuiltinPoll> {
+    match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
+        RegionalWhnfStatus::Ready(value) => {
+            match EvaluatedValue::from_whnf_in(access.values(), value)
+                .expect("a list demand must reach WHNF")
+                .into_value_in(access.values())
+            {
+                Value::Binary(bytes) => Ok(Value::List(List::from_bytes(bytes))),
+                list @ Value::List(_) => Ok(list),
+                _ => Err(failure(message)),
+            }
+        }
+        RegionalWhnfStatus::Boundary(request) => Err(RegionalBuiltinPoll::Boundary(request)),
+        RegionalWhnfStatus::BudgetExhausted => Err(RegionalBuiltinPoll::BudgetExhausted),
+        RegionalWhnfStatus::Failed(failure) => Err(RegionalBuiltinPoll::Failed(failure)),
     }
 }
 

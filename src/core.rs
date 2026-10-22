@@ -2142,6 +2142,8 @@ pub enum Builtin {
     ListAt,
     ListHead,
     ListTail,
+    /// A list's items in reverse order; a binary's bytes reversed.
+    ListReverse,
     /// Compiler-private pass/fail observations used by pattern lowering.
     PatternIsList,
     PatternListTryUncons,
@@ -2172,6 +2174,16 @@ pub enum Builtin {
     DictSingleton,
     DictUnion,
     DictUpdate,
+    /// A dictionary's members as `[key, value]` lists, in key order.
+    DictPairs,
+    /// `keys values`: the dictionary of those members, pairing keys and
+    /// values by position. It fails on lists of unequal length or a key
+    /// given twice, and leaves out a member whose value is already `{}`.
+    DictFromEntries,
+    /// The dictionary of a list of `[key, value]` lists, the twin of
+    /// `DictPairs`. A pair of another length fails, as do the failures of
+    /// `DictFromEntries`.
+    DictFromPairs,
     ObjectSpec,
     ObjectFromDict,
     ObjectLocalName,
@@ -2261,6 +2273,7 @@ impl Builtin {
             Self::ListAt => 2,
             Self::ListHead => 1,
             Self::ListTail => 1,
+            Self::ListReverse => 1,
             Self::PatternIsList => 1,
             Self::PatternListTryUncons => 1,
             Self::PatternListTryUnsnoc => 1,
@@ -2284,6 +2297,9 @@ impl Builtin {
             Self::DictSingleton => 2,
             Self::DictUnion => 2,
             Self::DictUpdate => 3,
+            Self::DictPairs => 1,
+            Self::DictFromEntries => 2,
+            Self::DictFromPairs => 1,
             Self::ObjectSpec => 1,
             Self::ObjectFromDict => 1,
             Self::ObjectLocalName => 2,

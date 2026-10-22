@@ -336,3 +336,109 @@ fn a_spent_budget_is_pushback_and_what_it_evaluated_stays() {
     assert_eq!(result, 45_150);
     assert!(attempts > 1, "a thousand steps were too few at once");
 }
+
+#[test]
+fn lists_reverse_lazily_and_twice_is_the_identity() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        push(m, &[1, 2]);
+        m.list_pack(2)?;
+        push(m, &[3]);
+        m.list_pack(1)?;
+        m.list_append()?;
+        m.list_reverse()?;
+        assert_eq!(m.kind()?, ValueKind::Lazy, "reversing evaluates nothing");
+        m.dup(1)?;
+        m.list_unpack(3)?;
+        assert_eq!(ints(m, 3)?, [3, 2, 1]);
+        m.list_reverse()?;
+        m.list_unpack(3)?;
+        assert_eq!(ints(m, 3)?, [1, 2, 3]);
+
+        m.bytes_push(b"abc".to_vec());
+        m.list_reverse()?;
+        assert_eq!(m.bytes_pop()?.as_ref(), b"cba");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn dict_pairs_and_entries_take_a_dict_apart_as_twins() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        push(m, &[1, 2]);
+        m.dict_pack(["a", "b"])?;
+        m.dict_pairs()?;
+        assert_eq!(m.kind()?, ValueKind::Lazy, "taking pairs evaluates nothing");
+        m.dup(1)?;
+        m.list_unpack(2)?;
+        m.list_unpack(2)?;
+        assert_eq!(m.int_pop()?, 2);
+        assert_eq!(m.atom_pop()?, "b");
+        m.discard(1)?;
+        m.dict_from_pairs()?;
+        m.dict_unpack(["a", "b"])?;
+        assert_eq!(ints(m, 2)?, [1, 2]);
+
+        push(m, &[1, 2]);
+        m.dict_pack(["a", "b"])?;
+        m.dict_entries()?;
+        m.dup(2)?;
+        m.list_unpack(2)?;
+        assert_eq!(ints(m, 2)?, [1, 2]);
+        m.list_unpack(2)?;
+        assert_eq!(m.atom_pop()?, "b");
+        assert_eq!(m.atom_pop()?, "a");
+        m.dict_from_entries()?;
+        m.dict_unpack(["a", "b"])?;
+        assert_eq!(ints(m, 2)?, [1, 2]);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn dicts_from_pairs_and_entries_fail_where_forced_on_ill_formed_input() {
+    let mut rt = runtime();
+    rt.run("m", |m| {
+        // Unequal lengths.
+        m.atom_push("a");
+        m.list_pack(1)?;
+        push(m, &[1, 2]);
+        m.list_pack(2)?;
+        m.dict_from_entries()?;
+        assert_eq!(m.kind()?, ValueKind::Lazy);
+        assert_eq!(
+            m.eval().expect_err("lengths differ").kind(),
+            ErrorKind::Failure
+        );
+        m.discard(1)?;
+
+        // A key given twice.
+        m.atom_push("a");
+        m.atom_push("a");
+        m.list_pack(2)?;
+        push(m, &[1, 2]);
+        m.list_pack(2)?;
+        m.dict_from_entries()?;
+        assert_eq!(
+            m.eval().expect_err("a key repeats").kind(),
+            ErrorKind::Failure
+        );
+        m.discard(1)?;
+
+        // A pair of three items.
+        m.atom_push("a");
+        push(m, &[1, 2]);
+        m.list_pack(3)?;
+        m.list_pack(1)?;
+        m.dict_from_pairs()?;
+        assert_eq!(
+            m.eval().expect_err("a pair has three items").kind(),
+            ErrorKind::Failure
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}

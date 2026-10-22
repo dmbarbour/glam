@@ -1443,6 +1443,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
+    /// `xs -- ys`, lazily: the items of `xs` in reverse order, or a binary's
+    /// bytes reversed. Reversing twice is the identity on lists.
+    pub fn list_reverse(&mut self) -> Result<(), Error> {
+        self.rewrite_top(1, |access, items| {
+            let [xs] =
+                <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            Ok(vec![builtin_call_in(access, Builtin::ListReverse, [xs])])
+        })
+    }
+
     /// Replaces the top values, one for each key, with a dict from the keys
     /// to them: `v1 … vn -- {k1:v1 … kn:vn}`, the deepest value under the
     /// first key. Nothing is evaluated.
@@ -1576,6 +1586,73 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 access,
                 Builtin::DictUnion,
                 [left, right],
+            )])
+        })
+    }
+
+    /// `d -- pairs`, lazily: the members of `d` as `[key, value]` lists, in
+    /// key order.
+    pub fn dict_pairs(&mut self) -> Result<(), Error> {
+        self.rewrite_top(1, |access, items| {
+            let [dict] =
+                <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            Ok(vec![builtin_call_in(access, Builtin::DictPairs, [dict])])
+        })
+    }
+
+    /// `pairs -- d`, lazily: the dict of a list of `[key, value]` lists, the
+    /// twin of [`Self::dict_pairs`]. A pair of another length, or a key
+    /// given twice, fails where forced; a member whose value is `{}` is left
+    /// out.
+    pub fn dict_from_pairs(&mut self) -> Result<(), Error> {
+        self.rewrite_top(1, |access, items| {
+            let [pairs] =
+                <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            Ok(vec![builtin_call_in(
+                access,
+                Builtin::DictFromPairs,
+                [pairs],
+            )])
+        })
+    }
+
+    /// `d -- keys values`, lazily: the keys of `d` in order, and its values
+    /// in the same order.
+    pub fn dict_entries(&mut self) -> Result<(), Error> {
+        self.rewrite_top(1, |access, items| {
+            let [dict] =
+                <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
+            let pairs = builtin_call_in(access, Builtin::DictPairs, [dict]);
+            let second = CoreValue::Lazy(crate::core::LazyValue::from_application_in(
+                access,
+                CoreValue::Builtin(Builtin::ListAt),
+                Arc::from([CoreValue::Number(1.into())]),
+            ));
+            let keys = builtin_call_in(
+                access,
+                Builtin::Map,
+                [
+                    CoreValue::Builtin(Builtin::ListHead),
+                    access.duplicate_value(&pairs),
+                ],
+            );
+            let values = builtin_call_in(access, Builtin::Map, [second, pairs]);
+            Ok(vec![keys, values])
+        })
+    }
+
+    /// `keys values -- d`, lazily: the dict pairing keys with values by
+    /// position, the twin of [`Self::dict_entries`]. Lists of unequal length,
+    /// or a key given twice, fail where forced; a member whose value is `{}`
+    /// is left out.
+    pub fn dict_from_entries(&mut self) -> Result<(), Error> {
+        self.rewrite_top(2, |access, items| {
+            let [keys, values] = <[CoreValue; 2]>::try_from(items)
+                .unwrap_or_else(|_| unreachable!("the top two values"));
+            Ok(vec![builtin_call_in(
+                access,
+                Builtin::DictFromEntries,
+                [keys, values],
             )])
         })
     }

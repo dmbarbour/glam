@@ -329,6 +329,10 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::ListAt) => "list.at",
         SyntaxOperator::Builtin(crate::core::Builtin::ListHead) => "list.head",
         SyntaxOperator::Builtin(crate::core::Builtin::ListTail) => "list.tail",
+        SyntaxOperator::Builtin(crate::core::Builtin::ListReverse) => "list_reverse",
+        SyntaxOperator::Builtin(crate::core::Builtin::DictPairs) => "dict_pairs",
+        SyntaxOperator::Builtin(crate::core::Builtin::DictFromEntries) => "dict_from_entries",
+        SyntaxOperator::Builtin(crate::core::Builtin::DictFromPairs) => "dict_from_pairs",
         SyntaxOperator::Builtin(crate::core::Builtin::PatternIsList) => "pattern_is_list",
         SyntaxOperator::Builtin(crate::core::Builtin::PatternListTryUncons) => {
             "pattern_list_try_uncons"
