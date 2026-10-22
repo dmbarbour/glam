@@ -815,6 +815,24 @@ handle API goes.
       `.promise.*`), which they carry only as bridge behavior: `conf.cli`
       and macros are pure evaluation, ideally handled by pure functions
       (maintainer, 2026-10-21).
+    - Sketched with the maintainer (2026-10-22,
+      `effect-families-pass-through`): `m.effect_run(&mut provider)` runs
+      `effect -- result`; only `.r`, `.seq`, `.reset`, `.shift` and `.fix`
+      stay in the effect machine, and every other request returns to the
+      turn. The provider's flags say which families pass through to the
+      machine (search to cuts, state to local state, the heap, `.log` to
+      the diagnostics output, `.env`, promises), and it defines the rest,
+      standard or unique. It answers on the stack: `Return`,
+      `Alternatives(n)`, each resumed in a nested cut, or `Scoped { close }`.
+      Slices: `effect_run` with returns and failure; families passing
+      through by flags; branching through cuts; `TokenEffects` as a
+      provider; then `CliEffects`.
+    - Built (2026-10-22): `effect_run` with returns and failure. The
+      effect machine runs on the turn's thread; a provider's request parks
+      on a promise the turn fulfills once the provider has answered on the
+      machine's stack, and `m.fail()` fails the request within the effect.
+      Until the flags come, the effect machine still serves the standard
+      families itself, searching and keeping state as it does for tasks.
 21. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`

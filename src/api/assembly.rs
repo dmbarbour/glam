@@ -998,26 +998,7 @@ impl Assembler {
     /// Resolving, failing, or dropping the resolver wakes each same-runtime
     /// work item currently blocked on the unresolved value.
     pub fn promise(&self, label: impl Into<Arc<str>>) -> (Value, PromiseResolver) {
-        let values = self.values();
-        values.with_access(|scoped| {
-            let label = label.into();
-            let promise = scoped
-                .runtime_access()
-                .construct_rooted_managed_promise()
-                .expect("managed promise representation must fit one collector run");
-            let value = scoped.wrap(CoreValue::Promised(PromisedValue::from_root(
-                &promise,
-                scoped.runtime_access(),
-            )));
-            (
-                value,
-                PromiseResolver {
-                    observer: scoped.runtime_access().values().runtime_value_observer(),
-                    label,
-                    promise: Some(promise),
-                },
-            )
-        })
+        self.values().promise(label)
     }
 
     /// Creates a protected reflection volume initialized with `initial`.

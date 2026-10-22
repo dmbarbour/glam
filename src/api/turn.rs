@@ -3552,7 +3552,10 @@ fn key_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Vec<Key> {
     path.into_iter().map(Into::into).collect()
 }
 
+mod effects;
 pub(in crate::api) mod environment;
+
+pub use effects::{Answer, EffectProvider};
 
 pub use crate::reflection::PromiseStatus;
 

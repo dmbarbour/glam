@@ -20,6 +20,7 @@ use crate::evaluation::{EvalContext, EvaluationWaitToken};
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot};
 
 /// One additional effect constructor contributed by a task specialization.
+#[derive(Clone)]
 pub struct EffectRequestSpec<R> {
     pub(super) api_path: Option<Arc<[Arc<str>]>>,
     pub(super) tag_path: Arc<[Arc<str>]>,
