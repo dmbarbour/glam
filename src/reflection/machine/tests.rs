@@ -6001,6 +6001,49 @@ fn reflection_eval_retries_terminal_lazy_dependencies() {
     assert!(String::from_utf8_lossy(&error).contains("failed permanently"));
 }
 
+/// An effect blocked on work that panicked halts with the panic, which the
+/// scheduler's poll boundary reports, rather than pumping the panicked wait
+/// again until its budget is spent (`budget-panicked-wait`).
+#[test]
+fn an_effect_blocked_on_a_panicked_dependency_halts_instead_of_spinning() {
+    let (assembler, function) =
+        compile_effect("\\value -> .eval value >>= (\\result -> .r result)");
+    let values = assembler.values();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    let panicking = values.with_access(|scoped| {
+        let lazy = LazyValue::semantic_thunk_in(scoped.runtime_access(), move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+            panic!("forced dependency panic");
+        });
+        scoped.wrap(Value::Lazy(lazy))
+    });
+    let effect = values
+        .apply(&function, [panicking])
+        .expect("the effect should apply to its dependency");
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
+
+    let outcome = (0..16).find_map(|_| match context.pump_wait(task.wait(), 4_096) {
+        crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => None,
+        outcome => Some(outcome),
+    });
+    assert_eq!(
+        outcome,
+        Some(crate::evaluation::EvaluationPumpOutcome::TargetReady),
+        "the task must halt rather than spend each budget on the panicked wait"
+    );
+    assert!(matches!(
+        context.poll_reflection_task(&task),
+        EvaluationWaitPoll::Panicked(_)
+    ));
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        1,
+        "the panicked work never reruns"
+    );
+}
+
 #[test]
 fn resumable_reflection_decode_consumes_one_application_checkpoint_after_resumption() {
     let (assembler, effect) =

@@ -688,7 +688,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 self.finish_in(context, TaskTerminal::Failed(error.clone()));
                 return EffectTaskPoll::Failed(error);
             }
-            let Some(WorkDependency::Wait(wait)) = &blocked.dependency else {
+            // A panicked dependency stays blocked, so the scheduler's poll
+            // boundary halts this task. The pump would find its wait ended
+            // and poll again, which would block again.
+            let Some(WorkDependency::Wait(wait)) = blocked
+                .dependency
+                .as_ref()
+                .filter(|dependency| dependency.panic_report().is_none())
+            else {
                 return poll;
             };
             // Pumped work shares this poll's mutator.

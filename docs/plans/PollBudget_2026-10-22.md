@@ -208,3 +208,13 @@ first.
    exists.
 3. **Whether a host call's invocation and a compiled application are
    reductions.** Recommended: yes, one unit each, as an immediate builtin.
+
+## As built
+
+- `budget-panicked-wait` (2026-10-22): confirmed first by
+  `an_effect_blocked_on_a_panicked_dependency_halts_instead_of_spinning`,
+  where sixteen pump calls of 4,096 steps each spent their budgets on the
+  panicked wait. `poll_pumping` now returns a block on a panicked
+  dependency without pumping it, and the scheduler halts the task with the
+  panic. The pump that `poll_blocked` and `poll_pumping` both run stays
+  for `budget-reflection-phases`.
