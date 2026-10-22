@@ -2775,7 +2775,10 @@ maps the short names used here to file names.
       starts left a one-unit poll nothing for its operands, so it never
       progressed.
   - **Reflection:** steps charge as before, and waiting pumps within the
-    caller's budget.
+    caller's budget. Amended 2026-10-22 (`budget-reflection-phases`): a
+    phase step that changes state pays one unit as it ends, as a machine
+    step does, in place of the administrative unit charged when a child
+    spent none.
 - **Consequences:**
   - A poll performs at most its budget of reductions. Free observation
     cannot loop, because a poll without a reduction ends in a result,

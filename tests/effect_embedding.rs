@@ -121,7 +121,7 @@ fn external_effect_specialization_uses_only_public_embedding_apis() {
 
     for _ in 0..32 {
         match search.poll(64) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 assert!(blocked.waiting_on_dependency());
                 assert_eq!(counts.starts.load(Ordering::SeqCst), 1);
@@ -140,7 +140,7 @@ fn external_effect_specialization_uses_only_public_embedding_apis() {
 
     for _ in 0..32 {
         match search.poll(64) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Complete(branches) => {
                 assert_eq!(branches.len(), 1);
                 let result = branches[0]

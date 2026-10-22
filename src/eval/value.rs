@@ -1056,7 +1056,7 @@ impl LazyTaskMachine {
                 return Transition::Replaced(checkpoint.kind());
             }
             match checkpoint.with_access_transition_in(&access, |machine| {
-                ManagedLazyCheckpointEdge::machine_steps(
+                super::lazy_checkpoint::machine_steps(
                     &access,
                     step_budget,
                     || AccessRegionalPoll::BudgetExhausted,

@@ -243,43 +243,6 @@ impl ManagedLazyCheckpointEdge {
         ))))
     }
 
-    /// Runs a regional machine's steps under the shared step budget until
-    /// it is ready, reaches a boundary or fails, or the budget is spent
-    /// (`reduction-costs-one-budget-unit`). A step needs a unit to start. One
-    /// that `advanced` its machine's state pays one unit as it ends, after
-    /// the operand evaluation within it paid its own; when that spent the
-    /// last unit, the step's own is forgiven, as a batch's overrun is, so a
-    /// one-unit poll still makes progress. Reporting a boundary or a failure
-    /// is free.
-    pub(in crate::eval) fn machine_steps<P>(
-        access: &crate::evaluation::EvaluationValueAccess<'_>,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-        exhausted: impl Fn() -> P,
-        continues: impl Fn(&P) -> bool,
-        advanced: impl Fn(&P) -> bool,
-        mut step: impl FnMut(&mut crate::evaluation::EvaluationStepBudget) -> P,
-    ) -> P {
-        loop {
-            if step_budget.remaining() == 0 {
-                return exhausted();
-            }
-            let poll = step(step_budget);
-            if advanced(&poll) {
-                let _ = step_budget.try_consume();
-                #[cfg(feature = "glam-prof")]
-                access
-                    .values()
-                    .values()
-                    .record_reduction(crate::profiling::EvaluationReduction::BuiltinStep);
-            }
-            if !continues(&poll) {
-                #[cfg(not(feature = "glam-prof"))]
-                let _ = access;
-                return poll;
-            }
-        }
-    }
-
     pub(in crate::eval) fn with_access_transition_in<R>(
         &self,
         authority: &crate::evaluation::EvaluationValueAccess<'_>,
@@ -336,7 +299,7 @@ impl ManagedLazyCheckpointEdge {
                 RegionalObjectFixpoint::trace_managed_edges,
                 RegionalObjectFixpoint::trace_managed_edges,
                 |state| {
-                    Self::machine_steps(
+                    machine_steps(
                         authority,
                         step_budget,
                         || RegionalObjectFixpointPoll::BudgetExhausted,
@@ -383,7 +346,7 @@ impl ManagedLazyCheckpointEdge {
                 RegionalListEffect::trace_managed_edges,
                 RegionalListEffect::trace_managed_edges,
                 |state| {
-                    Self::machine_steps(
+                    machine_steps(
                         authority,
                         step_budget,
                         || RegionalListEffectPoll::BudgetExhausted,
@@ -431,7 +394,7 @@ impl ManagedLazyCheckpointEdge {
                 RegionalBuiltinMachine::trace_managed_edges,
                 RegionalBuiltinMachine::trace_managed_edges,
                 |state| {
-                    Self::machine_steps(
+                    machine_steps(
                         authority,
                         step_budget,
                         || RegionalBuiltinPoll::BudgetExhausted,
@@ -818,4 +781,41 @@ unsafe impl ManagedFamily for ManagedBuiltinCheckpointCell {
         "no direct Drop implementation",
         "regional builtin state and child state destroy passively",
     );
+}
+
+/// Runs a regional machine's steps under the shared step budget until
+/// it is ready, reaches a boundary or fails, or the budget is spent
+/// (`reduction-costs-one-budget-unit`). A step needs a unit to start. One
+/// that `advanced` its machine's state pays one unit as it ends, after
+/// the operand evaluation within it paid its own; when that spent the
+/// last unit, the step's own is forgiven, as a batch's overrun is, so a
+/// one-unit poll still makes progress. Reporting a boundary or a failure
+/// is free.
+pub(in crate::eval) fn machine_steps<P>(
+    access: &crate::evaluation::EvaluationValueAccess<'_>,
+    step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    exhausted: impl Fn() -> P,
+    continues: impl Fn(&P) -> bool,
+    advanced: impl Fn(&P) -> bool,
+    mut step: impl FnMut(&mut crate::evaluation::EvaluationStepBudget) -> P,
+) -> P {
+    loop {
+        if step_budget.remaining() == 0 {
+            return exhausted();
+        }
+        let poll = step(step_budget);
+        if advanced(&poll) {
+            let _ = step_budget.try_consume();
+            #[cfg(feature = "glam-prof")]
+            access
+                .values()
+                .values()
+                .record_reduction(crate::profiling::EvaluationReduction::BuiltinStep);
+        }
+        if !continues(&poll) {
+            #[cfg(not(feature = "glam-prof"))]
+            let _ = access;
+            return poll;
+        }
+    }
 }

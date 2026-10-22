@@ -267,7 +267,7 @@ fn poll_key_conversion(context: &EvalContext, machine: &mut KeyConversionMachine
             });
         match result {
             ConversionPoll::Ready(key) => return key,
-            ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {}
+            ConversionPoll::BudgetExhausted => {}
             ConversionPoll::Pending(_) => panic!("the strict key fixture must not suspend"),
             ConversionPoll::Failed(failure) => {
                 panic!("the strict key fixture failed: {failure:?}")
@@ -286,7 +286,7 @@ fn poll_key_list(context: &EvalContext, machine: &mut KeyListMachine) -> Vec<Key
             });
         match result {
             ConversionPoll::Ready(keys) => return keys,
-            ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {}
+            ConversionPoll::BudgetExhausted => {}
             ConversionPoll::Pending(_) => panic!("the strict list fixture must not suspend"),
             ConversionPoll::Failed(failure) => {
                 panic!("the strict list fixture failed: {failure:?}")

@@ -515,13 +515,13 @@ control-flow overview.
   after the client has released that lease.
 - Keep evaluator quantum vocabulary exact. `EvaluationStepBudget::spent()` is
   the transition count consumed inside one claimed poll. The foreground exact
-  demand driver's scalar is instead a conservative reservation allowance: it
-  reserves a whole quantum and does not refund unused units. Its
-  `BudgetExhausted` result must never be presented as an exact-spend report.
-  The runtime background pump does translate exact inner spend into its public
-  report. Nested WHNF and list-front machines borrow the same mutable budget;
-  they never recreate an allowance from the remaining count. An outer
-  administrative phase charges one transition only when its child spent none.
+  demand driver lends each poll a quantum from its scalar and takes back what
+  the poll did not reduce, so its `BudgetExhausted` result reports exact
+  spend, as the runtime background pump's report does. Nested WHNF and
+  list-front machines borrow the same mutable budget; they never recreate an
+  allowance from the remaining count. A machine or reflection phase step
+  that changes state pays one unit as it ends, forgiven when its
+  delegations spent the last (`docs/plans/PollBudget_2026-10-22.md`).
 - Preserve inactive per-heap allocation cursors across ordinary worker
   quantums, but explicitly release all such thread-local cache records when a
   worker terminates. This exit boundary must run only after scoped mutators

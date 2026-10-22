@@ -154,7 +154,7 @@ fn run_search(
 
     loop {
         match search.poll(SEARCH_STEP_BUDGET) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 if let Some(error) = blocked.error() {
                     return Err(CliError::from_failure(

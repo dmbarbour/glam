@@ -109,18 +109,6 @@ impl EvaluationStepBudget {
             .checked_sub(steps)
             .expect("delegated work must stay within its granted budget");
     }
-
-    /// Charges one administrative transition only when delegated work did
-    /// not already consume from this same budget.
-    pub(crate) fn charge_if_unchanged(&mut self, previous_remaining: usize) {
-        debug_assert!(self.remaining <= previous_remaining);
-        if self.remaining == previous_remaining {
-            assert!(
-                self.try_consume(),
-                "an admitted evaluation transition must retain one budget unit"
-            );
-        }
-    }
 }
 
 const _: () = {

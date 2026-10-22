@@ -22,6 +22,7 @@ use crate::list::{ListBackLeafStep, ListBackStep, ListFrontLeafStep, ListFrontSt
 use crate::number::Number;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
+use super::lazy_checkpoint::machine_steps;
 use super::whnf::{
     RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfPoll,
     drive_regional_in_place, reduce_semantic_shell,
@@ -30,7 +31,6 @@ use super::whnf::{
 pub(crate) enum ListFrontPoll {
     Ready(Option<(RuntimeValueRoot, RuntimeValueRoot)>),
     Pending(crate::evaluation::WorkDependency),
-    Continue,
     BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
@@ -102,7 +102,6 @@ pub(in crate::eval) enum RegionalListBackPoll<Item = Value> {
 enum DurableListFrontPoll {
     Ready(Option<(RuntimeValueRoot, RuntimeValueRoot)>),
     Boundary(RegionalBoundaryRequest),
-    Continue,
     BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
@@ -439,7 +438,21 @@ impl ManagedListFrontRoot {
                 &mut *state,
                 RegionalListFront::trace_managed_edges,
                 RegionalListFront::trace_managed_edges,
-                |state| state.poll_in(access, step_budget),
+                |state| {
+                    machine_steps(
+                        access,
+                        step_budget,
+                        || RegionalListFrontPoll::BudgetExhausted,
+                        |poll| matches!(poll, RegionalListFrontPoll::Continue),
+                        |poll| {
+                            matches!(
+                                poll,
+                                RegionalListFrontPoll::Continue | RegionalListFrontPoll::Ready(_)
+                            )
+                        },
+                        |budget| state.poll_in(access, budget),
+                    )
+                },
             )
         };
         match result {
@@ -451,7 +464,9 @@ impl ManagedListFrontRoot {
             }
             RegionalListFrontPoll::Ready(None) => DurableListFrontPoll::Ready(None),
             RegionalListFrontPoll::Boundary(request) => DurableListFrontPoll::Boundary(request),
-            RegionalListFrontPoll::Continue => DurableListFrontPoll::Continue,
+            RegionalListFrontPoll::Continue => {
+                unreachable!("a durable list front runs its steps until it stops")
+            }
             RegionalListFrontPoll::BudgetExhausted => DurableListFrontPoll::BudgetExhausted,
             RegionalListFrontPoll::Failed(failure) => {
                 DurableListFrontPoll::Failed(access.values().root_runtime_failure(failure))
@@ -480,7 +495,6 @@ fn interpret_durable_list_front(
                 }
             }
         }
-        DurableListFrontPoll::Continue => ListFrontPoll::Continue,
         DurableListFrontPoll::BudgetExhausted => ListFrontPoll::BudgetExhausted,
         DurableListFrontPoll::Failed(failure) => ListFrontPoll::Failed(failure),
     }
@@ -616,7 +630,7 @@ mod tests {
 
         assert!(matches!(
             poll_front(&mut machine, &context, 1),
-            ListFrontPoll::Continue
+            ListFrontPoll::BudgetExhausted
         ));
         assert_eq!(
             context.values().managed_root_registrations_for_test(),
@@ -646,7 +660,7 @@ mod tests {
         let (item, tail) = loop {
             match poll_front(&mut machine, &context, 1) {
                 ListFrontPoll::Ready(Some(result)) => break result,
-                ListFrontPoll::Continue | ListFrontPoll::BudgetExhausted => {
+                ListFrontPoll::BudgetExhausted => {
                     context
                         .values()
                         .collect_managed_for_test()

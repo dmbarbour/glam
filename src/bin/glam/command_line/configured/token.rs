@@ -74,7 +74,7 @@ where
 
     loop {
         match search.poll(SEARCH_STEP_BUDGET) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Complete(branches) => {
                 let mut values = Vec::new();
                 let mut furthest = 0;

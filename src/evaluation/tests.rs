@@ -83,12 +83,8 @@ fn evaluation_step_budget_reports_exact_zero_one_and_many_spend() {
 
     let mut many = EvaluationStepBudget::new(4);
     assert!(many.try_consume());
-    let after_child = many.remaining();
     assert!(many.try_consume());
-    many.charge_if_unchanged(after_child);
     assert_eq!((many.granted(), many.remaining(), many.spent()), (4, 2, 2));
-    many.charge_if_unchanged(many.remaining());
-    assert_eq!((many.remaining(), many.spent()), (1, 3));
 }
 
 /// Compile-exhaustive ownership inventory for every value-bearing machine

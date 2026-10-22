@@ -1652,7 +1652,7 @@ fn drive_request_decode(
         }) {
             RequestDecodePoll::Ready(request) => return Ok(request),
             RequestDecodePoll::Continue => {}
-            RequestDecodePoll::Yielded => {}
+            RequestDecodePoll::BudgetExhausted => {}
             RequestDecodePoll::Pending(WorkDependency::Wait(wait)) => {
                 assert!(matches!(
                     context.pump_wait(&wait, 4_096),
@@ -1831,7 +1831,7 @@ fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>)
 
 fn assert_effect_decode_step_inventory(step: &EffectDecodeStep<TestEffects>) {
     match step {
-        EffectDecodeStep::Continue(decoding) | EffectDecodeStep::Yielded(decoding) => {
+        EffectDecodeStep::Continue(decoding) | EffectDecodeStep::BudgetExhausted(decoding) => {
             let _: &EffectDecodeWork<TestEffects> = decoding;
         }
         EffectDecodeStep::Complete(work) => {
@@ -1933,14 +1933,14 @@ fn assert_state_path_root_inventory(
         ValuePathPoll::Pending(dependency) => {
             let _: &WorkDependency = dependency;
         }
-        ValuePathPoll::Yielded => {}
+        ValuePathPoll::Continue | ValuePathPoll::BudgetExhausted => {}
         ValuePathPoll::Failed(error) => {
             let _: &TaskHalt = error;
         }
     }
 
     match step {
-        StatePathStep::Continue(work) | StatePathStep::Yielded(work) => {
+        StatePathStep::Continue(work) | StatePathStep::BudgetExhausted(work) => {
             let _: &StatePathWork<TestEffects> = work;
         }
         StatePathStep::Complete(work) => {
@@ -2060,7 +2060,7 @@ fn drive_reset_stack_decoder(
             )
         }) {
             ResetStackPoll::Ready(stack) => return Ok(stack),
-            ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
+            ResetStackPoll::Continue | ResetStackPoll::BudgetExhausted => {}
             ResetStackPoll::Pending(WorkDependency::Wait(wait)) => {
                 assert!(matches!(
                     context.pump_wait(&wait, 4_096),
@@ -2359,7 +2359,7 @@ fn reset_stack_decoder_resumes_a_promised_numeric_field() {
                 &mut crate::evaluation::EvaluationStepBudget::new(1),
             )
         }) {
-            ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
+            ResetStackPoll::Continue | ResetStackPoll::BudgetExhausted => {}
             ResetStackPoll::Pending(WorkDependency::Promise(dependency)) => break dependency,
             ResetStackPoll::Pending(other) => panic!("unexpected dependency: {other:?}"),
             ResetStackPoll::Ready(_) => panic!("promised scope completed before publication"),
@@ -2486,7 +2486,7 @@ fn dropping_a_blocked_reset_stack_decoder_releases_its_owner_without_consuming_t
                 &mut crate::evaluation::EvaluationStepBudget::new(1),
             )
         }) {
-            ResetStackPoll::Continue | ResetStackPoll::Yielded => {}
+            ResetStackPoll::Continue | ResetStackPoll::BudgetExhausted => {}
             ResetStackPoll::Pending(WorkDependency::Promise(_)) => break,
             ResetStackPoll::Pending(other) => panic!("unexpected dependency: {other:?}"),
             ResetStackPoll::Ready(_) => panic!("unfulfilled promise completed"),
@@ -2558,7 +2558,7 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
 
     let blocked = loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
             EffectTaskPoll::Complete(_) => panic!("unfulfilled reset key completed"),
             EffectTaskPoll::Failed(error) => panic!("unfulfilled reset key failed: {error}"),
@@ -2614,7 +2614,7 @@ fn shift_control_work_does_not_capture_before_its_key_resolves() {
 
     loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => {
                 assert!(matches!(
                     blocked.dependency,
@@ -2706,7 +2706,7 @@ fn captured_control_installation_waits_before_publishing_its_resume_layer() {
 
     loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => {
                 assert!(matches!(
                     blocked.dependency,
@@ -2762,7 +2762,7 @@ fn initial_fixpoint_waits_for_the_reset_stack_before_allocating_control() {
 
     loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => {
                 assert!(matches!(
                     blocked.dependency,
@@ -2853,7 +2853,7 @@ fn fixpoint_restart_retains_its_selection_while_the_entry_stack_is_blocked() {
 
     loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => {
                 assert!(matches!(
                     blocked.dependency,
@@ -2946,7 +2946,7 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
 
         loop {
             match task.poll(1) {
-                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::BudgetExhausted => {}
                 EffectTaskPoll::Blocked(_) => break,
                 _ => panic!("unfulfilled delivery stack did not block"),
             }
@@ -2971,7 +2971,7 @@ fn delivery_selects_reset_or_delimiter_only_after_stack_decoding() {
         crate::core::set_test_promise(&values, &stack, Value::List(List::from_values(vec![frame])))
             .expect_without_debug("delivery stack should publish once");
         while task.execution.controlling.is_some() {
-            assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
+            assert!(matches!(task.poll(1), EffectTaskPoll::BudgetExhausted));
         }
         match (&task.execution.work, reset_wins) {
             (MachineWork::Apply { .. }, true) => {}
@@ -3029,7 +3029,7 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
 
     loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => {
                 assert!(matches!(
                     blocked.dependency,
@@ -3049,7 +3049,7 @@ fn restore_delimiter_waits_for_its_saved_stack_before_replacing_control() {
     crate::core::set_test_promise(&values, &saved, Value::List(List::empty()))
         .expect_without_debug("saved restore stack should publish once");
     while task.execution.controlling.is_some() {
-        assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
+        assert!(matches!(task.poll(1), EffectTaskPoll::BudgetExhausted));
     }
     let MachineWork::Deliver { branch, .. } = &task.execution.work else {
         panic!("restore should redeliver after replacing control")
@@ -3114,7 +3114,7 @@ fn malformed_restore_stack_fails_before_popping_the_delimiter() {
 
     let blocked = loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => {
+            EffectTaskPoll::BudgetExhausted => {
                 assert_eq!(
                     task.execution
                         .active_branch()
@@ -3164,7 +3164,7 @@ fn retry_wake_and_terminalization_discard_blocked_control_work() {
         .expect("blocked-control fixture should construct");
         loop {
             match task.poll(1) {
-                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::BudgetExhausted => {}
                 EffectTaskPoll::Blocked(_) => return task,
                 _ => panic!("unfulfilled reset key did not block"),
             }
@@ -3353,7 +3353,7 @@ fn assert_specialization_step_inventory(step: &SpecializationStep<TestEffects>) 
     match step {
         SpecializationStep::Continue(specializing)
         | SpecializationStep::Blocked(specializing, _)
-        | SpecializationStep::Yielded(specializing)
+        | SpecializationStep::BudgetExhausted(specializing)
         | SpecializationStep::Failed(specializing, _) => {
             let _: &SpecializationWork<TestEffects> = specializing;
         }
@@ -3370,7 +3370,7 @@ fn assert_specialization_step_inventory(step: &SpecializationStep<TestEffects>) 
         }
         SpecializationStep::Continue(_)
         | SpecializationStep::Complete(_)
-        | SpecializationStep::Yielded(_) => {}
+        | SpecializationStep::BudgetExhausted(_) => {}
     }
 }
 
@@ -3421,7 +3421,7 @@ fn assert_task_exit_inventory(poll: &TaskExitBlock, state: &TaskExitState<TestEf
 
 fn assert_task_terminal_inventory(poll: &EffectTaskPoll, terminal: &TaskTerminal) {
     match poll {
-        EffectTaskPoll::Yielded | EffectTaskPoll::Cancelled => {}
+        EffectTaskPoll::BudgetExhausted | EffectTaskPoll::Cancelled => {}
         EffectTaskPoll::Blocked(blocked) => {
             let _: &TaskBlock = blocked;
         }
@@ -3762,7 +3762,7 @@ fn poll_isolated_search<S: TaskSpecialization>(
 ) -> Arc<[IsolatedSearchBranch<S>]> {
     loop {
         match search.poll(256) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Complete(results) => return results,
             IsolatedSearchPoll::Blocked(blocked) => panic!(
                 "finite isolated search blocked: dependency={}, generation={:?}, error={:?}",
@@ -4273,7 +4273,7 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
 
         let blocked = loop {
             match task.poll(512) {
-                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::BudgetExhausted => {}
                 EffectTaskPoll::Blocked(blocked) => break blocked,
                 EffectTaskPoll::Complete(_) => {
                     panic!("{label} publication fixture should suspend after its read")
@@ -4305,7 +4305,7 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
 
         let value = loop {
             match task.poll(512) {
-                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::BudgetExhausted => {}
                 EffectTaskPoll::Complete(value) => break value,
                 EffectTaskPoll::Blocked(_) => panic!("{label} fixture remained blocked"),
                 EffectTaskPoll::Failed(error) => panic!("{label} fixture failed: {error}"),
@@ -4361,7 +4361,7 @@ fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
 
     let blocked = loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
             EffectTaskPoll::Complete(_) => {
                 panic!("standalone-volume fixture should suspend after its read")
@@ -4387,7 +4387,7 @@ fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
 
     let value = loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Complete(value) => break value,
             EffectTaskPoll::Blocked(_) => panic!("standalone-volume fixture remained blocked"),
             EffectTaskPoll::Failed(error) => panic!("standalone-volume fixture failed: {error}"),
@@ -4584,7 +4584,7 @@ fn isolated_search_reports_and_resumes_retryable_state_observations() {
 
     let generation = loop {
         match search.poll(256) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 assert!(!blocked.waiting_on_dependency());
                 break blocked
@@ -4630,7 +4630,7 @@ fn isolated_search_retries_observed_errors_without_advancing_choice() {
 
     let generation = loop {
         match search.poll(256) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 assert!(!blocked.waiting_on_dependency());
                 let error = blocked
@@ -4682,7 +4682,7 @@ fn isolated_search_keeps_unobserved_errors_terminal() {
 
     loop {
         match search.poll(256) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Failed(error) => {
                 assert!(error.to_string().contains("requires a function value"));
                 assert_eq!(
@@ -4744,7 +4744,7 @@ fn isolated_search_reports_and_resumes_lazy_dependencies() {
 
     loop {
         match search.poll(256) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 assert!(blocked.waiting_on_dependency());
                 assert!(blocked.observed_generation().is_none());
@@ -4791,10 +4791,10 @@ fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
     )
     .unwrap();
 
-    assert!(matches!(task.poll(1), EffectTaskPoll::Yielded));
+    assert!(matches!(task.poll(1), EffectTaskPoll::BudgetExhausted));
     let value = loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Complete(value) => break value,
             EffectTaskPoll::Blocked(_) => panic!("finite task unexpectedly blocked"),
             EffectTaskPoll::Failed(error) => panic!("finite task failed: {error}"),
@@ -4825,7 +4825,7 @@ fn nested_effect_work_cannot_renew_one_shared_poll_budget() {
         EvaluationPollContext::quantum_for_context(&eval_context, |poll| {
             task.poll_with_context(poll, &mut budget)
         }),
-        EffectTaskPoll::Yielded
+        EffectTaskPoll::BudgetExhausted
     ));
     assert_eq!(budget.granted(), 3);
     assert_eq!(budget.remaining(), 0);
@@ -5023,7 +5023,7 @@ fn internal_exit_error_message_failure_is_an_ordinary_task_failure() {
 
     loop {
         match task.poll(256) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Failed(_) => break,
             EffectTaskPoll::Blocked(_) => {
                 panic!("failed exit message unexpectedly blocked")
@@ -6360,7 +6360,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
 
     let blocked = loop {
         match task.poll(256) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
             _ => panic!("eval should suspend on its value's pending dependency"),
         }
@@ -6408,7 +6408,7 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
 
     let blocked = loop {
         match task.poll(256) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
             _ => panic!("the hostile specialization demand should suspend"),
         }
@@ -6428,7 +6428,7 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
     .expect_without_debug("the hostile demand dependency should resolve once");
     let value = loop {
         match task.poll(256) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Complete(value) => break value,
             EffectTaskPoll::Blocked(_) => panic!("the resolved hostile demand stayed blocked"),
             EffectTaskPoll::Failed(error) => panic!("the hostile request failed: {error}"),
@@ -6458,7 +6458,7 @@ fn specialization_request_completes_under_one_step_polling_without_replay() {
     let mut yields = 0;
     let value = loop {
         match task.poll(1) {
-            EffectTaskPoll::Yielded => yields += 1,
+            EffectTaskPoll::BudgetExhausted => yields += 1,
             EffectTaskPoll::Complete(value) => break value,
             EffectTaskPoll::Blocked(_) => {
                 panic!("strict one-step specialization request became blocked")
@@ -6502,7 +6502,7 @@ fn specialization_request_propagates_terminal_demand_failure_without_replay() {
 
     let blocked = loop {
         match task.poll(64) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
             _ => panic!("unresolved specialization demand must block"),
         }
@@ -6521,7 +6521,7 @@ fn specialization_request_propagates_terminal_demand_failure_without_replay() {
     .expect_without_debug("specialization dependency should fail once");
     let error = loop {
         match task.poll(64) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Failed(error) => break error,
             EffectTaskPoll::Blocked(_) => panic!("terminal dependency remained blocked"),
             _ => panic!("terminal specialization failure produced another disposition"),
@@ -7661,7 +7661,7 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
         );
         polls += 1;
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
             EffectTaskPoll::Complete(_) => panic!("retryable error unexpectedly completed"),
             EffectTaskPoll::Failed(error) => panic!("retryable error failed: {error}"),
@@ -7687,7 +7687,7 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
     ));
     let value = loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Complete(value) => break value,
             EffectTaskPoll::Blocked(_) => panic!("changed observation did not retry the cut"),
             EffectTaskPoll::Failed(error) => panic!("retryable task failed: {error}"),
@@ -7802,7 +7802,7 @@ fn polling_reports_state_block_without_waiting_in_the_machine() {
     // the state block may take more than one call.
     let blocked = (0..16)
         .find_map(|_| match task.poll(256) {
-            EffectTaskPoll::Yielded => None,
+            EffectTaskPoll::BudgetExhausted => None,
             EffectTaskPoll::Blocked(blocked) => Some(blocked),
             _ => panic!("empty queue should suspend the task"),
         })
@@ -7817,7 +7817,7 @@ fn polling_reports_state_block_without_waiting_in_the_machine() {
         "available now",
     ));
     let completed = (0..16).find_map(|_| match task.poll(256) {
-        EffectTaskPoll::Yielded => None,
+        EffectTaskPoll::BudgetExhausted => None,
         poll => Some(poll),
     });
     assert!(matches!(completed, Some(EffectTaskPoll::Complete(_))));
@@ -7842,7 +7842,7 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
 
     let blocked = loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
             EffectTaskPoll::Complete(value) => panic!(
                 "annotation dependency completed early with {:?}",
@@ -7864,7 +7864,7 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
         .expect("the host promise should accept its value");
     let value = loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Complete(value) => break value,
             EffectTaskPoll::Blocked(_) => panic!("completed dependency remained blocked"),
             EffectTaskPoll::Failed(error) => panic!("resumed task failed: {error}"),
@@ -7894,7 +7894,7 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
 
     let blocked = loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
             _ => panic!("right alternative should retain the failed queue observation"),
         }
@@ -7914,7 +7914,7 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
     ));
     let value = loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Complete(value) => break value,
             EffectTaskPoll::Blocked(_) => panic!("changed observation did not restart cut"),
             EffectTaskPoll::Failed(error) => panic!("restarted cut failed: {error}"),
@@ -7975,7 +7975,7 @@ fn suspend_heap_transaction(
     .unwrap();
     loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => {
                 assert!(
                     blocked.dependency.is_some(),
@@ -8000,7 +8000,7 @@ fn suspend_heap_transaction(
 fn poll_suspended_transaction(task: &mut EffectTask<TestEffects>) -> TaskBlock {
     loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => return blocked,
             EffectTaskPoll::Complete(_) => panic!("transaction dependency completed early"),
             EffectTaskPoll::Failed(error) => panic!("transaction failed: {error}"),
@@ -8066,7 +8066,7 @@ fn suspended_transaction_revalidation_uses_the_configured_store_policy() {
             .expect("the transaction gate should accept its value");
         let value = loop {
             match fixture.task.poll(512) {
-                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::BudgetExhausted => {}
                 EffectTaskPoll::Complete(value) => break value,
                 EffectTaskPoll::Blocked(_) => panic!("{policy} did not resume its exact wait"),
                 EffectTaskPoll::Failed(error) => panic!("{policy} failed after resume: {error}"),
@@ -8163,7 +8163,7 @@ fn nonconflicting_store_publication_retains_a_specialization_dependency() {
         .expect("the specialization gate should accept its value");
     let value = loop {
         match task.poll(512) {
-            EffectTaskPoll::Yielded => {}
+            EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Complete(value) => break value,
             EffectTaskPoll::Blocked(_) => panic!("completed specialization gate stayed blocked"),
             EffectTaskPoll::Failed(error) => panic!("specialization task failed: {error}"),
@@ -9317,7 +9317,7 @@ fn a_cut_that_read_a_promise_pending_retries_once_it_resolves() {
     .expect("the watcher should initialize");
     let generation = loop {
         match search.poll(256) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 assert!(!blocked.waiting_on_dependency());
                 break blocked

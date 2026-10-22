@@ -241,7 +241,7 @@ impl IsolatedSearchBlock {
 
 #[doc(hidden)]
 pub enum IsolatedSearchPoll<S: TaskSpecialization> {
-    Yielded,
+    BudgetExhausted,
     Blocked(IsolatedSearchBlock),
     Complete(Arc<[IsolatedSearchBranch<S>]>),
     Failed(TaskHalt),
@@ -296,7 +296,7 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
 
     fn map_poll(&mut self, poll: EffectTaskPoll) -> IsolatedSearchPoll<S> {
         match poll {
-            EffectTaskPoll::Yielded => IsolatedSearchPoll::Yielded,
+            EffectTaskPoll::BudgetExhausted => IsolatedSearchPoll::BudgetExhausted,
             EffectTaskPoll::Blocked(blocked) => {
                 let error = blocked.error.map(TaskHalt::rooted_failure);
                 let dependency = match blocked.dependency {
@@ -423,7 +423,7 @@ mod tests {
         let _: &Option<TaskHalt> = error;
 
         match poll {
-            IsolatedSearchPoll::Yielded | IsolatedSearchPoll::Cancelled => {}
+            IsolatedSearchPoll::BudgetExhausted | IsolatedSearchPoll::Cancelled => {}
             IsolatedSearchPoll::Blocked(block) => {
                 let _: &IsolatedSearchBlock = block;
             }

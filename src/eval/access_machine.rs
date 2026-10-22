@@ -26,6 +26,7 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 #[cfg(test)]
 use crate::test_support::ResultTestExt as _;
 
+use super::lazy_checkpoint::machine_steps;
 use super::whnf::{
     RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, WhnfPoll,
     drive_regional_in_place, reduce_semantic_shell,
@@ -60,7 +61,6 @@ enum AccessConversion {
 pub(crate) enum ConversionPoll<T> {
     Ready(T),
     Pending(crate::evaluation::WorkDependency),
-    Continue,
     BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
@@ -164,7 +164,6 @@ pub(in crate::eval) enum RegionalConversionPoll<T> {
 enum DurableConversionPoll<T> {
     Ready(T),
     Boundary(RegionalBoundaryRequest),
-    Continue,
     BudgetExhausted,
     Failed(RuntimeFailureRoot),
 }
@@ -375,7 +374,6 @@ impl KeyConversionMachine {
                 "dictionary keys must evaluate to keyable values",
             )),
             ConversionPoll::Pending(dependency) => ConversionPoll::Pending(dependency),
-            ConversionPoll::Continue => ConversionPoll::Continue,
             ConversionPoll::BudgetExhausted => ConversionPoll::BudgetExhausted,
             ConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
         }
@@ -486,9 +484,19 @@ impl ManagedKeyConversionRoot {
     ) -> DurableConversionPoll<Option<Key>> {
         self.with_state_transition(access, |state| {
             let result = match state {
-                ManagedKeyConversionState::Key(state) => {
-                    state.poll_optional_in(access, step_budget)
-                }
+                ManagedKeyConversionState::Key(state) => machine_steps(
+                    access,
+                    step_budget,
+                    || RegionalConversionPoll::BudgetExhausted,
+                    |poll| matches!(poll, RegionalConversionPoll::Continue),
+                    |poll| {
+                        matches!(
+                            poll,
+                            RegionalConversionPoll::Continue | RegionalConversionPoll::Ready(_)
+                        )
+                    },
+                    |budget| state.poll_optional_in(access, budget),
+                ),
                 ManagedKeyConversionState::CompleteKey(key) => {
                     return RegionalConversionPoll::Ready(key.clone());
                 }
@@ -515,7 +523,19 @@ impl ManagedKeyConversionRoot {
     ) -> DurableConversionPoll<Vec<Key>> {
         self.with_state_transition(access, |state| {
             let result = match state {
-                ManagedKeyConversionState::List(state) => state.poll_in(access, step_budget),
+                ManagedKeyConversionState::List(state) => machine_steps(
+                    access,
+                    step_budget,
+                    || RegionalConversionPoll::BudgetExhausted,
+                    |poll| matches!(poll, RegionalConversionPoll::Continue),
+                    |poll| {
+                        matches!(
+                            poll,
+                            RegionalConversionPoll::Continue | RegionalConversionPoll::Ready(_)
+                        )
+                    },
+                    |budget| state.poll_in(access, budget),
+                ),
                 ManagedKeyConversionState::CompleteList(keys) => {
                     return RegionalConversionPoll::Ready(keys.clone());
                 }
@@ -570,7 +590,9 @@ impl ManagedKeyConversionRoot {
         match result {
             RegionalConversionPoll::Ready(value) => DurableConversionPoll::Ready(value),
             RegionalConversionPoll::Boundary(request) => DurableConversionPoll::Boundary(request),
-            RegionalConversionPoll::Continue => DurableConversionPoll::Continue,
+            RegionalConversionPoll::Continue => {
+                unreachable!("a durable conversion runs its steps until it stops")
+            }
             RegionalConversionPoll::BudgetExhausted => DurableConversionPoll::BudgetExhausted,
             RegionalConversionPoll::Failed(failure) => {
                 DurableConversionPoll::Failed(access.values().root_runtime_failure(failure))
@@ -1012,7 +1034,6 @@ fn interpret_durable_conversion<T>(
                 }
             }
         }
-        DurableConversionPoll::Continue => ConversionPoll::Continue,
         DurableConversionPoll::BudgetExhausted => ConversionPoll::BudgetExhausted,
         DurableConversionPoll::Failed(failure) => ConversionPoll::Failed(failure),
     }
@@ -1189,7 +1210,7 @@ mod tests {
             let first = loop {
                 match root.poll_key_in(&access, &mut EvaluationStepBudget::new(8)) {
                     DurableConversionPoll::Ready(key) => break key,
-                    DurableConversionPoll::Continue | DurableConversionPoll::BudgetExhausted => {}
+                    DurableConversionPoll::BudgetExhausted => {}
                     DurableConversionPoll::Boundary(_) => {
                         panic!("strict key conversion must not reach a semantic boundary")
                     }
@@ -1254,7 +1275,7 @@ mod tests {
         let result = loop {
             match poll_key(&mut machine, &context, 1) {
                 ConversionPoll::Ready(key) => break key,
-                ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {
+                ConversionPoll::BudgetExhausted => {
                     context
                         .values()
                         .collect_managed_for_test()
@@ -1298,7 +1319,7 @@ mod tests {
 
         assert!(matches!(
             poll_key_list(&mut machine, &context, 1),
-            ConversionPoll::Continue
+            ConversionPoll::BudgetExhausted
         ));
         assert_eq!(
             context.values().managed_root_registrations_for_test(),
@@ -1313,7 +1334,7 @@ mod tests {
         loop {
             match poll_key_list(&mut machine, &context, 1) {
                 ConversionPoll::Pending(_) => break,
-                ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {
+                ConversionPoll::BudgetExhausted => {
                     context
                         .values()
                         .collect_managed_for_test()
@@ -1341,7 +1362,7 @@ mod tests {
         let keys = loop {
             match poll_key_list(&mut machine, &context, 1) {
                 ConversionPoll::Ready(keys) => break keys,
-                ConversionPoll::Continue | ConversionPoll::BudgetExhausted => {
+                ConversionPoll::BudgetExhausted => {
                     context
                         .values()
                         .collect_managed_for_test()

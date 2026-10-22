@@ -559,7 +559,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let values = self.eval_context.values().clone();
         values.with_runtime_value_mutator(|mut mutator| loop {
             match self.poll_under(&mut mutator, 256) {
-                EffectTaskPoll::Yielded => {}
+                EffectTaskPoll::BudgetExhausted => {}
                 EffectTaskPoll::Blocked(blocked) => {
                     if let Some(dependency) = blocked.dependency {
                         // A panicked dependency would otherwise be pumped
@@ -653,8 +653,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     /// Polls this task within one total budget of `steps`, including the work
-    /// it pumps while waiting. Each pass charges at least one step, so a call
-    /// never spends more than `steps`.
+    /// it pumps while waiting, so a call never spends more than `steps`.
     pub(super) fn poll(&mut self, steps: usize) -> EffectTaskPoll {
         let mut budget = crate::evaluation::EvaluationStepBudget::new(steps.max(1));
         let eval_context = self.eval_context.clone();
@@ -672,9 +671,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         budget: &mut crate::evaluation::EvaluationStepBudget,
     ) -> EffectTaskPoll {
         while budget.remaining() != 0 {
-            let before = budget.remaining();
             let poll = self.poll_with_context(context, budget);
-            budget.charge_if_unchanged(before);
             let EffectTaskPoll::Blocked(blocked) = &poll else {
                 return poll;
             };
@@ -707,7 +704,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             );
             match pumped {
                 EvaluationPumpOutcome::TargetReady => {}
-                EvaluationPumpOutcome::BudgetExhausted => return EffectTaskPoll::Yielded,
+                EvaluationPumpOutcome::BudgetExhausted => return EffectTaskPoll::BudgetExhausted,
                 EvaluationPumpOutcome::Busy | EvaluationPumpOutcome::NoProgress => {
                     if let Some(error) = blocked.dependency.as_ref().and_then(|dependency| {
                         self.eval_context.recursive_promise_dependency(dependency)
@@ -721,7 +718,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
             }
         }
-        EffectTaskPoll::Yielded
+        EffectTaskPoll::BudgetExhausted
     }
 
     pub(super) fn poll_with_context(
@@ -747,7 +744,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 .values()
                 .record_reduction(crate::profiling::EvaluationReduction::ReflectionStep);
             if let Some(controlling) = self.execution.controlling.take() {
-                let previous_remaining = step_budget.remaining();
                 match self.control_step(context, controlling, step_budget) {
                     ControlStep::Continue(controlling) => {
                         self.execution.controlling = Some(controlling);
@@ -760,20 +756,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             return poll;
                         }
                     }
-                    ControlStep::Yielded(controlling) => {
+                    ControlStep::BudgetExhausted(controlling) => {
                         self.execution.controlling = Some(controlling);
-                        return EffectTaskPoll::Yielded;
+                        return EffectTaskPoll::BudgetExhausted;
                     }
                     ControlStep::Failed(controlling, error) => {
                         self.execution.controlling = Some(controlling);
-                        return self.handle_step_error(context, error);
+                        if let Some(poll) = self.handle_step_error(context, error) {
+                            return poll;
+                        }
                     }
                 }
-                step_budget.charge_if_unchanged(previous_remaining);
+                // A phase step that advanced pays one unit as it ends,
+                // forgiven when its delegations spent the last.
+                let _ = step_budget.try_consume();
                 continue;
             }
             if let Some(specializing) = self.execution.specializing.take() {
-                let previous_remaining = step_budget.remaining();
                 match self.specialization_step(context, specializing, step_budget) {
                     SpecializationStep::Continue(specializing) => {
                         self.execution.specializing = Some(specializing);
@@ -786,20 +785,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             return poll;
                         }
                     }
-                    SpecializationStep::Yielded(specializing) => {
+                    SpecializationStep::BudgetExhausted(specializing) => {
                         self.execution.specializing = Some(specializing);
-                        return EffectTaskPoll::Yielded;
+                        return EffectTaskPoll::BudgetExhausted;
                     }
                     SpecializationStep::Failed(specializing, error) => {
                         self.execution.specializing = Some(specializing);
-                        return self.handle_step_error(context, error);
+                        if let Some(poll) = self.handle_step_error(context, error) {
+                            return poll;
+                        }
                     }
                 }
-                step_budget.charge_if_unchanged(previous_remaining);
+                // A phase step that advanced pays one unit as it ends,
+                // forgiven when its delegations spent the last.
+                let _ = step_budget.try_consume();
                 continue;
             }
             if let Some(demanding) = self.execution.demanding.take() {
-                let previous_remaining = step_budget.remaining();
                 match self.scalar_demand_step(context, demanding, step_budget) {
                     ScalarDemandStep::Complete(step) => match step {
                         MachineStep::Continue(work) => self.execution.work = work,
@@ -845,20 +847,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             return poll;
                         }
                     }
-                    ScalarDemandStep::Yielded(demanding) => {
+                    ScalarDemandStep::BudgetExhausted(demanding) => {
                         self.execution.demanding = Some(demanding);
-                        return EffectTaskPoll::Yielded;
+                        return EffectTaskPoll::BudgetExhausted;
                     }
                     ScalarDemandStep::Failed(demanding, error) => {
                         self.execution.demanding = Some(demanding);
-                        return self.handle_step_error(context, error);
+                        if let Some(poll) = self.handle_step_error(context, error) {
+                            return poll;
+                        }
                     }
                 }
-                step_budget.charge_if_unchanged(previous_remaining);
+                // A phase step that advanced pays one unit as it ends,
+                // forgiven when its delegations spent the last.
+                let _ = step_budget.try_consume();
                 continue;
             }
             if let Some(pathing) = self.execution.pathing.take() {
-                let previous_remaining = step_budget.remaining();
                 match self.state_path_step(context, pathing, step_budget) {
                     StatePathStep::Continue(pathing) => self.execution.pathing = Some(pathing),
                     StatePathStep::Complete(work) => self.execution.work = work,
@@ -869,20 +874,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             return poll;
                         }
                     }
-                    StatePathStep::Yielded(pathing) => {
+                    StatePathStep::BudgetExhausted(pathing) => {
                         self.execution.pathing = Some(pathing);
-                        return EffectTaskPoll::Yielded;
+                        return EffectTaskPoll::BudgetExhausted;
                     }
                     StatePathStep::Failed(pathing, error) => {
                         self.execution.pathing = Some(pathing);
-                        return self.handle_step_error(context, error);
+                        if let Some(poll) = self.handle_step_error(context, error) {
+                            return poll;
+                        }
                     }
                 }
-                step_budget.charge_if_unchanged(previous_remaining);
+                // A phase step that advanced pays one unit as it ends,
+                // forgiven when its delegations spent the last.
+                let _ = step_budget.try_consume();
                 continue;
             }
             if let Some(decoding) = self.execution.decoding.take() {
-                let previous_remaining = step_budget.remaining();
                 match self.decode_step(context, decoding, step_budget) {
                     EffectDecodeStep::Continue(decoding) => {
                         self.execution.decoding = Some(decoding);
@@ -895,16 +903,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             return poll;
                         }
                     }
-                    EffectDecodeStep::Yielded(decoding) => {
+                    EffectDecodeStep::BudgetExhausted(decoding) => {
                         self.execution.decoding = Some(decoding);
-                        return EffectTaskPoll::Yielded;
+                        return EffectTaskPoll::BudgetExhausted;
                     }
                     EffectDecodeStep::Failed(decoding, error) => {
                         self.execution.decoding = Some(decoding);
-                        return self.handle_step_error(context, error);
+                        if let Some(poll) = self.handle_step_error(context, error) {
+                            return poll;
+                        }
                     }
                 }
-                step_budget.charge_if_unchanged(previous_remaining);
+                // A phase step that advanced pays one unit as it ends,
+                // forgiven when its delegations spent the last.
+                let _ = step_budget.try_consume();
                 continue;
             }
             assert!(step_budget.try_consume());
@@ -961,10 +973,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     self.exit = Some(exit);
                     return EffectTaskPoll::Exit(poll);
                 }
-                Err(error) => return self.handle_step_error(context, error),
+                Err(error) => {
+                    if let Some(poll) = self.handle_step_error(context, error) {
+                        return poll;
+                    }
+                }
             }
         }
-        EffectTaskPoll::Yielded
+        EffectTaskPoll::BudgetExhausted
     }
 
     /// The work for one step. A failed step's recovery (`retry_wake`) reads
@@ -995,21 +1011,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
+    /// Handles a failed step: `None` when its retry restarted the task, which
+    /// goes on within the poll.
     fn handle_step_error(
         &mut self,
         context: &mut EvaluationPollContext,
         error: TaskHalt,
-    ) -> EffectTaskPoll {
+    ) -> Option<EffectTaskPoll> {
         let error = context.with_runtime_access(|access| error.root_in(&access));
         if let Some(retry) = self.retry_wake() {
             let blocked =
                 BlockedExecution::evaluation_error(error, retry, self.eval_context.values());
-            return self
-                .install_blocked(context, blocked)
-                .unwrap_or(EffectTaskPoll::Yielded);
+            return self.install_blocked(context, blocked);
         }
         self.finish_in(context, TaskTerminal::Failed(error));
-        self.terminal.as_ref().expect("terminal set above").poll()
+        Some(self.terminal.as_ref().expect("terminal set above").poll())
     }
 
     fn decode_step(
@@ -1039,7 +1055,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 RequestDecodePoll::Pending(dependency) => {
                     EffectDecodeStep::Blocked(decoding, dependency)
                 }
-                RequestDecodePoll::Yielded => EffectDecodeStep::Yielded(decoding),
+                RequestDecodePoll::BudgetExhausted => EffectDecodeStep::BudgetExhausted(decoding),
                 RequestDecodePoll::Failed(error) => {
                     let error = decoding.contextualize(error, context, &self.eval_context);
                     EffectDecodeStep::Failed(decoding, error)
@@ -1065,7 +1081,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 }
                 EffectDecodeStep::Blocked(decoding, dependency)
             }
-            WhnfOwnerPoll::BudgetExhausted => EffectDecodeStep::Yielded(decoding),
+            WhnfOwnerPoll::BudgetExhausted => EffectDecodeStep::BudgetExhausted(decoding),
             WhnfOwnerPoll::Failed(failure) => {
                 let error = decoding.contextualize(
                     TaskHalt::rooted_failure(failure),
@@ -1102,7 +1118,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     return SpecializationStep::Blocked(specializing, dependency);
                 }
                 WhnfOwnerPoll::BudgetExhausted => {
-                    return SpecializationStep::Yielded(specializing);
+                    return SpecializationStep::BudgetExhausted(specializing);
                 }
                 WhnfOwnerPoll::Failed(failure) => {
                     SpecializationRequestInput::Failed(TaskHalt::rooted_failure(failure))
@@ -1186,7 +1202,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             WhnfOwnerPoll::Pending(dependency) => {
                 return ScalarDemandStep::Blocked(demanding, dependency);
             }
-            WhnfOwnerPoll::BudgetExhausted => return ScalarDemandStep::Yielded(demanding),
+            WhnfOwnerPoll::BudgetExhausted => return ScalarDemandStep::BudgetExhausted(demanding),
             WhnfOwnerPoll::Failed(failure) => {
                 return ScalarDemandStep::Failed(demanding, TaskHalt::rooted_failure(failure));
             }
@@ -1332,13 +1348,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         };
                         ControlStep::Blocked(controlling, dependency)
                     }
-                    eval::ConversionPoll::Continue | eval::ConversionPoll::BudgetExhausted => {
+                    eval::ConversionPoll::BudgetExhausted => {
                         controlling.operation = ControlOperation::Key {
                             key,
                             stack,
                             disposition,
                         };
-                        ControlStep::Yielded(controlling)
+                        ControlStep::BudgetExhausted(controlling)
                     }
                     eval::ConversionPoll::Failed(failure) => {
                         controlling.operation = ControlOperation::Key {
@@ -1487,13 +1503,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     };
                     ControlStep::Blocked(controlling, dependency)
                 }
-                ResetStackPoll::Yielded => {
+                ResetStackPoll::BudgetExhausted => {
                     controlling.operation = ControlOperation::Stack {
                         key,
                         stack,
                         disposition,
                     };
-                    ControlStep::Yielded(controlling)
+                    ControlStep::BudgetExhausted(controlling)
                 }
                 ResetStackPoll::Failed(error) => {
                     controlling.operation = ControlOperation::Stack {
@@ -1601,13 +1617,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     };
                     ControlStep::Blocked(controlling, dependency)
                 }
-                ResetStackPoll::Yielded => {
+                ResetStackPoll::BudgetExhausted => {
                     controlling.operation = ControlOperation::InstallCaptured {
                         stack,
                         captured,
                         value,
                     };
-                    ControlStep::Yielded(controlling)
+                    ControlStep::BudgetExhausted(controlling)
                 }
                 ResetStackPoll::Failed(error) => {
                     controlling.operation = ControlOperation::InstallCaptured {
@@ -1701,13 +1717,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     };
                     ControlStep::Blocked(controlling, dependency)
                 }
-                ResetStackPoll::Yielded => {
+                ResetStackPoll::BudgetExhausted => {
                     controlling.operation = ControlOperation::StartFixpoint {
                         stack,
                         root,
                         choices,
                     };
-                    ControlStep::Yielded(controlling)
+                    ControlStep::BudgetExhausted(controlling)
                 }
                 ResetStackPoll::Failed(error) => {
                     controlling.operation = ControlOperation::StartFixpoint {
@@ -1793,9 +1809,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         controlling.operation = ControlOperation::Delivery { stack, value };
                         ControlStep::Blocked(controlling, dependency)
                     }
-                    ResetStackPoll::Yielded => {
+                    ResetStackPoll::BudgetExhausted => {
                         controlling.operation = ControlOperation::Delivery { stack, value };
-                        ControlStep::Yielded(controlling)
+                        ControlStep::BudgetExhausted(controlling)
                     }
                     ResetStackPoll::Failed(error) => {
                         controlling.operation = ControlOperation::Delivery { stack, value };
@@ -1857,13 +1873,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     };
                     ControlStep::Blocked(controlling, dependency)
                 }
-                ResetStackPoll::Yielded => {
+                ResetStackPoll::BudgetExhausted => {
                     controlling.operation = ControlOperation::Restore {
                         stack,
                         outer,
                         value,
                     };
-                    ControlStep::Yielded(controlling)
+                    ControlStep::BudgetExhausted(controlling)
                 }
                 ResetStackPoll::Failed(error) => {
                     controlling.operation = ControlOperation::Restore {
@@ -1931,8 +1947,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     eval::ConversionPoll::Pending(dependency) => {
                         StatePathStep::Blocked(pathing, dependency)
                     }
-                    eval::ConversionPoll::Continue | eval::ConversionPoll::BudgetExhausted => {
-                        StatePathStep::Yielded(pathing)
+                    eval::ConversionPoll::BudgetExhausted => {
+                        StatePathStep::BudgetExhausted(pathing)
                     }
                     eval::ConversionPoll::Failed(failure) => {
                         StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
@@ -1947,7 +1963,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ValuePathPoll::Pending(dependency) => {
                         StatePathStep::Blocked(pathing, dependency)
                     }
-                    ValuePathPoll::Yielded => StatePathStep::Yielded(pathing),
+                    ValuePathPoll::Continue => StatePathStep::Continue(pathing),
+                    ValuePathPoll::BudgetExhausted => StatePathStep::BudgetExhausted(pathing),
                     ValuePathPoll::Failed(error) => StatePathStep::Failed(pathing, error),
                 }
             }
@@ -1995,7 +2012,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     StatePathStep::Continue(pathing)
                 }
                 WhnfOwnerPoll::Pending(dependency) => StatePathStep::Blocked(pathing, dependency),
-                WhnfOwnerPoll::BudgetExhausted => StatePathStep::Yielded(pathing),
+                WhnfOwnerPoll::BudgetExhausted => StatePathStep::BudgetExhausted(pathing),
                 WhnfOwnerPoll::Failed(failure) => {
                     StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
                 }
@@ -2011,7 +2028,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     WhnfOwnerPoll::Pending(dependency) => {
                         StatePathStep::Blocked(pathing, dependency)
                     }
-                    WhnfOwnerPoll::BudgetExhausted => StatePathStep::Yielded(pathing),
+                    WhnfOwnerPoll::BudgetExhausted => StatePathStep::BudgetExhausted(pathing),
                     WhnfOwnerPoll::Failed(failure) => {
                         StatePathStep::Failed(pathing, TaskHalt::rooted_failure(failure))
                     }
@@ -3873,7 +3890,7 @@ fn poll_value_effect_task<S: TaskSpecialization>(
 ) -> EvaluationMachinePoll {
     let observed_epoch = task.eval_context.current_observation_epoch();
     match task.poll_pumping(context, step_budget) {
-        EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
+        EffectTaskPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
         EffectTaskPoll::Blocked(blocked) => {
             if let Some(error) = blocked
                 .dependency
@@ -3920,7 +3937,7 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
     ) -> EvaluationMachinePoll {
         let observed_epoch = self.0.eval_context.current_observation_epoch();
         match self.0.poll_with_context(context, step_budget) {
-            EffectTaskPoll::Yielded => EvaluationMachinePoll::Yielded,
+            EffectTaskPoll::BudgetExhausted => EvaluationMachinePoll::Yielded,
             EffectTaskPoll::Blocked(blocked) => {
                 EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
                     dependency: blocked.dependency,
@@ -4226,7 +4243,7 @@ enum EffectDecodeStep<S: TaskSpecialization> {
     Continue(EffectDecodeWork<S>),
     Complete(MachineWork<S>),
     Blocked(EffectDecodeWork<S>, WorkDependency),
-    Yielded(EffectDecodeWork<S>),
+    BudgetExhausted(EffectDecodeWork<S>),
     Failed(EffectDecodeWork<S>, TaskHalt),
 }
 
@@ -4274,7 +4291,7 @@ impl<S: TaskSpecialization> ScalarDemandWork<S> {
 enum ScalarDemandStep<S: TaskSpecialization> {
     Complete(MachineStep<S>),
     Blocked(ScalarDemandWork<S>, WorkDependency),
-    Yielded(ScalarDemandWork<S>),
+    BudgetExhausted(ScalarDemandWork<S>),
     Failed(ScalarDemandWork<S>, TaskHalt),
 }
 
@@ -4331,7 +4348,7 @@ enum SpecializationStep<S: TaskSpecialization> {
     Continue(Box<SpecializationWork<S>>),
     Complete(Box<MachineWork<S>>),
     Blocked(Box<SpecializationWork<S>>, WorkDependency),
-    Yielded(Box<SpecializationWork<S>>),
+    BudgetExhausted(Box<SpecializationWork<S>>),
     Failed(Box<SpecializationWork<S>>, TaskHalt),
 }
 
@@ -4493,7 +4510,7 @@ enum ControlStep<S: TaskSpecialization> {
     Continue(ControlWork<S>),
     Complete(MachineWork<S>),
     Blocked(ControlWork<S>, WorkDependency),
-    Yielded(ControlWork<S>),
+    BudgetExhausted(ControlWork<S>),
     Failed(ControlWork<S>, TaskHalt),
 }
 
@@ -4669,7 +4686,7 @@ enum StatePathStep<S: TaskSpecialization> {
     Continue(StatePathWork<S>),
     Complete(MachineWork<S>),
     Blocked(StatePathWork<S>, WorkDependency),
-    Yielded(StatePathWork<S>),
+    BudgetExhausted(StatePathWork<S>),
     Failed(StatePathWork<S>, TaskHalt),
 }
 
@@ -4705,7 +4722,7 @@ impl ValuePathMachine {
         let current = match poll_whnf_computation(demand, poll_context, context, step_budget) {
             WhnfOwnerPoll::Ready(current) => current,
             WhnfOwnerPoll::Pending(dependency) => return ValuePathPoll::Pending(dependency),
-            WhnfOwnerPoll::BudgetExhausted => return ValuePathPoll::Yielded,
+            WhnfOwnerPoll::BudgetExhausted => return ValuePathPoll::BudgetExhausted,
             WhnfOwnerPoll::Failed(failure) => {
                 return ValuePathPoll::Failed(TaskHalt::rooted_failure(failure));
             }
@@ -4728,7 +4745,7 @@ impl ValuePathMachine {
                 self.current = selected;
                 self.next += 1;
                 self.demand = None;
-                ValuePathPoll::Yielded
+                ValuePathPoll::Continue
             }
             Err(error) => ValuePathPoll::Failed(error),
         }
@@ -4738,7 +4755,8 @@ impl ValuePathMachine {
 enum ValuePathPoll {
     Ready(RuntimeValueRoot),
     Pending(WorkDependency),
-    Yielded,
+    Continue,
+    BudgetExhausted,
     Failed(TaskHalt),
 }
 
@@ -5039,7 +5057,7 @@ struct TaskExitState<S: TaskSpecialization> {
 }
 
 pub(super) enum EffectTaskPoll {
-    Yielded,
+    BudgetExhausted,
     Blocked(TaskBlock),
     Exit(TaskExitBlock),
     Complete(PublicValue),
@@ -5521,7 +5539,7 @@ enum RequestDecodePoll<R> {
     Ready(Request<R>),
     Continue,
     Pending(WorkDependency),
-    Yielded,
+    BudgetExhausted,
     Failed(TaskHalt),
 }
 
@@ -5565,7 +5583,9 @@ impl<R: Clone> RequestDecodeWork<R> {
                         WhnfOwnerPoll::Pending(dependency) => {
                             return RequestDecodePoll::Pending(dependency);
                         }
-                        WhnfOwnerPoll::BudgetExhausted => return RequestDecodePoll::Yielded,
+                        WhnfOwnerPoll::BudgetExhausted => {
+                            return RequestDecodePoll::BudgetExhausted;
+                        }
                         WhnfOwnerPoll::Failed(failure) => {
                             return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
                         }
@@ -5604,9 +5624,7 @@ impl<R: Clone> RequestDecodeWork<R> {
                     eval::ListFrontPoll::Pending(dependency) => {
                         RequestDecodePoll::Pending(dependency)
                     }
-                    eval::ListFrontPoll::Continue | eval::ListFrontPoll::BudgetExhausted => {
-                        RequestDecodePoll::Yielded
-                    }
+                    eval::ListFrontPoll::BudgetExhausted => RequestDecodePoll::BudgetExhausted,
                     eval::ListFrontPoll::Failed(failure) => {
                         RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure))
                     }
@@ -5623,7 +5641,7 @@ impl<R: Clone> RequestDecodeWork<R> {
                     RequestIdPoll::Pending(dependency) => {
                         return RequestDecodePoll::Pending(dependency);
                     }
-                    RequestIdPoll::Yielded => return RequestDecodePoll::Yielded,
+                    RequestIdPoll::BudgetExhausted => return RequestDecodePoll::BudgetExhausted,
                     RequestIdPoll::Failed(error) => return RequestDecodePoll::Failed(error),
                 };
                 let Some(task) = EvaluationTaskId::from_u64(task) else {
@@ -5648,7 +5666,7 @@ impl<R: Clone> RequestDecodeWork<R> {
                         Request::Resume(*task, continuation, value.clone()),
                     ),
                     RequestIdPoll::Pending(dependency) => RequestDecodePoll::Pending(dependency),
-                    RequestIdPoll::Yielded => RequestDecodePoll::Yielded,
+                    RequestIdPoll::BudgetExhausted => RequestDecodePoll::BudgetExhausted,
                     RequestIdPoll::Failed(error) => RequestDecodePoll::Failed(error),
                 }
             }
@@ -5663,7 +5681,7 @@ impl<R: Clone> RequestDecodeWork<R> {
                     WhnfOwnerPoll::Pending(dependency) => {
                         return RequestDecodePoll::Pending(dependency);
                     }
-                    WhnfOwnerPoll::BudgetExhausted => return RequestDecodePoll::Yielded,
+                    WhnfOwnerPoll::BudgetExhausted => return RequestDecodePoll::BudgetExhausted,
                     WhnfOwnerPoll::Failed(failure) => {
                         return RequestDecodePoll::Failed(TaskHalt::rooted_failure(failure));
                     }
@@ -5766,7 +5784,7 @@ impl<R: Clone> RequestDecodeWork<R> {
 enum RequestIdPoll {
     Ready(u64),
     Pending(WorkDependency),
-    Yielded,
+    BudgetExhausted,
     Failed(TaskHalt),
 }
 
@@ -5780,7 +5798,7 @@ fn poll_request_id(
     let value = match poll_whnf_computation(demand, poll_context, context, step_budget) {
         WhnfOwnerPoll::Ready(value) => value,
         WhnfOwnerPoll::Pending(dependency) => return RequestIdPoll::Pending(dependency),
-        WhnfOwnerPoll::BudgetExhausted => return RequestIdPoll::Yielded,
+        WhnfOwnerPoll::BudgetExhausted => return RequestIdPoll::BudgetExhausted,
         WhnfOwnerPoll::Failed(failure) => {
             return RequestIdPoll::Failed(TaskHalt::rooted_failure(failure));
         }

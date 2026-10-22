@@ -269,3 +269,16 @@ first.
   gated went. A spark request is submitted from the lazy's poll, which
   goes on to its next phase, so `ScheduleSpark` and the release's spark
   conversion went (`a_spark_request_goes_on_within_its_poll`).
+- `budget-reflection-phases` (2026-10-22): the durable key-conversion and
+  list-front machines that reflection drives run their steps within its
+  poll through `machine_steps`, which became a free function, so their
+  polls only finish, block or exhaust. The value path continues after a
+  key of its own. Every other yield in reflection, through its decoders,
+  phases, `EffectTaskPoll` and `IsolatedSearchPoll`, meant a spent budget,
+  so it is renamed `BudgetExhausted`. A phase step that changes state pays
+  one unit as it ends, forgiven at zero; `poll_pumping` charges nothing of
+  its own, now that a panicked wait cannot spin it; a failed step whose
+  retry restarts goes on within the poll. `charge_if_unchanged` is gone.
+  Left as they were: `UnitEffectTask` polls without `poll_pumping`, and
+  `poll_blocked` and `poll_pumping` both pump a wait; neither breaks the
+  contract.

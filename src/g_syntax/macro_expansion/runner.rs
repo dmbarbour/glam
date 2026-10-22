@@ -132,7 +132,7 @@ pub(in crate::g_syntax) fn run_macro_effect(
     let mut exact_demand_route = ExactDemandRoute::default();
     let branches = loop {
         match search.poll(STEP_BUDGET) {
-            IsolatedSearchPoll::Yielded => {}
+            IsolatedSearchPoll::BudgetExhausted => {}
             IsolatedSearchPoll::Blocked(blocked) => {
                 let Some(dependency) = blocked.dependency().cloned() else {
                     return Err(match blocked.error() {

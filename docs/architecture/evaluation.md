@@ -331,8 +331,11 @@ A step pays one unit when it changes state, and observing is free (decision
   last; reporting a boundary or a failure is free.
 - **Nets:** each rule application is charged at its claim; see
   [`interaction_nets.md`](interaction_nets.md) "The Net Driver".
-- **Reflection:** delegating phases charge an administrative unit only when
-  their child consumed none, and waiting pumps within the caller's budget.
+- **Reflection:** the effect machine runs its phases within a poll while a
+  unit remains. A phase step that changes state pays one unit as it ends,
+  forgiven when its delegations spent the last, as a machine step does;
+  the durable key-conversion and list-front machines it drives run their
+  own steps within its poll; waiting pumps within the caller's budget.
 
 So a one-unit quantum can always advance some work without hiding a renewed
 sub-budget. The demand pump lends each poll a task quantum from its outer
