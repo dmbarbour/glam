@@ -776,6 +776,17 @@ handle API goes.
       started. Done ahead of the rest of this step, with the drain's own
       test of detached `.task.new` failures, which retire with task
       handles.
+    - As built (2026-10-22): the reasoning session is the runtime's compile
+      service. It holds the value factory, the shared execution, the
+      runtime's one invocation counter (moved from the `Assembler`) and
+      the diagnostics bus, and its methods take the served path
+      (`api/assembly/compile.rs`): the compile builtin's compiler holds the
+      session weakly with its import site, so a served compile on a worker
+      builds no `Assembler`; a source audit keeps the module from naming
+      one. Its diagnostics go to the session's bus, which `Runtime` routes
+      into `refl`'s diagnostics input, as reflection effects. The front
+      end is still chosen by extension, in one place. `DeferredAssembler`
+      stays only for the file loaders, which go with `api-cli-sources`.
 20. `api-effect-providers` — absorbs `lifecycle-leases`. A turn runs a
     monadic effect by evaluation, on its own thread (option A, maintainer,
     2026-10-18; see [Effect providers](#effect-providers)).
@@ -1129,7 +1140,9 @@ The review's findings, by the step that resolves each:
 - **L2** (the CLI logger on workers): done with `lifecycle-cli-logger`; the
   logger machine (`api-ports`) ends what remains.
 - **L3, L9** (workers upgrading `DeferredAssembler` for imports):
-  `api-import-requests` and `api-runtime-compile`.
+  `api-import-requests` and `api-runtime-compile`; served sources now
+  compile through the reasoning session, and only the file loaders still
+  upgrade `DeferredAssembler`, until `api-cli-sources`.
 - **L4** (a subscriber leaking its runtime): the diagnostics port
   (`api-ports`) retires subscribers.
 - **L7, L8** (callbacks that capture owners, client code on workers):

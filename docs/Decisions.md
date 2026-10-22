@@ -2557,6 +2557,12 @@ maps the short names used here to file names.
   belongs where a mixin is closed, `compile-bootstrap`, and resumable
   compilation, `compile-resumable`, retires replay. Origins become
   `meta_refl` metadata later, `origin-meta-refl`.
+  - Amended 2026-10-22 (maintainer, `api-runtime-compile`): compilation
+    is a pure function, so its diagnostics are reflection effects, never
+    output of the machine that asked for the compile. The reasoning
+    session serves compiles from runtime-side parts, reached weakly from
+    the compile builtin's compiler, and its front-end lookup is the one
+    place `compile-bootstrap` later extends.
 - **Recorded in:** runtime API plan, `api-compile-ops` and
   `api-compile-replay`.
 
