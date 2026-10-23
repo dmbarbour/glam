@@ -9540,7 +9540,7 @@ fn try_answers_with_its_operation_s_value_or_failure() {
     for (source, expected) in [
         (".try (.r \"A\") >>= (\\r -> .r r.ok)", "A"),
         (
-            ".try (.fail) >>= (\\r -> .r (if r == { fail:() } then \"fail\" else \"other\"))",
+            ".try (.fail) >>= (\\r -> .r (if r == 'fail then \"fail\" else \"other\"))",
             "fail",
         ),
         (".try (.alt (.fail) (.r \"B\")) >>= (\\r -> .r r.ok)", "B"),
@@ -9581,7 +9581,7 @@ fn try_answers_wait_until_its_promise_is_kept() {
 fn try_within_a_cut_or_a_choice_nests() {
     for (source, expected) in [
         (
-            ".cut (.try (.heap.set ['k] \"set\" =>> .fail) >>= (\\r -> .heap.get ['k] >>= (\\k -> .r (if r == { fail:() } and k == {} then \"undone\" else \"kept\"))))",
+            ".cut (.try (.heap.set ['k] \"set\" =>> .fail) >>= (\\r -> .heap.get ['k] >>= (\\k -> .r (if r == 'fail and k == {} then \"undone\" else \"kept\"))))",
             "undone",
         ),
         (

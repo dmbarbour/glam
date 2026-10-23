@@ -5560,7 +5560,8 @@ struct CutFrame<S: TaskSpecialization> {
 /// What a `.try` answers with, other than its operation's value
 /// (`api-refl-try`).
 enum TryOutcome {
-    /// An explicit failure, with no alternative left.
+    /// An explicit failure, with no alternative left: the atom `'fail`,
+    /// which carries nothing, as the failure is intentional.
     Fail,
     /// A wait on what is outside the `.try`'s control: a pending promise.
     Wait,
@@ -5581,7 +5582,7 @@ fn try_outcome_in(access: &RuntimeValueAccess<'_>, outcome: TryOutcome) -> Value
             .expect("a `.try` reports failures, never panics")
     };
     match outcome {
-        TryOutcome::Fail => try_value_in(access, &keys::FAIL, access.unit()),
+        TryOutcome::Fail => Value::Atom(Atom::from_key(&Key::binary_from_text("fail"))),
         TryOutcome::Wait => try_value_in(
             access,
             &keys::WAIT,

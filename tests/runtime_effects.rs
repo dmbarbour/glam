@@ -730,7 +730,7 @@ fn try_answers_with_its_outcome_in_an_effect_a_turn_runs() {
         .run("m", |m| {
             run(
                 m,
-                ".try (.r \"A\") >>= (\\a -> .try (.heap.set ['k] \"set\" =>> .fail) >>= (\\f -> .heap.get ['k] >>= (\\k -> .r (if a.ok == \"A\" and f == { fail:() } and k == {} then \"pass\" else \"fail\"))))",
+                ".try (.r \"A\") >>= (\\a -> .try (.heap.set ['k] \"set\" =>> .fail) >>= (\\f -> .heap.get ['k] >>= (\\k -> .r (if a.ok == \"A\" and f == 'fail and k == {} then \"pass\" else \"fail\"))))",
                 &mut Counter,
             )?;
             m.text_pop()

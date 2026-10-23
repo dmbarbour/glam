@@ -169,7 +169,7 @@ a reserved word in Rust.
 | Outcome | Meaning | `ErrorKind` |
 |---|---|---|
 | `ok:Value` | `Op` succeeded; outermost, it committed. | — |
-| `fail` | An explicit failure reached it with no alternative left. Intentional, so it carries no diagnostic; whether it is an error is the caller's to say. | `Backtrack` |
+| `'fail` | An explicit failure reached it with no alternative left. Intentional, so it is a bare atom, with no diagnostic; whether it is an error is the caller's to say. | `Backtrack` |
 | `wait:Diagnostic` | `Op` waits on what is outside its control: input not yet on a port, or a pending promise. The diagnostic says on what. | `Retry` |
 | `conflict:Diagnostic` | `Op` would have succeeded but for concurrent interference; running it again now may succeed. The diagnostic may later name what conflicted, such as heap paths. | `Conflict` |
 | `err:Diagnostic` | An evaluation error, as `.eval` reports one. | `Failure` |
@@ -180,6 +180,10 @@ a reserved word in Rust.
 - `wait` does not report divergence in general, which cannot be detected:
   an infinite loop is not reported.
 - Every outcome but `ok` undoes what `Op` did; its reads stay recorded.
+- Both forms of `try` stay (maintainer, 2026-10-23): the syntax's `try C
+  then A else B` attempts atomically and observes whether its condition
+  succeeds; the effect's `.try` adds reflective observation of how an
+  operation failed.
 - Within a cut, `.try` is a nested cut. A conflict then shows at the
   enclosing commit, so only an outermost `.try` returns `conflict`.
 - A panic is never an outcome: it re-raises, as in Rust.

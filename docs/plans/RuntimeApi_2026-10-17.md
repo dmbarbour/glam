@@ -913,7 +913,7 @@ handle API goes.
     `api-hosts-as-machines`, 2026-10-21). Its notes are in
     [Reflection Model](ReflectionModel_2026-10-21.md).
     - `.try Op` (maintainer, 2026-10-23): `Op` run once as a transaction,
-      returning `ok:Value`, `fail`, `wait:Diagnostic` (input or a promise),
+      returning `ok:Value`, `'fail`, `wait:Diagnostic` (input or a promise),
       `conflict:Diagnostic` or `err:Diagnostic` (an evaluation error), the
       effectful counterpart of `.eval` and glam's counterpart of
       `m.atomic`. See
@@ -930,7 +930,7 @@ handle API goes.
         trying, which answers rather than retries. Its commit's conflict,
         its operation's failure with no alternative, an error within it,
         and a block on a promise no one resolved are its answers, `fail`
-        carrying unit. A task waits on a promise only after pumping what
+        the bare atom `'fail` (maintainer, 2026-10-23). A task waits on a promise only after pumping what
         it waits on makes no progress; work another worker runs is waited
         for. Where a turn runs the effect, the turn decides, since the
         requests it serves park on promises it resolves:

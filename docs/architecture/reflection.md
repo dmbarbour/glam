@@ -319,7 +319,7 @@ volume to retry. Dropping the Rust owner does not revoke it.
 - `.eval Value` demands weak-head normal form and returns `ok:WHNF` or
   `err:Diagnostic`.
 - `.try Op` runs `Op` once as a transaction and returns its outcome as
-  data: `ok:Value`, `fail:()` for an explicit failure, `wait:Diagnostic`
+  data: `ok:Value`, the atom `'fail` for an explicit failure, `wait:Diagnostic`
   for a promise no one has resolved, `conflict:Diagnostic` for a commit
   another's interfered with, or `err:Diagnostic` for an evaluation error.
   Every outcome but `ok` undoes `Op`; within a cut it nests. Where a turn
