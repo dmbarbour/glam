@@ -912,6 +912,14 @@ handle API goes.
     `validate` hooks retire with the handles (decision 6, from
     `api-hosts-as-machines`, 2026-10-21). Its notes are in
     [Reflection Model](ReflectionModel_2026-10-21.md).
+    - `.try Op` (maintainer, 2026-10-23): `Op` run once as a transaction,
+      returning `ok:Value`, `fail`, `wait:Diagnostic` (input or a promise),
+      `conflict:Diagnostic` or `err:Diagnostic` (an evaluation error), the
+      effectful counterpart of `.eval` and glam's counterpart of
+      `m.atomic`. See
+      [Trying an operation](ReflectionModel_2026-10-21.md#trying-an-operation).
+      An effect of today's reflection machine, it may be built ahead of the
+      rest of the step.
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
       a `stderr` port with `.port.*`, and its exit vote goes.

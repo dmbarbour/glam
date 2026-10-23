@@ -150,12 +150,41 @@ boundary task's child, and each `refl.*` entry as the scanner's.
 | `.exit.success`, `.exit.error` | Retire: a machine waiting on input or for tasks is idle. |
 | — | Obligations, as accepted promises (`obligations-are-accepted-promises`): `.promise.accept Resolver Diagnostic`, `.promise.abandon Resolver`, `.promise.accepted Resolver`. |
 | `.eval`, `.meta.inspect`, `.dict_items`, `.env 'glam.origin.inspect` | Unchanged: evaluation and inspection. |
+| — | `.try Op`: `Op` run once as a transaction, its outcome returned as data (see [Trying an operation](#trying-an-operation)). |
 
 The CLI's own families (`.read.*`, `.write.*`, `.case`, `.token.*`) and
 the macro runner's are providers' effects within turns
 (`api-effect-providers`), not tasks, and no reflection: `conf.cli` and
 macros are pure evaluation, ideally handled by pure functions
 (maintainer).
+
+### Trying an operation
+
+`.try Op` is the effectful counterpart of `.eval` (maintainer,
+2026-10-23): it runs `Op` once as a transaction, never waits for a change,
+and returns its outcome as data, as `.eval` returns an evaluation's.
+Rust's counterpart is `m.atomic`, which reports through `Result`; `try` is
+a reserved word in Rust.
+
+| Outcome | Meaning | `ErrorKind` |
+|---|---|---|
+| `ok:Value` | `Op` succeeded; outermost, it committed. | — |
+| `fail` | An explicit failure reached it with no alternative left. Intentional, so it carries no diagnostic; whether it is an error is the caller's to say. | `Backtrack` |
+| `wait:Diagnostic` | `Op` waits on what is outside its control: input not yet on a port, or a pending promise. The diagnostic says on what. | `Retry` |
+| `conflict:Diagnostic` | `Op` would have succeeded but for concurrent interference; running it again now may succeed. The diagnostic may later name what conflicted, such as heap paths. | `Conflict` |
+| `err:Diagnostic` | An evaluation error, as `.eval` reports one. | `Failure` |
+
+- `.try` evaluates what `Op` needs, lazy values included. Their work is
+  not a reason to wait; only what it reaches outside `.try`'s control is,
+  a promise or input.
+- `wait` does not report divergence in general, which cannot be detected:
+  an infinite loop is not reported.
+- Every outcome but `ok` undoes what `Op` did; its reads stay recorded.
+- Within a cut, `.try` is a nested cut. A conflict then shows at the
+  enclosing commit, so only an outermost `.try` returns `conflict`.
+- A panic is never an outcome: it re-raises, as in Rust.
+- A task that loops on `.try` while it gets `wait` spins. To park, it fails
+  within a cut instead, which waits on what it observed.
 
 ### Rust's counterparts
 
