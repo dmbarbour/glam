@@ -80,6 +80,8 @@ protocol_key!(CUT, "cut");
 protocol_key!(FIX, "fix");
 protocol_key!(GET, "get");
 protocol_key!(SET, "set");
+protocol_key!(RESET, "reset");
+protocol_key!(SHIFT, "shift");
 // A pure handler's state and outcomes (`pure-handler-core`).
 protocol_key!(USER, "user");
 protocol_key!(HANDLER, "handler");

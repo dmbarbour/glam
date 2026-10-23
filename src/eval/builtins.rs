@@ -159,8 +159,15 @@ pub(super) fn apply_builtin_in(
         | Builtin::HandlerFail
         | Builtin::HandlerCut
         | Builtin::HandlerGet
-        | Builtin::HandlerSet => {
-            super::list_effect_machine::apply_handler_builtin_in(access, builtin, arguments)
+        | Builtin::HandlerSet
+        | Builtin::HandlerFix
+        | Builtin::HandlerReset
+        | Builtin::HandlerShift
+        | Builtin::HandlerContinuation
+        | Builtin::HandlerResume
+        | Builtin::HandlerFixApply
+        | Builtin::HandlerFixRun => {
+            super::handler_machine::apply_handler_builtin_in(access, builtin, arguments)
         }
         Builtin::TokenText
         | Builtin::TokenRegex

@@ -77,9 +77,32 @@ search object: about 700 lines in all.
    - `pure-handler-core`, with `list.pure`'s tests as its starting cases.
    - `pure-handler-token`, the smallest and free of the host, run by the
      argument parser's `.read.token`.
+   - `pure-handler-control`: the core reduces `.fix`, `.reset` and
+     `.shift`, which macros promise.
+   - Macros, the largest, run within compilation's macro session as now,
+     without a search object of their own, before the CLI, which waits on
+     `api-cli-sources` (maintainer, 2026-10-23):
+     - `pure-handler-macro-ops`: an opaque context holds the input's
+       structure, its text runs, delimiters, separation and layouts; the
+       handler's state holds the embedded data and the environment as
+       plain values, and per branch the reader's position, the output,
+       the active cases and the logs. The readers, writers, `.env` and
+       `.log` are private builtins. `.case`, `.read.layout` and
+       `.write.layout` are compositions over `.seq` of hidden operations
+       that open and close them, so a failure within keeps what was
+       opened as evidence.
+     - `pure-handler-macro-run`: the runner reads the successes, at most
+       two, and otherwise the failures' furthest frontier and cases, then
+       checks and splices as now; `MacroEffects` and `MacroHost` retire.
+     - `pure-handler-macro-resume`: a macro's run, a lazy value, stays in
+       the compile's replay cache, so a compile replayed after a wait on
+       an import resumes the macro where it waited rather than running it
+       again; only while that stays small.
+     - Imports stay evaluation dependencies, not macro effects: a macro is
+       a pure function of its input and environment. Were macros ever to
+       make the front end's requests, the shape is a pass-through to the
+       compiler's handler, with `.with` or `compile-resumable`.
    - `pure-handler-cli`, with the host facts.
-   - `pure-handler-macros`, the largest, run within compilation's macro
-     session as it is now, without its own search object.
    - `pure-handler-retire-search`: the isolated search and
      `IsolatedTaskHost` leave the public API (`effect-families-pass-through`).
 
@@ -100,8 +123,8 @@ search object: about 700 lines in all.
     it is used (maintainer, 2026-10-23).
   - The core reduces `.r`, `.seq`, `.alt` (every branch, in order),
     `.fail`, `.cut` (its first success and the failures before it), and
-    `.get`/`.set` on `user`, the empty path naming all of it. It does not
-    reduce `.fix`, `.reset` or `.shift`.
+    `.get`/`.set` on `user`, the empty path naming all of it. It did not
+    reduce `.fix`, `.reset` or `.shift` until `pure-handler-control`.
   - The outcomes stay ordered within a run, since a cut keeps only the
     failures before its first success. A run's results are two lazy views
     of them: `ok`, each `{value, user, handler}`, and `failed`, each `{user,
@@ -133,6 +156,41 @@ search object: about 700 lines in all.
     last failure's alone. No test depended on the difference.
   - `list.search` stays bound in tests only.
 
+- `pure-handler-control` (2026-10-23): the core reduces every standard
+  effect, `.fix`, `.reset` and `.shift` too, so the token parser, macros
+  and any later handler have them (maintainer, 2026-10-23; `.with` joins
+  when it becomes a standard). The private interaction-net builder was the
+  precedent: a pure handler in the same family with all three.
+  - The run carries what it returns to: the continuation up to its
+    innermost `.reset`, its frames innermost first. `.seq` pushes onto it
+    in place, and `.r` returns to it. Before, the continuation lived only
+    in nested lazy lists, where `.reset` could not take it.
+  - A `.reset` pushes that continuation, with its key, onto a stack of
+    frames in the user's state, under a key no source can name, as
+    Design.md's reference handler and the effect machine keep it
+    (`effect-families-pass-through`): `.get []` captures the stack and
+    `.set []` restores it, and a state without it has no reset in scope.
+    The key leaves the state when the stack empties, so a reset whose
+    operation returns leaves the state as it found it. A run with no reset
+    never reads the user's state to return.
+  - A `.shift` takes the continuation and the frames above its reset as a
+    continuation value; resuming it pushes them back above a frame for the
+    caller, whose continuation the resumed one returns to.
+  - A cut marks the continuation it runs within, and the first outcome to
+    return to the mark is its success: the cut's walk passes the outcomes
+    before it, failures and others, then continues that one. A `.shift`
+    that leaves cuts within its reset sends its outcomes past their walks,
+    so its branch is no longer theirs, and resuming a continuation that
+    holds cut marks walks them anew.
+  - `.fix` reuses `list.pure`'s fixpoint, one future per alternative, and
+    hides the frames beneath it behind a barrier frame, so a `.shift`
+    within it reaches only resets within it (Design.md: "`fn` receives
+    result as input but hides `.reset` scope").
+  - Not settled: a frame restored by `.set []` after the cut it lies within
+    has ended returns through a mark no walk awaits; the run fails with a
+    diagnostic rather than guess. The effect machine orders its delimiters
+    to decide this; the pure handler has no such order yet.
+
 ## Answers (maintainer, 2026-10-23)
 
 1. Generalize to a shared core where it fits; where that proves awkward,
@@ -143,4 +201,9 @@ search object: about 700 lines in all.
    before its first success, for diagnostics, and keep that success.
 4. Aggregation may live in Rust or in glam: the hard part is interpreting
    an arbitrary user program, done by then.
-5. The core does not reduce `.reset` and `.shift`.
+5. The core reduces every standard effect, `.reset`, `.shift` and `.fix`
+   included, for every handler; `.with` joins when it becomes a standard
+   (revised the same day; the first answer left delimited control out).
+6. Macros keep their run across a compile's replays only if that stays
+   small; if it interacts badly with lazy fixpoints shifting under the
+   compile's replay, it waits for `compile-resumable`.

@@ -371,6 +371,15 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::HandlerCut) => "handler.cut",
         SyntaxOperator::Builtin(crate::core::Builtin::HandlerGet) => "handler.get",
         SyntaxOperator::Builtin(crate::core::Builtin::HandlerSet) => "handler.set",
+        SyntaxOperator::Builtin(crate::core::Builtin::HandlerFix) => "handler.fix",
+        SyntaxOperator::Builtin(crate::core::Builtin::HandlerReset) => "handler.reset",
+        SyntaxOperator::Builtin(crate::core::Builtin::HandlerShift) => "handler.shift",
+        SyntaxOperator::Builtin(crate::core::Builtin::HandlerContinuation) => {
+            "handler.continuation"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::HandlerResume) => "handler.resume",
+        SyntaxOperator::Builtin(crate::core::Builtin::HandlerFixApply) => "handler.fix_apply",
+        SyntaxOperator::Builtin(crate::core::Builtin::HandlerFixRun) => "handler.fix_run",
         SyntaxOperator::Builtin(crate::core::Builtin::TokenText) => "token.text",
         SyntaxOperator::Builtin(crate::core::Builtin::TokenRegex) => "token.regex",
         SyntaxOperator::Builtin(crate::core::Builtin::TokenTextSpan) => "token.text_span",

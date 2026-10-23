@@ -140,21 +140,37 @@ impl CompatibilityValueEdges for ListEffectComputation {
                 visit(continuation);
             }
             Self::FirstResult { results } => results.visit_compatibility_value_edges(visit),
-            Self::HandlerRun { effect, state, api } => {
-                visit(effect);
+            Self::HandlerRun {
+                effect: value,
+                state,
+                control,
+                api,
+            }
+            | Self::HandlerReturn {
+                value,
+                state,
+                control,
+                api,
+            } => {
+                visit(value);
                 visit(state);
+                control.sequence.visit_compatibility_value_edges(visit);
                 visit(api);
             }
-            Self::HandlerSequence {
+            Self::HandlerContinue {
                 outcomes,
-                continuation,
+                control,
                 api,
             } => {
                 outcomes.visit_compatibility_value_edges(visit);
-                visit(continuation);
+                control.sequence.visit_compatibility_value_edges(visit);
                 visit(api);
             }
-            Self::HandlerCut { outcomes } | Self::HandlerOutcomes { outcomes, .. } => {
+            Self::HandlerCut { outcomes, api } => {
+                outcomes.visit_compatibility_value_edges(visit);
+                visit(api);
+            }
+            Self::HandlerEscape { outcomes, .. } | Self::HandlerOutcomes { outcomes, .. } => {
                 outcomes.visit_compatibility_value_edges(visit);
             }
         }
@@ -167,15 +183,25 @@ impl CompatibilityValueEdges for ListEffectComputation {
             | Self::FirstResult { results } => {
                 results.trace_direct_compatibility_managed_edges(visitor);
             }
-            Self::HandlerSequence { outcomes, .. }
-            | Self::HandlerCut { outcomes }
+            Self::HandlerContinue {
+                outcomes, control, ..
+            } => {
+                outcomes.trace_direct_compatibility_managed_edges(visitor);
+                control
+                    .sequence
+                    .trace_direct_compatibility_managed_edges(visitor);
+            }
+            Self::HandlerRun { control, .. } | Self::HandlerReturn { control, .. } => {
+                control
+                    .sequence
+                    .trace_direct_compatibility_managed_edges(visitor);
+            }
+            Self::HandlerCut { outcomes, .. }
+            | Self::HandlerEscape { outcomes, .. }
             | Self::HandlerOutcomes { outcomes, .. } => {
                 outcomes.trace_direct_compatibility_managed_edges(visitor);
             }
-            Self::Run { .. }
-            | Self::Cut { .. }
-            | Self::FixFunction { .. }
-            | Self::HandlerRun { .. } => {}
+            Self::Run { .. } | Self::Cut { .. } | Self::FixFunction { .. } => {}
         }
     }
 }

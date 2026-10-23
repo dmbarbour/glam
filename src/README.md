@@ -78,7 +78,8 @@ not define language semantics or collect subsystem invariants.
 | `eval/object_machine.rs` | Pollable object-fixpoint construction |
 | `eval/pattern_machine.rs` | Resumable compiler-pattern builtins: list, path, dictionary, and equality observations |
 | `eval/list_machine.rs` | Pollable logical-list front and back projection shared by other machines |
-| `eval/list_effect_machine.rs` | Regional reducer for the lazy list-effect recipe family: `list.pure`, and pure handlers, which thread a user's and a handler's state through each branch and keep every branch, failed ones with their state |
+| `eval/list_effect_machine.rs` | Regional reducer for the lazy list-effect recipe family: `list.pure`, its fixpoint, and the pure handler's states, reduced by `handler_machine` |
+| `eval/handler_machine.rs` | A pure handler's run and walks: threads a user's and a handler's state through each branch, keeps every branch, failed ones with their state, and carries its continuation, whose reset frames live in the user's state, for `.fix`, `.reset` and `.shift` |
 | `eval/token_machine.rs` | The CLI token parser's operations as private builtins over an opaque token context and each branch's cursor and evidence |
 | `eval/list_transform_machine.rs` | Non-forcing structural `map` and `list.concat` |
 | `eval/tagged_machine.rs` | Shared resumable tagged-payload recognition and iterative semantic-undefined traversal |

@@ -1650,6 +1650,29 @@ impl SemanticComputation {
     }
 }
 
+/// What a pure handler's run returns to (`pure-handler-control`): the
+/// continuation up to its innermost `.reset`, whose frames, innermost first,
+/// are continuations and the marks of the cuts they lie within; the count of
+/// those marks; and whether the user's state may hold reset frames, so that
+/// a run with none never reads it.
+#[derive(Clone)]
+pub(crate) struct HandlerControl {
+    pub(crate) sequence: List,
+    pub(crate) cuts: usize,
+    pub(crate) resets: bool,
+}
+
+impl HandlerControl {
+    /// The control of a run with nothing to return to.
+    pub(crate) fn top() -> Self {
+        Self {
+            sequence: List::empty(),
+            cuts: 0,
+            resets: false,
+        }
+    }
+}
+
 pub(crate) enum ListEffectComputation {
     Run {
         effect: Value,
@@ -1679,24 +1702,40 @@ pub(crate) enum ListEffectComputation {
         alternative: usize,
     },
     /// Runs `effect` under a pure handler, whose API is `api`, from `state`,
-    /// `{user, handler}`, to an ordered list of outcomes: `{value, state}`
-    /// for a success, `{failed: state}` for a failure (`pure-handler-core`).
+    /// `{user, handler}`, then `control`, to an ordered list of outcomes:
+    /// `{value, state}` for a success, `{failed: state}` for a failure
+    /// (`pure-handler-core`).
     HandlerRun {
         effect: Value,
         state: Value,
+        control: HandlerControl,
         api: Value,
     },
-    /// Continues each success of `outcomes` with `continuation`, run against
-    /// `api`, and passes each failure through.
-    HandlerSequence {
+    /// Returns `value` to `control` from `state`.
+    HandlerReturn {
+        value: Value,
+        state: Value,
+        control: HandlerControl,
+        api: Value,
+    },
+    /// Returns each success of `outcomes` to `control`, and passes each
+    /// failure through.
+    HandlerContinue {
         outcomes: List,
-        continuation: Value,
+        control: HandlerControl,
         api: Value,
     },
-    /// The outcomes through the first success: the failures before it, and
-    /// it.
+    /// A cut's outcomes through the first to reach it: the outcomes before
+    /// it, then it, continued.
     HandlerCut {
         outcomes: List,
+        api: Value,
+    },
+    /// `outcomes`, each to pass `crossings` more cuts: those a `.shift`
+    /// left.
+    HandlerEscape {
+        outcomes: List,
+        crossings: usize,
     },
     /// The successes of `outcomes`, `{value, user, handler}`, or its
     /// failures, `{user, handler}`: a run's results.
@@ -2199,9 +2238,9 @@ pub enum Builtin {
     /// user's state and the handler's, keeping every branch.
     Handler,
     /// The core's requests, each a function of the state `{user, handler}`
-    /// to an ordered list of outcomes. The handler's run answers `.seq`,
-    /// `.alt` and `.cut`, which run effects of their own, with the API it
-    /// holds.
+    /// to an ordered list of outcomes. The handler's run answers `.r`,
+    /// `.seq`, `.alt`, `.cut`, `.fix`, `.reset` and `.shift` itself, with
+    /// the API and the continuation it holds (`pure-handler-control`).
     HandlerReturn,
     HandlerSeq,
     HandlerAlt,
@@ -2209,6 +2248,18 @@ pub enum Builtin {
     HandlerCut,
     HandlerGet,
     HandlerSet,
+    HandlerFix,
+    HandlerReset,
+    HandlerShift,
+    /// A continuation `.shift` captured: `HandlerContinuation sequence cuts
+    /// resets crossings value` is the effect resuming it with `value`.
+    HandlerContinuation,
+    /// That effect's request, which the run answers.
+    HandlerResume,
+    /// `.fix`'s adapters to `list.pure`'s fixpoint: the effect of one
+    /// alternative's run, and that run.
+    HandlerFixApply,
+    HandlerFixRun,
     /// The CLI's token parser's operations (`pure-handler-token`), each
     /// applied to its argument, if any, and a pure handler's state.
     TokenText,
@@ -2348,6 +2399,13 @@ impl Builtin {
             Self::HandlerCut => 2,
             Self::HandlerGet => 2,
             Self::HandlerSet => 3,
+            Self::HandlerFix => 2,
+            Self::HandlerReset => 3,
+            Self::HandlerShift => 3,
+            Self::HandlerContinuation => 5,
+            Self::HandlerResume => 7,
+            Self::HandlerFixApply => 5,
+            Self::HandlerFixRun => 6,
             Self::TokenText => 2,
             Self::TokenRegex => 2,
             Self::TokenTextSpan => 1,

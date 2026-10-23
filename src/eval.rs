@@ -36,6 +36,7 @@ mod comparison_machine;
 mod compile_machine;
 mod dict_machine;
 mod effect_machine;
+mod handler_machine;
 mod journal_machine;
 pub(crate) mod lazy_checkpoint;
 #[cfg(test)]

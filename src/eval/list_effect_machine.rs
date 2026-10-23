@@ -1,7 +1,7 @@
 //! Regional reducer for the closed lazy list-effect recipe family: the list
 //! handler, `list.pure`, and pure handlers, which thread a state through
 //! each branch and keep every branch, failed ones with their state
-//! (`pure-handler-core`).
+//! (`pure-handler-core`), reduced by `handler_machine`.
 //!
 //! Every poll-spanning semantic edge lives beneath the owning lazy's typed
 //! managed checkpoint. Boundary interpretation and terminal publication stay
@@ -12,14 +12,14 @@ use std::sync::Arc;
 use glam_gc::Visitor;
 
 use crate::core::{
-    Builtin, BuiltinCall, Dict, EvaluationFailure, EvaluationHalt, LazyId, LazyValue, List,
+    Builtin, Dict, EvaluationFailure, EvaluationHalt, LazyId, LazyValue, List,
     ListEffectComputation, ManagedPromisePublication, PromisedValue, Value, keys,
     trace_compatibility_value_managed_edges,
 };
-use crate::core_net::CoreDataKey;
 use crate::evaluation::EvaluationValueAccess;
 
 use super::effect_machine::effect_function_in;
+use super::handler_machine::{RegionalHandlerRun, RegionalHandlerWalk};
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::whnf::{
     RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
@@ -73,41 +73,15 @@ enum ListEffectState {
         handle: PromisedValue,
         front: RegionalListFront,
     },
-    /// A pure handler's run of an effect from `state`, against `api`.
-    HandlerRun {
-        phase: HandlerPhase,
-        demand: RegionalWhnfWork,
-        state: Value,
-        api: Value,
-    },
-    /// A walk of a pure handler's outcomes, the head's demand with the tail
-    /// once the front has given them.
-    HandlerWalk {
-        walk: HandlerWalk,
-        front: RegionalListFront,
-        head: Option<Box<(RegionalWhnfWork, Value)>>,
-    },
+    /// A pure handler's run of an effect, or of a return, from a state.
+    HandlerRun(Box<RegionalHandlerRun>),
+    /// A walk of a pure handler's outcomes.
+    HandlerWalk(Box<RegionalHandlerWalk>),
 }
 
 enum RunPhase {
     Effect,
     Application,
-}
-
-enum HandlerPhase {
-    /// The effect, to its function of the API.
-    Effect,
-    /// The function applied to the API: a request, a function of the
-    /// state.
-    Request,
-    /// The request applied to the state: its outcomes.
-    Outcomes,
-}
-
-enum HandlerWalk {
-    Sequence { continuation: Value, api: Value },
-    Cut,
-    Outcomes { successes: bool },
 }
 
 impl RegionalListEffect {
@@ -172,44 +146,37 @@ impl RegionalListEffect {
                 .with_source_owner(source_owner),
                 alternative: *alternative,
             },
-            ListEffectComputation::HandlerRun { effect, state, api } => {
-                ListEffectState::HandlerRun {
-                    phase: HandlerPhase::Effect,
-                    demand: RegionalWhnfWork::from_focus(
-                        access,
-                        access.values().duplicate_value(effect),
-                    )
-                    .with_source_owner(source_owner),
-                    state: access.values().duplicate_value(state),
-                    api: access.values().duplicate_value(api),
-                }
-            }
-            ListEffectComputation::HandlerSequence {
-                outcomes,
-                continuation,
+            ListEffectComputation::HandlerRun {
+                effect,
+                state,
+                control,
                 api,
-            } => handler_walk_in(
+            } => ListEffectState::HandlerRun(Box::new(RegionalHandlerRun::run_in(
                 access,
                 source_owner,
-                HandlerWalk::Sequence {
-                    continuation: access.values().duplicate_value(continuation),
-                    api: access.values().duplicate_value(api),
-                },
-                outcomes,
-            ),
-            ListEffectComputation::HandlerCut { outcomes } => {
-                handler_walk_in(access, source_owner, HandlerWalk::Cut, outcomes)
-            }
-            ListEffectComputation::HandlerOutcomes {
-                outcomes,
-                successes,
-            } => handler_walk_in(
+                effect,
+                state,
+                control,
+                api,
+            ))),
+            ListEffectComputation::HandlerReturn {
+                value,
+                state,
+                control,
+                api,
+            } => ListEffectState::HandlerRun(Box::new(RegionalHandlerRun::return_in(
                 access,
                 source_owner,
-                HandlerWalk::Outcomes {
-                    successes: *successes,
-                },
-                outcomes,
+                value,
+                state,
+                control,
+                api,
+            ))),
+            ListEffectComputation::HandlerContinue { .. }
+            | ListEffectComputation::HandlerCut { .. }
+            | ListEffectComputation::HandlerEscape { .. }
+            | ListEffectComputation::HandlerOutcomes { .. } => ListEffectState::HandlerWalk(
+                Box::new(RegionalHandlerWalk::new_in(access, source_owner, recipe)),
             ),
         };
         Self {
@@ -427,196 +394,8 @@ impl RegionalListEffect {
                 RegionalListFrontPoll::BudgetExhausted => RegionalListEffectPoll::BudgetExhausted,
                 RegionalListFrontPoll::Failed(failure) => RegionalListEffectPoll::Failed(failure),
             },
-            ListEffectState::HandlerRun {
-                phase,
-                demand,
-                state,
-                api,
-            } => {
-                let value = match drive_regional_in_place(
-                    access,
-                    demand,
-                    step_budget,
-                    reduce_semantic_shell,
-                ) {
-                    RegionalWhnfStatus::Ready(value) => value,
-                    RegionalWhnfStatus::Boundary(request) => {
-                        return RegionalListEffectPoll::Boundary(request);
-                    }
-                    RegionalWhnfStatus::BudgetExhausted => {
-                        return RegionalListEffectPoll::BudgetExhausted;
-                    }
-                    RegionalWhnfStatus::Failed(failure) => {
-                        return RegionalListEffectPoll::Failed(failure);
-                    }
-                };
-                match phase {
-                    HandlerPhase::Effect => {
-                        let function = match effect_function_in(access, &value, "pure handler") {
-                            Ok(function) => function,
-                            Err(error) => {
-                                return RegionalListEffectPoll::Failed(
-                                    error.into_permanent_failure(),
-                                );
-                            }
-                        };
-                        *demand = RegionalWhnfWork::from_application_checkpoint_in(
-                            access,
-                            function,
-                            &[access.values().duplicate_value(api)],
-                            Some(self.source_owner),
-                        );
-                        *phase = HandlerPhase::Request;
-                        RegionalListEffectPoll::Continue
-                    }
-                    // `.seq`, `.alt` and `.cut` run effects of their own,
-                    // against the API this run holds.
-                    HandlerPhase::Request
-                        if let Some(outcomes) = held_request_in(access, &value, state, api) =>
-                    {
-                        RegionalListEffectPoll::Ready(Value::List(outcomes))
-                    }
-                    HandlerPhase::Request => {
-                        *demand = RegionalWhnfWork::from_application_checkpoint_in(
-                            access,
-                            value,
-                            &[access.values().duplicate_value(state)],
-                            Some(self.source_owner),
-                        );
-                        *phase = HandlerPhase::Outcomes;
-                        RegionalListEffectPoll::Continue
-                    }
-                    _ if matches!(value, Value::List(_)) => RegionalListEffectPoll::Ready(value),
-                    _ => RegionalListEffectPoll::Failed(Arc::new(EvaluationFailure::message(
-                        format!(
-                            "a pure handler's request answers with a list of outcomes, got {:?}",
-                            access.values().diagnostic_debug(&value)
-                        ),
-                    ))),
-                }
-            }
-            ListEffectState::HandlerWalk { walk, front, head } => {
-                let Some(demand) = head.as_deref_mut().map(|(demand, _)| demand) else {
-                    return match front.poll_in(access, step_budget) {
-                        RegionalListFrontPoll::Ready(None) => {
-                            RegionalListEffectPoll::Ready(Value::List(List::empty()))
-                        }
-                        RegionalListFrontPoll::Ready(Some((outcome, tail))) => {
-                            *head = Some(Box::new((
-                                RegionalWhnfWork::from_focus(access, outcome)
-                                    .with_source_owner(self.source_owner),
-                                tail,
-                            )));
-                            RegionalListEffectPoll::Continue
-                        }
-                        RegionalListFrontPoll::Boundary(request) => {
-                            RegionalListEffectPoll::Boundary(request)
-                        }
-                        RegionalListFrontPoll::Continue => RegionalListEffectPoll::Continue,
-                        RegionalListFrontPoll::BudgetExhausted => {
-                            RegionalListEffectPoll::BudgetExhausted
-                        }
-                        RegionalListFrontPoll::Failed(failure) => {
-                            RegionalListEffectPoll::Failed(failure)
-                        }
-                    };
-                };
-                let outcome = match drive_regional_in_place(
-                    access,
-                    demand,
-                    step_budget,
-                    reduce_semantic_shell,
-                ) {
-                    RegionalWhnfStatus::Ready(value) => value,
-                    RegionalWhnfStatus::Boundary(request) => {
-                        return RegionalListEffectPoll::Boundary(request);
-                    }
-                    RegionalWhnfStatus::BudgetExhausted => {
-                        return RegionalListEffectPoll::BudgetExhausted;
-                    }
-                    RegionalWhnfStatus::Failed(failure) => {
-                        return RegionalListEffectPoll::Failed(failure);
-                    }
-                };
-                let (_, tail) = *head.take().expect("checked above");
-                let Value::List(tail) = tail else {
-                    unreachable!("a pure handler's outcomes keep a list tail")
-                };
-                let Value::Dict(fields) = &outcome else {
-                    return RegionalListEffectPoll::Failed(Arc::new(EvaluationFailure::message(
-                        format!(
-                            "a pure handler's outcome is `{{value, state}}` or `{{failed}}`, got {:?}",
-                            access.values().diagnostic_debug(&outcome)
-                        ),
-                    )));
-                };
-                let failed = fields.get(&keys::FAILED).is_some();
-                let rest = |walk: ListEffectComputation| deferred_handler_list_in(access, walk);
-                match walk {
-                    HandlerWalk::Sequence { continuation, api } => {
-                        let rest = rest(ListEffectComputation::HandlerSequence {
-                            outcomes: tail,
-                            continuation: access.values().duplicate_value(continuation),
-                            api: access.values().duplicate_value(api),
-                        });
-                        if failed {
-                            return RegionalListEffectPoll::Ready(cons_in(access, outcome, rest));
-                        }
-                        let (Some(value), Some(state)) =
-                            (fields.get(&keys::VALUE), fields.get(&keys::STATE))
-                        else {
-                            return RegionalListEffectPoll::Failed(Arc::new(
-                                EvaluationFailure::message(
-                                    "a pure handler's success has a `value` and a `state`",
-                                ),
-                            ));
-                        };
-                        let next = LazyValue::from_application_in(
-                            access.values(),
-                            access.values().duplicate_value(continuation),
-                            Arc::from([access.values().duplicate_value(value)]),
-                        );
-                        let continued = handler_run_in(
-                            access,
-                            Value::Lazy(next),
-                            access.values().duplicate_value(state),
-                            access.values().duplicate_value(api),
-                        );
-                        RegionalListEffectPoll::Ready(Value::List(List::concat(continued, rest)))
-                    }
-                    HandlerWalk::Cut if failed => RegionalListEffectPoll::Ready(cons_in(
-                        access,
-                        outcome,
-                        rest(ListEffectComputation::HandlerCut { outcomes: tail }),
-                    )),
-                    // The first success ends the cut.
-                    HandlerWalk::Cut => {
-                        RegionalListEffectPoll::Ready(Value::List(List::from_values(vec![outcome])))
-                    }
-                    HandlerWalk::Outcomes { successes } if failed != *successes => {
-                        let successes = *successes;
-                        let result = handler_result_in(access, fields, successes);
-                        RegionalListEffectPoll::Ready(cons_in(
-                            access,
-                            result,
-                            rest(ListEffectComputation::HandlerOutcomes {
-                                outcomes: tail,
-                                successes,
-                            }),
-                        ))
-                    }
-                    // An outcome of the other kind is passed over here,
-                    // without a list cell of its own.
-                    HandlerWalk::Outcomes { .. } => {
-                        *front = RegionalListFront::new_in(
-                            access,
-                            Value::List(tail),
-                            Some(self.source_owner),
-                        );
-                        RegionalListEffectPoll::Continue
-                    }
-                }
-            }
+            ListEffectState::HandlerRun(run) => run.poll_in(access, step_budget),
+            ListEffectState::HandlerWalk(walk) => walk.poll_in(access, step_budget),
         }
     }
 
@@ -652,263 +431,10 @@ impl ListEffectState {
                 handle.trace_managed_edge(visitor);
                 front.trace_managed_edges(visitor);
             }
-            Self::HandlerRun {
-                demand, state, api, ..
-            } => {
-                demand.trace_managed_edges(visitor);
-                trace_compatibility_value_managed_edges(state, visitor);
-                trace_compatibility_value_managed_edges(api, visitor);
-            }
-            Self::HandlerWalk { walk, front, head } => {
-                if let HandlerWalk::Sequence { continuation, api } = walk {
-                    trace_compatibility_value_managed_edges(continuation, visitor);
-                    trace_compatibility_value_managed_edges(api, visitor);
-                }
-                front.trace_managed_edges(visitor);
-                if let Some((demand, tail)) = head.as_deref() {
-                    demand.trace_managed_edges(visitor);
-                    trace_compatibility_value_managed_edges(tail, visitor);
-                }
-            }
+            Self::HandlerRun(run) => run.trace_managed_edges(visitor),
+            Self::HandlerWalk(walk) => walk.trace_managed_edges(visitor),
         }
     }
-}
-
-fn handler_walk_in(
-    access: &EvaluationValueAccess<'_>,
-    source_owner: LazyId,
-    walk: HandlerWalk,
-    outcomes: &List,
-) -> ListEffectState {
-    ListEffectState::HandlerWalk {
-        walk,
-        front: RegionalListFront::new_in(access, Value::List(outcomes.clone()), Some(source_owner)),
-        head: None,
-    }
-}
-
-fn deferred_handler_list_in(
-    access: &EvaluationValueAccess<'_>,
-    computation: ListEffectComputation,
-) -> List {
-    List::from_thunk(LazyValue::list_effect_computation_in(access.values(), computation).into())
-}
-
-/// The outcomes of `effect` run from `state` against `api`.
-fn handler_run_in(
-    access: &EvaluationValueAccess<'_>,
-    effect: Value,
-    state: Value,
-    api: Value,
-) -> List {
-    deferred_handler_list_in(
-        access,
-        ListEffectComputation::HandlerRun { effect, state, api },
-    )
-}
-
-/// The outcomes of a request that the run answers itself, as `.seq`, `.alt`
-/// and `.cut` run effects of their own against the API it holds: the run's
-/// API is fixed, so it need not travel in the state.
-fn held_request_in(
-    access: &EvaluationValueAccess<'_>,
-    request: &Value,
-    state: &Value,
-    api: &Value,
-) -> Option<List> {
-    let Value::PartialBuiltin(call) = request else {
-        return None;
-    };
-    let values = access.values();
-    let run = |effect: &Value| {
-        handler_run_in(
-            access,
-            values.duplicate_value(effect),
-            values.duplicate_value(state),
-            values.duplicate_value(api),
-        )
-    };
-    match (call.builtin, &*call.arguments) {
-        (Builtin::HandlerSeq, [operation, continuation]) => Some(deferred_handler_list_in(
-            access,
-            ListEffectComputation::HandlerSequence {
-                outcomes: run(operation),
-                continuation: values.duplicate_value(continuation),
-                api: values.duplicate_value(api),
-            },
-        )),
-        (Builtin::HandlerAlt, [left, right]) => Some(List::concat(run(left), run(right))),
-        (Builtin::HandlerCut, [operation]) => Some(deferred_handler_list_in(
-            access,
-            ListEffectComputation::HandlerCut {
-                outcomes: run(operation),
-            },
-        )),
-        _ => None,
-    }
-}
-
-fn cons_in(access: &EvaluationValueAccess<'_>, head: Value, rest: List) -> Value {
-    let _ = access;
-    Value::List(List::concat(List::from_values(vec![head]), rest))
-}
-
-/// `member` of a pure handler's state, lazily.
-fn state_member_in(
-    access: &EvaluationValueAccess<'_>,
-    state: &Value,
-    member: &crate::core::Key,
-) -> Value {
-    Value::Lazy(LazyValue::from_access_in(
-        access.values(),
-        Arc::from([CoreDataKey::Key(member.clone())]),
-        Arc::from([access.values().duplicate_value(state)]),
-    ))
-}
-
-/// A run's result for one of its outcomes: a success's value with the
-/// user's state and the handler's, or a failure's states.
-fn handler_result_in(access: &EvaluationValueAccess<'_>, outcome: &Dict, success: bool) -> Value {
-    let undefined = || Value::Dict(Dict::new_sync());
-    let state = outcome
-        .get(if success { &keys::STATE } else { &keys::FAILED })
-        .map(|state| access.values().duplicate_value(state))
-        .unwrap_or_else(undefined);
-    let mut result = Dict::new_sync()
-        .insert(
-            keys::USER.clone(),
-            state_member_in(access, &state, &keys::USER),
-        )
-        .insert(
-            keys::HANDLER.clone(),
-            state_member_in(access, &state, &keys::HANDLER),
-        );
-    if success {
-        let value = outcome
-            .get(&keys::VALUE)
-            .map(|value| access.values().duplicate_value(value))
-            .unwrap_or_else(undefined);
-        result = result.insert(keys::VALUE.clone(), value);
-    }
-    Value::Dict(result)
-}
-
-/// Applies a pure handler's builtin (`pure-handler-core`): `Handler` runs an
-/// effect; the rest are the core's requests, each a function of the state.
-pub(in crate::eval) fn apply_handler_builtin_in(
-    access: &EvaluationValueAccess<'_>,
-    builtin: Builtin,
-    arguments: Vec<Value>,
-) -> Result<Value, EvaluationHalt> {
-    fn exact<const N: usize>(
-        arguments: Vec<Value>,
-        name: &str,
-    ) -> Result<[Value; N], EvaluationHalt> {
-        arguments.try_into().map_err(|_| {
-            EvaluationHalt::new(format!(
-                "{name} builtin received the wrong number of arguments"
-            ))
-        })
-    }
-    let values = access.values();
-    let success = |value: Value, state: Value| {
-        Value::Dict(
-            Dict::new_sync()
-                .insert(keys::VALUE.clone(), value)
-                .insert(keys::STATE.clone(), state),
-        )
-    };
-    let one = |outcome| Ok(Value::List(List::from_values(vec![outcome])));
-    match builtin {
-        Builtin::Handler => {
-            let [ops, user, handler, effect] = exact(arguments, "handler")?;
-            let api = Value::Lazy(LazyValue::from_builtin_in(
-                values,
-                BuiltinCall {
-                    builtin: Builtin::DictUnion,
-                    arguments: Arc::from([handler_api(access), ops]),
-                },
-            ));
-            let state = Value::Dict(
-                Dict::new_sync()
-                    .insert(keys::USER.clone(), user)
-                    .insert(keys::HANDLER.clone(), handler),
-            );
-            let outcomes = handler_run_in(access, effect, state, api);
-            let view = |successes| {
-                Value::List(deferred_handler_list_in(
-                    access,
-                    ListEffectComputation::HandlerOutcomes {
-                        outcomes: outcomes.clone(),
-                        successes,
-                    },
-                ))
-            };
-            Ok(Value::Dict(
-                Dict::new_sync()
-                    .insert(keys::OK.clone(), view(true))
-                    .insert(keys::FAILED.clone(), view(false)),
-            ))
-        }
-        Builtin::HandlerReturn => {
-            let [value, state] = exact(arguments, "handler return")?;
-            one(success(value, state))
-        }
-        // A run answers these itself, with its API; applied to a state
-        // elsewhere, they have none.
-        Builtin::HandlerSeq | Builtin::HandlerAlt | Builtin::HandlerCut => Err(
-            EvaluationHalt::new("`.seq`, `.alt` and `.cut` run only within their pure handler"),
-        ),
-        Builtin::HandlerFail => {
-            let [state] = exact(arguments, "handler fail")?;
-            one(Value::Dict(
-                Dict::new_sync().insert(keys::FAILED.clone(), state),
-            ))
-        }
-        Builtin::HandlerGet => {
-            let [path, state] = exact(arguments, "handler get")?;
-            let value = Value::Lazy(LazyValue::from_access_in(
-                values,
-                Arc::from([CoreDataKey::Key(keys::USER.clone()), CoreDataKey::PathIndex]),
-                Arc::from([values.duplicate_value(&state), path]),
-            ));
-            one(success(value, state))
-        }
-        Builtin::HandlerSet => {
-            let [path, item, state] = exact(arguments, "handler set")?;
-            // The user's state at `path` is the state at `[user] ++ path`.
-            let path = super::sequence::append_values(
-                values,
-                Value::List(List::from_values(vec![keys::USER.to_value_in(values)])),
-                path,
-            )?;
-            let state = Value::Lazy(LazyValue::from_builtin_in(
-                values,
-                BuiltinCall {
-                    builtin: Builtin::DictUpdate,
-                    arguments: Arc::from([path, item, state]),
-                },
-            ));
-            one(success(values.unit(), state))
-        }
-        _ => unreachable!("a pure handler's branch received another builtin"),
-    }
-}
-
-/// The core's requests, which a pure handler's API extends with its own.
-/// It holds only builtins, so one dictionary serves every run.
-fn handler_api(_access: &EvaluationValueAccess<'_>) -> Value {
-    static API: std::sync::LazyLock<Dict> = std::sync::LazyLock::new(|| {
-        Dict::new_sync()
-            .insert((*keys::R).clone(), Value::Builtin(Builtin::HandlerReturn))
-            .insert((*keys::SEQ).clone(), Value::Builtin(Builtin::HandlerSeq))
-            .insert((*keys::ALT).clone(), Value::Builtin(Builtin::HandlerAlt))
-            .insert((*keys::FAIL).clone(), Value::Builtin(Builtin::HandlerFail))
-            .insert((*keys::CUT).clone(), Value::Builtin(Builtin::HandlerCut))
-            .insert((*keys::GET).clone(), Value::Builtin(Builtin::HandlerGet))
-            .insert((*keys::SET).clone(), Value::Builtin(Builtin::HandlerSet))
-    });
-    Value::Dict(API.clone())
 }
 
 fn deferred_run_list_in(access: &EvaluationValueAccess<'_>, operation: &Value) -> Value {
