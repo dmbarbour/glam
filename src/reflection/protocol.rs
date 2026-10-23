@@ -1093,7 +1093,7 @@ mod root_inventory_tests {
             include_str!("../g_syntax/macro_expansion/effects.rs"),
             include_str!("../bin/glam/configuration/logger/effects.rs"),
             include_str!("../bin/glam/command_line/configured/effects.rs"),
-            include_str!("../bin/glam/command_line/configured/token/effects.rs"),
+            include_str!("../api/turn/effects.rs"),
             include_str!("../../tests/effect_embedding.rs"),
         ];
         let count = |needle: &str| {

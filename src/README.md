@@ -22,7 +22,7 @@ not define language semantics or collect subsystem invariants.
 | `bin/glam/rendering.rs` | Default and fallback terminal diagnostic rendering |
 | `bin/glam/configuration/` | `GLAM_CONF`, `conf.env`, configured logger lifecycle, and executable configuration policy |
 | `bin/glam/command_line/` | Private bootstrap command grammar, validated command models, help, and shell completion |
-| `bin/glam/command_line/configured/` | `conf.cli` effects, isolated search, path policy, and nested token parsing |
+| `bin/glam/command_line/configured/` | `conf.cli` effects, isolated search, path policy, and `.read.token`, which runs the library's token parser |
 | `source.rs` | Source artifacts, digests, relative resolvers, tracked local files |
 | `lib.rs`, `api.rs` | Stable embedding facade and re-exports |
 | `api/value.rs`, `api/evaluator.rs`, `api/error.rs` | Opaque inline-or-managed runtime-rooted value construction, explicit demand/extraction, privileged inspection, and structured embedding failures |
@@ -78,7 +78,8 @@ not define language semantics or collect subsystem invariants.
 | `eval/object_machine.rs` | Pollable object-fixpoint construction |
 | `eval/pattern_machine.rs` | Resumable compiler-pattern builtins: list, path, dictionary, and equality observations |
 | `eval/list_machine.rs` | Pollable logical-list front and back projection shared by other machines |
-| `eval/list_effect_machine.rs` | Regional reducer for the lazy list-effect recipe family |
+| `eval/list_effect_machine.rs` | Regional reducer for the lazy list-effect recipe family: `list.pure`, and pure handlers, which thread a user's and a handler's state through each branch and keep every branch, failed ones with their state |
+| `eval/token_machine.rs` | The CLI token parser's operations as private builtins over an opaque token context and each branch's cursor and evidence |
 | `eval/list_transform_machine.rs` | Non-forcing structural `map` and `list.concat` |
 | `eval/tagged_machine.rs` | Shared resumable tagged-payload recognition and iterative semantic-undefined traversal |
 | `eval/whnf.rs`, `eval/whnf/tests/` | Crate-private WHNF submachine protocol with one canonical raw-edge state behind zero-walk regional/net ownership wrappers, a separate durable rooted demand checkpoint, a bounded callback-free regional driver, atomic rooted checkpoint publication, and scheduler-independent lifecycle/collection fixtures; lazy sources install progress beneath their owning lazy, while client demand, promise sources, reflection request work, and demand-capable builtin machines use the protocol |
@@ -94,6 +95,7 @@ not define language semantics or collect subsystem invariants.
 | `reflection.rs`, `reflection/protocol.rs` | Reflection facade, cut-wide observation/branch-local edit protocol, read-only host validation, and bounded callback evaluation service |
 | `reflection/lifecycle.rs` | Effect lifecycle, scheduled runs, and task launchers |
 | `reflection/machine.rs`, `reflection/requests.rs`, `reflection/search.rs` | Persistent phased effect machine, resumable rooted WHNF request decoding, a dispatch shortcut for decoded `.seq`, `.r`, `.get`, and `.set`, and isolated search |
+| `reflection/token_parse.rs` | The CLI's token parser run by a pure handler: the values of parses that read the whole token, and every branch's evidence at the furthest offset |
 | `reflection/machine/reset_stack.rs` | Resumable decoding of the reset frames serialized in reflection state |
 | `reflection/store.rs` | Journaled volume roots, edits, snapshots, commits, and query lifetime |
 | `reflection/store/conflict.rs` | Conflict paths plus exact, fingerprint, coarse, and client-defined observation strategies |

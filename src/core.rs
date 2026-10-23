@@ -2196,9 +2196,7 @@ pub enum Builtin {
     ListEffectFix,
     /// A pure handler (`pure-handler-core`): `Handler ops user handler
     /// effect` runs `effect` against the core's requests and `ops`, from the
-    /// user's state and the handler's, keeping every branch. Only tests
-    /// bind it until `pure-handler-token` runs the CLI's token parser by it.
-    #[cfg_attr(not(test), allow(dead_code))]
+    /// user's state and the handler's, keeping every branch.
     Handler,
     /// The core's requests, each a function of the state `{user, handler}`
     /// to an ordered list of outcomes. The handler's run answers `.seq`,
@@ -2211,6 +2209,13 @@ pub enum Builtin {
     HandlerCut,
     HandlerGet,
     HandlerSet,
+    /// The CLI's token parser's operations (`pure-handler-token`), each
+    /// applied to its argument, if any, and a pure handler's state.
+    TokenText,
+    TokenRegex,
+    TokenTextSpan,
+    TokenAny,
+    TokenEnd,
     /// Compiler-private selectors for pure conditional search results.
     IfResult,
     MatchResult,
@@ -2343,6 +2348,11 @@ impl Builtin {
             Self::HandlerCut => 2,
             Self::HandlerGet => 2,
             Self::HandlerSet => 3,
+            Self::TokenText => 2,
+            Self::TokenRegex => 2,
+            Self::TokenTextSpan => 1,
+            Self::TokenAny => 1,
+            Self::TokenEnd => 1,
             Self::IfResult => 1,
             Self::MatchResult => 1,
             Self::DictSingleton => 2,

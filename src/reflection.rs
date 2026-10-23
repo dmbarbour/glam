@@ -11,6 +11,7 @@ mod protocol;
 mod requests;
 mod search;
 mod store;
+mod token_parse;
 mod volume_handle;
 
 pub(crate) use lifecycle::coordinator_task_launcher;
@@ -40,6 +41,7 @@ pub use search::{
     IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchBranch, IsolatedSearchPoll,
     IsolatedTaskHost,
 };
+pub use token_parse::{TokenCandidate, TokenExpectation, TokenRun, run_token_parser};
 
 #[cfg(test)]
 pub(crate) use requests::assert_task_handle_family_shape;

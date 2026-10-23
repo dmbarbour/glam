@@ -4,7 +4,7 @@ use std::sync::Arc;
 use glam::reflection::{
     EffectRequestSpec, ReflectionRequest, ReflectionRequestWork, RequestContext, RequestResult,
     SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork, TaskHalt,
-    TaskSpecialization, environment_diagnostic_request_specs,
+    TaskSpecialization, environment_diagnostic_request_specs, run_token_parser,
 };
 use glam::{EvaluatedValue, HandleValue, ModuleInput};
 
@@ -629,17 +629,17 @@ fn read_token_value(
     };
 
     let result =
-        token::run(&parser, argument, completion_offset, context).map_err(TaskHalt::new)?;
+        run_token_parser(context, &parser, argument, completion_offset).map_err(TaskHalt::new)?;
     let completion_candidates = if completion_offset.is_some() {
         result
             .candidates
             .iter()
             .filter_map(|candidate| {
-                let verification = token::run(
+                let verification = run_token_parser(
+                    context,
                     &parser,
                     Arc::from(candidate.replacement.as_str()),
                     None,
-                    context,
                 )
                 .ok()?;
                 let complete_reader = !verification.values.is_empty();

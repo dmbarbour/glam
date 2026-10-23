@@ -85,6 +85,14 @@ protocol_key!(USER, "user");
 protocol_key!(HANDLER, "handler");
 protocol_key!(STATE, "state");
 protocol_key!(FAILED, "failed");
+// The CLI's token parser's state and evidence (`pure-handler-token`).
+protocol_key!(CURSOR, "cursor");
+protocol_key!(EXPECTATIONS, "expectations");
+protocol_key!(CANDIDATES, "candidates");
+protocol_key!(OFFSET, "offset");
+protocol_key!(LABEL, "label");
+protocol_key!(REPLACEMENT, "replacement");
+protocol_key!(SPAN, "span");
 
 pub(crate) static UNIT: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));

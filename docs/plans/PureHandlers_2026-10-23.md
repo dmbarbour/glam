@@ -114,6 +114,25 @@ search object: about 700 lines in all.
   - Bound as `list.search` only in tests until `pure-handler-token` gives it
     a caller; its name, if glam is to have it, is the maintainer's.
 
+- `pure-handler-token` (2026-10-23): the CLI's token parser runs by the
+  pure handler, from the library, `run_token_parser`, which the CLI's
+  `.read.token` calls in place of a nested isolated search; the CLI's
+  token specialization, about 450 lines, is gone.
+  - Its operations, `.token.text`, `.regex`, `.text_span`, `.any` and
+    `.end`, are private builtins, each a function of its argument, if any,
+    and the state (maintainer, 2026-10-23: private builtins for now, to be
+    eliminated gradually as performance and accelerators allow).
+  - The handler's state holds an opaque context made once a parse, the
+    token's text and the offset being completed, and per branch plain
+    data: the cursor and the evidence, expectations and candidates, each
+    `{offset, label}` or `{offset, replacement}`.
+  - The run reads the successes' values and every branch's evidence, as
+    the isolated search's branches were read.
+  - Within a user's `.cut`, a token parse now keeps the evidence of the
+    failures before its first success, where the isolated search kept the
+    last failure's alone. No test depended on the difference.
+  - `list.search` stays bound in tests only.
+
 ## Answers (maintainer, 2026-10-23)
 
 1. Generalize to a shared core where it fits; where that proves awkward,
