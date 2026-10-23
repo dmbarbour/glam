@@ -87,13 +87,17 @@ search object: about 700 lines in all.
 
 - `pure-handler-core` (2026-10-23), in `list.pure`'s family of lazy
   computations, so it shares its reducer, checkpoints and tracing.
-  - `Handler ops user handler effect` runs `effect` from the state `{api,
-    user, handler}`, where `api` is the core's requests united with `ops`.
-    Each request, the core's or a handler's, is a function of that state,
-    as `list.pure`'s are tagless, answering with an ordered list of
-    outcomes: `{value, state}` or `{failed: state}`. A request that answers
-    with an effect, `{eff:_}`, runs in its place, so an operation may be a
-    composition of others.
+  - `Handler ops user handler effect` runs `effect` from the state `{user,
+    handler}` against an API, the core's requests united with `ops`, which
+    the run holds: fixed for the run, it need not travel in the state
+    (maintainer, 2026-10-23). Each request, the core's or a handler's, is a
+    function of the state, as `list.pure`'s are tagless, answering with an
+    ordered list of outcomes: `{value, state}` or `{failed: state}`. The run
+    answers `.seq`, `.alt` and `.cut` itself, since they run effects of
+    their own against its API.
+  - A request answers with outcomes, never with an effect to run in its
+    place: a composition of operations is an ordinary effect, built where
+    it is used (maintainer, 2026-10-23).
   - The core reduces `.r`, `.seq`, `.alt` (every branch, in order),
     `.fail`, `.cut` (its first success and the failures before it), and
     `.get`/`.set` on `user`, the empty path naming all of it. It does not
@@ -104,9 +108,9 @@ search object: about 700 lines in all.
     handler}`. A view passes over the other kind without a list cell of its
     own, and reads only as far as it is read, so `ok`'s first success
     forces no later branch.
-  - An operation receives the whole state, which it returns with its
-    `handler` changed, rather than the handler's state alone, as the sketch
-    had it: one convention for every request.
+  - An operation receives the whole state, `{user, handler}`, which it
+    returns with its `handler` changed, rather than the handler's state
+    alone, as the sketch had it: one convention for every request.
   - Bound as `list.search` only in tests until `pure-handler-token` gives it
     a caller; its name, if glam is to have it, is the maintainer's.
 

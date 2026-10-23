@@ -81,7 +81,6 @@ protocol_key!(FIX, "fix");
 protocol_key!(GET, "get");
 protocol_key!(SET, "set");
 // A pure handler's state and outcomes (`pure-handler-core`).
-protocol_key!(API, "api");
 protocol_key!(USER, "user");
 protocol_key!(HANDLER, "handler");
 protocol_key!(STATE, "state");

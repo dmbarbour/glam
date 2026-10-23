@@ -1678,18 +1678,20 @@ pub(crate) enum ListEffectComputation {
         function: Value,
         alternative: usize,
     },
-    /// Runs `effect` under a pure handler from `state`, `{api, user,
-    /// handler}`, to an ordered list of outcomes: `{value, state}` for a
-    /// success, `{failed: state}` for a failure (`pure-handler-core`).
+    /// Runs `effect` under a pure handler, whose API is `api`, from `state`,
+    /// `{user, handler}`, to an ordered list of outcomes: `{value, state}`
+    /// for a success, `{failed: state}` for a failure (`pure-handler-core`).
     HandlerRun {
         effect: Value,
         state: Value,
+        api: Value,
     },
-    /// Continues each success of `outcomes` with `continuation`, and passes
-    /// each failure through.
+    /// Continues each success of `outcomes` with `continuation`, run against
+    /// `api`, and passes each failure through.
     HandlerSequence {
         outcomes: List,
         continuation: Value,
+        api: Value,
     },
     /// The outcomes through the first success: the failures before it, and
     /// it.
@@ -2193,13 +2195,15 @@ pub enum Builtin {
     ListEffectCut,
     ListEffectFix,
     /// A pure handler (`pure-handler-core`): `Handler ops user handler
-    /// effect` runs `effect` against the core's operations and `ops`, from
-    /// the user's state and the handler's, keeping every branch. Only tests
+    /// effect` runs `effect` against the core's requests and `ops`, from the
+    /// user's state and the handler's, keeping every branch. Only tests
     /// bind it until `pure-handler-token` runs the CLI's token parser by it.
     #[cfg_attr(not(test), allow(dead_code))]
     Handler,
-    /// The core's operations, each a function of the state `{api, user,
-    /// handler}` to an ordered list of outcomes.
+    /// The core's requests, each a function of the state `{user, handler}`
+    /// to an ordered list of outcomes. The handler's run answers `.seq`,
+    /// `.alt` and `.cut`, which run effects of their own, with the API it
+    /// holds.
     HandlerReturn,
     HandlerSeq,
     HandlerAlt,

@@ -140,16 +140,19 @@ impl CompatibilityValueEdges for ListEffectComputation {
                 visit(continuation);
             }
             Self::FirstResult { results } => results.visit_compatibility_value_edges(visit),
-            Self::HandlerRun { effect, state } => {
+            Self::HandlerRun { effect, state, api } => {
                 visit(effect);
                 visit(state);
+                visit(api);
             }
             Self::HandlerSequence {
                 outcomes,
                 continuation,
+                api,
             } => {
                 outcomes.visit_compatibility_value_edges(visit);
                 visit(continuation);
+                visit(api);
             }
             Self::HandlerCut { outcomes } | Self::HandlerOutcomes { outcomes, .. } => {
                 outcomes.visit_compatibility_value_edges(visit);
