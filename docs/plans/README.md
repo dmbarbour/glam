@@ -81,9 +81,9 @@ flags a step for discussion when work reaches it, not a decision.
   `list.pure`'s pattern, to replace the CLI's argument and token parsers
   and source macros, which run under the isolated search. A shared core
   keeps every branch with its state; each handler adds a table of
-  operations; successes and failures come as two lazy lists; host facts
-  are lazy input. Drafted 2026-10-23; the maintainer answered its
-  questions but one, the CLI's host facts, which is to discuss.
+  operations; successes and failures come as two lazy lists; file
+  metadata is a pseudo-import. Drafted 2026-10-23; the maintainer
+  answered its questions.
 - [`PollBudget_2026-10-22.md`](PollBudget_2026-10-22.md): `budget-` steps
   from an audit of how polls spend and report their budget: coarse-grained
   steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`

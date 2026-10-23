@@ -59,19 +59,20 @@ search object: about 700 lines in all.
 3. **The input is the handler's argument,** so a handler is pure: the token
    parser over a text and a completion offset; the argument parser over the
    arguments and their host facts; macros over their input and environment.
-4. **Host facts are lazy input.** Nothing is gathered ahead: the input
-   carries, for each argument, a lazy value that a host function computes
-   on first demand (`LazyValue::external_host_call_in`, as the compiler's
-   host calls do): what the argument names, a file, a folder or nothing
-   (with its parent then), and whether it could be read or written. In
-   completion, one more lazy value lists the folder being completed. A
-   branch's `.read.path` forces only its argument's facts, and the run
-   keeps them, so the least is done: one probe for each argument some
-   branch reads as a path, where today each branch probes for itself, and
-   a run made to verify a completion can share the facts. Checking write
-   access by opening the file for writing, as now, should give way to its
-   metadata. Whether `.read.path` stays a request to a provider instead is
-   to discuss (maintainer, 2026-10-23).
+4. **File metadata is a pseudo-import** (maintainer, 2026-10-23). Nothing
+   is gathered ahead: the input carries, for each argument, a lazy value
+   that, once forced, requests the argument's metadata as an import
+   requests its source (`imports-are-source-requests`), and awaits the
+   host's reply: what the argument names, a file, a folder or nothing (with
+   its parent then), and whether it could be read or written. In
+   completion, one more such value lists the folder being completed. As an
+   import's binary is, the reply is data, fixed within the assembly step,
+   so the parser stays a pure function of its input. A branch's
+   `.read.path` forces only its argument's facts, and the run keeps them,
+   so the least is done: one request for each argument some branch reads
+   as a path, where today each branch probes for itself, and a run made to
+   verify a completion can share the replies. The host answers from
+   metadata, rather than opening a file for writing to test it, as now.
 5. **The order of building.**
    - `pure-handler-core`, with `list.pure`'s tests as its starting cases.
    - `pure-handler-token`, the smallest and free of the host, run by the
@@ -86,10 +87,10 @@ search object: about 700 lines in all.
 
 1. Generalize to a shared core where it fits; where that proves awkward,
    separate handlers.
-2. Host facts as lazy input, or `.read.path` as a provider's request: to
-   discuss.
-3. Within a user's `.cut`, aggregate the failed alternatives' evidence for
-   diagnostics, and keep at most one success.
+2. File metadata is a pseudo-import: lazy input the host serves as it
+   serves imports.
+3. Within a user's `.cut`, aggregate the evidence of the failures observed
+   before its first success, for diagnostics, and keep that success.
 4. Aggregation may live in Rust or in glam: the hard part is interpreting
    an arbitrary user program, done by then.
 5. The core does not reduce `.reset` and `.shift`.
