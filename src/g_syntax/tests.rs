@@ -252,6 +252,8 @@ fn output_binary_result_list(value: &Value) -> Vec<u8> {
 
 use super::*;
 use crate::diagnostic::Severity;
+
+mod pure_handler;
 use std::sync::{Arc, Mutex};
 
 fn parse(text: &str) -> ParsedSource {

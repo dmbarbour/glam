@@ -78,6 +78,14 @@ protocol_key!(ALT, "alt");
 protocol_key!(FAIL, "fail");
 protocol_key!(CUT, "cut");
 protocol_key!(FIX, "fix");
+protocol_key!(GET, "get");
+protocol_key!(SET, "set");
+// A pure handler's state and outcomes (`pure-handler-core`).
+protocol_key!(API, "api");
+protocol_key!(USER, "user");
+protocol_key!(HANDLER, "handler");
+protocol_key!(STATE, "state");
+protocol_key!(FAILED, "failed");
 
 pub(crate) static UNIT: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));

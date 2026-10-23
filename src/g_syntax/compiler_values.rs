@@ -230,23 +230,26 @@ impl GCompilerValues {
         });
         rooted_checkpoint();
         let list = build_module(values, &constant_object_defs, |_| {
-            Value::Dict(
-                Dict::new_sync()
-                    .insert(name_as_key("slice"), Value::Builtin(Builtin::Slice))
-                    .insert(name_as_key("split"), Value::Builtin(Builtin::ListSplit))
-                    .insert(
-                        name_as_key("split_end"),
-                        Value::Builtin(Builtin::ListSplitEnd),
-                    )
-                    .insert(name_as_key("map"), Value::Builtin(Builtin::Map))
-                    .insert(name_as_key("concat"), Value::Builtin(Builtin::ListConcat))
-                    .insert(name_as_key("len"), Value::Builtin(Builtin::ListLen))
-                    .insert(name_as_key("at"), Value::Builtin(Builtin::ListAt))
-                    .insert(name_as_key("head"), Value::Builtin(Builtin::ListHead))
-                    .insert(name_as_key("tail"), Value::Builtin(Builtin::ListTail))
-                    .insert(name_as_key("reverse"), Value::Builtin(Builtin::ListReverse))
-                    .insert(name_as_key("pure"), Value::Builtin(Builtin::ListEffect)),
-            )
+            let list = Dict::new_sync()
+                .insert(name_as_key("slice"), Value::Builtin(Builtin::Slice))
+                .insert(name_as_key("split"), Value::Builtin(Builtin::ListSplit))
+                .insert(
+                    name_as_key("split_end"),
+                    Value::Builtin(Builtin::ListSplitEnd),
+                )
+                .insert(name_as_key("map"), Value::Builtin(Builtin::Map))
+                .insert(name_as_key("concat"), Value::Builtin(Builtin::ListConcat))
+                .insert(name_as_key("len"), Value::Builtin(Builtin::ListLen))
+                .insert(name_as_key("at"), Value::Builtin(Builtin::ListAt))
+                .insert(name_as_key("head"), Value::Builtin(Builtin::ListHead))
+                .insert(name_as_key("tail"), Value::Builtin(Builtin::ListTail))
+                .insert(name_as_key("reverse"), Value::Builtin(Builtin::ListReverse))
+                .insert(name_as_key("pure"), Value::Builtin(Builtin::ListEffect));
+            // A pure handler, bound for tests until handlers' callers come
+            // (`pure-handler-core`).
+            #[cfg(test)]
+            let list = list.insert(name_as_key("search"), Value::Builtin(Builtin::Handler));
+            Value::Dict(list)
         });
         rooted_checkpoint();
         // Only constructors: a dict's keys are listed only by reflection.

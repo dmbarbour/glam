@@ -83,6 +83,33 @@ search object: about 700 lines in all.
    - `pure-handler-retire-search`: the isolated search and
      `IsolatedTaskHost` leave the public API (`effect-families-pass-through`).
 
+## Built
+
+- `pure-handler-core` (2026-10-23), in `list.pure`'s family of lazy
+  computations, so it shares its reducer, checkpoints and tracing.
+  - `Handler ops user handler effect` runs `effect` from the state `{api,
+    user, handler}`, where `api` is the core's requests united with `ops`.
+    Each request, the core's or a handler's, is a function of that state,
+    as `list.pure`'s are tagless, answering with an ordered list of
+    outcomes: `{value, state}` or `{failed: state}`. A request that answers
+    with an effect, `{eff:_}`, runs in its place, so an operation may be a
+    composition of others.
+  - The core reduces `.r`, `.seq`, `.alt` (every branch, in order),
+    `.fail`, `.cut` (its first success and the failures before it), and
+    `.get`/`.set` on `user`, the empty path naming all of it. It does not
+    reduce `.fix`, `.reset` or `.shift`.
+  - The outcomes stay ordered within a run, since a cut keeps only the
+    failures before its first success. A run's results are two lazy views
+    of them: `ok`, each `{value, user, handler}`, and `failed`, each `{user,
+    handler}`. A view passes over the other kind without a list cell of its
+    own, and reads only as far as it is read, so `ok`'s first success
+    forces no later branch.
+  - An operation receives the whole state, which it returns with its
+    `handler` changed, rather than the handler's state alone, as the sketch
+    had it: one convention for every request.
+  - Bound as `list.search` only in tests until `pure-handler-token` gives it
+    a caller; its name, if glam is to have it, is the maintainer's.
+
 ## Answers (maintainer, 2026-10-23)
 
 1. Generalize to a shared core where it fits; where that proves awkward,

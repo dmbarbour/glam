@@ -1678,6 +1678,30 @@ pub(crate) enum ListEffectComputation {
         function: Value,
         alternative: usize,
     },
+    /// Runs `effect` under a pure handler from `state`, `{api, user,
+    /// handler}`, to an ordered list of outcomes: `{value, state}` for a
+    /// success, `{failed: state}` for a failure (`pure-handler-core`).
+    HandlerRun {
+        effect: Value,
+        state: Value,
+    },
+    /// Continues each success of `outcomes` with `continuation`, and passes
+    /// each failure through.
+    HandlerSequence {
+        outcomes: List,
+        continuation: Value,
+    },
+    /// The outcomes through the first success: the failures before it, and
+    /// it.
+    HandlerCut {
+        outcomes: List,
+    },
+    /// The successes of `outcomes`, `{value, user, handler}`, or its
+    /// failures, `{user, handler}`: a run's results.
+    HandlerOutcomes {
+        outcomes: List,
+        successes: bool,
+    },
 }
 
 #[cfg(test)]
@@ -2168,6 +2192,21 @@ pub enum Builtin {
     ListEffectAlt,
     ListEffectCut,
     ListEffectFix,
+    /// A pure handler (`pure-handler-core`): `Handler ops user handler
+    /// effect` runs `effect` against the core's operations and `ops`, from
+    /// the user's state and the handler's, keeping every branch. Only tests
+    /// bind it until `pure-handler-token` runs the CLI's token parser by it.
+    #[cfg_attr(not(test), allow(dead_code))]
+    Handler,
+    /// The core's operations, each a function of the state `{api, user,
+    /// handler}` to an ordered list of outcomes.
+    HandlerReturn,
+    HandlerSeq,
+    HandlerAlt,
+    HandlerFail,
+    HandlerCut,
+    HandlerGet,
+    HandlerSet,
     /// Compiler-private selectors for pure conditional search results.
     IfResult,
     MatchResult,
@@ -2292,6 +2331,14 @@ impl Builtin {
             Self::ListEffectAlt => 2,
             Self::ListEffectCut => 1,
             Self::ListEffectFix => 1,
+            Self::Handler => 4,
+            Self::HandlerReturn => 2,
+            Self::HandlerSeq => 3,
+            Self::HandlerAlt => 3,
+            Self::HandlerFail => 1,
+            Self::HandlerCut => 2,
+            Self::HandlerGet => 2,
+            Self::HandlerSet => 3,
             Self::IfResult => 1,
             Self::MatchResult => 1,
             Self::DictSingleton => 2,

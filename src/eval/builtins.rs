@@ -152,6 +152,16 @@ pub(super) fn apply_builtin_in(
                 _ => unreachable!("list-effect branch received another builtin"),
             }
         }
+        Builtin::Handler
+        | Builtin::HandlerReturn
+        | Builtin::HandlerSeq
+        | Builtin::HandlerAlt
+        | Builtin::HandlerFail
+        | Builtin::HandlerCut
+        | Builtin::HandlerGet
+        | Builtin::HandlerSet => {
+            super::list_effect_machine::apply_handler_builtin_in(access, builtin, arguments)
+        }
         Builtin::IfResult | Builtin::MatchResult => Ok(deferred(arguments)),
         Builtin::DictSingleton
         | Builtin::DictUnion

@@ -140,6 +140,20 @@ impl CompatibilityValueEdges for ListEffectComputation {
                 visit(continuation);
             }
             Self::FirstResult { results } => results.visit_compatibility_value_edges(visit),
+            Self::HandlerRun { effect, state } => {
+                visit(effect);
+                visit(state);
+            }
+            Self::HandlerSequence {
+                outcomes,
+                continuation,
+            } => {
+                outcomes.visit_compatibility_value_edges(visit);
+                visit(continuation);
+            }
+            Self::HandlerCut { outcomes } | Self::HandlerOutcomes { outcomes, .. } => {
+                outcomes.visit_compatibility_value_edges(visit);
+            }
         }
     }
 
@@ -150,7 +164,15 @@ impl CompatibilityValueEdges for ListEffectComputation {
             | Self::FirstResult { results } => {
                 results.trace_direct_compatibility_managed_edges(visitor);
             }
-            Self::Run { .. } | Self::Cut { .. } | Self::FixFunction { .. } => {}
+            Self::HandlerSequence { outcomes, .. }
+            | Self::HandlerCut { outcomes }
+            | Self::HandlerOutcomes { outcomes, .. } => {
+                outcomes.trace_direct_compatibility_managed_edges(visitor);
+            }
+            Self::Run { .. }
+            | Self::Cut { .. }
+            | Self::FixFunction { .. }
+            | Self::HandlerRun { .. } => {}
         }
     }
 }
