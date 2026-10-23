@@ -91,6 +91,12 @@ flags a step for discussion when work reaches it, not a decision.
   reinstating a continuation, after the four-primitive frameworks.
   Recorded 2026-10-23 at the maintainer's request; not a priority unless it
   simplifies something at once.
+- [`PromiseCells_2026-10-23.md`](PromiseCells_2026-10-23.md): the runtime
+  API plan's `api-promise-cells`, a design note for review: one identity
+  per promise, its cell's; a resolver as an edge to a managed breaker that
+  holds the cell weakly, keeps its own status, and reports its death
+  through an external-owner token; the store holding no promise alive.
+  Drafted 2026-10-23 at the maintainer's request.
 - [`PollBudget_2026-10-22.md`](PollBudget_2026-10-22.md): `budget-` steps
   from an audit of how polls spend and report their budget: coarse-grained
   steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`

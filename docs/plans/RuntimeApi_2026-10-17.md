@@ -955,6 +955,11 @@ handle API goes.
         behind lazy values or a reflection gate answers `wait` as one held
         directly does (tested both ways). Pumping within `.try` had spun
         on a panicked producer's wait.
+      - `api-promise-cells-review`, then `api-promise-cells` (maintainer,
+        2026-10-23): one identity per promise, its cell's; resolvers as
+        edges to managed breakers that hold the cell weakly; the store
+        holding no promise alive. Ahead of child tasks, which answer with
+        promises. See [Promise Cells](PromiseCells_2026-10-23.md).
       - `api-refl-child-tasks`: `.child.task`, `.status`, `.recover`,
         `.interrupt` and `.clear`; `.task.*` and task handles retire.
       - `api-refl-call`: `.child.call`, with a child's machine state where
