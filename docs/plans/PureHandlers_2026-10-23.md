@@ -48,20 +48,30 @@ search object: about 700 lines in all.
      API is the core's builtins plus the operations, fixed per handler.
    - Scoped operations are compositions, not machinery: `.case e p` pushes
      `e`, runs `p`, and pops on success, so a failure keeps the push.
-2. **Every branch is a result.** A run reduces to a lazy list of outcomes in
-   search order: `ok` with a value and its states, or `failed` with its
-   states. The Rust callers read that list as they read branches now: the
-   furthest frontier, ambiguity, the unique success.
+2. **Every branch is a result, in two lists.** A run reduces to two lazy
+   lists, each in search order, from one search: successes, each a value
+   with its states, and failures, each with its states as evidence. Order
+   across the two is not needed, so a consumer of successes never touches a
+   failure (maintainer, 2026-10-23); the search still runs a failed path to
+   learn it fails, and keeps it for the other list. The Rust callers read
+   them as they read branches now: ambiguity and the unique success from
+   the first, the furthest frontier from the second.
 3. **The input is the handler's argument,** so a handler is pure: the token
    parser over a text and a completion offset; the argument parser over the
    arguments and their host facts; macros over their input and environment.
-4. **Host facts are gathered before the parse.** For each argument, the CLI
-   stats it once, to see whether it names a file or a folder, and whether
-   it could be read or written, from metadata alone. In completion, it also
-   lists the folder being completed. The facts go in as input, so a branch's
-   `.read.path` is pure, and a run made to verify a completion probes
-   nothing new. Today a branch probes for itself, and checking write access
-   opens the file for writing.
+4. **Host facts are lazy input.** Nothing is gathered ahead: the input
+   carries, for each argument, a lazy value that a host function computes
+   on first demand (`LazyValue::external_host_call_in`, as the compiler's
+   host calls do): what the argument names, a file, a folder or nothing
+   (with its parent then), and whether it could be read or written. In
+   completion, one more lazy value lists the folder being completed. A
+   branch's `.read.path` forces only its argument's facts, and the run
+   keeps them, so the least is done: one probe for each argument some
+   branch reads as a path, where today each branch probes for itself, and
+   a run made to verify a completion can share the facts. Checking write
+   access by opening the file for writing, as now, should give way to its
+   metadata. Whether `.read.path` stays a request to a provider instead is
+   to discuss (maintainer, 2026-10-23).
 5. **The order of building.**
    - `pure-handler-core`, with `list.pure`'s tests as its starting cases.
    - `pure-handler-token`, the smallest and free of the host, run by the
@@ -72,18 +82,14 @@ search object: about 700 lines in all.
    - `pure-handler-retire-search`: the isolated search and
      `IsolatedTaskHost` leave the public API (`effect-families-pass-through`).
 
-## Open questions
+## Answers (maintainer, 2026-10-23)
 
-1. A shared core with a Rust table of operations per handler, as proposed;
-   or glam libraries over a generic stateful runner, which would make the
-   CLI's and macros' operations glam code at some cost per operation; or
-   handlers fully separate, as `list.pure` is.
-2. Host facts gathered beforehand, from metadata alone, as proposed; or
-   `.read.path` kept as a request to a provider, so the argument parser is
-   not pure.
-3. Within a user's `.cut`, keep the evidence of every failed alternative,
-   for better diagnostics, or only the last, as now.
-4. Where aggregation lives: in Rust, reading the outcomes as now, or in
-   glam, with the handlers' results.
-5. Whether the core reduces `.reset` and `.shift`, which none of the three
-   parsers' tests and samples use.
+1. Generalize to a shared core where it fits; where that proves awkward,
+   separate handlers.
+2. Host facts as lazy input, or `.read.path` as a provider's request: to
+   discuss.
+3. Within a user's `.cut`, aggregate the failed alternatives' evidence for
+   diagnostics, and keep at most one success.
+4. Aggregation may live in Rust or in glam: the hard part is interpreting
+   an arbitrary user program, done by then.
+5. The core does not reduce `.reset` and `.shift`.
