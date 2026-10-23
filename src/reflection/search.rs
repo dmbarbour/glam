@@ -314,6 +314,9 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
                 IsolatedSearchPoll::Failed(self.root_poll_error(error))
             }
             EffectTaskPoll::Cancelled => IsolatedSearchPoll::Cancelled,
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => {
                 unreachable!("isolated effect-search profiles do not expose runtime exit")
             }
@@ -363,8 +366,8 @@ pub(crate) struct HostedEffectRun<S: TaskSpecialization> {
 /// What a hosted run's poll came to.
 pub(crate) enum HostedPoll {
     BudgetExhausted,
-    /// Paused for the host to handle its events.
-    Paused,
+    /// Paused for the host to handle this, before the run's next step.
+    Paused(HostControl),
     Blocked(IsolatedSearchBlock),
     Complete {
         value: PublicValue,
@@ -401,11 +404,7 @@ impl<S: TaskSpecialization> HostedEffectRun<S> {
     pub(crate) fn poll(&mut self, step_budget: usize) -> HostedPoll {
         match self.task.poll(step_budget) {
             EffectTaskPoll::BudgetExhausted => HostedPoll::BudgetExhausted,
-            EffectTaskPoll::Blocked(blocked)
-                if blocked.dependency.is_none() && blocked.error.is_none() =>
-            {
-                HostedPoll::Paused
-            }
+            EffectTaskPoll::Paused(event) => HostedPoll::Paused(event),
             EffectTaskPoll::Blocked(blocked) => {
                 match search_block(&self.task.eval_context, blocked) {
                     Ok(blocked) => HostedPoll::Blocked(blocked),
@@ -425,11 +424,6 @@ impl<S: TaskSpecialization> HostedEffectRun<S> {
         }
     }
 
-    /// The events the host has yet to handle, in order.
-    pub(crate) fn take_events(&mut self) -> Vec<HostControl> {
-        self.task.take_host_events()
-    }
-
     /// Whether the host must keep a way back to its state before it
     /// answers a request: a branch set aside since it last answered.
     pub(crate) fn needs_checkpoint(&self) -> bool {
@@ -441,12 +435,15 @@ impl<S: TaskSpecialization> HostedEffectRun<S> {
         self.task.host_version()
     }
 
-    /// The host committed the outermost cut.
-    pub(crate) fn cut_committed(&mut self) {
-        self.task.cut_committed();
+    /// Answers [`HostControl::CutCommit`]: committed, or, as the host began
+    /// its transaction again, the cut runs again. The run polls only once
+    /// answered.
+    pub(crate) fn resume_commit(&mut self, committed: bool) {
+        self.task.resume_commit(committed);
     }
 
-    /// Runs the outermost cut again from its entry.
+    /// Runs the outermost cut again from its entry, as the host began its
+    /// transaction again where the cut diverged.
     pub(crate) fn restart_outermost_cut(&mut self) {
         self.task.restart_outermost_cut();
     }

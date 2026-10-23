@@ -876,7 +876,24 @@ handle API goes.
       factored out of it; within one, it nests. A provider may answer
       `Alternatives(n)`. Undo-based checkpoints are to explore
       (`perf-undo-checkpoints`).
-21. `api-reflection-machines` — reflection tasks become tasks on machines
+    - Cleaned up (2026-10-23, with the maintainer): the run pauses with
+      `EffectTaskPoll::Paused`, one event a poll, in place of a queue
+      signalled by an empty block; a commit waits for the turn's answer
+      (`resume_commit`); and a restore is raised where a set-aside branch
+      resumes, a cut's next alternative or a fixpoint's restart, with a
+      debug check that each step drives the turn's present version, so
+      tasks the host does not run pay nothing.
+21. `api-atomic` — `m.atomic`, a transaction run once (maintainer,
+    2026-10-23): as `m.cut`, without its automatic retry. Built on the
+    primitives `api-effect-providers` factored out of `m.cut`
+    (`transaction_begin`, `_end`, `_abort`). Outermost, a success commits;
+    a failure or pushback rolls back and returns, without waiting; a
+    conflict at commit rolls back and returns a new
+    `ErrorKind::Conflict`, so a caller tells "run again now" from "run
+    again after a change". Nested within a cut, it is a nested cut. An
+    effect run's own transaction may share it, keeping the retry it does
+    on purpose.
+22. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`
     shares and accepted promises (`obligations-are-accepted-promises`) for
@@ -891,7 +908,7 @@ handle API goes.
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
       a `stderr` port with `.port.*`, and its exit vote goes.
-22. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
+23. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
     decides (maintainer, 2026-10-19), in place of exit votes. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
     tasks as machines and no exit votes, rather than building on both. The runtime is
@@ -921,7 +938,7 @@ handle API goes.
      check that evaluation would otherwise need at every wait. Turns
      already fail such a cut when their own evaluation returns
      (`api-transactional-promises`).
-23. `api-cli-sources` — the CLI slice of `api-import-requests`, moved after
+24. `api-cli-sources` — the CLI slice of `api-import-requests`, moved after
     settlement (2026-10-21): a CLI machine serves the requests with
     `FileSourceSystem`, records the reads, and writes the manifest and
     checks that no file changed once settlement is done, so imports forced
@@ -929,13 +946,13 @@ handle API goes.
     with `Runtime::open` and hands its top-level files over as sources;
     the bridge's constructor goes, and with it the assembler's source
     system and the loaders that read files.
-24. `api-handle-retirement` — the public handle types go: `Assembler`,
+25. `api-handle-retirement` — the public handle types go: `Assembler`,
     `ModuleBuilder`, readiness results, `EffectRun`, endpoints and buses,
     and `Values` as a separate handle. The bridge goes with them, and the
     public tests move to turns (see
     [Parity](#parity-for-handle-retirement)). Standing docs describe the new
     API.
-25. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
+26. `api-retirement` — absorbs `lifecycle-owner`'s retirement protocol (L1,
     L5, L6, L10). With the handles gone, the `Runtime` is the only owner,
     and dropping it retires in order: admit no new work; stop, wake and
     join the workers; fail pending operations as retired; close sessions

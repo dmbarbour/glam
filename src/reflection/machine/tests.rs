@@ -2569,6 +2569,9 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
             EffectTaskPoll::Complete(_) => panic!("unfulfilled reset key completed"),
             EffectTaskPoll::Failed(error) => panic!("unfulfilled reset key failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("reset fixture was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("reset fixture voted to exit"),
         }
     };
@@ -2631,6 +2634,9 @@ fn shift_control_work_does_not_capture_before_its_key_resolves() {
             EffectTaskPoll::Complete(_) => panic!("unfulfilled shift key completed"),
             EffectTaskPoll::Failed(error) => panic!("unfulfilled shift key failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("shift fixture was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("shift fixture voted to exit"),
         }
     }
@@ -3431,6 +3437,7 @@ fn assert_task_terminal_inventory(poll: &EffectTaskPoll, terminal: &TaskTerminal
         EffectTaskPoll::Blocked(blocked) => {
             let _: &TaskBlock = blocked;
         }
+        EffectTaskPoll::Paused(_) => unreachable!("only a task whose host runs its cuts pauses"),
         EffectTaskPoll::Exit(exit) => {
             let _: &TaskExitBlock = exit;
         }
@@ -4287,6 +4294,9 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
                 }
                 EffectTaskPoll::Failed(error) => panic!("{label} fixture failed: {error}"),
                 EffectTaskPoll::Cancelled => panic!("{label} fixture was cancelled"),
+                EffectTaskPoll::Paused(_) => {
+                    unreachable!("only a task whose host runs its cuts pauses")
+                }
                 EffectTaskPoll::Exit(_) => panic!("{label} fixture unexpectedly voted to exit"),
             }
         };
@@ -4317,6 +4327,9 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
                 EffectTaskPoll::Blocked(_) => panic!("{label} fixture remained blocked"),
                 EffectTaskPoll::Failed(error) => panic!("{label} fixture failed: {error}"),
                 EffectTaskPoll::Cancelled => panic!("{label} fixture was cancelled"),
+                EffectTaskPoll::Paused(_) => {
+                    unreachable!("only a task whose host runs its cuts pauses")
+                }
                 EffectTaskPoll::Exit(_) => panic!("{label} fixture unexpectedly voted to exit"),
             }
         };
@@ -4375,6 +4388,9 @@ fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
             }
             EffectTaskPoll::Failed(error) => panic!("standalone-volume fixture failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("standalone-volume fixture was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => {
                 panic!("standalone-volume fixture unexpectedly voted to exit")
             }
@@ -4399,6 +4415,9 @@ fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
             EffectTaskPoll::Blocked(_) => panic!("standalone-volume fixture remained blocked"),
             EffectTaskPoll::Failed(error) => panic!("standalone-volume fixture failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("standalone-volume fixture was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => {
                 panic!("standalone-volume fixture unexpectedly voted to exit")
             }
@@ -4806,6 +4825,9 @@ fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
             EffectTaskPoll::Blocked(_) => panic!("finite task unexpectedly blocked"),
             EffectTaskPoll::Failed(error) => panic!("finite task failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("finite task was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("finite task unexpectedly voted to exit"),
         }
     };
@@ -5040,6 +5062,9 @@ fn internal_exit_error_message_failure_is_an_ordinary_task_failure() {
             }
             EffectTaskPoll::Cancelled => {
                 panic!("failed exit message was cancelled")
+            }
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
             }
             EffectTaskPoll::Exit(_) => {
                 panic!("failed exit message produced an exit vote")
@@ -6440,6 +6465,9 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
             EffectTaskPoll::Blocked(_) => panic!("the resolved hostile demand stayed blocked"),
             EffectTaskPoll::Failed(error) => panic!("the hostile request failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("the hostile request was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("the hostile request voted to exit"),
         }
     };
@@ -6472,6 +6500,9 @@ fn specialization_request_completes_under_one_step_polling_without_replay() {
             }
             EffectTaskPoll::Failed(error) => panic!("one-step request failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("one-step request was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("one-step request voted to exit"),
         }
     };
@@ -7673,6 +7704,9 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
             EffectTaskPoll::Complete(_) => panic!("retryable error unexpectedly completed"),
             EffectTaskPoll::Failed(error) => panic!("retryable error failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("retryable error was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("retryable error voted to exit"),
         }
     };
@@ -7699,6 +7733,9 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
             EffectTaskPoll::Blocked(_) => panic!("changed observation did not retry the cut"),
             EffectTaskPoll::Failed(error) => panic!("retryable task failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("retryable task was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("retryable task unexpectedly voted to exit"),
         }
     };
@@ -7857,6 +7894,9 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
             ),
             EffectTaskPoll::Failed(error) => panic!("annotation dependency failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("annotation dependency was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("annotation dependency unexpectedly voted to exit"),
         }
     };
@@ -7876,6 +7916,9 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
             EffectTaskPoll::Blocked(_) => panic!("completed dependency remained blocked"),
             EffectTaskPoll::Failed(error) => panic!("resumed task failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("resumed task was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("resumed task unexpectedly voted to exit"),
         }
     };
@@ -7926,6 +7969,9 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
             EffectTaskPoll::Blocked(_) => panic!("changed observation did not restart cut"),
             EffectTaskPoll::Failed(error) => panic!("restarted cut failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("restarted cut was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("restarted cut unexpectedly voted to exit"),
         }
     };
@@ -7993,6 +8039,9 @@ fn suspend_heap_transaction(
             EffectTaskPoll::Complete(_) => panic!("transaction gate completed early"),
             EffectTaskPoll::Failed(error) => panic!("transaction gate failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("transaction gate was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("transaction gate unexpectedly voted to exit"),
         }
     }
@@ -8012,6 +8061,9 @@ fn poll_suspended_transaction(task: &mut EffectTask<TestEffects>) -> TaskBlock {
             EffectTaskPoll::Complete(_) => panic!("transaction dependency completed early"),
             EffectTaskPoll::Failed(error) => panic!("transaction failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("transaction was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("transaction unexpectedly voted to exit"),
         }
     }
@@ -8078,6 +8130,9 @@ fn suspended_transaction_revalidation_uses_the_configured_store_policy() {
                 EffectTaskPoll::Blocked(_) => panic!("{policy} did not resume its exact wait"),
                 EffectTaskPoll::Failed(error) => panic!("{policy} failed after resume: {error}"),
                 EffectTaskPoll::Cancelled => panic!("{policy} was cancelled"),
+                EffectTaskPoll::Paused(_) => {
+                    unreachable!("only a task whose host runs its cuts pauses")
+                }
                 EffectTaskPoll::Exit(_) => panic!("{policy} unexpectedly voted to exit"),
             }
         };
@@ -8175,6 +8230,9 @@ fn nonconflicting_store_publication_retains_a_specialization_dependency() {
             EffectTaskPoll::Blocked(_) => panic!("completed specialization gate stayed blocked"),
             EffectTaskPoll::Failed(error) => panic!("specialization task failed: {error}"),
             EffectTaskPoll::Cancelled => panic!("specialization task was cancelled"),
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
+            }
             EffectTaskPoll::Exit(_) => panic!("specialization task voted to exit"),
         }
     };

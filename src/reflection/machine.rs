@@ -588,6 +588,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .fix_restarts
             .pop()
             .expect("restart observed above must exist");
+        self.hosted_resume(restart.root.entry.host_version);
         let stack = context.evaluate(&self.eval_context, |evaluator| {
             reset_stack_root_in(
                 evaluator,
@@ -683,6 +684,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 EffectTaskPoll::Complete(value) => return Ok(TaskOutcome::Complete(value)),
                 EffectTaskPoll::Failed(error) => return Err(error),
                 EffectTaskPoll::Cancelled => return Ok(TaskOutcome::Cancelled),
+                EffectTaskPoll::Paused(_) => unreachable!("only a task whose host runs its cuts pauses"),
                 EffectTaskPoll::Exit(_) => {
                     unreachable!("direct effect-run profiles do not expose runtime exit")
                 }
@@ -3162,7 +3164,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if let Some(hosted) = &mut self.hosted {
             hosted.set_aside = true;
             if outermost {
-                hosted.events.push(HostControl::CutBegin(entry));
+                hosted.pending = Some(HostControl::CutBegin(entry));
             }
         }
         work
@@ -3268,7 +3270,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     // The host commits the outermost cut, and may restart it.
                     completed.control.sequence = frame.outer_sequence.clone();
                     hosted.committing = Some(frame);
-                    hosted.events.push(HostControl::CutCommit);
+                    hosted.pending = Some(HostControl::CutCommit);
                 } else {
                     completed.control.sequence = frame.outer_sequence;
                 }
@@ -3305,7 +3307,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .is_some_and(|transaction| transaction.observed);
                 frame.retry = Some(failed);
                 if !frame.alternatives.is_empty() {
-                    return Ok(MachineStep::Continue(frame.next_alternative()));
+                    let work = frame.next_alternative();
+                    if let Some(branch) = work.branch() {
+                        self.hosted_resume(branch.host_version);
+                    }
+                    return Ok(MachineStep::Continue(work));
                 }
                 self.finish_cut_attempt(context)
             }
@@ -3341,7 +3347,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             // The host returns to where the outermost cut began.
             let entry = frame.outer.host_version;
             hosted.version = entry;
-            hosted.events.push(HostControl::CutAbort(entry));
+            hosted.pending = Some(HostControl::CutAbort(entry));
         }
         let mut failed = frame.retry.take().unwrap_or_else(|| frame.outer.clone());
         if frame.observed_failure
@@ -3492,32 +3498,48 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
-    /// Returns to the host before the next step while it has events to
-    /// handle, having noted the step's resuming a branch set aside at an
-    /// earlier version.
-    fn hosted_pause(&mut self) -> Option<EffectTaskPoll> {
-        let resumed = self
-            .execution
-            .driven_branch()
-            .map(|branch| branch.host_version);
-        let hosted = self.hosted.as_mut()?;
-        if let Some(version) = resumed.filter(|version| *version < hosted.version) {
-            hosted.version = version;
-            hosted.events.push(HostControl::Restore(version));
-        }
-        (!hosted.events.is_empty()).then_some(EffectTaskPoll::Blocked(TaskBlock {
-            dependency: None,
-            observed_generation: None,
-            error: None,
-        }))
+    /// Where the host runs the cuts, raises `event`, which the task pauses
+    /// for before its next step.
+    fn hosted_signal(&mut self, event: HostControl) {
+        let hosted = self
+            .hosted
+            .as_mut()
+            .expect("only a task whose host runs its cuts signals it");
+        debug_assert!(hosted.pending.is_none(), "one host event a step");
+        hosted.pending = Some(event);
     }
 
-    /// The events the host has yet to handle, in order.
-    pub(super) fn take_host_events(&mut self) -> Vec<HostControl> {
-        self.hosted
-            .as_mut()
-            .map(|hosted| std::mem::take(&mut hosted.events))
-            .unwrap_or_default()
+    /// Where the host runs the cuts, notes the resumption of a branch set
+    /// aside at `version`: the host returns to that version first.
+    fn hosted_resume(&mut self, version: u64) {
+        if self
+            .hosted
+            .as_ref()
+            .is_some_and(|hosted| version < hosted.version)
+        {
+            self.hosted.as_mut().expect("checked above").version = version;
+            self.hosted_signal(HostControl::Restore(version));
+        }
+    }
+
+    /// Pauses before the next step for the event the last step raised.
+    fn hosted_pause(&mut self) -> Option<EffectTaskPoll> {
+        let hosted = self.hosted.as_mut()?;
+        if let Some(event) = hosted.pending.take() {
+            return Some(EffectTaskPoll::Paused(event));
+        }
+        assert!(
+            hosted.committing.is_none(),
+            "a hosted cut's commit awaits its host's answer"
+        );
+        // Each resumption of an earlier version raises a restore.
+        debug_assert!(
+            self.execution
+                .driven_branch()
+                .is_none_or(|branch| branch.host_version == hosted.version),
+            "a hosted task drives a branch of its host's present version"
+        );
+        None
     }
 
     /// Whether the host must keep a way back to its state before it
@@ -3536,30 +3558,32 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.hosted.as_mut()?.result.take()
     }
 
-    /// The host committed the outermost cut.
-    pub(super) fn cut_committed(&mut self) {
-        if let Some(hosted) = &mut self.hosted {
-            hosted.committing = None;
+    /// The host's answer to the outermost cut's commit: committed, or, as
+    /// the host began its transaction again, the cut runs again.
+    pub(super) fn resume_commit(&mut self, committed: bool) {
+        let frame = self
+            .hosted
+            .as_mut()
+            .and_then(|hosted| hosted.committing.take())
+            .expect("a commit awaits its host's answer");
+        if !committed {
+            self.restart_hosted_cut(frame);
         }
     }
 
     /// Runs the outermost cut again from its entry, as the host began its
-    /// transaction again: after the commit conflicted, or where the cut
-    /// diverged.
+    /// transaction again where the cut diverged.
     pub(super) fn restart_outermost_cut(&mut self) {
-        let hosted = self
-            .hosted
-            .as_mut()
-            .expect("only a host that runs the cuts restarts one");
-        let mut frame = match hosted.committing.take() {
-            Some(frame) => frame,
-            None => self
-                .execution
-                .cuts
-                .drain(..)
-                .next()
-                .expect("an outermost cut to restart"),
-        };
+        let frame = self
+            .execution
+            .cuts
+            .drain(..)
+            .next()
+            .expect("an outermost cut to restart");
+        self.restart_hosted_cut(frame);
+    }
+
+    fn restart_hosted_cut(&mut self, mut frame: CutFrame<S>) {
         self.execution.cuts.clear();
         self.execution.decoding = None;
         self.execution.demanding = None;
@@ -3567,7 +3591,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.controlling = None;
         self.execution.specializing = None;
         self.blocked = None;
-        hosted.events.clear();
+        let hosted = self
+            .hosted
+            .as_mut()
+            .expect("only a host that runs the cuts restarts one");
+        hosted.pending = None;
         hosted.version = frame.outer.host_version;
         hosted.set_aside = true;
         frame.alternatives.clear();
@@ -4212,6 +4240,7 @@ fn poll_value_effect_task<S: TaskSpecialization>(
                 })
             }
         }
+        EffectTaskPoll::Paused(_) => unreachable!("only a task whose host runs its cuts pauses"),
         EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
             intent: exit.intent,
             observed_epoch: exit.observed_generation.map(|_| observed_epoch),
@@ -4241,6 +4270,9 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
                     observed_epoch: blocked.observed_generation.map(|_| observed_epoch),
                     error: blocked.error,
                 })
+            }
+            EffectTaskPoll::Paused(_) => {
+                unreachable!("only a task whose host runs its cuts pauses")
             }
             EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
                 intent: exit.intent,
@@ -5410,7 +5442,8 @@ struct HostedCuts<S: TaskSpecialization> {
     /// Whether a branch was set aside since the host last answered, so
     /// the host keeps a way back to its state before it answers again.
     set_aside: bool,
-    events: Vec<HostControl>,
+    /// The event the last step raised, which the task pauses for.
+    pending: Option<HostControl>,
     /// The outermost cut, while the host commits it.
     committing: Option<CutFrame<S>>,
     result: Option<HostedResult>,
@@ -5421,7 +5454,7 @@ impl<S: TaskSpecialization> Default for HostedCuts<S> {
         Self {
             version: 0,
             set_aside: false,
-            events: Vec::new(),
+            pending: None,
             committing: None,
             result: None,
         }
@@ -5432,6 +5465,8 @@ pub(super) enum EffectTaskPoll {
     BudgetExhausted,
     Blocked(TaskBlock),
     Exit(TaskExitBlock),
+    /// Where the host runs the cuts, paused for the host to handle this.
+    Paused(HostControl),
     Complete(PublicValue),
     Failed(TaskHalt),
     Cancelled,

@@ -503,12 +503,9 @@ impl Machine<'_, '_> {
         let context = self.runtime.assembler.eval_context();
         let mut route = ExactDemandRoute::default();
         loop {
-            let poll = run.poll(STEP_BUDGET);
-            for event in run.take_events() {
-                self.effect_cut_event(run, cuts, event)?;
-            }
-            match poll {
-                HostedPoll::BudgetExhausted | HostedPoll::Paused => {}
+            match run.poll(STEP_BUDGET) {
+                HostedPoll::BudgetExhausted => {}
+                HostedPoll::Paused(event) => self.effect_cut_event(run, cuts, event)?,
                 HostedPoll::Blocked(blocked) => {
                     let parked = slot
                         .lock()
@@ -599,18 +596,18 @@ impl Machine<'_, '_> {
                 cuts.checkpoints.retain(|(version, _)| *version < entry);
                 match cuts.owned.take() {
                     Some((entry, start)) => match self.transaction_end(start, Ok(())) {
-                        Ok(()) => run.cut_committed(),
+                        Ok(()) => run.resume_commit(true),
                         Err(CutRetry::Now) => {
                             cuts.entry = Some(entry);
                             cuts.owned = Some((entry, self.transaction_begin()));
-                            run.restart_outermost_cut();
+                            run.resume_commit(false);
                         }
                         Err(CutRetry::Never(error)) => return Err(error),
                         Err(CutRetry::AfterChange(_) | CutRetry::AfterEvaluation(..)) => {
                             unreachable!("a commit runs again at once or never")
                         }
                     },
-                    None => run.cut_committed(),
+                    None => run.resume_commit(true),
                 }
             }
         }
