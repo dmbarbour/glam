@@ -496,3 +496,126 @@ fn a_failure_without_observations_or_outside_a_cut_ends_the_turn() {
         .expect_err("a failure outside a cut ends the turn");
     assert_eq!(error.kind(), ErrorKind::Backtrack);
 }
+
+#[test]
+fn an_atomic_transaction_commits_once() {
+    let mut rt = runtime();
+    let result = rt
+        .run("writer", |m| {
+            m.atomic(|m| {
+                m.int_push(4);
+                m.heap_set(["atomic"])?;
+                Ok(7)
+            })
+        })
+        .expect("the transaction should commit");
+    assert_eq!(result, 7);
+    assert_eq!(heap_int(&mut rt, &["atomic"]), 4);
+}
+
+#[test]
+fn an_atomic_failure_or_pushback_returns_at_once_undone() {
+    let mut rt = runtime();
+    let kinds = rt
+        .run("writer", |m| {
+            let mut kinds = Vec::new();
+            for retry in [false, true] {
+                let attempts = Cell::new(0);
+                let outcome: Result<(), Error> = m.atomic(|m| {
+                    attempts.set(attempts.get() + 1);
+                    m.int_push(1);
+                    m.heap_set(["undone"])?;
+                    m.int_push(2);
+                    m.local_set("undone")?;
+                    m.int_push(3);
+                    Err(if retry { m.retry() } else { m.fail() })
+                });
+                assert_eq!(attempts.get(), 1, "an atomic transaction runs once");
+                assert_eq!(m.depth(), 0, "the transaction undid its stack");
+                m.local_get("undone");
+                assert!(
+                    m.dict_unpack(Vec::<&str>::new()).is_ok(),
+                    "the transaction undid its state, which reads `{{}}`"
+                );
+                kinds.push(outcome.expect_err("the body failed").kind());
+            }
+            Ok(kinds)
+        })
+        .expect("the turn should succeed");
+    assert_eq!(kinds, [ErrorKind::Backtrack, ErrorKind::Retry]);
+    assert!(heap_undefined(&mut rt, &["undone"]), "nothing committed");
+}
+
+#[test]
+fn a_conflicting_atomic_commit_returns_a_conflict() {
+    let mut rt = runtime();
+    let (read_sender, read_receiver) = mpsc::channel();
+    let (written_sender, written_receiver) = mpsc::channel();
+    rt.run("setup", |m| {
+        m.int_push(1);
+        m.heap_set(["x"])
+    })
+    .expect("the setup should commit");
+    let outcome = rt.run((), |root| {
+        let doubler = root.fork("doubler", move |m| {
+            let double = |m: &mut Machine<'_, '_>| {
+                m.heap_get(["x"]);
+                let x = m.int_pop()?;
+                m.int_push(x * 2);
+                m.heap_set(["doubled"])
+            };
+            let conflict = m
+                .atomic(|m| {
+                    m.heap_get(["x"]);
+                    m.int_pop()?;
+                    // Forces another commit between this read and this
+                    // transaction's commit.
+                    read_sender.send(()).expect("the writer listens");
+                    written_receiver.recv().expect("the writer commits");
+                    double(m)
+                })
+                .expect_err("the commit should conflict");
+            assert_eq!(conflict.kind(), ErrorKind::Conflict);
+            // The caller runs it again, now.
+            m.atomic(double)
+        })?;
+        read_receiver.recv().expect("the doubler reads first");
+        root.int_push(10);
+        root.heap_set(["x"])?;
+        written_sender.send(()).expect("the doubler waits");
+        root.join(doubler)
+    });
+    outcome.expect("the second transaction should commit");
+    assert_eq!(
+        heap_int(&mut rt, &["doubled"]),
+        20,
+        "the second transaction reads the new value"
+    );
+}
+
+#[test]
+fn an_atomic_transaction_within_a_cut_nests() {
+    let mut rt = runtime();
+    rt.run("writer", |m| {
+        m.cut(|m| {
+            let failed: Result<(), Error> = m.atomic(|m| {
+                m.int_push(1);
+                m.heap_set(["inner"])?;
+                Err(m.fail())
+            });
+            assert_eq!(
+                failed.expect_err("the nested transaction failed").kind(),
+                ErrorKind::Backtrack,
+                "the failure returns to the enclosing cut's body"
+            );
+            m.int_push(2);
+            m.heap_set(["outer"])
+        })
+    })
+    .expect("the enclosing cut should commit");
+    assert!(
+        heap_undefined(&mut rt, &["inner"]),
+        "the nested failure undid its write"
+    );
+    assert_eq!(heap_int(&mut rt, &["outer"]), 2);
+}

@@ -893,6 +893,13 @@ handle API goes.
     again after a change". Nested within a cut, it is a nested cut. An
     effect run's own transaction may share it, keeping the retry it does
     on purpose.
+    - Built (2026-10-23): `m.atomic(body)`, one pass of `m.cut`'s loop over
+      the same primitives. A failure or pushback undoes the body and returns
+      its error at once; a commit that conflicts, or forks that merged in no
+      serial order, undo it and return `ErrorKind::Conflict`; within a cut,
+      it is a nested cut. Its body runs once, so it may be `FnOnce`. Tests
+      force each outcome, the conflict by a commit between the
+      transaction's read and its commit.
 22. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`

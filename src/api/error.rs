@@ -16,6 +16,7 @@ pub struct Error {
     panic: Option<EvaluationPanic>,
     backtrack: bool,
     retry: bool,
+    conflict: bool,
     /// What an evaluation that waited was waiting on.
     awaited: Option<Awaited>,
 }
@@ -54,6 +55,11 @@ pub enum ErrorKind {
     /// undoes the cuts it passes through, no alternative takes it, and the
     /// outermost cut runs again once what it observed has changed.
     Retry,
+    /// A transaction run once, by `Machine::atomic`, conflicted at its commit
+    /// with another's and was undone: running it again now may succeed,
+    /// where after [`ErrorKind::Backtrack`] or [`ErrorKind::Retry`] it would
+    /// wait for a change.
+    Conflict,
 }
 
 impl Error {
@@ -67,6 +73,7 @@ impl Error {
             panic: None,
             backtrack: false,
             retry: false,
+            conflict: false,
             awaited: None,
         }
     }
@@ -93,6 +100,7 @@ impl Error {
             // An evaluation that waits on what is not known yet, such as an
             // unresolved promise, is pushback.
             retry: error.permanent_failure().is_none(),
+            conflict: false,
             awaited: error
                 .unassigned_promise_root()
                 .map(|root| crate::evaluation::WorkDependency::Promise(root.clone()))
@@ -115,6 +123,7 @@ impl Error {
             panic: Some(report),
             backtrack: false,
             retry: false,
+            conflict: false,
             awaited: None,
         }
     }
@@ -126,6 +135,8 @@ impl Error {
             ErrorKind::Backtrack
         } else if self.retry {
             ErrorKind::Retry
+        } else if self.conflict {
+            ErrorKind::Conflict
         } else {
             ErrorKind::Failure
         }
@@ -154,6 +165,15 @@ impl Error {
         Self {
             backtrack: true,
             ..Self::new("an explicit failure reached no cut")
+        }
+    }
+
+    /// A transaction run once that conflicted at its commit
+    /// ([`ErrorKind::Conflict`]).
+    pub(crate) fn conflict() -> Self {
+        Self {
+            conflict: true,
+            ..Self::new("the transaction conflicted with another's commit")
         }
     }
 

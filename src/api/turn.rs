@@ -3018,6 +3018,47 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         }
     }
 
+    /// Runs `body` once as a transaction: as [`Self::cut`], without its
+    /// retry (`api-atomic`). Outermost, it commits when `body` returns `Ok`.
+    /// When `body` returns an error, explicit failure and pushback included,
+    /// it undoes what `body` did and returns the error at once, without
+    /// waiting for a change; when its commit conflicts with another's, it
+    /// undoes it and returns [`ErrorKind::Conflict`], so the caller tells
+    /// "run again now" from "run again after a change". Within a cut, it is
+    /// a nested cut.
+    pub fn atomic<'b, R>(
+        &mut self,
+        body: impl for<'inner> FnOnce(&mut Machine<'inner, 'b>) -> Result<R, Error>,
+    ) -> Result<R, Error>
+    where
+        'scope: 'b,
+    {
+        if self.cut.is_some() {
+            let mut body = Some(body);
+            return self
+                .nested_cut(&mut |m| body.take().expect("a nested cut runs its body once")(m));
+        }
+        let start = self.transaction_begin();
+        let outcome = self.within_scope(body);
+        let conflicted = self.cut.as_ref().is_some_and(|cut| cut.conflicted);
+        match outcome {
+            // An attempt whose forks merged in no serial order is
+            // inconsistent, whatever it returned: that is the conflict.
+            Err(error) if !conflicted => {
+                self.transaction_abort(start);
+                Err(error)
+            }
+            outcome => match self.transaction_end(start, outcome) {
+                Ok(result) => Ok(result),
+                Err(CutRetry::Now) => Err(Error::conflict()),
+                Err(CutRetry::Never(error)) => Err(error),
+                Err(CutRetry::AfterChange(_) | CutRetry::AfterEvaluation(..)) => {
+                    unreachable!("only an error waits for a change, and it returned above")
+                }
+            },
+        }
+    }
+
     /// Begins the outermost transaction, which [`Self::transaction_end`]
     /// or [`Self::transaction_abort`] ends.
     fn transaction_begin(&mut self) -> TransactionStart {
