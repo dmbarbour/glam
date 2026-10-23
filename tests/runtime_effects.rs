@@ -797,3 +797,65 @@ fn try_answers_wait_on_a_promise_in_an_effect_a_turn_runs() {
         .expect("the turn should succeed");
     assert_eq!(text, "set");
 }
+
+/// Answers `.signal` with unit, telling the test the first time.
+struct Signal {
+    sent: Option<std::sync::mpsc::Sender<()>>,
+}
+
+impl EffectProvider for Signal {
+    type Request = ();
+
+    fn requests(&self) -> Vec<EffectRequestSpec<()>> {
+        vec![EffectRequestSpec::new(
+            "signal",
+            ["signal_test", "request", "signal"],
+            0,
+            (),
+        )]
+    }
+
+    fn answer(&mut self, m: &mut Machine<'_, '_>, _request: &()) -> Result<Answer, Error> {
+        if let Some(sent) = self.sent.take() {
+            sent.send(()).expect("the test listens");
+        }
+        m.unit_push();
+        Ok(Answer::Return)
+    }
+}
+
+#[test]
+fn a_cut_that_fails_on_a_try_s_wait_parks_until_the_promise_is_kept() {
+    // `api-refl-try`: what a `.try` waited on stays with the cut around it,
+    // so a cut that fails on the `wait` runs again once the promise is kept.
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let (signal_sender, signal) = std::sync::mpsc::channel();
+    let text = rt
+        .run((), |root| {
+            root.promise_new();
+            root.local_set("resolver")?;
+            root.heap_set(["p"])?;
+            let worker = root.fork("worker", move |m| {
+                let mut signal = Signal {
+                    sent: Some(signal_sender),
+                };
+                m.cut(|m| {
+                    run(
+                        m,
+                        ".heap.get ['p] >>= (\\p -> .try (if p == 1 then .r \"kept\" else .r \"other\") >>= (\\r -> if r.wait == {} then .r r.ok else (.signal =>> .fail)))",
+                        &mut signal,
+                    )
+                })
+            })?;
+            // The worker's `.try` answered `wait`; its cut fails and parks.
+            signal.recv().expect("the worker waits once");
+            root.local_get("resolver");
+            root.int_push(1);
+            root.promise_fulfill()?;
+            root.join(worker)?;
+            root.take("worker", 1)?;
+            root.text_pop()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(text, "kept");
+}

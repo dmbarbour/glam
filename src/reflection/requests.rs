@@ -29,7 +29,6 @@ use super::store::{
 pub enum ReflectionRequest {
     Environment,
     DictItems,
-    Eval,
     MetadataInspect,
     Log,
     TaskNew,
@@ -52,7 +51,6 @@ pub struct ReflectionRequestWork {
 
 enum ReflectionRequestOperation {
     Environment(EnvironmentRequestWork),
-    Eval(EvalRequestWork),
     Inspection(InspectionRequestWork),
     Log(LogRequestWork),
     TaskCreate(Vec<Value>),
@@ -60,11 +58,6 @@ enum ReflectionRequestOperation {
     TaskJoin(TaskJoinRequestWork),
     TaskQuery(TaskQueryRequestWork),
     Poisoned,
-}
-
-enum EvalRequestWork {
-    Start(Vec<Value>),
-    Awaiting,
 }
 
 enum InspectionRequestWork {
@@ -198,9 +191,6 @@ impl ReflectionRequestWork {
             ReflectionRequest::Environment => {
                 ReflectionRequestOperation::Environment(EnvironmentRequestWork::Start(arguments))
             }
-            ReflectionRequest::Eval => {
-                ReflectionRequestOperation::Eval(EvalRequestWork::Start(arguments))
-            }
             ReflectionRequest::DictItems => {
                 ReflectionRequestOperation::Inspection(InspectionRequestWork::Start {
                     request: InspectionRequest::DictItems,
@@ -324,38 +314,6 @@ where
                     RequestResult::Return(value),
                 )),
             },
-            ReflectionRequestOperation::Eval(EvalRequestWork::Start(arguments)) => {
-                assert!(input.is_none(), "new `.eval` work cannot have demand input");
-                let [value]: [Value; 1] = arguments
-                    .try_into()
-                    .map_err(|_| TaskHalt::new("`.eval` received the wrong number of arguments"))?;
-                self.operation = ReflectionRequestOperation::Eval(EvalRequestWork::Awaiting);
-                Ok(SpecializationRequestPoll::Demand(value))
-            }
-            ReflectionRequestOperation::Eval(EvalRequestWork::Awaiting) => {
-                let input = input.expect("resumed `.eval` work must receive demand input");
-                let result = match input {
-                    SpecializationRequestInput::Value(value) => {
-                        tagged_result(&context.values(), &keys::OK, value.into_value())
-                    }
-                    SpecializationRequestInput::Failed(error) => {
-                        let failure = error.permanent_failure().expect(
-                            "completed `.eval` demand failure must retain a permanent failure",
-                        );
-                        let values = context.values();
-                        let diagnostic = Value::from_runtime_root(
-                            crate::diagnostic::failure_diagnostic_root_with(
-                                context.eval_context().values(),
-                                failure,
-                            ),
-                        );
-                        tagged_result(&values, &keys::ERR, diagnostic)
-                    }
-                };
-                Ok(SpecializationRequestPoll::Complete(RequestResult::Return(
-                    result,
-                )))
-            }
             ReflectionRequestOperation::Inspection(InspectionRequestWork::Start {
                 request,
                 arguments,
@@ -1423,12 +1381,6 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 1,
                 ReflectionRequest::DictItems,
             ),
-            EffectRequestSpec::new(
-                "eval",
-                ["reflection_runtime", "v0", "request", "eval"],
-                1,
-                ReflectionRequest::Eval,
-            ),
             EffectRequestSpec::at_path(
                 ["meta", "inspect"],
                 ["reflection_runtime", "v0", "request", "meta", "inspect"],
@@ -1500,19 +1452,6 @@ pub fn environment_diagnostic_request_specs() -> Vec<EffectRequestSpec<Reflectio
 }
 
 /// Handles one reusable reflection request inside a composed task.
-fn tagged_result(values: &Values, tag: &Key, value: Value) -> Value {
-    values.with_access(|access| {
-        access.wrap(CoreValue::Dict(
-            Dict::new_sync().insert(
-                tag.clone(),
-                access
-                    .clone_core(&value)
-                    .expect("tagged result belongs to its request runtime"),
-            ),
-        ))
-    })
-}
-
 /// Runtime-local opaque task capability shared by every clone of the Glam
 /// handle value.
 ///
@@ -1801,7 +1740,6 @@ mod tests {
         match request {
             ReflectionRequest::Environment
             | ReflectionRequest::DictItems
-            | ReflectionRequest::Eval
             | ReflectionRequest::MetadataInspect
             | ReflectionRequest::Log
             | ReflectionRequest::TaskNew
@@ -1851,7 +1789,6 @@ mod tests {
     fn assert_reflection_work_inventory(work: &ReflectionRequestWork) {
         match &work.operation {
             ReflectionRequestOperation::Environment(_)
-            | ReflectionRequestOperation::Eval(_)
             | ReflectionRequestOperation::Inspection(_)
             | ReflectionRequestOperation::Log(_)
             | ReflectionRequestOperation::TaskCreate(_)
@@ -1915,14 +1852,6 @@ mod tests {
             domain.collect_and_drain_retired_external_owners_for_test();
             assert!(retained.upgrade().is_none());
         }
-
-        let (value, retained) = retained_request_value(&domain);
-        let work = ReflectionRequestWork::new(ReflectionRequest::Eval, vec![value]);
-        domain.collect_and_drain_retired_external_owners_for_test();
-        assert!(retained.upgrade().is_some());
-        drop(work);
-        domain.collect_and_drain_retired_external_owners_for_test();
-        assert!(retained.upgrade().is_none());
     }
 
     impl EvaluationTaskMachine for CompleteTask {

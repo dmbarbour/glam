@@ -667,6 +667,25 @@ impl TestHost {
         (promise.expect("allocation names the promise"), resolver)
     }
 
+    /// Allocates a promise in the host's store, giving its identity and
+    /// its promised value, which waits until it is resolved.
+    fn promised(&self) -> (PromiseId, PublicValue) {
+        let (values, promises) = {
+            let state = self.state.lock().unwrap();
+            (
+                state.store.values().clone(),
+                state.store.snapshot().promises().clone(),
+            )
+        };
+        let mut promise = None;
+        let promised = public_value_with(&values, |access| {
+            let (id, promised, _) = promises.allocate(access);
+            promise = Some(id);
+            promised
+        });
+        (promise.expect("allocation names the promise"), promised)
+    }
+
     /// Fulfills `promise` as a resolver outside this host would: the
     /// promised value, then its place in the store.
     fn fulfill(&self, promise: PromiseId, value: PublicValue) {
@@ -1556,6 +1575,7 @@ fn assert_execution_root_inventory(
         retry,
         observed_failure,
         trying,
+        awaited,
     } = cut;
     let _: &Option<Branch<TestEffects>> = fallback;
     let _: &RuntimeValueRoot = operation;
@@ -1569,6 +1589,7 @@ fn assert_execution_root_inventory(
         retry,
         observed_failure,
         trying,
+        awaited,
     );
 
     match wake {
@@ -1811,6 +1832,7 @@ fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>)
         | RequestSelection::Fail
         | RequestSelection::Cut
         | RequestSelection::Try
+        | RequestSelection::Eval
         | RequestSelection::Fix
         | RequestSelection::Get
         | RequestSelection::Set
@@ -3261,6 +3283,7 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
         Request::Return(value)
         | Request::Cut(value)
         | Request::Try(value)
+        | Request::Eval(value)
         | Request::Fix(value)
         | Request::Get(value)
         | Request::HeapGet(value)
@@ -3402,7 +3425,7 @@ type ProtocolHandoffInventoryFn = fn(
 fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
     let BlockedExecution { reason, retry } = blocked;
     match reason {
-        BlockReason::WaitingOn(dependency) => {
+        BlockReason::WaitingOn(dependency) | BlockReason::AwaitingRetry(dependency) => {
             let _: &WorkDependency = dependency;
         }
         BlockReason::Exhausted => {}
@@ -3575,6 +3598,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
         retry: None,
         observed_failure: false,
         trying: false,
+        awaited: Vec::new(),
     };
     domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
@@ -4752,8 +4776,7 @@ fn isolated_search_can_be_cancelled_between_polls() {
 
 #[test]
 fn isolated_search_reports_and_resumes_lazy_dependencies() {
-    let (assembler, function) =
-        compile_effect("\\value -> .eval value >>= (\\result -> .r result.ok)");
+    let (assembler, function) = compile_effect("\\value -> seq value (.r value)");
     let session = EvalContext::isolated(assembler.core_values());
     let (promised, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
@@ -5955,10 +5978,18 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
     let Value::Dict(result) = result.clone_core_for_test() else {
         panic!("eval should return an ok result");
     };
-    assembler.core_values().assert_same_representation_for_test(
-        &result.get(&*keys::OK),
-        &Some(&Value::Number(Number::integer(3))),
-    );
+    // `.eval V` is `.try (seq V (.r V))`: `ok` holds `V`, already forced.
+    let evaluated = |value: &Value| {
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &assembler.eval_context(),
+            value,
+        )
+        .expect("the forced value reads at once")
+    };
+    let ok = evaluated(result.get(&*keys::OK).expect("eval should return ok"));
+    assembler
+        .core_values()
+        .assert_same_representation_for_test(&ok, &Value::Number(Number::integer(3)));
 
     let (assembler, nested) = compile_effect(".eval { bad: 1 / 0 }");
     let (context, task) = schedule_composed_test_task(
@@ -5972,7 +6003,12 @@ fn reflection_eval_returns_a_tagged_whnf_result() {
     let Value::Dict(result) = result.clone_core_for_test() else {
         panic!("eval should return a tagged dictionary");
     };
-    let Some(Value::Dict(payload)) = result.get(&*keys::OK) else {
+    let ok = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+        &assembler.eval_context(),
+        result.get(&*keys::OK).expect("eval should return ok"),
+    )
+    .expect("the forced value reads at once");
+    let Value::Dict(payload) = ok else {
         panic!("eval should not recursively force a dictionary payload");
     };
     assert!(matches!(
@@ -6160,18 +6196,18 @@ fn resumable_reflection_decode_consumes_one_application_checkpoint_after_resumpt
         "replaying request decoding must not duplicate the nested reflection task"
     );
     assert_eq!(
-        application_starts, 3,
-        "the authored sequence, eval, and return requests must each construct one application checkpoint without replaying the first"
+        application_starts, 4,
+        "the authored sequence, eval, its `.r`, and the return requests must each construct one application checkpoint without replaying the first"
     );
     assert_eq!(
         probe.parsed_requests(),
-        3,
-        "the outer sequence, eval, and return requests must each parse once"
+        4,
+        "the outer sequence, eval, its `.r`, and the return requests must each parse once"
     );
     assert_eq!(
         probe.dispatched_requests(),
-        3,
-        "the outer sequence, eval, and return requests must each dispatch once"
+        4,
+        "the outer sequence, eval, its `.r`, and the return requests must each dispatch once"
     );
     assert_eq!(
         probe.phase(),
@@ -6375,8 +6411,13 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
 }
 
 #[test]
-fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
-    let (assembler, function) = compile_effect("\\value -> .eval value");
+fn reflection_eval_answers_wait_on_a_pending_value_and_a_cut_parks_on_it() {
+    // `.eval` answers `wait` on a pending promise; the cut that fails on it
+    // parks on the promise, and once the promise breaks, `.eval` answers
+    // `err`.
+    let (assembler, function) = compile_effect(
+        "\\value -> .cut (.eval value >>= (\\result -> if result.wait == {} then .r result else .fail))",
+    );
     let session = EvalContext::isolated(assembler.core_values());
     let (promised, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
@@ -6399,7 +6440,7 @@ fn reflection_eval_suspends_instead_of_failing_around_a_pending_value() {
         match task.poll(256) {
             EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
-            _ => panic!("eval should suspend on its value's pending dependency"),
+            _ => panic!("the cut should park on its value's pending dependency"),
         }
     };
     assert!(blocked.dependency.is_some());
@@ -9591,4 +9632,46 @@ fn try_within_a_cut_or_a_choice_nests() {
     ] {
         assert_eq!(try_text(source), expected.as_bytes(), "{source}");
     }
+}
+
+#[test]
+fn a_cut_that_fails_on_a_try_s_wait_parks_until_its_promise_is_kept() {
+    // The cut fails on the `.try`'s `wait`: rather than failing
+    // permanently, it parks on the promise, and runs again once it is kept.
+    let (assembler, watch) = compile_effect(
+        "\\v -> .cut (.try (seq v (.r \"kept\")) >>= (\\r -> if r.wait == {} then .r r.ok else .fail))",
+    );
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let (promise, promised) = host.promised();
+    let effect = assembler
+        .values()
+        .apply(&watch, [promised])
+        .expect("the watcher applies to the promise");
+    let mut task = EffectTask::new_owned_in_context(
+        effect.clone_core_for_test(),
+        TestEffects,
+        host.clone(),
+        EvalContext::isolated(assembler.core_values()),
+    )
+    .expect("the watcher should construct");
+    loop {
+        match task.poll(256) {
+            EffectTaskPoll::BudgetExhausted => {}
+            EffectTaskPoll::Blocked(_) => break,
+            EffectTaskPoll::Failed(error) => panic!("the cut should park, not fail: {error}"),
+            _ => panic!("the cut should park on the promise"),
+        }
+    }
+    assert!(
+        matches!(
+            task.blocked.as_ref().map(|blocked| &blocked.reason),
+            Some(BlockReason::AwaitingRetry(_))
+        ),
+        "the failed cut parks on what its `.try` waited on"
+    );
+    host.fulfill(promise, assembler.values().integer(1));
+    let TaskOutcome::Complete(value) = task.run().expect("the cut should run again") else {
+        panic!("the watcher should complete")
+    };
+    assert_eq!(assembler.to_binary(&value).unwrap(), b"kept".as_slice());
 }

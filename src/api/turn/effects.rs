@@ -15,7 +15,9 @@ use super::{CutCheckpoint, CutRetry, DIAGNOSTICS, Machine, TransactionStart};
 use crate::api::{Diagnostic, Error, ErrorKind, PromiseResolver, Value as HandleValue};
 use crate::core::{EvaluationHalt, Key};
 use crate::core_net::CoreWaitToken;
-use crate::evaluation::{EvaluationPumpOutcome, EvaluationWaitToken, ExactDemandRoute};
+use crate::evaluation::{
+    EvaluationPumpOutcome, EvaluationWaitToken, ExactDemandRoute, WorkDependency,
+};
 use crate::reflection::{
     EffectRequestSpec, HostControl, HostedEffectRun, HostedPoll, IsolatedTaskHost,
     KeyListRequestWork, PreparationPoll, RequestContext, RequestResult, SpecializationRequestInput,
@@ -549,8 +551,16 @@ impl Machine<'_, '_> {
                         | EvaluationPumpOutcome::Busy
                         | EvaluationPumpOutcome::BudgetExhausted => {}
                         // A `.try` within the effect answers a wait
-                        // outside the effect's control as its outcome.
-                        EvaluationPumpOutcome::NoProgress if run.answer_try_wait() => {}
+                        // outside the effect's control as its outcome; the
+                        // turn's cut keeps what it waited on, so should the
+                        // cut fail, that wait's progress wakes it.
+                        EvaluationPumpOutcome::NoProgress if run.answer_try_wait() => {
+                            if let Some(cut) = &mut self.cut {
+                                cut.observed = true;
+                                cut.awaits_evaluation = true;
+                                cut.awaited.push(WorkDependency::Wait(wait));
+                            }
+                        }
                         EvaluationPumpOutcome::NoProgress => {
                             let pushback = self.awaiting(wait);
                             let pushback = self

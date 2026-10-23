@@ -2756,6 +2756,35 @@ maps the short names used here to file names.
   incremental computing, is a later opportunity.
 - **Recorded in:** runtime API plan, `api-effect-providers`.
 
+### `.try` reports an operation's outcome, and `.eval` is a `.try`
+`try-reports-outcomes` · 2026-10-23 · maintainer · accepted
+- **Context:** `m.atomic` runs a turn's transaction once and reports how it
+  ended. Glam had no counterpart, and `.eval` reported an evaluation's
+  error as data but waited on a pending promise.
+- **Decision:**
+  - `.try Op` runs `Op` once as a transaction, never waiting for a change,
+    and answers `ok:Value`, `'fail` for an explicit failure (intentional,
+    so no diagnostic), `wait:Diagnostic` for a promise outside its control
+    no one has resolved, `conflict:Diagnostic` when another commit
+    interfered, or `err:Diagnostic` for an evaluation error. Lazy work is
+    evaluated, not waited out. Every outcome but `ok` undoes `Op`; within a
+    cut, `.try` nests. A panic is never an outcome.
+  - What a `.try` observed and waited on stays with the transaction around
+    it, so a cut that fails on `wait` parks until the promise progresses,
+    as on a change in what it observed.
+  - `.eval V` is `.try (seq V (.r V))`: `ok:V`, forced; `err`; or `wait`,
+    where it waited before.
+  - Both forms of `try` stay: the syntax's `try C then A else B` attempts
+    atomically and observes success; the effect adds reflective
+    observation of how an operation failed.
+- **Consequences:** a holder of a promise, without its resolver, can tell
+  pending from kept from broken. `.eval` no longer waits: to wait for a
+  value and report its errors, a cut fails on `wait`. In a turn's effect
+  run, the turn decides which waits are outside the effect, since the
+  requests it serves park on promises it resolves.
+- **Recorded in:** runtime API plan, `api-refl-try`; reflection model plan,
+  "Trying an operation".
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable

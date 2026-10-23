@@ -744,6 +744,10 @@ pub(super) struct Transaction<S: TaskSpecialization> {
     pub(super) store: StoreJournal,
     pub(super) journal: S::Journal,
     pub(super) observed: bool,
+    /// What a `.try` within the transaction waited on, outside the task's
+    /// control: a cut that fails waits for its progress, as for a change in
+    /// what it observed (`api-refl-try`).
+    pub(super) awaited: Vec<crate::evaluation::WorkDependency>,
 }
 
 impl<S: TaskSpecialization> Transaction<S> {
@@ -755,6 +759,7 @@ impl<S: TaskSpecialization> Transaction<S> {
             store,
             journal,
             observed: false,
+            awaited: Vec::new(),
         }
     }
 
@@ -1023,11 +1028,13 @@ mod root_inventory_tests {
             store,
             journal,
             observed,
+            awaited,
         } = transaction;
         let _: &HostSnapshot<ProtocolRootTestEffects> = snapshot;
         let _: &StoreJournal = store;
         let _: &Vec<PublicValue> = journal;
         let _: &bool = observed;
+        let _: &Vec<crate::evaluation::WorkDependency> = awaited;
     }
 
     fn assert_borrowed_protocol_context_inventory<S: TaskSpecialization>(

@@ -15,8 +15,9 @@ use super::search::{IsolatedSearchBranch, SearchPolicy};
 use super::store::{StoreJournal, StoreSnapshot, VolumeId, contents_at_path};
 use crate::api::{EvaluatedValue, Value as PublicValue, Values};
 use crate::core::{
-    Atom, Builtin, CoreValueFactory, Dict, EvaluationFailure, FunctionValue, Key, LazyValue, List,
-    NetValue, PromisedValue, RuntimeValueAccess, Value, VolumeCellView, VolumeContentsView, keys,
+    Atom, Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluationFailure, FunctionValue, Key,
+    LazyValue, List, NetValue, PromisedValue, RuntimeValueAccess, Value, VolumeCellView,
+    VolumeContentsView, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
@@ -53,6 +54,7 @@ struct Tags {
     fail: Key,
     cut: Key,
     trying: Key,
+    eval: Key,
     fix: Key,
     get: Key,
     set: Key,
@@ -93,6 +95,7 @@ impl Tags {
             fail: tag("fail"),
             cut: tag("cut"),
             trying: tag("try"),
+            eval: tag("eval"),
             fix: tag("fix"),
             get: tag("get"),
             set: tag("set"),
@@ -780,6 +783,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         self.finish_in(context, TaskTerminal::Failed(error.clone()));
                         return EffectTaskPoll::Failed(error);
                     }
+                    // What made no progress may rest on a promise a `.try`
+                    // answers with.
+                    if matches!(pumped, EvaluationPumpOutcome::NoProgress)
+                        && self.try_answers_wait(context)
+                    {
+                        continue;
+                    }
                     return poll;
                 }
             }
@@ -821,7 +831,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ControlStep::Blocked(controlling, dependency) => {
                         self.execution.controlling = Some(controlling);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, blocked) {
                             return poll;
                         }
                     }
@@ -850,7 +860,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     SpecializationStep::Blocked(specializing, dependency) => {
                         self.execution.specializing = Some(specializing);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, blocked) {
                             return poll;
                         }
                     }
@@ -894,9 +904,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             unreachable!("one scalar completion cannot begin specialized work")
                         }
                         MachineStep::Blocked(blocked) => {
-                            if let Some(poll) =
-                                self.install_blocked_in(context, step_budget, blocked)
-                            {
+                            if let Some(poll) = self.install_blocked_in(context, blocked) {
                                 return poll;
                             }
                         }
@@ -914,7 +922,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ScalarDemandStep::Blocked(demanding, dependency) => {
                         self.execution.demanding = Some(demanding);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, blocked) {
                             return poll;
                         }
                     }
@@ -941,7 +949,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     StatePathStep::Blocked(pathing, dependency) => {
                         self.execution.pathing = Some(pathing);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, blocked) {
                             return poll;
                         }
                     }
@@ -970,7 +978,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     EffectDecodeStep::Blocked(decoding, dependency) => {
                         self.execution.decoding = Some(decoding);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, blocked) {
                             return poll;
                         }
                     }
@@ -1030,7 +1038,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     self.execution.specializing = Some(specializing);
                 }
                 Ok(MachineStep::Blocked(blocked)) => {
-                    if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
+                    if let Some(poll) = self.install_blocked_in(context, blocked) {
                         return poll;
                     }
                 }
@@ -1094,7 +1102,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if error.panic_message().is_none()
             && let Some(index) = self.innermost_try()
         {
-            self.unwind_to_try(context, index, TryOutcome::Err(error));
+            self.unwind_to_try(context, index, TryOutcome::Err(error), None);
             return None;
         }
         if let Some(retry) = self.retry_wake() {
@@ -2714,12 +2722,28 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 )));
             }
+            Request::Try(_) | Request::Eval(_) if self.search.retains_all() => {
+                return Err(TaskHalt::new(
+                    "`.try` and `.eval` are not available in an isolated search",
+                ));
+            }
+            // `.eval V` is `.try (seq V (.r V))` (maintainer, 2026-10-23):
+            // its value's weak-head normal form as `ok`, an evaluation error
+            // as `err`, or a promise no one has resolved as `wait`.
+            Request::Eval(value) => {
+                let operation = context.with_runtime_access(|access| {
+                    let value = value.clone_core_with(&access);
+                    branch.root_value(&access, evaluation_effect_in(&access, value))
+                });
+                let work = self.enter_cut(context, operation, branch, scope_depth);
+                self.execution
+                    .cuts
+                    .last_mut()
+                    .expect("the cut was just entered")
+                    .trying = true;
+                return Ok(MachineStep::Continue(work));
+            }
             Request::Try(operation) => {
-                if self.search.retains_all() {
-                    return Err(TaskHalt::new(
-                        "`.try` is not available in an isolated search",
-                    ));
-                }
                 let work = self.enter_cut(context, operation, branch, scope_depth);
                 self.execution
                     .cuts
@@ -3179,6 +3203,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             retry: None,
             observed_failure: false,
             trying: false,
+            awaited: Vec::new(),
         };
         // Where the host runs the cuts, it owns their transactions.
         frame.owns_transaction = self.hosted.is_none() && frame.outer.transaction.is_none();
@@ -3200,6 +3225,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         frame.alternatives.clear();
         frame.retry = None;
         frame.observed_failure = false;
+        frame.awaited.clear();
         if frame.owns_transaction {
             let snapshot = context.suspend(|| self.host.snapshot());
             frame.outer.transaction = Some(Transaction::new(snapshot));
@@ -3271,7 +3297,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                     context,
                                     frame,
                                     TryOutcome::Conflict,
-                                    false,
+                                    TryTrace::default(),
                                 )));
                             }
                             frame.observed_failure = true;
@@ -3354,6 +3380,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .transaction
                     .as_ref()
                     .is_some_and(|transaction| transaction.observed);
+                if let Some(transaction) = &failed.transaction {
+                    frame.awaited.extend(transaction.awaited.iter().cloned());
+                }
                 frame.retry = Some(failed);
                 if !frame.alternatives.is_empty() {
                     let work = frame.next_alternative();
@@ -3385,31 +3414,33 @@ impl<S: TaskSpecialization> EffectTask<S> {
         context: &EvaluationPollContext,
         frame: CutFrame<S>,
         outcome: TryOutcome,
-        observed: bool,
+        trace: TryTrace,
     ) -> MachineWork<S> {
         let value = context.with_runtime_access(|access| {
             frame
                 .outer
                 .root_value(&access, try_outcome_in(&access, outcome))
         });
-        self.deliver_try(frame, value, observed)
+        self.deliver_try(frame, value, trace)
     }
 
     /// Continues where a `.try`, whose `frame` has left the stack, began,
-    /// with `value`, what it answers. What its operation did is undone; what
-    /// it `observed` stays observed by the transaction around it.
+    /// with `value`, what it answers. What its operation did is undone; its
+    /// `trace`, what it observed and waited on, stays with the transaction
+    /// around it.
     fn deliver_try(
         &mut self,
         frame: CutFrame<S>,
         value: RuntimeValueRoot,
-        observed: bool,
+        trace: TryTrace,
     ) -> MachineWork<S> {
         let mut branch = frame.outer;
         branch.control.sequence = frame.outer_sequence;
         if frame.owns_transaction {
             branch.transaction = None;
         } else if let Some(transaction) = branch.transaction.as_mut() {
-            transaction.observed |= observed;
+            transaction.observed |= trace.observed;
+            transaction.awaited.extend(trace.awaited);
         }
         MachineWork::deliver_root(value, branch, frame.parent_scope_depth)
     }
@@ -3434,10 +3465,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             hosted.pending = Some(HostControl::CutAbort(entry));
         }
         let mut failed = frame.retry.take().unwrap_or_else(|| frame.outer.clone());
-        if frame.observed_failure
-            && let Some(transaction) = failed.transaction.as_mut()
-        {
-            transaction.observed = true;
+        if let Some(transaction) = failed.transaction.as_mut() {
+            transaction.observed |= frame.observed_failure;
+            transaction.awaited.append(&mut frame.awaited);
         }
         if failed
             .fix_restarts
@@ -3451,11 +3481,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
         // A `.try` answers with its operation's failure.
         if frame.trying {
-            let observed = frame.observed_failure
-                || failed
-                    .transaction
-                    .as_ref()
-                    .is_some_and(|transaction| transaction.observed);
+            let trace = match failed.transaction {
+                Some(transaction) => TryTrace {
+                    observed: transaction.observed,
+                    awaited: transaction.awaited,
+                },
+                None => TryTrace {
+                    observed: frame.observed_failure,
+                    awaited: std::mem::take(&mut frame.awaited),
+                },
+            };
             if !self.execution.cuts.is_empty() {
                 self.hosted_resume(frame.outer.host_version);
             }
@@ -3463,7 +3498,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 context,
                 frame,
                 TryOutcome::Fail,
-                observed,
+                trace,
             )));
         }
         // A failed cut is a failure, which its choice handles by falling
@@ -3480,7 +3515,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 scope_depth: frame.parent_scope_depth,
             }));
         }
-        if !frame.observed_failure {
+        // What a `.try` within the cut waited on wakes the cut too: its
+        // progress, as a change in what it observed, may let it succeed.
+        let awaited = failed
+            .transaction
+            .as_ref()
+            .and_then(|transaction| transaction.awaited.first().cloned());
+        if !frame.observed_failure && awaited.is_none() {
             failed.transaction = None;
             return Ok(MachineStep::Continue(MachineWork::Outcome {
                 outcome: failed.into_failure(),
@@ -3497,13 +3538,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
         frame.retry = Some(failed);
         let index = self.execution.cuts.len();
         self.execution.cuts.push(frame);
-        Ok(MachineStep::Blocked(BlockedExecution::exhausted(
-            RetryWake {
-                observed_generation: generation,
-                validation,
-                action: WakeAction::RestartCut(index),
-            },
-        )))
+        let retry = RetryWake {
+            observed_generation: generation,
+            validation,
+            action: WakeAction::RestartCut(index),
+        };
+        Ok(MachineStep::Blocked(match awaited {
+            Some(dependency) => BlockedExecution::awaiting_retry(dependency, retry),
+            None => BlockedExecution::exhausted(retry),
+        }))
     }
 
     fn handle_top_level_outcome(
@@ -3684,7 +3727,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .outer
                     .root_value(&access, try_outcome_in(&access, TryOutcome::Conflict))
             });
-            self.execution.work = self.deliver_try(frame, value, false);
+            self.execution.work = self.deliver_try(frame, value, TryTrace::default());
             return;
         }
         self.restart_hosted_cut(frame);
@@ -3888,23 +3931,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
         })
     }
 
-    /// As [`Self::install_blocked`], for a phase that blocked with `step_budget`
-    /// left: within a `.try`, a block nothing in the task can progress is the
-    /// `.try`'s answer (`api-refl-try`).
+    /// As [`Self::install_blocked`], for a phase that blocked: within a
+    /// `.try`, a block on a promise no one has resolved is the `.try`'s
+    /// answer (`api-refl-try`).
     fn install_blocked_in(
         &mut self,
         context: &mut EvaluationPollContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
         blocked: BlockedExecution<S>,
     ) -> Option<EffectTaskPoll> {
         let poll = self.install_blocked(context, blocked)?;
-        if !matches!(poll, EffectTaskPoll::Blocked(_)) {
-            return Some(poll);
+        if matches!(poll, EffectTaskPoll::Blocked(_)) && self.try_answers_wait(context) {
+            return None;
         }
-        match self.try_wait(context, step_budget) {
-            Some(answered) => answered,
-            None => Some(poll),
-        }
+        Some(poll)
     }
 
     /// The innermost open `.try`'s frame, by its index.
@@ -3913,48 +3952,32 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     /// Within a `.try`, answers `wait` where the task blocks on a promise no
-    /// one has resolved, which pumping what it waits on cannot progress.
-    /// Work another worker runs, or work this poll can run, is not a reason
-    /// to answer: the task waits for it, or runs it. `None` where no `.try`
-    /// answers; otherwise what the poll returns, `None` to go on.
-    fn try_wait(
-        &mut self,
-        context: &mut EvaluationPollContext,
-        step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> Option<Option<EffectTaskPoll>> {
+    /// one has resolved: directly, or through work the coordinator knows
+    /// waits on it. It never pumps: the poll's own pumping runs work this
+    /// task can run, and asks again once it makes no progress. Work another
+    /// worker runs, or work not yet run, is not a reason to answer: the task
+    /// waits for it, or runs it. Whether it answered.
+    fn try_answers_wait(&mut self, context: &EvaluationPollContext) -> bool {
         // A host that runs the task's cuts parks the requests it serves on
         // promises it resolves, so only it knows which waits are outside
         // the task's control; it says so with `answer_try_wait`.
         if self.hosted.is_some() {
-            return None;
+            return false;
         }
-        let index = self.innermost_try()?;
-        let BlockReason::WaitingOn(dependency) = &self.blocked.as_ref()?.reason else {
-            return None;
+        let Some(index) = self.innermost_try() else {
+            return false;
+        };
+        let Some(BlockedExecution {
+            reason: BlockReason::WaitingOn(dependency),
+            ..
+        }) = &self.blocked
+        else {
+            return false;
         };
         if dependency.panic_report().is_some() {
-            return None;
+            return false;
         }
-        let dependency = dependency.clone();
-        if let WorkDependency::Wait(wait) = &dependency {
-            match self.eval_context.pump_wait_on_route_within(
-                context,
-                wait,
-                step_budget,
-                &mut self.exact_demand_route,
-            ) {
-                EvaluationPumpOutcome::TargetReady => {
-                    self.blocked = None;
-                    return Some(None);
-                }
-                EvaluationPumpOutcome::BudgetExhausted => {
-                    return Some(Some(EffectTaskPoll::BudgetExhausted));
-                }
-                EvaluationPumpOutcome::Busy => return None,
-                EvaluationPumpOutcome::NoProgress => {}
-            }
-        }
-        let pending_promise = match &dependency {
+        let pending = match dependency {
             WorkDependency::Promise(_) => true,
             dependency => self
                 .eval_context
@@ -3962,11 +3985,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 .work_coordinator()
                 .is_some_and(|coordinator| coordinator.awaited_promise(dependency).is_some()),
         };
-        if !pending_promise {
-            return None;
+        if !pending {
+            return false;
         }
-        self.unwind_to_try(context, index, TryOutcome::Wait);
-        Some(None)
+        let dependency = dependency.clone();
+        self.unwind_to_try(context, index, TryOutcome::Wait, Some(dependency));
+        true
     }
 
     /// Answers the innermost `.try` with `wait`, where its host found the
@@ -3976,14 +4000,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
         let Some(index) = self.innermost_try() else {
             return false;
         };
-        let (frame, observed) = self.leave_try(index);
+        let (frame, trace) = self.leave_try(index);
         let values = self.eval_context.values().clone();
         let value = values.with_boundary_access(|access| {
             frame
                 .outer
                 .root_value(&access, try_outcome_in(&access, TryOutcome::Wait))
         });
-        self.execution.work = self.deliver_try(frame, value, observed);
+        self.execution.work = self.deliver_try(frame, value, trace);
         true
     }
 
@@ -3994,23 +4018,36 @@ impl<S: TaskSpecialization> EffectTask<S> {
         context: &EvaluationPollContext,
         index: usize,
         outcome: TryOutcome,
+        awaited: Option<WorkDependency>,
     ) {
-        let (frame, observed) = self.leave_try(index);
-        self.execution.work = self.answer_try(context, frame, outcome, observed);
+        let (frame, mut trace) = self.leave_try(index);
+        trace.awaited.extend(awaited);
+        self.execution.work = self.answer_try(context, frame, outcome, trace);
     }
 
     /// Leaves the `.try` whose frame is at `index`, and every frame within
-    /// it, discarding the work in progress: its frame, and whether what it
-    /// did observed shared state.
-    fn leave_try(&mut self, index: usize) -> (CutFrame<S>, bool) {
-        let observed = self.execution.cuts[index..]
-            .iter()
-            .any(|frame| frame.observed_failure)
-            || self
-                .execution
-                .active_branch()
-                .and_then(|branch| branch.transaction.as_ref())
-                .is_some_and(|transaction| transaction.observed);
+    /// it, discarding the work in progress: its frame, and what it observed
+    /// and waited on.
+    fn leave_try(&mut self, index: usize) -> (CutFrame<S>, TryTrace) {
+        let active = self
+            .execution
+            .active_branch()
+            .and_then(|branch| branch.transaction.as_ref());
+        let trace = TryTrace {
+            observed: self.execution.cuts[index..]
+                .iter()
+                .any(|frame| frame.observed_failure)
+                || active.is_some_and(|transaction| transaction.observed),
+            awaited: self.execution.cuts[index..]
+                .iter()
+                .flat_map(|frame| frame.awaited.iter().cloned())
+                .chain(
+                    active
+                        .into_iter()
+                        .flat_map(|transaction| transaction.awaited.iter().cloned()),
+                )
+                .collect(),
+        };
         self.execution.decoding = None;
         self.execution.demanding = None;
         self.execution.pathing = None;
@@ -4033,7 +4070,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         } else {
             self.hosted_resume(entry);
         }
-        (frame, observed)
+        (frame, trace)
     }
 
     fn install_blocked(
@@ -4130,36 +4167,53 @@ impl<S: TaskSpecialization> EffectTask<S> {
             BlockedRetryPoll::Restarted => return None,
             BlockedRetryPoll::Terminal(poll) => return Some(poll),
         }
-        if let Some(answered) = self.try_wait(context, step_budget) {
-            return answered;
+        if self.try_answers_wait(context) {
+            return None;
         }
         let blocked = self.blocked.as_ref().expect("checked blocked state above");
-        let BlockReason::WaitingOn(dependency) = &blocked.reason else {
-            return Some(self.blocked_poll());
+        let (dependency, restarts) = match &blocked.reason {
+            BlockReason::WaitingOn(dependency) => (dependency, false),
+            BlockReason::AwaitingRetry(dependency) => (dependency, true),
+            BlockReason::Exhausted | BlockReason::EvaluationError(_) => {
+                return Some(self.blocked_poll());
+            }
         };
         // A panicked dependency stays blocked: re-polling would reinstall
         // the panicked work, so the scheduler's poll boundary halts this task.
         if dependency.panic_report().is_some() {
             return Some(self.blocked_poll());
         }
+        // What a failed cut awaited progressed: the cut runs again. What
+        // evaluation awaited progressed: it goes on.
+        let progressed = |machine: &mut Self, context: &mut EvaluationPollContext| {
+            let blocked = machine.blocked.take().expect("checked blocked state above");
+            if restarts {
+                let retry = blocked
+                    .retry
+                    .expect("a cut that awaits progress keeps its wake action");
+                machine.apply_wake(context, retry.action);
+            }
+            None
+        };
         if dependency.is_terminal() {
-            self.blocked = None;
-            return None;
+            return progressed(self, context);
         }
         let WorkDependency::Wait(wait) = dependency else {
             return Some(self.blocked_poll());
         };
-        match self.eval_context.poll_wait(wait) {
+        let wait = wait.clone();
+        match self.eval_context.poll_wait(&wait) {
             EvaluationWaitPoll::Pending(_) => {
                 // Pumped work shares this poll's mutator.
                 let pumped = self.eval_context.pump_wait_on_route_within(
                     context,
-                    wait,
+                    &wait,
                     step_budget,
                     &mut self.exact_demand_route,
                 );
                 if matches!(pumped, EvaluationPumpOutcome::TargetReady) {
-                    self.blocked = None;
+                    progressed(self, context)
+                } else if self.try_answers_wait(context) {
                     None
                 } else {
                     Some(self.blocked_poll())
@@ -4171,10 +4225,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             | EvaluationWaitPoll::Cancelled
             | EvaluationWaitPoll::Abandoned
             | EvaluationWaitPoll::Exited
-            | EvaluationWaitPoll::Killed(_) => {
-                self.blocked = None;
-                None
-            }
+            | EvaluationWaitPoll::Killed(_) => progressed(self, context),
         }
     }
 
@@ -5555,6 +5606,9 @@ struct CutFrame<S: TaskSpecialization> {
     /// A `.try`'s frame, which returns its operation's outcome as data
     /// rather than retrying it (`api-refl-try`).
     trying: bool,
+    /// What the `.try`s within the cut's failed attempts waited on, as
+    /// `observed_failure` records what they observed.
+    awaited: Vec<WorkDependency>,
 }
 
 /// What a `.try` answers with, other than its operation's value
@@ -5569,6 +5623,29 @@ enum TryOutcome {
     Conflict,
     /// An evaluation error.
     Err(TaskHalt),
+}
+
+/// What a `.try`'s abandoned operation leaves recorded in the transaction
+/// around it: whether it observed shared state, and what it waited on.
+#[derive(Default)]
+struct TryTrace {
+    observed: bool,
+    awaited: Vec<WorkDependency>,
+}
+
+/// `seq value (.r value)`, the operation `.eval value` tries.
+fn evaluation_effect_in(access: &RuntimeValueAccess<'_>, value: Value) -> Value {
+    let returned = Value::Dict(Dict::new_sync().insert(
+        keys::EFF.clone(),
+        Value::PartialBuiltin(BuiltinCall {
+            builtin: Builtin::EffectCall,
+            arguments: Arc::from([
+                Value::Atom(Atom::from_key(&Key::binary_from_text("r"))),
+                Value::List(List::from_values(vec![access.duplicate_value(&value)])),
+            ]),
+        }),
+    ));
+    Value::builtin_call_in(access, Builtin::Seq, vec![value, returned])
 }
 
 /// A `.try`'s answer, `{key: payload}`.
@@ -5652,6 +5729,13 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
         }
     }
 
+    fn awaiting_retry(dependency: WorkDependency, retry: RetryWake<S>) -> Self {
+        Self {
+            reason: BlockReason::AwaitingRetry(dependency),
+            retry: Some(retry),
+        }
+    }
+
     fn evaluation_error(error: TaskHalt, retry: RetryWake<S>, values: &CoreValueFactory) -> Self {
         Self {
             reason: BlockReason::EvaluationError(error.root_for_values(values)),
@@ -5661,7 +5745,9 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
 
     fn dependency(&self) -> Option<WorkDependency> {
         match &self.reason {
-            BlockReason::WaitingOn(dependency) => Some(dependency.clone()),
+            BlockReason::WaitingOn(dependency) | BlockReason::AwaitingRetry(dependency) => {
+                Some(dependency.clone())
+            }
             BlockReason::Exhausted | BlockReason::EvaluationError(_) => None,
         }
     }
@@ -5678,7 +5764,9 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
                     .expect("evaluation-error blocks retain permanent failure roots")
                     .clone(),
             ),
-            BlockReason::WaitingOn(_) | BlockReason::Exhausted => None,
+            BlockReason::WaitingOn(_) | BlockReason::Exhausted | BlockReason::AwaitingRetry(_) => {
+                None
+            }
         }
     }
 }
@@ -5687,6 +5775,9 @@ enum BlockReason {
     WaitingOn(WorkDependency),
     Exhausted,
     EvaluationError(TaskHalt),
+    /// A failed cut whose `.try`s waited on this: its progress restarts the
+    /// cut, as a change in what the cut observed does.
+    AwaitingRetry(WorkDependency),
 }
 
 struct RetryWake<S: TaskSpecialization> {
@@ -5944,6 +6035,7 @@ enum Request<R, V = RuntimeValueRoot> {
     Fail,
     Cut(V),
     Try(V),
+    Eval(V),
     Fix(V),
     Get(V),
     Set(V, V),
@@ -6122,6 +6214,7 @@ enum RequestSelection<R> {
     Fail,
     Cut,
     Try,
+    Eval,
     Fix,
     Get,
     Set,
@@ -6148,6 +6241,7 @@ impl<R> RequestSelection<R> {
             Self::Return
             | Self::Cut
             | Self::Try
+            | Self::Eval
             | Self::Fix
             | Self::Get
             | Self::HeapGet
@@ -6195,6 +6289,7 @@ impl<R> RequestSelection<R> {
             Self::Fail => Request::Fail,
             Self::Cut => Request::Cut(next()),
             Self::Try => Request::Try(next()),
+            Self::Eval => Request::Eval(next()),
             Self::Fix => Request::Fix(next()),
             Self::Get => Request::Get(next()),
             Self::Set => Request::Set(next(), next()),
@@ -6579,6 +6674,7 @@ fn select_request_from_whnf<R: Clone>(
     select!(&tags.fail, RequestSelection::Fail);
     select!(&tags.cut, RequestSelection::Cut);
     select!(&tags.trying, RequestSelection::Try);
+    select!(&tags.eval, RequestSelection::Eval);
     select!(&tags.fix, RequestSelection::Fix);
     select!(&tags.get, RequestSelection::Get);
     select!(&tags.set, RequestSelection::Set);
@@ -6834,6 +6930,10 @@ fn effect_api<R: Clone>(
             entry(
                 "try",
                 request_function_in(access, tags.trying.clone(), 1, Vec::new(), false),
+            ),
+            entry(
+                "eval",
+                request_function_in(access, tags.eval.clone(), 1, Vec::new(), false),
             ),
         ]);
         if serve_host_families {

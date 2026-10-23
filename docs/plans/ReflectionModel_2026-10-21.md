@@ -149,7 +149,8 @@ boundary task's child, and each `refl.*` entry as the scanner's.
 | — | `.child.clear Key`; `.child.call Key Op`. |
 | `.exit.success`, `.exit.error` | Retire: a machine waiting on input or for tasks is idle. |
 | — | Obligations, as accepted promises (`obligations-are-accepted-promises`): `.promise.accept Resolver Diagnostic`, `.promise.abandon Resolver`, `.promise.accepted Resolver`. |
-| `.eval`, `.meta.inspect`, `.dict_items`, `.env 'glam.origin.inspect` | Unchanged: evaluation and inspection. |
+| `.eval` | `.try (seq V (.r V))`: it answers `wait` where it waited (see [Trying an operation](#trying-an-operation)). |
+| `.meta.inspect`, `.dict_items`, `.env 'glam.origin.inspect` | Unchanged: inspection. |
 | — | `.try Op`: `Op` run once as a transaction, its outcome returned as data (see [Trying an operation](#trying-an-operation)). |
 
 The CLI's own families (`.read.*`, `.write.*`, `.case`, `.token.*`) and
@@ -188,7 +189,10 @@ a reserved word in Rust.
   enclosing commit, so only an outermost `.try` returns `conflict`.
 - A panic is never an outcome: it re-raises, as in Rust.
 - A task that loops on `.try` while it gets `wait` spins. To park, it fails
-  within a cut instead, which waits on what it observed.
+  within a cut instead: the cut keeps what the `.try` waited on, as it
+  keeps what it observed, and runs again once that progresses.
+- `.eval V` is `.try (seq V (.r V))` (maintainer, 2026-10-23,
+  `try-reports-outcomes`).
 
 ### Rust's counterparts
 
