@@ -317,7 +317,14 @@ volume to retry. Dropping the Rust owner does not revoke it.
   publishes it through the session's diagnostic bus only after commit.
 - `.dict_items Dict` returns ordered `{key,value}` records.
 - `.eval Value` demands weak-head normal form and returns `ok:WHNF` or
-  `err:Diagnostic`. A raw opaque `Value::Net` is already WHNF and is returned
+  `err:Diagnostic`.
+- `.try Op` runs `Op` once as a transaction and returns its outcome as
+  data: `ok:Value`, `fail:()` for an explicit failure, `wait:Diagnostic`
+  for a promise no one has resolved, `conflict:Diagnostic` for a commit
+  another's interfered with, or `err:Diagnostic` for an evaluation error.
+  Every outcome but `ok` undoes `Op`; within a cut it nests. Where a turn
+  runs the effect, the turn decides which waits are outside the effect: a
+  request it serves parks on a promise it resolves. A raw opaque `Value::Net` is already WHNF and is returned
   unchanged; only an explicit net-arity bridge observes its interface.
 - `.task.new Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is

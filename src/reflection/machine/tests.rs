@@ -1555,6 +1555,7 @@ fn assert_execution_root_inventory(
         fallback,
         retry,
         observed_failure,
+        trying,
     } = cut;
     let _: &Option<Branch<TestEffects>> = fallback;
     let _: &RuntimeValueRoot = operation;
@@ -1567,6 +1568,7 @@ fn assert_execution_root_inventory(
         alternatives,
         retry,
         observed_failure,
+        trying,
     );
 
     match wake {
@@ -1808,6 +1810,7 @@ fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>)
         | RequestSelection::Alt
         | RequestSelection::Fail
         | RequestSelection::Cut
+        | RequestSelection::Try
         | RequestSelection::Fix
         | RequestSelection::Get
         | RequestSelection::Set
@@ -3257,6 +3260,7 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
     match request {
         Request::Return(value)
         | Request::Cut(value)
+        | Request::Try(value)
         | Request::Fix(value)
         | Request::Get(value)
         | Request::HeapGet(value)
@@ -3570,6 +3574,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
         fallback: None,
         retry: None,
         observed_failure: false,
+        trying: false,
     };
     domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
@@ -9516,5 +9521,74 @@ fn assert_volume_target<V>(volume: &VolumeTarget<V>, mut assert_handle: impl FnM
             let _: &VolumeId = volume;
         }
         VolumeTarget::Handle(handle) => assert_handle(handle),
+    }
+}
+
+/// The text `source`, an effect over `.try`, completes with.
+fn try_text(source: &str) -> Vec<u8> {
+    let (assembler, value) = completed(source);
+    assembler
+        .to_binary(&value)
+        .expect("the effect should return text")
+        .to_vec()
+}
+
+#[test]
+fn try_answers_with_its_operation_s_value_or_failure() {
+    // `api-refl-try`: `.try` runs its operation once and answers with its
+    // outcome as data.
+    for (source, expected) in [
+        (".try (.r \"A\") >>= (\\r -> .r r.ok)", "A"),
+        (
+            ".try (.fail) >>= (\\r -> .r (if r == { fail:() } then \"fail\" else \"other\"))",
+            "fail",
+        ),
+        (".try (.alt (.fail) (.r \"B\")) >>= (\\r -> .r r.ok)", "B"),
+        (
+            ".try (.heap.set ['k] \"set\" =>> .fail) >>= (\\_ -> .heap.get ['k] >>= (\\k -> .r (if k == {} then \"undone\" else \"kept\")))",
+            "undone",
+        ),
+        (
+            ".try (.heap.set ['k] \"set\") >>= (\\_ -> .heap.get ['k])",
+            "set",
+        ),
+    ] {
+        assert_eq!(try_text(source), expected.as_bytes(), "{source}");
+    }
+}
+
+#[test]
+fn try_answers_with_an_evaluation_error_within_it() {
+    for source in [
+        ".try (seq (1 / 0) (.r ())) >>= (\\r -> .r (if r.err == {} then \"none\" else \"err\"))",
+        ".try (.cut (seq (1 / 0) (.r ()))) >>= (\\r -> .r (if r.err == {} then \"none\" else \"err\"))",
+    ] {
+        assert_eq!(try_text(source), b"err".as_slice(), "{source}");
+    }
+}
+
+#[test]
+fn try_answers_wait_until_its_promise_is_kept() {
+    assert_eq!(
+        try_text(
+            ".promise.new >>= (\\p -> .try (seq p.promise (.r ())) >>= (\\r -> .promise.fulfill p.resolver 1 =>> .try (seq p.promise (.r \"kept\")) >>= (\\s -> .r (if r.wait == {} then \"none\" else s.ok))))"
+        ),
+        b"kept".as_slice()
+    );
+}
+
+#[test]
+fn try_within_a_cut_or_a_choice_nests() {
+    for (source, expected) in [
+        (
+            ".cut (.try (.heap.set ['k] \"set\" =>> .fail) >>= (\\r -> .heap.get ['k] >>= (\\k -> .r (if r == { fail:() } and k == {} then \"undone\" else \"kept\"))))",
+            "undone",
+        ),
+        (
+            ".alt (.try (.fail) >>= (\\_ -> .fail)) (.r \"fallback\")",
+            "fallback",
+        ),
+    ] {
+        assert_eq!(try_text(source), expected.as_bytes(), "{source}");
     }
 }

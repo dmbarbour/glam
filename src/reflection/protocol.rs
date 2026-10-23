@@ -567,6 +567,18 @@ impl TaskHalt {
         Self(TaskHaltKind::Panicked(report))
     }
 
+    /// The diagnostic of a failure, as `.eval` reports one. A panic has
+    /// none: it is never an outcome.
+    pub(super) fn diagnostic_in(&self, access: &RuntimeValueAccess<'_>) -> Option<Value> {
+        match &self.0 {
+            TaskHaltKind::Failure(failure) => Some(crate::diagnostic::failure_diagnostic_in(
+                access,
+                failure.as_failure(),
+            )),
+            TaskHaltKind::Panicked(_) => None,
+        }
+    }
+
     /// Returns the panic message when scheduled work was interrupted by a
     /// panic rather than failing.
     pub fn panic_message(&self) -> Option<&str> {

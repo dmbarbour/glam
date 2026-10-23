@@ -433,6 +433,13 @@ impl<S: TaskSpecialization> HostedEffectRun<S> {
         self.task.resume_commit(committed);
     }
 
+    /// Answers the innermost open `.try` with `wait`, where the host found
+    /// the run blocked on what it does not serve and cannot progress.
+    /// Whether a `.try` was open to answer (`api-refl-try`).
+    pub(crate) fn answer_try_wait(&mut self) -> bool {
+        self.task.answer_try_wait()
+    }
+
     /// Runs the outermost cut again from its entry, as the host began its
     /// transaction again where the cut diverged.
     pub(crate) fn restart_outermost_cut(&mut self) {

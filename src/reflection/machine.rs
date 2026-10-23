@@ -52,6 +52,7 @@ struct Tags {
     alt: Key,
     fail: Key,
     cut: Key,
+    trying: Key,
     fix: Key,
     get: Key,
     set: Key,
@@ -91,6 +92,7 @@ impl Tags {
             alt: tag("alt"),
             fail: tag("fail"),
             cut: tag("cut"),
+            trying: tag("try"),
             fix: tag("fix"),
             get: tag("get"),
             set: tag("set"),
@@ -819,7 +821,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ControlStep::Blocked(controlling, dependency) => {
                         self.execution.controlling = Some(controlling);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(context, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
                             return poll;
                         }
                     }
@@ -848,7 +850,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     SpecializationStep::Blocked(specializing, dependency) => {
                         self.execution.specializing = Some(specializing);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(context, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
                             return poll;
                         }
                     }
@@ -892,7 +894,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             unreachable!("one scalar completion cannot begin specialized work")
                         }
                         MachineStep::Blocked(blocked) => {
-                            if let Some(poll) = self.install_blocked(context, blocked) {
+                            if let Some(poll) =
+                                self.install_blocked_in(context, step_budget, blocked)
+                            {
                                 return poll;
                             }
                         }
@@ -910,7 +914,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ScalarDemandStep::Blocked(demanding, dependency) => {
                         self.execution.demanding = Some(demanding);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(context, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
                             return poll;
                         }
                     }
@@ -937,7 +941,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     StatePathStep::Blocked(pathing, dependency) => {
                         self.execution.pathing = Some(pathing);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(context, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
                             return poll;
                         }
                     }
@@ -966,7 +970,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     EffectDecodeStep::Blocked(decoding, dependency) => {
                         self.execution.decoding = Some(decoding);
                         let blocked = BlockedExecution::waiting_on(dependency, self.retry_wake());
-                        if let Some(poll) = self.install_blocked(context, blocked) {
+                        if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
                             return poll;
                         }
                     }
@@ -1026,7 +1030,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     self.execution.specializing = Some(specializing);
                 }
                 Ok(MachineStep::Blocked(blocked)) => {
-                    if let Some(poll) = self.install_blocked(context, blocked) {
+                    if let Some(poll) = self.install_blocked_in(context, step_budget, blocked) {
                         return poll;
                     }
                 }
@@ -1086,6 +1090,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         error: TaskHalt,
     ) -> Option<EffectTaskPoll> {
         let error = context.with_runtime_access(|access| error.root_in(&access));
+        // A `.try` answers with an evaluation error within it.
+        if error.panic_message().is_none()
+            && let Some(index) = self.innermost_try()
+        {
+            self.unwind_to_try(context, index, TryOutcome::Err(error));
+            return None;
+        }
         if let Some(retry) = self.retry_wake() {
             let blocked =
                 BlockedExecution::evaluation_error(error, retry, self.eval_context.values());
@@ -2703,6 +2714,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 )));
             }
+            Request::Try(operation) => {
+                if self.search.retains_all() {
+                    return Err(TaskHalt::new(
+                        "`.try` is not available in an isolated search",
+                    ));
+                }
+                let work = self.enter_cut(context, operation, branch, scope_depth);
+                self.execution
+                    .cuts
+                    .last_mut()
+                    .expect("the cut was just entered")
+                    .trying = true;
+                return Ok(MachineStep::Continue(work));
+            }
             Request::Get(path) => {
                 return Ok(MachineStep::StatePath(Box::new(StatePathWork::get(
                     path,
@@ -3153,6 +3178,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             fallback: None,
             retry: None,
             observed_failure: false,
+            trying: false,
         };
         // Where the host runs the cuts, it owns their transactions.
         frame.owns_transaction = self.hosted.is_none() && frame.outer.transaction.is_none();
@@ -3235,6 +3261,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                                 .cuts
                                 .last_mut()
                                 .expect("checked nonempty cut stack");
+                            if frame.trying {
+                                let frame = self
+                                    .execution
+                                    .cuts
+                                    .pop()
+                                    .expect("checked nonempty cut stack");
+                                return Ok(MachineStep::Continue(self.answer_try(
+                                    context,
+                                    frame,
+                                    TryOutcome::Conflict,
+                                    false,
+                                )));
+                            }
                             frame.observed_failure = true;
                             frame.retry = Some(completed);
                             return self.finish_cut_attempt(context);
@@ -3262,6 +3301,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .pop()
                     .expect("checked nonempty cut stack");
                 let parent_scope_depth = frame.parent_scope_depth;
+                // A `.try` answers with its operation's value as `ok`.
+                let value = if frame.trying {
+                    context.with_runtime_access(|access| {
+                        let value = value.clone_core_with(&access);
+                        completed.root_value(&access, try_value_in(&access, &keys::OK, value))
+                    })
+                } else {
+                    value
+                };
                 if let Some(hosted) = self
                     .hosted
                     .as_mut()
@@ -3269,8 +3317,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 {
                     // The host commits the outermost cut, and may restart it.
                     completed.control.sequence = frame.outer_sequence.clone();
+                    let retries = !frame.trying;
                     hosted.committing = Some(frame);
-                    hosted.pending = Some(HostControl::CutCommit);
+                    hosted.pending = Some(HostControl::CutCommit { retries });
                 } else {
                     completed.control.sequence = frame.outer_sequence;
                 }
@@ -3330,6 +3379,41 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
+    /// Answers a `.try`, whose `frame` has left the stack, with `outcome`.
+    fn answer_try(
+        &mut self,
+        context: &EvaluationPollContext,
+        frame: CutFrame<S>,
+        outcome: TryOutcome,
+        observed: bool,
+    ) -> MachineWork<S> {
+        let value = context.with_runtime_access(|access| {
+            frame
+                .outer
+                .root_value(&access, try_outcome_in(&access, outcome))
+        });
+        self.deliver_try(frame, value, observed)
+    }
+
+    /// Continues where a `.try`, whose `frame` has left the stack, began,
+    /// with `value`, what it answers. What its operation did is undone; what
+    /// it `observed` stays observed by the transaction around it.
+    fn deliver_try(
+        &mut self,
+        frame: CutFrame<S>,
+        value: RuntimeValueRoot,
+        observed: bool,
+    ) -> MachineWork<S> {
+        let mut branch = frame.outer;
+        branch.control.sequence = frame.outer_sequence;
+        if frame.owns_transaction {
+            branch.transaction = None;
+        } else if let Some(transaction) = branch.transaction.as_mut() {
+            transaction.observed |= observed;
+        }
+        MachineWork::deliver_root(value, branch, frame.parent_scope_depth)
+    }
+
     fn finish_cut_attempt(
         &mut self,
         context: &mut EvaluationPollContext,
@@ -3364,6 +3448,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 outcome: BranchOutcome::Retry(failed),
                 scope_depth: frame.parent_scope_depth,
             }));
+        }
+        // A `.try` answers with its operation's failure.
+        if frame.trying {
+            let observed = frame.observed_failure
+                || failed
+                    .transaction
+                    .as_ref()
+                    .is_some_and(|transaction| transaction.observed);
+            if !self.execution.cuts.is_empty() {
+                self.hosted_resume(frame.outer.host_version);
+            }
+            return Ok(MachineStep::Continue(self.answer_try(
+                context,
+                frame,
+                TryOutcome::Fail,
+                observed,
+            )));
         }
         // A failed cut is a failure, which its choice handles by falling
         // back; only a failure nothing handles waits for a change.
@@ -3566,9 +3667,27 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .as_mut()
             .and_then(|hosted| hosted.committing.take())
             .expect("a commit awaits its host's answer");
-        if !committed {
-            self.restart_hosted_cut(frame);
+        if committed {
+            return;
         }
+        if frame.trying {
+            // The host ended its transaction, returning to where the `.try`
+            // began, which answers with the conflict in place of its
+            // operation's value.
+            self.hosted
+                .as_mut()
+                .expect("only a host that runs the cuts commits one")
+                .version = frame.outer.host_version;
+            let values = self.eval_context.values().clone();
+            let value = values.with_boundary_access(|access| {
+                frame
+                    .outer
+                    .root_value(&access, try_outcome_in(&access, TryOutcome::Conflict))
+            });
+            self.execution.work = self.deliver_try(frame, value, false);
+            return;
+        }
+        self.restart_hosted_cut(frame);
     }
 
     /// Runs the outermost cut again from its entry, as the host began its
@@ -3769,6 +3888,154 @@ impl<S: TaskSpecialization> EffectTask<S> {
         })
     }
 
+    /// As [`Self::install_blocked`], for a phase that blocked with `step_budget`
+    /// left: within a `.try`, a block nothing in the task can progress is the
+    /// `.try`'s answer (`api-refl-try`).
+    fn install_blocked_in(
+        &mut self,
+        context: &mut EvaluationPollContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+        blocked: BlockedExecution<S>,
+    ) -> Option<EffectTaskPoll> {
+        let poll = self.install_blocked(context, blocked)?;
+        if !matches!(poll, EffectTaskPoll::Blocked(_)) {
+            return Some(poll);
+        }
+        match self.try_wait(context, step_budget) {
+            Some(answered) => answered,
+            None => Some(poll),
+        }
+    }
+
+    /// The innermost open `.try`'s frame, by its index.
+    fn innermost_try(&self) -> Option<usize> {
+        self.execution.cuts.iter().rposition(|frame| frame.trying)
+    }
+
+    /// Within a `.try`, answers `wait` where the task blocks on a promise no
+    /// one has resolved, which pumping what it waits on cannot progress.
+    /// Work another worker runs, or work this poll can run, is not a reason
+    /// to answer: the task waits for it, or runs it. `None` where no `.try`
+    /// answers; otherwise what the poll returns, `None` to go on.
+    fn try_wait(
+        &mut self,
+        context: &mut EvaluationPollContext,
+        step_budget: &mut crate::evaluation::EvaluationStepBudget,
+    ) -> Option<Option<EffectTaskPoll>> {
+        // A host that runs the task's cuts parks the requests it serves on
+        // promises it resolves, so only it knows which waits are outside
+        // the task's control; it says so with `answer_try_wait`.
+        if self.hosted.is_some() {
+            return None;
+        }
+        let index = self.innermost_try()?;
+        let BlockReason::WaitingOn(dependency) = &self.blocked.as_ref()?.reason else {
+            return None;
+        };
+        if dependency.panic_report().is_some() {
+            return None;
+        }
+        let dependency = dependency.clone();
+        if let WorkDependency::Wait(wait) = &dependency {
+            match self.eval_context.pump_wait_on_route_within(
+                context,
+                wait,
+                step_budget,
+                &mut self.exact_demand_route,
+            ) {
+                EvaluationPumpOutcome::TargetReady => {
+                    self.blocked = None;
+                    return Some(None);
+                }
+                EvaluationPumpOutcome::BudgetExhausted => {
+                    return Some(Some(EffectTaskPoll::BudgetExhausted));
+                }
+                EvaluationPumpOutcome::Busy => return None,
+                EvaluationPumpOutcome::NoProgress => {}
+            }
+        }
+        let pending_promise = match &dependency {
+            WorkDependency::Promise(_) => true,
+            dependency => self
+                .eval_context
+                .values()
+                .work_coordinator()
+                .is_some_and(|coordinator| coordinator.awaited_promise(dependency).is_some()),
+        };
+        if !pending_promise {
+            return None;
+        }
+        self.unwind_to_try(context, index, TryOutcome::Wait);
+        Some(None)
+    }
+
+    /// Answers the innermost `.try` with `wait`, where its host found the
+    /// task's block outside the task's control: not a request it serves.
+    /// Whether a `.try` was open to answer.
+    pub(super) fn answer_try_wait(&mut self) -> bool {
+        let Some(index) = self.innermost_try() else {
+            return false;
+        };
+        let (frame, observed) = self.leave_try(index);
+        let values = self.eval_context.values().clone();
+        let value = values.with_boundary_access(|access| {
+            frame
+                .outer
+                .root_value(&access, try_outcome_in(&access, TryOutcome::Wait))
+        });
+        self.execution.work = self.deliver_try(frame, value, observed);
+        true
+    }
+
+    /// Leaves the `.try` whose frame is at `index`, and every frame within
+    /// it, discarding the work in progress, and answers it with `outcome`.
+    fn unwind_to_try(
+        &mut self,
+        context: &EvaluationPollContext,
+        index: usize,
+        outcome: TryOutcome,
+    ) {
+        let (frame, observed) = self.leave_try(index);
+        self.execution.work = self.answer_try(context, frame, outcome, observed);
+    }
+
+    /// Leaves the `.try` whose frame is at `index`, and every frame within
+    /// it, discarding the work in progress: its frame, and whether what it
+    /// did observed shared state.
+    fn leave_try(&mut self, index: usize) -> (CutFrame<S>, bool) {
+        let observed = self.execution.cuts[index..]
+            .iter()
+            .any(|frame| frame.observed_failure)
+            || self
+                .execution
+                .active_branch()
+                .and_then(|branch| branch.transaction.as_ref())
+                .is_some_and(|transaction| transaction.observed);
+        self.execution.decoding = None;
+        self.execution.demanding = None;
+        self.execution.pathing = None;
+        self.execution.controlling = None;
+        self.execution.specializing = None;
+        self.blocked = None;
+        self.execution.cuts.truncate(index + 1);
+        let frame = self
+            .execution
+            .cuts
+            .pop()
+            .expect("the `.try`'s frame is on the stack");
+        let entry = frame.outer.host_version;
+        if self.execution.cuts.is_empty() {
+            if let Some(hosted) = self.hosted.as_mut() {
+                // The host returns to where the outermost cut began.
+                hosted.version = entry;
+                hosted.pending = Some(HostControl::CutAbort(entry));
+            }
+        } else {
+            self.hosted_resume(entry);
+        }
+        (frame, observed)
+    }
+
     fn install_blocked(
         &mut self,
         context: &mut EvaluationPollContext,
@@ -3862,6 +4129,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
             BlockedRetryPoll::Stable => {}
             BlockedRetryPoll::Restarted => return None,
             BlockedRetryPoll::Terminal(poll) => return Some(poll),
+        }
+        if let Some(answered) = self.try_wait(context, step_budget) {
+            return answered;
         }
         let blocked = self.blocked.as_ref().expect("checked blocked state above");
         let BlockReason::WaitingOn(dependency) = &blocked.reason else {
@@ -5282,6 +5552,52 @@ struct CutFrame<S: TaskSpecialization> {
     fallback: Option<Branch<S>>,
     retry: Option<Branch<S>>,
     observed_failure: bool,
+    /// A `.try`'s frame, which returns its operation's outcome as data
+    /// rather than retrying it (`api-refl-try`).
+    trying: bool,
+}
+
+/// What a `.try` answers with, other than its operation's value
+/// (`api-refl-try`).
+enum TryOutcome {
+    /// An explicit failure, with no alternative left.
+    Fail,
+    /// A wait on what is outside the `.try`'s control: a pending promise.
+    Wait,
+    /// A commit that conflicted with another's.
+    Conflict,
+    /// An evaluation error.
+    Err(TaskHalt),
+}
+
+/// A `.try`'s answer, `{key: payload}`.
+fn try_value_in(_access: &RuntimeValueAccess<'_>, key: &Key, payload: Value) -> Value {
+    Value::Dict(Dict::new_sync().insert(key.clone(), payload))
+}
+
+fn try_outcome_in(access: &RuntimeValueAccess<'_>, outcome: TryOutcome) -> Value {
+    let diagnostic = |halt: TaskHalt| {
+        halt.diagnostic_in(access)
+            .expect("a `.try` reports failures, never panics")
+    };
+    match outcome {
+        TryOutcome::Fail => try_value_in(access, &keys::FAIL, access.unit()),
+        TryOutcome::Wait => try_value_in(
+            access,
+            &keys::WAIT,
+            diagnostic(TaskHalt::new(
+                "`.try` waits on a promise no one has resolved yet",
+            )),
+        ),
+        TryOutcome::Conflict => try_value_in(
+            access,
+            &keys::CONFLICT,
+            diagnostic(TaskHalt::new(
+                "`.try`'s transaction conflicted with another's commit",
+            )),
+        ),
+        TryOutcome::Err(halt) => try_value_in(access, &keys::ERR, diagnostic(halt)),
+    }
 }
 
 impl<S: TaskSpecialization> CutFrame<S> {
@@ -5418,8 +5734,9 @@ pub(crate) enum HostControl {
     /// The outermost cut began, at this version.
     CutBegin(u64),
     /// The outermost cut succeeded: the host commits it, then confirms the
-    /// commit or restarts the cut.
-    CutCommit,
+    /// commit or, where the cut `retries`, restarts it. A `.try` does not
+    /// retry: a conflict is its outcome, and the host ends its transaction.
+    CutCommit { retries: bool },
     /// The outermost cut failed: the host returns to the version it began
     /// at.
     CutAbort(u64),
@@ -5625,6 +5942,7 @@ enum Request<R, V = RuntimeValueRoot> {
     Alt(V, V),
     Fail,
     Cut(V),
+    Try(V),
     Fix(V),
     Get(V),
     Set(V, V),
@@ -5802,6 +6120,7 @@ enum RequestSelection<R> {
     Alt,
     Fail,
     Cut,
+    Try,
     Fix,
     Get,
     Set,
@@ -5827,6 +6146,7 @@ impl<R> RequestSelection<R> {
             Self::Fail | Self::HeapVolume | Self::PromiseNew | Self::ExitSuccess => 0,
             Self::Return
             | Self::Cut
+            | Self::Try
             | Self::Fix
             | Self::Get
             | Self::HeapGet
@@ -5873,6 +6193,7 @@ impl<R> RequestSelection<R> {
             Self::Alt => Request::Alt(next(), next()),
             Self::Fail => Request::Fail,
             Self::Cut => Request::Cut(next()),
+            Self::Try => Request::Try(next()),
             Self::Fix => Request::Fix(next()),
             Self::Get => Request::Get(next()),
             Self::Set => Request::Set(next(), next()),
@@ -6256,6 +6577,7 @@ fn select_request_from_whnf<R: Clone>(
     select!(&tags.alt, RequestSelection::Alt);
     select!(&tags.fail, RequestSelection::Fail);
     select!(&tags.cut, RequestSelection::Cut);
+    select!(&tags.trying, RequestSelection::Try);
     select!(&tags.fix, RequestSelection::Fix);
     select!(&tags.get, RequestSelection::Get);
     select!(&tags.set, RequestSelection::Set);
@@ -6507,6 +6829,10 @@ fn effect_api<R: Clone>(
             entry(
                 "cut",
                 request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
+            ),
+            entry(
+                "try",
+                request_function_in(access, tags.trying.clone(), 1, Vec::new(), false),
             ),
         ]);
         if serve_host_families {

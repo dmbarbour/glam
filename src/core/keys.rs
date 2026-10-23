@@ -87,6 +87,9 @@ protocol_key!(USER, "user");
 protocol_key!(HANDLER, "handler");
 protocol_key!(STATE, "state");
 protocol_key!(FAILED, "failed");
+// A `.try`'s outcomes beside `ok`, `err` and `fail` (`api-refl-try`).
+protocol_key!(WAIT, "wait");
+protocol_key!(CONFLICT, "conflict");
 // The CLI's token parser's state and evidence (`pure-handler-token`).
 protocol_key!(CURSOR, "cursor");
 protocol_key!(EXPECTATIONS, "expectations");

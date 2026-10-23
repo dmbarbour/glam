@@ -548,6 +548,9 @@ impl Machine<'_, '_> {
                         EvaluationPumpOutcome::TargetReady
                         | EvaluationPumpOutcome::Busy
                         | EvaluationPumpOutcome::BudgetExhausted => {}
+                        // A `.try` within the effect answers a wait
+                        // outside the effect's control as its outcome.
+                        EvaluationPumpOutcome::NoProgress if run.answer_try_wait() => {}
                         EvaluationPumpOutcome::NoProgress => {
                             let pushback = self.awaiting(wait);
                             let pushback = self
@@ -591,12 +594,15 @@ impl Machine<'_, '_> {
                     None => self.effect_restore(cuts, entry),
                 }
             }
-            HostControl::CutCommit => {
+            HostControl::CutCommit { retries } => {
                 let entry = cuts.entry.take().expect("a committing cut began before it");
                 cuts.checkpoints.retain(|(version, _)| *version < entry);
                 match cuts.owned.take() {
                     Some((entry, start)) => match self.transaction_end(start, Ok(())) {
                         Ok(()) => run.resume_commit(true),
+                        // A `.try` answers with the conflict, without
+                        // running again.
+                        Err(CutRetry::Now) if !retries => run.resume_commit(false),
                         Err(CutRetry::Now) => {
                             cuts.entry = Some(entry);
                             cuts.owned = Some((entry, self.transaction_begin()));

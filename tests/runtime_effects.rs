@@ -694,3 +694,106 @@ fn an_answer_s_forks_join_before_its_cut_ends() {
     })
     .expect("the turn should succeed");
 }
+
+/// Answers `.pause` with unit once the test lets it go: it says it has
+/// reached the pause, then waits, so the test can act in between.
+struct Pause {
+    reached: std::sync::mpsc::Sender<()>,
+    resume: std::sync::mpsc::Receiver<()>,
+}
+
+impl EffectProvider for Pause {
+    type Request = ();
+
+    fn requests(&self) -> Vec<EffectRequestSpec<()>> {
+        vec![EffectRequestSpec::new(
+            "pause",
+            ["pause_test", "request", "pause"],
+            0,
+            (),
+        )]
+    }
+
+    fn answer(&mut self, m: &mut Machine<'_, '_>, _request: &()) -> Result<Answer, Error> {
+        self.reached.send(()).expect("the test listens");
+        self.resume.recv().expect("the test lets the pause go");
+        m.unit_push();
+        Ok(Answer::Return)
+    }
+}
+
+#[test]
+fn try_answers_with_its_outcome_in_an_effect_a_turn_runs() {
+    // `api-refl-try`: as `m.atomic` is, `.try` is run once.
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let text = rt
+        .run("m", |m| {
+            run(
+                m,
+                ".try (.r \"A\") >>= (\\a -> .try (.heap.set ['k] \"set\" =>> .fail) >>= (\\f -> .heap.get ['k] >>= (\\k -> .r (if a.ok == \"A\" and f == { fail:() } and k == {} then \"pass\" else \"fail\"))))",
+                &mut Counter,
+            )?;
+            m.text_pop()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(text, "pass");
+}
+
+#[test]
+fn try_answers_conflict_when_another_commit_intervenes() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("setup", |m| {
+        m.int_push(1);
+        m.heap_set(["x"])
+    })
+    .expect("the setup should commit");
+    let (reached_sender, reached) = std::sync::mpsc::channel();
+    let (resume, resume_receiver) = std::sync::mpsc::channel();
+    let text = rt
+        .run((), |root| {
+            let worker = root.fork("worker", move |m| {
+                let mut pause = Pause {
+                    reached: reached_sender,
+                    resume: resume_receiver,
+                };
+                // The `.try` reads `x`, then pauses before it commits.
+                run(
+                    m,
+                    ".try (.heap.get ['x] >>= (\\x -> .pause =>> .heap.set ['y] x)) >>= (\\r -> .r (if r.conflict == {} then \"no conflict\" else \"conflict\"))",
+                    &mut pause,
+                )
+            })?;
+            reached.recv().expect("the worker reaches its pause");
+            root.int_push(2);
+            root.heap_set(["x"])?;
+            resume.send(()).expect("the worker waits");
+            root.join(worker)?;
+            root.take("worker", 1)?;
+            root.text_pop()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(
+        text, "conflict",
+        "the `.try` answers, without running again"
+    );
+}
+
+#[test]
+fn try_answers_wait_on_a_promise_in_an_effect_a_turn_runs() {
+    // The turn answers the effect's requests through promises it resolves
+    // itself; only a promise outside them is a wait. Once the promise is
+    // kept, a second `.try` succeeds. The continuation keeps the resolver,
+    // without which the promise would be broken, not pending.
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let text = rt
+        .run("m", |m| {
+            run(
+                m,
+                ".promise.new >>= (\\p -> .heap.set ['k] \"set\" =>> .try (if p.promise == 1 then .r \"kept\" else .r \"other\") >>= (\\r -> .promise.fulfill p.resolver 1 =>> .try (if p.promise == 1 then .r \"kept\" else .r \"other\") >>= (\\s -> .heap.get ['k] >>= (\\k -> .r (if r.wait == {} then \"no wait\" else (if s.ok == \"kept\" then k else \"not kept\"))))))",
+                &mut Counter,
+            )?;
+            m.text_pop()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(text, "set");
+}

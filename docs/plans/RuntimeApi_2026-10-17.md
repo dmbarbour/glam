@@ -923,6 +923,36 @@ handle API goes.
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
       a `stderr` port with `.port.*`, and its exit vote goes.
+    - Slices (2026-10-23), in roughly this order, which is the
+      implementer's to adjust (maintainer); checkpoints where they make
+      sense, and the full gate at least once a slice:
+      - `api-refl-try`: `.try`. Built (2026-10-23): a cut frame marked as
+        trying, which answers rather than retries. Its commit's conflict,
+        its operation's failure with no alternative, an error within it,
+        and a block on a promise no one resolved are its answers, `fail`
+        carrying unit. A task waits on a promise only after pumping what
+        it waits on makes no progress; work another worker runs is waited
+        for. Where a turn runs the effect, the turn decides, since the
+        requests it serves park on promises it resolves:
+        `HostedEffectRun::answer_try_wait`. Its commit event carries
+        whether the cut retries, so the turn ends a `.try`'s transaction
+        on a conflict rather than beginning another. An isolated search
+        rejects `.try`.
+      - `api-refl-child-tasks`: `.child.task`, `.status`, `.recover`,
+        `.interrupt` and `.clear`; `.task.*` and task handles retire.
+      - `api-refl-call`: `.child.call`, with a child's machine state where
+        a caller's transaction stages it.
+      - `api-refl-annotations`: annotation tasks on anonymous machines
+        under `refl`.
+      - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`
+        and `.env.clear` for tasks.
+      - `api-refl-obligations`: accepted promises, for tasks and turns.
+      - `api-refl-retirements`: exit votes and `.exit.*`,
+        `AssemblerReflectionHost` and `TaskHost`'s hooks, and the `'macro`
+        role, host, profile and bus. `macro-import-waits` is revisited here,
+        where the macro session moves to the pure front end, or with
+        `compile-resumable` if that fits better (maintainer).
+      - `api-refl-cli-log`: the CLI slice above.
 23. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
     decides (maintainer, 2026-10-19), in place of exit votes. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
