@@ -251,6 +251,19 @@ impl Promises {
         }
     }
 
+    /// The pending promise whose cell is `cell`: the promise an evaluation
+    /// that waits on `cell` waits on, where the store holds it. A scan, for
+    /// the rare `.try` that waits (`api-refl-try`).
+    pub(crate) fn pending_with_cell(&self, cell: crate::core::PromiseId) -> Option<PromiseId> {
+        self.pending()
+            .entries
+            .iter()
+            .find_map(|(promise, entry)| match entry {
+                PromiseEntry::Pending(root) if root.id() == cell => Some(*promise),
+                _ => None,
+            })
+    }
+
     /// How many promises the record holds, pending or resolved.
     #[cfg(test)]
     pub(crate) fn len_for_test(&self) -> usize {

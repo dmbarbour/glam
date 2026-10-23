@@ -2769,9 +2769,14 @@ maps the short names used here to file names.
     interfered, or `err:Diagnostic` for an evaluation error. Lazy work is
     evaluated, not waited out. Every outcome but `ok` undoes `Op`; within a
     cut, `.try` nests. A panic is never an outcome.
-  - What a `.try` observed and waited on stays with the transaction around
-    it, so a cut that fails on `wait` parks until the promise progresses,
-    as on a change in what it observed.
+  - What a `.try` observed stays with the transaction around it, and a
+    `wait` records a read of the promise's status, as `.promise.status`
+    does: a cut that fails on `wait` parks on what it observed and wakes on
+    the resolution of any promise it waited on.
+  - `wait` is for the store's promises, those made by `.promise.new`, by
+    turns, or for requests such as imports. A promise internal to
+    evaluation is work in progress, which `.try` waits out, as it does
+    lazy work.
   - `.eval V` is `.try (seq V (.r V))`: `ok:V`, forced; `err`; or `wait`,
     where it waited before.
   - Both forms of `try` stay: the syntax's `try C then A else B` attempts

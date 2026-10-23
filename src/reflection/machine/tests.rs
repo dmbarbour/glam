@@ -667,9 +667,11 @@ impl TestHost {
         (promise.expect("allocation names the promise"), resolver)
     }
 
-    /// Allocates a promise in the host's store, giving its identity and
-    /// its promised value, which waits until it is resolved.
-    fn promised(&self) -> (PromiseId, PublicValue) {
+    /// Allocates a promise in the host's store, giving its identity, its
+    /// promised value, which waits until it is resolved, and its resolver,
+    /// which a test holds while the promise is to stay pending: a resolver
+    /// collected breaks its promise.
+    fn promised(&self) -> (PromiseId, PublicValue, PublicValue) {
         let (values, promises) = {
             let state = self.state.lock().unwrap();
             (
@@ -678,12 +680,18 @@ impl TestHost {
             )
         };
         let mut promise = None;
+        let mut resolver = None;
         let promised = public_value_with(&values, |access| {
-            let (id, promised, _) = promises.allocate(access);
+            let (id, promised, kept) = promises.allocate(access);
             promise = Some(id);
+            resolver = Some(access.root_runtime_value(kept));
             promised
         });
-        (promise.expect("allocation names the promise"), promised)
+        (
+            promise.expect("allocation names the promise"),
+            promised,
+            PublicValue::from_runtime_root(resolver.expect("allocation gives a resolver")),
+        )
     }
 
     /// Fulfills `promise` as a resolver outside this host would: the
@@ -1575,7 +1583,6 @@ fn assert_execution_root_inventory(
         retry,
         observed_failure,
         trying,
-        awaited,
     } = cut;
     let _: &Option<Branch<TestEffects>> = fallback;
     let _: &RuntimeValueRoot = operation;
@@ -1589,7 +1596,6 @@ fn assert_execution_root_inventory(
         retry,
         observed_failure,
         trying,
-        awaited,
     );
 
     match wake {
@@ -3425,7 +3431,7 @@ type ProtocolHandoffInventoryFn = fn(
 fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &TaskBlock) {
     let BlockedExecution { reason, retry } = blocked;
     match reason {
-        BlockReason::WaitingOn(dependency) | BlockReason::AwaitingRetry(dependency) => {
+        BlockReason::WaitingOn(dependency) => {
             let _: &WorkDependency = dependency;
         }
         BlockReason::Exhausted => {}
@@ -3598,7 +3604,6 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
         retry: None,
         observed_failure: false,
         trying: false,
-        awaited: Vec::new(),
     };
     domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());
@@ -6411,13 +6416,10 @@ fn suspended_nested_reflection_branch_resumes_without_replay_or_leakage() {
 }
 
 #[test]
-fn reflection_eval_answers_wait_on_a_pending_value_and_a_cut_parks_on_it() {
-    // `.eval` answers `wait` on a pending promise; the cut that fails on it
-    // parks on the promise, and once the promise breaks, `.eval` answers
-    // `err`.
-    let (assembler, function) = compile_effect(
-        "\\value -> .cut (.eval value >>= (\\result -> if result.wait == {} then .r result else .fail))",
-    );
+fn reflection_eval_waits_out_an_evaluation_promise_and_reports_its_failure() {
+    // A promise internal to evaluation, unlike the store's, is work in
+    // progress: `.eval` waits it out, and reports its failure as `err`.
+    let (assembler, function) = compile_effect("\\value -> .eval value");
     let session = EvalContext::isolated(assembler.core_values());
     let (promised, _owner_task, _owner) = session.task_owned_promise().unwrap();
     let observer = session.with_new_task().unwrap();
@@ -6440,7 +6442,7 @@ fn reflection_eval_answers_wait_on_a_pending_value_and_a_cut_parks_on_it() {
         match task.poll(256) {
             EffectTaskPoll::BudgetExhausted => {}
             EffectTaskPoll::Blocked(blocked) => break blocked,
-            _ => panic!("the cut should park on its value's pending dependency"),
+            _ => panic!("eval should wait on its value's pending dependency"),
         }
     };
     assert!(blocked.dependency.is_some());
@@ -9642,7 +9644,7 @@ fn a_cut_that_fails_on_a_try_s_wait_parks_until_its_promise_is_kept() {
         "\\v -> .cut (.try (seq v (.r \"kept\")) >>= (\\r -> if r.wait == {} then .r r.ok else .fail))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (promise, promised) = host.promised();
+    let (promise, promised, _resolver) = host.promised();
     let effect = assembler
         .values()
         .apply(&watch, [promised])
@@ -9663,15 +9665,81 @@ fn a_cut_that_fails_on_a_try_s_wait_parks_until_its_promise_is_kept() {
         }
     }
     assert!(
-        matches!(
-            task.blocked.as_ref().map(|blocked| &blocked.reason),
-            Some(BlockReason::AwaitingRetry(_))
-        ),
-        "the failed cut parks on what its `.try` waited on"
+        task.blocked
+            .as_ref()
+            .is_some_and(|blocked| matches!(blocked.reason, BlockReason::Exhausted)
+                && blocked.retry.is_some()),
+        "the failed cut parks on what it observed: the promise its `.try` waited on"
     );
     host.fulfill(promise, assembler.values().integer(1));
     let TaskOutcome::Complete(value) = task.run().expect("the cut should run again") else {
         panic!("the watcher should complete")
     };
     assert_eq!(assembler.to_binary(&value).unwrap(), b"kept".as_slice());
+}
+
+#[test]
+fn eval_answers_wait_alike_for_a_promise_and_a_promise_behind_lazy_values() {
+    // In a task the scheduler polls, a promise behind lazy values, or behind
+    // a reflection gate that runs as work of its own, is found as a promise
+    // held directly is, once the work it waits on comes to rest.
+    let report =
+        "(\\r -> .log 'info { msg:{ text:(if r.wait == {} then \"no wait\" else \"wait\") } })";
+    for (source, gated) in [
+        (format!("\\v -> .eval v >>= {report}"), false),
+        (format!("\\v -> .eval ((\\x -> x) v) >>= {report}"), false),
+        (format!("\\v -> .eval v >>= {report}"), true),
+    ] {
+        let (assembler, function) = compile_effect(&source);
+        let runtime = assembler.evaluation_runtime();
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let (_promise, promised, _resolver) = host.promised();
+        let argument = if gated {
+            let values = assembler.core_values();
+            PublicValue::from_runtime_root(values.construct_runtime_value_root(|access| {
+                let reflection = return_effect_in(access, access.unit());
+                Value::Lazy(LazyValue::from_reflection_gate_in(
+                    access,
+                    reflection,
+                    promised.clone().into_runtime_root().clone_core_with(access),
+                ))
+            }))
+        } else {
+            promised
+        };
+        let effect = assembler
+            .values()
+            .apply(&function, [argument])
+            .expect("the effect applies to its argument");
+        let lifecycle = EffectLifecycle::new(&runtime);
+        let task = EffectRun::new(&runtime, &effect, TestEffects, host.clone())
+            .requiring_unit_result()
+            .schedule(&lifecycle)
+            .expect("the task should be admitted");
+        assert!(
+            matches!(task.run().unwrap(), TaskOutcome::Complete(_)),
+            "{source}"
+        );
+        let diagnostics = host.diagnostics();
+        assert_eq!(diagnostics.len(), 1, "{source}");
+        assert_eq!(
+            diagnostics[0].rendered_text_for_test(&assembler.values()),
+            "wait",
+            "{source}, gated: {gated}"
+        );
+    }
+}
+
+/// `.r value`, as the front end lowers it: an effect calling the API's `r`.
+fn return_effect_in(_access: &RuntimeValueAccess<'_>, value: Value) -> Value {
+    Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("eff"),
+        Value::PartialBuiltin(crate::core::BuiltinCall {
+            builtin: Builtin::EffectCall,
+            arguments: Arc::from([
+                Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("r"))),
+                Value::List(List::from_values(vec![value])),
+            ]),
+        }),
+    ))
 }

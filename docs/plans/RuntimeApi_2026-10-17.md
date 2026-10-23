@@ -938,15 +938,23 @@ handle API goes.
         whether the cut retries, so the turn ends a `.try`'s transaction
         on a conflict rather than beginning another. An isolated search
         rejects `.try`.
-      - Then (2026-10-23, `try-reports-outcomes`): what a `.try` waited on
-        stays with the transaction around it, as its reads do: a machine's
-        failed cut parks on it (`BlockReason::AwaitingRetry`) and restarts
-        on its progress, and a turn's cut records it as evaluation it
-        awaited. `.eval V` became `.try (seq V (.r V))`: it answers `wait`
-        where it waited, and moved from the reflection specialization to
-        the machine's own requests, so turns' effects have it too. `.try`
-        never pumps to decide `wait`: the poll's own pumping does, which
-        keeps a task blocked on a panicked producer from spinning.
+      - Then (2026-10-23, `try-reports-outcomes`): `.eval V` became `.try
+        (seq V (.r V))`: it answers `wait` where it waited, and moved from
+        the reflection specialization to the machine's own requests, so
+        turns' effects have it too. A `.try` that answers `wait` records a
+        read of the promise's status in the transaction around it, as
+        `.promise.status` does, so a cut that fails on the `wait` parks on
+        what it observed and wakes on that promise's resolution, however
+        many promises it waited on; a turn's cut records the same read
+        (maintainer, on several promises in one cut). `wait` is for the
+        store's promises, found through `awaited_promise` and the store's
+        pending cells: a promise internal to evaluation is work in
+        progress, waited out. `.try` runs nothing to decide: it asks when
+        the task blocks and after the poll's pumping, and the scheduler
+        re-polls a task once the work it waits on rests, so a promise
+        behind lazy values or a reflection gate answers `wait` as one held
+        directly does (tested both ways). Pumping within `.try` had spun
+        on a panicked producer's wait.
       - `api-refl-child-tasks`: `.child.task`, `.status`, `.recover`,
         `.interrupt` and `.clear`; `.task.*` and task handles retire.
       - `api-refl-call`: `.child.call`, with a child's machine state where

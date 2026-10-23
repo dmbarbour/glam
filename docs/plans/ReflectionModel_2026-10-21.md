@@ -189,8 +189,11 @@ a reserved word in Rust.
   enclosing commit, so only an outermost `.try` returns `conflict`.
 - A panic is never an outcome: it re-raises, as in Rust.
 - A task that loops on `.try` while it gets `wait` spins. To park, it fails
-  within a cut instead: the cut keeps what the `.try` waited on, as it
-  keeps what it observed, and runs again once that progresses.
+  within a cut instead: a `wait` reads the promise's status into the cut's
+  transaction, so the cut runs again once any promise it waited on
+  resolves.
+- `wait` is for the store's promises; a promise internal to evaluation is
+  work in progress, which `.try` waits out.
 - `.eval V` is `.try (seq V (.r V))` (maintainer, 2026-10-23,
   `try-reports-outcomes`).
 

@@ -550,15 +550,20 @@ impl Machine<'_, '_> {
                         EvaluationPumpOutcome::TargetReady
                         | EvaluationPumpOutcome::Busy
                         | EvaluationPumpOutcome::BudgetExhausted => {}
-                        // A `.try` within the effect answers a wait
-                        // outside the effect's control as its outcome; the
-                        // turn's cut keeps what it waited on, so should the
-                        // cut fail, that wait's progress wakes it.
-                        EvaluationPumpOutcome::NoProgress if run.answer_try_wait() => {
+                        // A `.try` within the effect answers a wait on a
+                        // promise of the store as its outcome. The turn's cut
+                        // reads the promise's status, so should the cut
+                        // fail, its resolution wakes it, as a change in what
+                        // it observed does.
+                        EvaluationPumpOutcome::NoProgress
+                            if self.awaited_store_promise(&wait).is_some()
+                                && run.answer_try_wait() =>
+                        {
+                            let promise = self
+                                .awaited_store_promise(&wait)
+                                .expect("checked in the guard");
                             if let Some(cut) = &mut self.cut {
-                                cut.observed = true;
-                                cut.awaits_evaluation = true;
-                                cut.awaited.push(WorkDependency::Wait(wait));
+                                cut.observed |= cut.journal.observe_promise_read(promise);
                             }
                         }
                         EvaluationPumpOutcome::NoProgress => {
@@ -780,6 +785,20 @@ impl Machine<'_, '_> {
     }
 
     /// Pushback for an effect whose evaluation waits on `wait`.
+    /// The store's pending promise that the effect's evaluation, waiting on
+    /// `wait`, rests on: a wait outside the effect's control, unlike the
+    /// requests the turn serves, which park on promises it resolves itself.
+    fn awaited_store_promise(&self, wait: &EvaluationWaitToken) -> Option<u64> {
+        let cell = self
+            .runtime
+            .assembler
+            .values()
+            .core()
+            .work_coordinator()?
+            .awaited_promise(&WorkDependency::Wait(wait.clone()))?;
+        self.promises().pending_with_cell(cell)
+    }
+
     fn awaiting(&self, wait: EvaluationWaitToken) -> Error {
         self.runtime
             .assembler

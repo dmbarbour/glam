@@ -3203,7 +3203,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             retry: None,
             observed_failure: false,
             trying: false,
-            awaited: Vec::new(),
         };
         // Where the host runs the cuts, it owns their transactions.
         frame.owns_transaction = self.hosted.is_none() && frame.outer.transaction.is_none();
@@ -3225,7 +3224,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         frame.alternatives.clear();
         frame.retry = None;
         frame.observed_failure = false;
-        frame.awaited.clear();
         if frame.owns_transaction {
             let snapshot = context.suspend(|| self.host.snapshot());
             frame.outer.transaction = Some(Transaction::new(snapshot));
@@ -3380,9 +3378,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .transaction
                     .as_ref()
                     .is_some_and(|transaction| transaction.observed);
-                if let Some(transaction) = &failed.transaction {
-                    frame.awaited.extend(transaction.awaited.iter().cloned());
-                }
                 frame.retry = Some(failed);
                 if !frame.alternatives.is_empty() {
                     let work = frame.next_alternative();
@@ -3440,7 +3435,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
             branch.transaction = None;
         } else if let Some(transaction) = branch.transaction.as_mut() {
             transaction.observed |= trace.observed;
-            transaction.awaited.extend(trace.awaited);
+            // A promise it waited on is observed, as `.promise.status`
+            // reads one: its resolution wakes a cut that fails on the
+            // `wait`, however many promises the cut waited on.
+            if let Some(promise) = trace.waited {
+                transaction.observed |= transaction.store.observe_promise_read(promise);
+            }
         }
         MachineWork::deliver_root(value, branch, frame.parent_scope_depth)
     }
@@ -3465,9 +3465,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
             hosted.pending = Some(HostControl::CutAbort(entry));
         }
         let mut failed = frame.retry.take().unwrap_or_else(|| frame.outer.clone());
-        if let Some(transaction) = failed.transaction.as_mut() {
-            transaction.observed |= frame.observed_failure;
-            transaction.awaited.append(&mut frame.awaited);
+        if frame.observed_failure
+            && let Some(transaction) = failed.transaction.as_mut()
+        {
+            transaction.observed = true;
         }
         if failed
             .fix_restarts
@@ -3481,15 +3482,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
         // A `.try` answers with its operation's failure.
         if frame.trying {
-            let trace = match failed.transaction {
-                Some(transaction) => TryTrace {
-                    observed: transaction.observed,
-                    awaited: transaction.awaited,
-                },
-                None => TryTrace {
-                    observed: frame.observed_failure,
-                    awaited: std::mem::take(&mut frame.awaited),
-                },
+            let trace = TryTrace {
+                observed: frame.observed_failure
+                    || failed
+                        .transaction
+                        .as_ref()
+                        .is_some_and(|transaction| transaction.observed),
+                waited: None,
             };
             if !self.execution.cuts.is_empty() {
                 self.hosted_resume(frame.outer.host_version);
@@ -3515,13 +3514,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 scope_depth: frame.parent_scope_depth,
             }));
         }
-        // What a `.try` within the cut waited on wakes the cut too: its
-        // progress, as a change in what it observed, may let it succeed.
-        let awaited = failed
-            .transaction
-            .as_ref()
-            .and_then(|transaction| transaction.awaited.first().cloned());
-        if !frame.observed_failure && awaited.is_none() {
+        if !frame.observed_failure {
             failed.transaction = None;
             return Ok(MachineStep::Continue(MachineWork::Outcome {
                 outcome: failed.into_failure(),
@@ -3538,15 +3531,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         frame.retry = Some(failed);
         let index = self.execution.cuts.len();
         self.execution.cuts.push(frame);
-        let retry = RetryWake {
-            observed_generation: generation,
-            validation,
-            action: WakeAction::RestartCut(index),
-        };
-        Ok(MachineStep::Blocked(match awaited {
-            Some(dependency) => BlockedExecution::awaiting_retry(dependency, retry),
-            None => BlockedExecution::exhausted(retry),
-        }))
+        Ok(MachineStep::Blocked(BlockedExecution::exhausted(
+            RetryWake {
+                observed_generation: generation,
+                validation,
+                action: WakeAction::RestartCut(index),
+            },
+        )))
     }
 
     fn handle_top_level_outcome(
@@ -3932,8 +3923,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
     }
 
     /// As [`Self::install_blocked`], for a phase that blocked: within a
-    /// `.try`, a block on a promise no one has resolved is the `.try`'s
-    /// answer (`api-refl-try`).
+    /// `.try`, a block that rests on a promise no one has resolved is the
+    /// `.try`'s answer (`api-refl-try`).
     fn install_blocked_in(
         &mut self,
         context: &mut EvaluationPollContext,
@@ -3951,12 +3942,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.cuts.iter().rposition(|frame| frame.trying)
     }
 
-    /// Within a `.try`, answers `wait` where the task blocks on a promise no
-    /// one has resolved: directly, or through work the coordinator knows
-    /// waits on it. It never pumps: the poll's own pumping runs work this
-    /// task can run, and asks again once it makes no progress. Work another
-    /// worker runs, or work not yet run, is not a reason to answer: the task
-    /// waits for it, or runs it. Whether it answered.
+    /// Within a `.try`, answers `wait` where the task's block rests on a
+    /// promise of the store no one has resolved, directly or through work
+    /// the coordinator knows waits on it. It runs nothing: the poll's own
+    /// pumping, and the scheduler's, run the work the task waits on, and
+    /// the task asks again when polled; lazy work in progress is waited for,
+    /// and a panicked producer halts the task, as outside a `.try`.
+    /// Whether it answered.
     fn try_answers_wait(&mut self, context: &EvaluationPollContext) -> bool {
         // A host that runs the task's cuts parks the requests it serves on
         // promises it resolves, so only it knows which waits are outside
@@ -3977,20 +3969,36 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if dependency.panic_report().is_some() {
             return false;
         }
-        let pending = match dependency {
-            WorkDependency::Promise(_) => true,
+        let Some(promise) = self.awaited_store_promise(index, dependency) else {
+            return false;
+        };
+        self.unwind_to_try(context, index, TryOutcome::Wait, Some(promise));
+        true
+    }
+
+    /// The store's pending promise that `dependency` rests on, directly or
+    /// through blocked work, as seen from the `.try` whose frame is at
+    /// `index`. A promise internal to evaluation is work in progress, not
+    /// what a `.try` waits on.
+    fn awaited_store_promise(
+        &self,
+        index: usize,
+        dependency: &WorkDependency,
+    ) -> Option<PromiseId> {
+        let cell = match dependency {
+            WorkDependency::Promise(promise) => promise.id(),
             dependency => self
                 .eval_context
                 .values()
-                .work_coordinator()
-                .is_some_and(|coordinator| coordinator.awaited_promise(dependency).is_some()),
+                .work_coordinator()?
+                .awaited_promise(dependency)?,
         };
-        if !pending {
-            return false;
-        }
-        let dependency = dependency.clone();
-        self.unwind_to_try(context, index, TryOutcome::Wait, Some(dependency));
-        true
+        let transaction = self.execution.cuts[index].outer.transaction.as_ref()?;
+        transaction
+            .snapshot
+            .store()
+            .promises()
+            .pending_with_cell(cell)
     }
 
     /// Answers the innermost `.try` with `wait`, where its host found the
@@ -4018,10 +4026,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         context: &EvaluationPollContext,
         index: usize,
         outcome: TryOutcome,
-        awaited: Option<WorkDependency>,
+        waited: Option<PromiseId>,
     ) {
         let (frame, mut trace) = self.leave_try(index);
-        trace.awaited.extend(awaited);
+        trace.waited = waited;
         self.execution.work = self.answer_try(context, frame, outcome, trace);
     }
 
@@ -4038,15 +4046,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 .iter()
                 .any(|frame| frame.observed_failure)
                 || active.is_some_and(|transaction| transaction.observed),
-            awaited: self.execution.cuts[index..]
-                .iter()
-                .flat_map(|frame| frame.awaited.iter().cloned())
-                .chain(
-                    active
-                        .into_iter()
-                        .flat_map(|transaction| transaction.awaited.iter().cloned()),
-                )
-                .collect(),
+            waited: None,
         };
         self.execution.decoding = None;
         self.execution.demanding = None;
@@ -4171,48 +4171,33 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return None;
         }
         let blocked = self.blocked.as_ref().expect("checked blocked state above");
-        let (dependency, restarts) = match &blocked.reason {
-            BlockReason::WaitingOn(dependency) => (dependency, false),
-            BlockReason::AwaitingRetry(dependency) => (dependency, true),
-            BlockReason::Exhausted | BlockReason::EvaluationError(_) => {
-                return Some(self.blocked_poll());
-            }
+        let BlockReason::WaitingOn(dependency) = &blocked.reason else {
+            return Some(self.blocked_poll());
         };
         // A panicked dependency stays blocked: re-polling would reinstall
         // the panicked work, so the scheduler's poll boundary halts this task.
         if dependency.panic_report().is_some() {
             return Some(self.blocked_poll());
         }
-        // What a failed cut awaited progressed: the cut runs again. What
-        // evaluation awaited progressed: it goes on.
-        let progressed = |machine: &mut Self, context: &mut EvaluationPollContext| {
-            let blocked = machine.blocked.take().expect("checked blocked state above");
-            if restarts {
-                let retry = blocked
-                    .retry
-                    .expect("a cut that awaits progress keeps its wake action");
-                machine.apply_wake(context, retry.action);
-            }
-            None
-        };
         if dependency.is_terminal() {
-            return progressed(self, context);
+            self.blocked = None;
+            return None;
         }
         let WorkDependency::Wait(wait) = dependency else {
             return Some(self.blocked_poll());
         };
-        let wait = wait.clone();
-        match self.eval_context.poll_wait(&wait) {
+        match self.eval_context.poll_wait(wait) {
             EvaluationWaitPoll::Pending(_) => {
                 // Pumped work shares this poll's mutator.
                 let pumped = self.eval_context.pump_wait_on_route_within(
                     context,
-                    &wait,
+                    wait,
                     step_budget,
                     &mut self.exact_demand_route,
                 );
                 if matches!(pumped, EvaluationPumpOutcome::TargetReady) {
-                    progressed(self, context)
+                    self.blocked = None;
+                    None
                 } else if self.try_answers_wait(context) {
                     None
                 } else {
@@ -4225,7 +4210,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
             | EvaluationWaitPoll::Cancelled
             | EvaluationWaitPoll::Abandoned
             | EvaluationWaitPoll::Exited
-            | EvaluationWaitPoll::Killed(_) => progressed(self, context),
+            | EvaluationWaitPoll::Killed(_) => {
+                self.blocked = None;
+                None
+            }
         }
     }
 
@@ -5606,9 +5594,6 @@ struct CutFrame<S: TaskSpecialization> {
     /// A `.try`'s frame, which returns its operation's outcome as data
     /// rather than retrying it (`api-refl-try`).
     trying: bool,
-    /// What the `.try`s within the cut's failed attempts waited on, as
-    /// `observed_failure` records what they observed.
-    awaited: Vec<WorkDependency>,
 }
 
 /// What a `.try` answers with, other than its operation's value
@@ -5630,7 +5615,8 @@ enum TryOutcome {
 #[derive(Default)]
 struct TryTrace {
     observed: bool,
-    awaited: Vec<WorkDependency>,
+    /// The store's promise a `.try` answered `wait` on.
+    waited: Option<PromiseId>,
 }
 
 /// `seq value (.r value)`, the operation `.eval value` tries.
@@ -5729,13 +5715,6 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
         }
     }
 
-    fn awaiting_retry(dependency: WorkDependency, retry: RetryWake<S>) -> Self {
-        Self {
-            reason: BlockReason::AwaitingRetry(dependency),
-            retry: Some(retry),
-        }
-    }
-
     fn evaluation_error(error: TaskHalt, retry: RetryWake<S>, values: &CoreValueFactory) -> Self {
         Self {
             reason: BlockReason::EvaluationError(error.root_for_values(values)),
@@ -5745,9 +5724,7 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
 
     fn dependency(&self) -> Option<WorkDependency> {
         match &self.reason {
-            BlockReason::WaitingOn(dependency) | BlockReason::AwaitingRetry(dependency) => {
-                Some(dependency.clone())
-            }
+            BlockReason::WaitingOn(dependency) => Some(dependency.clone()),
             BlockReason::Exhausted | BlockReason::EvaluationError(_) => None,
         }
     }
@@ -5764,9 +5741,7 @@ impl<S: TaskSpecialization> BlockedExecution<S> {
                     .expect("evaluation-error blocks retain permanent failure roots")
                     .clone(),
             ),
-            BlockReason::WaitingOn(_) | BlockReason::Exhausted | BlockReason::AwaitingRetry(_) => {
-                None
-            }
+            BlockReason::WaitingOn(_) | BlockReason::Exhausted => None,
         }
     }
 }
@@ -5775,9 +5750,6 @@ enum BlockReason {
     WaitingOn(WorkDependency),
     Exhausted,
     EvaluationError(TaskHalt),
-    /// A failed cut whose `.try`s waited on this: its progress restarts the
-    /// cut, as a change in what the cut observed does.
-    AwaitingRetry(WorkDependency),
 }
 
 struct RetryWake<S: TaskSpecialization> {
