@@ -984,6 +984,19 @@ Later, beyond this plan (2026-10-21):
   waits on it; the isolated search, before it, spun on it instead. A wait
   during a macro's lookup is unaffected. Until this is fixed, keeping a
   macro's run across a compile's replays would not help.
+- `control-separation` — explore separating delimited control's
+  responsibilities in the standard API: the reset stack's placement in the
+  user's state, a thread's checkpoint, reinstating a continuation
+  (maintainer, 2026-10-23). Near future;
+  [Delimited Control](DelimitedControl_2026-10-23.md).
+- `net-builder-handler` — the interaction-net builder runs on the pure
+  handler's core in place of its private session (maintainer, 2026-10-23).
+  `eval/builtins/net/builder.rs`, about 1,600 lines, keeps its own copies
+  of state, cut, fix, reset and shift, and decodes and re-encodes its whole
+  continuation on every operation. Its constructors would become private
+  operations over an opaque construction state, as the token parser's are.
+  Best after `control-separation` settles, since it carries its own reset
+  stack.
 - `origin-meta-refl` — compilation origins as `meta_refl` metadata, not
   opaque payloads that `glam.origin.inspect` opens (maintainer).
 - `api-dict-ops` — a review of the machine's dict operations, for building

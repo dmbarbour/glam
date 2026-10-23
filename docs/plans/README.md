@@ -84,6 +84,13 @@ flags a step for discussion when work reaches it, not a decision.
   operations; successes and failures come as two lazy lists; file
   metadata is a pseudo-import. Drafted 2026-10-23; the maintainer
   answered its questions.
+- [`DelimitedControl_2026-10-23.md`](DelimitedControl_2026-10-23.md):
+  `control-` steps, an exploration for the near future: whether the
+  standard API can separate delimited control's responsibilities, the
+  reset stack's placement in the user's state, a thread's checkpoint and
+  reinstating a continuation, after the four-primitive frameworks.
+  Recorded 2026-10-23 at the maintainer's request; not a priority unless it
+  simplifies something at once.
 - [`PollBudget_2026-10-22.md`](PollBudget_2026-10-22.md): `budget-` steps
   from an audit of how polls spend and report their budget: coarse-grained
   steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`
