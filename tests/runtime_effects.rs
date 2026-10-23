@@ -645,3 +645,52 @@ fn an_effect_cut_that_meets_pushback_runs_again_once_what_it_read_changes() {
     assert_eq!(calls, 2, "the cut ran again once `ready` changed");
     assert_eq!(attempted, 1, "the second attempt committed");
 }
+
+/// Answers `.spawn` by forking a child that writes the shared heap, which
+/// it leaves for the answer's end to join.
+struct Spawner;
+
+impl EffectProvider for Spawner {
+    type Request = ();
+
+    fn requests(&self) -> Vec<EffectRequestSpec<()>> {
+        vec![EffectRequestSpec::new(
+            "spawn",
+            ["spawn_test", "request", "spawn"],
+            0,
+            (),
+        )]
+    }
+
+    fn answer(&mut self, m: &mut Machine<'_, '_>, _request: &()) -> Result<Answer, Error> {
+        let _unjoined = m.fork("writer", |w| {
+            w.int_push(1);
+            w.heap_set(["forked"])
+        })?;
+        m.unit_push();
+        Ok(Answer::Return)
+    }
+}
+
+#[test]
+fn an_answer_s_forks_join_before_its_cut_ends() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        run(m, ".alt (.spawn =>> (.fail)) (.r ())", &mut Spawner)?;
+        m.discard(1)?;
+        assert_eq!(
+            heap_kind(m, "forked")?,
+            ValueKind::Dict,
+            "the failed fork's write rolls back"
+        );
+        run(m, ".alt (.spawn) (.r ())", &mut Spawner)?;
+        m.discard(1)?;
+        assert_eq!(
+            heap_kind(m, "forked")?,
+            ValueKind::Number,
+            "the committed fork's write stands"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}

@@ -673,7 +673,11 @@ impl Machine<'_, '_> {
             TurnRequest::Standard(standard) => self
                 .serve_standard(standard, &path)
                 .map(|()| Answer::Return),
-            TurnRequest::Provider(index) => provider.answer(self, &names[index]),
+            // An answer joins the forks it made, as a cut's body does, so
+            // their branches of a cut's transaction merge before it ends.
+            TurnRequest::Provider(index) => {
+                self.within_scope(|m| provider.answer(m, &names[index]))
+            }
         };
         let mut frame = std::mem::replace(&mut self.state.stack, stack);
         let frame_stash = std::mem::replace(&mut self.state.stash, stash);
