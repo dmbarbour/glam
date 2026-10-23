@@ -153,10 +153,7 @@ fn a_provider_answers_on_a_stack_of_its_own() {
         assert_eq!(m.int_pop()?, 2, "the provider sees its state and argument");
         let error = run(m, ".peek ()", &mut Peek { short: true })
             .expect_err("an answer must leave a state and a result");
-        assert!(
-            error.to_string().contains("a state and a result"),
-            "{error}"
-        );
+        assert!(error.to_string().contains("a state and its"), "{error}");
         assert_eq!(m.int_pop()?, 99, "the turn's own stack is untouched");
         assert_eq!(m.depth(), 0);
         Ok(())
@@ -363,4 +360,288 @@ fn the_environment_passes_through_to_the_machine_s() {
         })
         .expect("the turn should succeed");
     assert_eq!(greeting, "hello");
+}
+
+/// Answers `.mark` by marking the machine's local state, and `.choose n`
+/// with the alternatives 1 to `n`.
+#[derive(Clone)]
+enum Host {
+    Mark,
+    Choose,
+}
+
+struct Marker;
+
+impl EffectProvider for Marker {
+    type Request = Host;
+
+    fn requests(&self) -> Vec<EffectRequestSpec<Host>> {
+        vec![
+            EffectRequestSpec::new("mark", ["marker_test", "request", "mark"], 0, Host::Mark),
+            EffectRequestSpec::new(
+                "choose",
+                ["marker_test", "request", "choose"],
+                1,
+                Host::Choose,
+            ),
+        ]
+    }
+
+    fn answer(&mut self, m: &mut Machine<'_, '_>, request: &Host) -> Result<Answer, Error> {
+        match request {
+            Host::Mark => {
+                m.int_push(1);
+                m.local_set("marked")?;
+                m.unit_push();
+                Ok(Answer::Return)
+            }
+            Host::Choose => {
+                let count = m.int_pop()?;
+                for choice in 1..=count {
+                    m.int_push(choice);
+                }
+                Ok(Answer::Alternatives(count as usize))
+            }
+        }
+    }
+}
+
+/// The counter's requests and the marker's together.
+struct Both;
+
+#[derive(Clone)]
+enum Either {
+    Counter(Ask),
+    Marker(Host),
+}
+
+impl EffectProvider for Both {
+    type Request = Either;
+
+    fn requests(&self) -> Vec<EffectRequestSpec<Either>> {
+        Counter
+            .requests()
+            .into_iter()
+            .map(|spec| spec.map_request(Either::Counter))
+            .chain(
+                Marker
+                    .requests()
+                    .into_iter()
+                    .map(|spec| spec.map_request(Either::Marker)),
+            )
+            .collect()
+    }
+
+    fn answer(&mut self, m: &mut Machine<'_, '_>, request: &Either) -> Result<Answer, Error> {
+        match request {
+            Either::Counter(ask) => Counter.answer(m, ask),
+            Either::Marker(host) => Marker.answer(m, host),
+        }
+    }
+}
+
+/// The evaluated kind of the shared heap's value at `key`.
+fn heap_kind(m: &mut Machine<'_, '_>, key: &str) -> Result<ValueKind, Error> {
+    m.heap_get([key]);
+    m.eval()?;
+    let kind = m.kind()?;
+    m.discard(1)?;
+    Ok(kind)
+}
+
+#[test]
+fn a_failed_first_operand_leaves_nothing_behind() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        run(
+            m,
+            ".alt ((.heap.set ['written] 1) =>> .mark =>> (.next 1 >>= (\\_ -> .fail))) (.calls)",
+            &mut Both,
+        )?;
+        assert_eq!(
+            m.int_pop()?,
+            0,
+            "the effect's state rolls back with its branch"
+        );
+        assert_eq!(
+            heap_kind(m, "written")?,
+            ValueKind::Dict,
+            "the heap rolls back"
+        );
+        m.local_get("marked");
+        assert_eq!(
+            m.kind()?,
+            ValueKind::Dict,
+            "what the provider did rolls back"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_choice_commits_its_first_operand_once_it_succeeds() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let written = rt
+        .run("m", |m| {
+            run(
+                m,
+                ".alt (.heap.set ['written] \"yes\") (.r ())",
+                &mut Standard,
+            )?;
+            m.discard(1)?;
+            m.heap_get(["written"]);
+            m.text_pop()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(written, "yes");
+}
+
+#[test]
+fn within_a_cut_a_later_failure_reaches_the_second_operand() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let (read, written) = rt
+        .run("m", |m| {
+            run(
+                m,
+                ".cut ((.alt ((.heap.set ['k] 1) =>> .r 1) ((.heap.set ['k] 2) =>> .r 2)) >>= (\\x -> (x == 2) =>> .heap.get ['k]))",
+                &mut Standard,
+            )?;
+            let read = m.int_pop()?;
+            m.heap_get(["k"]);
+            Ok((read, m.int_pop()?))
+        })
+        .expect("the turn should succeed");
+    assert_eq!((read, written), (2, 2));
+}
+
+#[test]
+fn a_provider_answers_with_alternatives() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        run(m, ".choose 3", &mut Marker)?;
+        assert_eq!(m.int_pop()?, 1, "outside a cut, the first is final");
+        run(
+            m,
+            ".cut (.choose 3 >>= (\\x -> (x == 3) =>> .r x))",
+            &mut Marker,
+        )?;
+        assert_eq!(
+            m.int_pop()?,
+            3,
+            "within a cut, a later failure takes the next"
+        );
+        let none = run(m, ".choose 0", &mut Marker).expect_err("no alternative fails");
+        assert_eq!(none.kind(), ErrorKind::Backtrack, "{none}");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn within_the_turn_s_cut_a_failed_effect_cut_leaves_nothing_behind() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        m.cut(|m| {
+            run(
+                m,
+                ".alt ((.heap.set ['first] 1) =>> (.fail)) (.r ())",
+                &mut Standard,
+            )?;
+            m.discard(1)?;
+            assert_eq!(heap_kind(m, "first")?, ValueKind::Dict);
+            let failed = run(
+                m,
+                ".cut ((.heap.set ['second] 1) =>> (.fail))",
+                &mut Standard,
+            )
+            .expect_err("the effect's cut fails");
+            assert_eq!(failed.kind(), ErrorKind::Backtrack, "{failed}");
+            assert_eq!(heap_kind(m, "second")?, ValueKind::Dict);
+            Ok(())
+        })
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn outside_the_turn_s_cut_a_failed_effect_cut_leaves_nothing_behind() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("m", |m| {
+        let failed = run(m, ".cut ((.heap.set ['k] 1) =>> (.fail))", &mut Standard)
+            .expect_err("the effect's cut fails");
+        assert_eq!(failed.kind(), ErrorKind::Backtrack, "{failed}");
+        assert_eq!(heap_kind(m, "k")?, ValueKind::Dict);
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+/// Answers `.ready` with the shared heap's `ready`, or with pushback while
+/// it holds none, signalling its first wait.
+struct Ready {
+    waiting: Option<std::sync::mpsc::Sender<()>>,
+    calls: usize,
+}
+
+impl EffectProvider for Ready {
+    type Request = ();
+
+    fn requests(&self) -> Vec<EffectRequestSpec<()>> {
+        vec![EffectRequestSpec::new(
+            "ready",
+            ["ready_test", "request", "ready"],
+            0,
+            (),
+        )]
+    }
+
+    fn answer(&mut self, m: &mut Machine<'_, '_>, _request: &()) -> Result<Answer, Error> {
+        self.calls += 1;
+        if heap_kind(m, "ready")? == ValueKind::Dict {
+            if let Some(waiting) = self.waiting.take() {
+                waiting
+                    .send(())
+                    .expect("the writer waits for the first attempt");
+            }
+            return Err(m.retry());
+        }
+        m.heap_get(["ready"]);
+        Ok(Answer::Return)
+    }
+}
+
+#[test]
+fn an_effect_cut_that_meets_pushback_runs_again_once_what_it_read_changes() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let (waiting, waited) = std::sync::mpsc::channel();
+    let (result, calls, attempted) = rt
+        .run("p", |p| {
+            let fork = p.fork("reader", move |r| {
+                let mut ready = Ready {
+                    waiting: Some(waiting),
+                    calls: 0,
+                };
+                run(
+                    r,
+                    ".cut ((.heap.set ['attempted] 1) =>> .ready)",
+                    &mut ready,
+                )?;
+                r.int_push(ready.calls as i64);
+                Ok(())
+            })?;
+            waited.recv().expect("the reader's first attempt waits");
+            p.int_push(1);
+            p.heap_set(["ready"])?;
+            p.join(fork)?;
+            p.take("reader", 2)?;
+            let calls = p.int_pop()?;
+            let result = p.int_pop()?;
+            p.heap_get(["attempted"]);
+            Ok((result, calls, p.int_pop()?))
+        })
+        .expect("the turn should succeed");
+    assert_eq!(result, 1);
+    assert_eq!(calls, 2, "the cut ran again once `ready` changed");
+    assert_eq!(attempted, 1, "the second attempt committed");
 }

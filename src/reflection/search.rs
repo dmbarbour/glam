@@ -1,6 +1,6 @@
 use std::sync::Arc;
 
-use super::machine::{EffectTask, EffectTaskPoll};
+use super::machine::{EffectTask, EffectTaskPoll, HostControl, HostedResult, TaskBlock};
 use super::protocol::{
     CommitResult, HostSnapshot, TaskCommit, TaskEnvironment, TaskHalt, TaskHost,
     TaskSpecialization, TaskValidation, ValidationResult,
@@ -187,19 +187,13 @@ pub(super) struct AllResults<B, R> {
 #[doc(hidden)]
 pub struct IsolatedSearchBranch<S: TaskSpecialization> {
     value: Option<PublicValue>,
-    state: Option<PublicValue>,
     transaction: TaskCommit<S>,
 }
 
 impl<S: TaskSpecialization> IsolatedSearchBranch<S> {
-    pub(super) fn complete(
-        value: PublicValue,
-        state: PublicValue,
-        transaction: TaskCommit<S>,
-    ) -> Self {
+    pub(super) fn complete(value: PublicValue, transaction: TaskCommit<S>) -> Self {
         Self {
             value: Some(value),
-            state: Some(state),
             transaction,
         }
     }
@@ -207,18 +201,12 @@ impl<S: TaskSpecialization> IsolatedSearchBranch<S> {
     pub(super) fn failed(transaction: TaskCommit<S>) -> Self {
         Self {
             value: None,
-            state: None,
             transaction,
         }
     }
 
     pub fn value(&self) -> Option<&PublicValue> {
         self.value.as_ref()
-    }
-
-    /// The state a completed branch ended with.
-    pub(crate) fn state(&self) -> Option<&PublicValue> {
-        self.state.as_ref()
     }
 
     pub fn journal(&self) -> &S::Journal {
@@ -297,29 +285,6 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
             .map_err(|error| error.root_for_values(values.core()))
     }
 
-    /// As [`Self::new_in_context`], the search starting from `state` rather
-    /// than `{}`.
-    pub(crate) fn new_with_state_in_context(
-        effect: &PublicValue,
-        state: &PublicValue,
-        specialization: S,
-        host: Arc<S::Host>,
-        context: EvalContext,
-    ) -> Result<Self, TaskHalt> {
-        let values = Values::from_core_factory(context.values().clone());
-        values.require(effect)?;
-        values.require(state)?;
-        EffectTask::new_isolated_with_state_in_context(
-            effect.clone().into_runtime_root(),
-            state.clone().into_runtime_root(),
-            specialization,
-            host,
-            context,
-        )
-        .map(|task| Self { task, _owner: None })
-        .map_err(|error| error.root_for_values(values.core()))
-    }
-
     fn root_poll_error(&self, error: TaskHalt) -> TaskHalt {
         error.root_for_values(self.task.eval_context.values())
     }
@@ -333,30 +298,10 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
         match poll {
             EffectTaskPoll::BudgetExhausted => IsolatedSearchPoll::BudgetExhausted,
             EffectTaskPoll::Blocked(blocked) => {
-                let error = blocked.error.map(TaskHalt::rooted_failure);
-                let dependency = match blocked.dependency {
-                    Some(WorkDependency::Wait(wait)) => Some(wait),
-                    Some(WorkDependency::Promise(promise)) => {
-                        match crate::eval::promise_root_wait(&self.task.eval_context, &promise) {
-                            Ok(wait) => Some(wait),
-                            Err(error) => {
-                                return IsolatedSearchPoll::Failed(TaskHalt::new(error.as_ref()));
-                            }
-                        }
-                    }
-                    #[cfg(test)]
-                    Some(WorkDependency::Test(_)) => {
-                        return IsolatedSearchPoll::Failed(TaskHalt::new(
-                            "isolated search cannot wait on a synthetic dependency",
-                        ));
-                    }
-                    None => None,
-                };
-                IsolatedSearchPoll::Blocked(IsolatedSearchBlock {
-                    dependency,
-                    observed_generation: blocked.observed_generation,
-                    error,
-                })
+                match search_block(&self.task.eval_context, blocked) {
+                    Ok(blocked) => IsolatedSearchPoll::Blocked(blocked),
+                    Err(error) => IsolatedSearchPoll::Failed(error),
+                }
             }
             EffectTaskPoll::Complete(_) => {
                 let results = self
@@ -377,6 +322,133 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
 
     pub fn cancel(&mut self) {
         self.task.cancel();
+    }
+}
+
+/// What a blocked search waits on.
+fn search_block(
+    context: &EvalContext,
+    blocked: TaskBlock,
+) -> Result<IsolatedSearchBlock, TaskHalt> {
+    let error = blocked.error.map(TaskHalt::rooted_failure);
+    let dependency = match blocked.dependency {
+        Some(WorkDependency::Wait(wait)) => Some(wait),
+        Some(WorkDependency::Promise(promise)) => Some(
+            crate::eval::promise_root_wait(context, &promise)
+                .map_err(|error| TaskHalt::new(error.as_ref()))?,
+        ),
+        #[cfg(test)]
+        Some(WorkDependency::Test(_)) => {
+            return Err(TaskHalt::new(
+                "isolated search cannot wait on a synthetic dependency",
+            ));
+        }
+        None => None,
+    };
+    Ok(IsolatedSearchBlock {
+        dependency,
+        observed_generation: blocked.observed_generation,
+        error,
+    })
+}
+
+/// An effect run whose host runs its cuts, as a turn does
+/// (`alt-cuts-its-first-operand`): it searches for its first complete
+/// success, telling the host where to begin, commit or abandon a
+/// transaction, and where to return to.
+pub(crate) struct HostedEffectRun<S: TaskSpecialization> {
+    task: EffectTask<S>,
+}
+
+/// What a hosted run's poll came to.
+pub(crate) enum HostedPoll {
+    BudgetExhausted,
+    /// Paused for the host to handle its events.
+    Paused,
+    Blocked(IsolatedSearchBlock),
+    Complete {
+        value: PublicValue,
+        state: PublicValue,
+    },
+    /// A failure that nothing handled.
+    Backtracked,
+    Failed(TaskHalt),
+    Cancelled,
+}
+
+impl<S: TaskSpecialization> HostedEffectRun<S> {
+    pub(crate) fn new_with_state_in_context(
+        effect: &PublicValue,
+        state: &PublicValue,
+        specialization: S,
+        host: Arc<S::Host>,
+        context: EvalContext,
+    ) -> Result<Self, TaskHalt> {
+        let values = Values::from_core_factory(context.values().clone());
+        values.require(effect)?;
+        values.require(state)?;
+        EffectTask::new_hosted_with_state_in_context(
+            effect.clone().into_runtime_root(),
+            state.clone().into_runtime_root(),
+            specialization,
+            host,
+            context,
+        )
+        .map(|task| Self { task })
+        .map_err(|error| error.root_for_values(values.core()))
+    }
+
+    pub(crate) fn poll(&mut self, step_budget: usize) -> HostedPoll {
+        match self.task.poll(step_budget) {
+            EffectTaskPoll::BudgetExhausted => HostedPoll::BudgetExhausted,
+            EffectTaskPoll::Blocked(blocked)
+                if blocked.dependency.is_none() && blocked.error.is_none() =>
+            {
+                HostedPoll::Paused
+            }
+            EffectTaskPoll::Blocked(blocked) => {
+                match search_block(&self.task.eval_context, blocked) {
+                    Ok(blocked) => HostedPoll::Blocked(blocked),
+                    Err(error) => HostedPoll::Failed(error),
+                }
+            }
+            EffectTaskPoll::Complete(value) => match self.task.take_hosted_result() {
+                Some(HostedResult::Complete(state)) => HostedPoll::Complete { value, state },
+                _ => unreachable!("a hosted run completes with its state"),
+            },
+            EffectTaskPoll::Failed(error) => match self.task.take_hosted_result() {
+                Some(HostedResult::Backtracked) => HostedPoll::Backtracked,
+                _ => HostedPoll::Failed(error.root_for_values(self.task.eval_context.values())),
+            },
+            EffectTaskPoll::Cancelled => HostedPoll::Cancelled,
+            EffectTaskPoll::Exit(_) => unreachable!("hosted runs do not expose runtime exit"),
+        }
+    }
+
+    /// The events the host has yet to handle, in order.
+    pub(crate) fn take_events(&mut self) -> Vec<HostControl> {
+        self.task.take_host_events()
+    }
+
+    /// Whether the host must keep a way back to its state before it
+    /// answers a request: a branch set aside since it last answered.
+    pub(crate) fn needs_checkpoint(&self) -> bool {
+        self.task.host_needs_checkpoint()
+    }
+
+    /// The count of requests the host has answered.
+    pub(crate) fn version(&self) -> u64 {
+        self.task.host_version()
+    }
+
+    /// The host committed the outermost cut.
+    pub(crate) fn cut_committed(&mut self) {
+        self.task.cut_committed();
+    }
+
+    /// Runs the outermost cut again from its entry.
+    pub(crate) fn restart_outermost_cut(&mut self) {
+        self.task.restart_outermost_cut();
     }
 }
 
@@ -444,13 +516,8 @@ mod tests {
         block: &IsolatedSearchBlock,
         poll: &IsolatedSearchPoll<SearchRootTestEffects>,
     ) {
-        let IsolatedSearchBranch {
-            value,
-            state,
-            transaction,
-        } = branch;
+        let IsolatedSearchBranch { value, transaction } = branch;
         let _: &Option<PublicValue> = value;
-        let _: &Option<PublicValue> = state;
         let _: &TaskCommit<SearchRootTestEffects> = transaction;
 
         let IsolatedSearchBlock {
@@ -532,20 +599,17 @@ mod tests {
         assert!(retained_extra.upgrade().is_none());
 
         let (result, retained_result) = retained_search_value(&domain);
-        let (state, retained_state) = retained_search_value(&domain);
         let (snapshot, retained_snapshot) = retained_search_value(&domain);
         let (journal, retained_journal) = retained_search_value(&domain);
         let branch =
-            IsolatedSearchBranch::complete(result, state, search_commit(&store, snapshot, journal));
+            IsolatedSearchBranch::complete(result, search_commit(&store, snapshot, journal));
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_result.upgrade().is_some());
-        assert!(retained_state.upgrade().is_some());
         assert!(retained_snapshot.upgrade().is_some());
         assert!(retained_journal.upgrade().is_some());
         drop(branch);
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_result.upgrade().is_none());
-        assert!(retained_state.upgrade().is_none());
         assert!(retained_snapshot.upgrade().is_none());
         assert!(retained_journal.upgrade().is_none());
 

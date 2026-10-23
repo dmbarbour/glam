@@ -27,6 +27,7 @@ pub(crate) use store::{DeathNotice, contents_at_path};
 #[cfg(test)]
 pub(crate) use volume_handle::handle_volume;
 
+pub(crate) use machine::HostControl;
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,
     RequestContext, RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
@@ -34,6 +35,7 @@ pub use protocol::{
     TaskEnvironment, TaskHalt, TaskHost, TaskOutcome, TaskSpecialization, TaskValidation,
     TransactionContext, ValidationResult,
 };
+pub(crate) use search::{HostedEffectRun, HostedPoll};
 pub use search::{
     IsolatedEffectSearch, IsolatedSearchBlock, IsolatedSearchBranch, IsolatedSearchPoll,
     IsolatedTaskHost,

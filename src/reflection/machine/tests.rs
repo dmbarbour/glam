@@ -1260,9 +1260,11 @@ fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
         exit,
         terminal,
         exact_demand_route,
+        hosted,
         phase_probe,
         force_unfused,
     } = task;
+    let _: &Option<HostedCuts<TestEffects>> = hosted;
     let _: &RuntimeValueRoot = api;
     let _ = (
         eval_context,
@@ -1312,7 +1314,9 @@ fn assert_branch_root_inventory(
         active_fixes,
         fix_restarts,
         retry: branch_retry,
+        host_version,
     } = branch;
+    let _: &u64 = host_version;
     let _: &RuntimeValueRoot = effect;
     let _: &RuntimeValueRoot = state;
     let _ = (

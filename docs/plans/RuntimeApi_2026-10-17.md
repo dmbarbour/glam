@@ -863,6 +863,19 @@ handle API goes.
       within a cut leaves its second operand among the cut's alternatives
       and enters a cut for its first; outside every cut, the first
       operand's cut takes the second as its fallback.
+    - Built (2026-10-23): search in effects a turn runs. The effect runs
+      as a task whose host runs its cuts (`HostedEffectRun`), searching
+      for its first complete success. It reports where its outermost cut
+      begins, commits or fails, and where it resumes a branch set aside
+      at an earlier version of the turn's state, counted in requests the
+      turn answered; the turn takes a checkpoint, as a nested cut saves
+      one, only before answering with a branch set aside since its last
+      answer, so search that never reaches the turn takes none. Outside
+      `m.cut`, the effect's outermost cut is the turn's transaction,
+      begun, committed and retried as `m.cut`'s are through primitives
+      factored out of it; within one, it nests. A provider may answer
+      `Alternatives(n)`. Undo-based checkpoints are to explore
+      (`perf-undo-checkpoints`).
 21. `api-reflection-machines` — reflection tasks become tasks on machines
     (`reflection-tasks-are-machine-tasks`), the implementation of
     `api-reflection-model`: `.child.*`, `.port.*`, `.wire.*`, `.env.*`

@@ -141,6 +141,8 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     exit: Option<TaskExitState<S>>,
     terminal: Option<TaskTerminal>,
     exact_demand_route: ExactDemandRoute,
+    /// Where the task's host runs its cuts, what it tells the host.
+    hosted: Option<HostedCuts<S>>,
     #[cfg(test)]
     phase_probe: Option<Arc<EffectPhaseProbe>>,
     #[cfg(test)]
@@ -347,23 +349,28 @@ impl<S: TaskSpecialization> EffectTask<S> {
         )
     }
 
-    /// An isolated search of `effect` that starts from `state`.
-    pub(super) fn new_isolated_with_state_in_context(
+    /// A task of `effect` that starts from `state`, whose host runs its
+    /// cuts: the host keeps the effects of the task's requests, so the
+    /// task reports where its cuts begin and end, and where it resumes a
+    /// branch it set aside (`alt-cuts-its-first-operand`).
+    pub(super) fn new_hosted_with_state_in_context(
         effect: RuntimeValueRoot,
         state: RuntimeValueRoot,
         specialization: S,
         host: Arc<S::Host>,
         eval_context: EvalContext,
     ) -> Result<Self, TaskHalt> {
-        Self::new_rooted_with_state(
+        let mut task = Self::new_rooted_with_state(
             effect,
             Some(state),
             specialization,
             host,
             eval_context,
-            true,
             false,
-        )
+            false,
+        )?;
+        task.hosted = Some(HostedCuts::default());
+        Ok(task)
     }
 
     /// A task of `effect` whose state starts as `state`, or `{}`.
@@ -431,6 +438,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             exit: None,
             terminal: None,
             exact_demand_route: ExactDemandRoute::default(),
+            hosted: None,
             #[cfg(test)]
             phase_probe: None,
             #[cfg(test)]
@@ -792,6 +800,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
 
         while step_budget.remaining() != 0 {
+            if let Some(poll) = self.hosted_pause() {
+                return poll;
+            }
             // Each pass takes exactly one step of one phase.
             #[cfg(feature = "glam-prof")]
             self.eval_context
@@ -1231,10 +1242,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 if let Err(error) = self.validate_specialization_result(&result) {
                     return SpecializationStep::Failed(specializing, error);
                 }
+                // The host answered the request, changing its state.
+                let mut branch = specializing.branch;
+                if let Some(hosted) = &mut self.hosted {
+                    hosted.version += 1;
+                    hosted.set_aside = false;
+                    branch.host_version = hosted.version;
+                }
                 SpecializationStep::Complete(Box::new(self.complete_specialization_request(
                     context,
                     result,
-                    specializing.branch,
+                    branch,
                     specializing.scope_depth,
                 )))
             }
@@ -2612,6 +2630,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             choices: right_choices,
                             inherited_restarts,
                         });
+                        self.hosted_set_aside();
                         FixChoice::Left
                     };
                     match choice {
@@ -2649,6 +2668,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         .expect("a branch within a cut runs in its frame");
                     debug_assert_eq!(frame.scope_depth, scope_depth);
                     frame.alternatives.push(alternative);
+                    self.hosted_set_aside();
                     return Ok(MachineStep::Continue(self.enter_cut(
                         context,
                         left,
@@ -2792,6 +2812,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 )));
             }
             Request::Fix(function) => {
+                // A restart resumes the fixpoint's entry.
+                self.hosted_set_aside();
                 let root = Arc::new(FixRoot {
                     function,
                     entry: branch,
@@ -3117,6 +3139,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
     ) -> MachineWork<S> {
         let outer_sequence = std::mem::take(&mut outer.control.sequence);
         debug_assert_eq!(operation.runtime_id(), outer.effect.runtime_id());
+        let outermost = self.execution.cuts.is_empty();
         let mut frame = CutFrame {
             operation,
             outer,
@@ -3129,10 +3152,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
             retry: None,
             observed_failure: false,
         };
-        frame.owns_transaction = frame.outer.transaction.is_none();
+        // Where the host runs the cuts, it owns their transactions.
+        frame.owns_transaction = self.hosted.is_none() && frame.outer.transaction.is_none();
         self.begin_cut_attempt(context, &mut frame);
         let work = frame.next_alternative();
+        let entry = frame.outer.host_version;
         self.execution.cuts.push(frame);
+        // A failure returns to the cut's entry, which is set aside.
+        if let Some(hosted) = &mut self.hosted {
+            hosted.set_aside = true;
+            if outermost {
+                hosted.events.push(HostControl::CutBegin(entry));
+            }
+        }
         work
     }
 
@@ -3227,11 +3259,23 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     .cuts
                     .pop()
                     .expect("checked nonempty cut stack");
-                completed.control.sequence = frame.outer_sequence;
+                let parent_scope_depth = frame.parent_scope_depth;
+                if let Some(hosted) = self
+                    .hosted
+                    .as_mut()
+                    .filter(|_| self.execution.cuts.is_empty())
+                {
+                    // The host commits the outermost cut, and may restart it.
+                    completed.control.sequence = frame.outer_sequence.clone();
+                    hosted.committing = Some(frame);
+                    hosted.events.push(HostControl::CutCommit);
+                } else {
+                    completed.control.sequence = frame.outer_sequence;
+                }
                 Ok(MachineStep::Continue(MachineWork::deliver_root(
                     value,
                     completed,
-                    frame.parent_scope_depth,
+                    parent_scope_depth,
                 )))
             }
             BranchOutcome::Fork(left, right) => {
@@ -3289,6 +3333,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .cuts
             .pop()
             .expect("cut attempt requires a cut frame");
+        if let Some(hosted) = self
+            .hosted
+            .as_mut()
+            .filter(|_| self.execution.cuts.is_empty())
+        {
+            // The host returns to where the outermost cut began.
+            let entry = frame.outer.host_version;
+            hosted.version = entry;
+            hosted.events.push(HostControl::CutAbort(entry));
+        }
         let mut failed = frame.retry.take().unwrap_or_else(|| frame.outer.clone());
         if frame.observed_failure
             && let Some(transaction) = failed.transaction.as_mut()
@@ -3354,6 +3408,9 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if self.search.retains_all() {
             return self.handle_isolated_search_outcome(context, outcome, scope_depth);
         }
+        if self.hosted.is_some() {
+            return self.handle_hosted_outcome(context, outcome, scope_depth);
+        }
         match outcome {
             BranchOutcome::Complete(value, _) => Ok(MachineStep::Terminal(TaskTerminal::Complete(
                 PublicValue::from_runtime_root(value),
@@ -3391,6 +3448,141 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
     }
 
+    /// An outcome outside every cut of a task whose host runs its cuts:
+    /// completion, or a failure nothing handled, which the host answers.
+    fn handle_hosted_outcome(
+        &mut self,
+        context: &EvaluationPollContext,
+        outcome: BranchOutcome<S>,
+        scope_depth: usize,
+    ) -> Result<MachineStep<S>, TaskHalt> {
+        let (result, terminal) = match outcome {
+            BranchOutcome::Complete(value, completed) => (
+                HostedResult::Complete(PublicValue::from_runtime_root(completed.state)),
+                TaskTerminal::Complete(PublicValue::from_runtime_root(value)),
+            ),
+            BranchOutcome::Fail(mut failed) | BranchOutcome::Retry(mut failed) => {
+                if let Some(restarted) =
+                    self.restart_fixpoint_at_scope(context, &mut failed, scope_depth)?
+                {
+                    return Ok(MachineStep::Control(Box::new(restarted)));
+                }
+                (
+                    HostedResult::Backtracked,
+                    TaskTerminal::Failed(TaskHalt::new("the effect failed")),
+                )
+            }
+            BranchOutcome::Fork(_, _) => {
+                return Err(TaskHalt::new("a choice forked outside every cut"));
+            }
+            BranchOutcome::Cancelled => return Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
+        };
+        self.hosted
+            .as_mut()
+            .expect("a hosted outcome has its host's record")
+            .result = Some(result);
+        Ok(MachineStep::Terminal(terminal))
+    }
+
+    /// Where the host runs the cuts, notes a branch set aside, to which
+    /// the host must be able to return.
+    fn hosted_set_aside(&mut self) {
+        if let Some(hosted) = &mut self.hosted {
+            hosted.set_aside = true;
+        }
+    }
+
+    /// Returns to the host before the next step while it has events to
+    /// handle, having noted the step's resuming a branch set aside at an
+    /// earlier version.
+    fn hosted_pause(&mut self) -> Option<EffectTaskPoll> {
+        let resumed = self
+            .execution
+            .driven_branch()
+            .map(|branch| branch.host_version);
+        let hosted = self.hosted.as_mut()?;
+        if let Some(version) = resumed.filter(|version| *version < hosted.version) {
+            hosted.version = version;
+            hosted.events.push(HostControl::Restore(version));
+        }
+        (!hosted.events.is_empty()).then_some(EffectTaskPoll::Blocked(TaskBlock {
+            dependency: None,
+            observed_generation: None,
+            error: None,
+        }))
+    }
+
+    /// The events the host has yet to handle, in order.
+    pub(super) fn take_host_events(&mut self) -> Vec<HostControl> {
+        self.hosted
+            .as_mut()
+            .map(|hosted| std::mem::take(&mut hosted.events))
+            .unwrap_or_default()
+    }
+
+    /// Whether the host must keep a way back to its state before it
+    /// answers a request.
+    pub(super) fn host_needs_checkpoint(&self) -> bool {
+        self.hosted.as_ref().is_some_and(|hosted| hosted.set_aside)
+    }
+
+    /// The count of requests the host has answered.
+    pub(super) fn host_version(&self) -> u64 {
+        self.hosted.as_ref().map_or(0, |hosted| hosted.version)
+    }
+
+    /// How the task ended, once it has.
+    pub(super) fn take_hosted_result(&mut self) -> Option<HostedResult> {
+        self.hosted.as_mut()?.result.take()
+    }
+
+    /// The host committed the outermost cut.
+    pub(super) fn cut_committed(&mut self) {
+        if let Some(hosted) = &mut self.hosted {
+            hosted.committing = None;
+        }
+    }
+
+    /// Runs the outermost cut again from its entry, as the host began its
+    /// transaction again: after the commit conflicted, or where the cut
+    /// diverged.
+    pub(super) fn restart_outermost_cut(&mut self) {
+        let hosted = self
+            .hosted
+            .as_mut()
+            .expect("only a host that runs the cuts restarts one");
+        let mut frame = match hosted.committing.take() {
+            Some(frame) => frame,
+            None => self
+                .execution
+                .cuts
+                .drain(..)
+                .next()
+                .expect("an outermost cut to restart"),
+        };
+        self.execution.cuts.clear();
+        self.execution.decoding = None;
+        self.execution.demanding = None;
+        self.execution.pathing = None;
+        self.execution.controlling = None;
+        self.execution.specializing = None;
+        self.blocked = None;
+        hosted.events.clear();
+        hosted.version = frame.outer.host_version;
+        hosted.set_aside = true;
+        frame.alternatives.clear();
+        frame.retry = None;
+        frame.observed_failure = false;
+        let mut initial = frame
+            .outer
+            .clone()
+            .with_effect_root(frame.operation.clone());
+        initial.control.sequence.clear();
+        frame.alternatives.push(initial);
+        self.execution.work = frame.next_alternative();
+        self.execution.cuts.push(frame);
+    }
+
     fn handle_isolated_search_outcome(
         &mut self,
         context: &EvaluationPollContext,
@@ -3405,7 +3597,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let transaction = Self::isolated_transaction(&mut completed);
                 self.search.retain(IsolatedSearchBranch::complete(
                     PublicValue::from_runtime_root(value),
-                    PublicValue::from_runtime_root(completed.state.clone()),
                     transaction,
                 ));
                 Ok(restarted
@@ -4098,6 +4289,9 @@ struct Branch<S: TaskSpecialization> {
     active_fixes: Vec<ActiveFix<S>>,
     fix_restarts: Vec<FixRestart<S>>,
     retry: Option<RetryCheckpoint<S>>,
+    /// Where the host runs the cuts, the version of its state this branch
+    /// continues from.
+    host_version: u64,
 }
 
 impl<S: TaskSpecialization> Branch<S> {
@@ -4122,6 +4316,7 @@ impl<S: TaskSpecialization> Branch<S> {
             active_fixes: Vec::new(),
             fix_restarts: Vec::new(),
             retry: None,
+            host_version: 0,
         }
     }
 
@@ -4200,6 +4395,21 @@ impl<S: TaskSpecialization> TaskExecution<S> {
             .or_else(|| self.pathing.as_ref().map(|work| &work.branch))
             .or_else(|| self.decoding.as_ref().map(|work| &work.branch))
             .or_else(|| self.work.branch())
+    }
+
+    /// The branch the next step drives, which an outcome does not.
+    fn driven_branch(&self) -> Option<&Branch<S>> {
+        self.controlling
+            .as_ref()
+            .map(|work| &work.branch)
+            .or_else(|| self.specializing.as_ref().map(|work| &work.branch))
+            .or_else(|| self.demanding.as_ref().map(|work| &work.branch))
+            .or_else(|| self.pathing.as_ref().map(|work| &work.branch))
+            .or_else(|| self.decoding.as_ref().map(|work| &work.branch))
+            .or_else(|| match &self.work {
+                MachineWork::Outcome { .. } => None,
+                work => work.branch(),
+            })
     }
 
     fn active_scope_depth(&self) -> usize {
@@ -5163,6 +5373,59 @@ pub(super) struct TaskExitBlock {
 struct TaskExitState<S: TaskSpecialization> {
     poll: TaskExitBlock,
     restart: Option<RetryWake<S>>,
+}
+
+/// What a task whose host runs its cuts tells the host
+/// (`alt-cuts-its-first-operand`). The host keeps the effects of the task's
+/// requests, which a failed alternative must undo, so the task reports
+/// where its outermost cut begins and ends, and where it resumes a branch
+/// set aside at an earlier version of the host's state: the count of
+/// requests the host had answered.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum HostControl {
+    /// The outermost cut began, at this version.
+    CutBegin(u64),
+    /// The outermost cut succeeded: the host commits it, then confirms the
+    /// commit or restarts the cut.
+    CutCommit,
+    /// The outermost cut failed: the host returns to the version it began
+    /// at.
+    CutAbort(u64),
+    /// The task resumes a branch set aside at this version.
+    Restore(u64),
+}
+
+/// How a task whose host runs its cuts ended.
+pub(crate) enum HostedResult {
+    /// With its value, which the terminal holds, and this state.
+    Complete(PublicValue),
+    /// With a failure that nothing handled.
+    Backtracked,
+}
+
+/// What a task whose host runs its cuts keeps for the host.
+struct HostedCuts<S: TaskSpecialization> {
+    /// The count of requests the host has answered.
+    version: u64,
+    /// Whether a branch was set aside since the host last answered, so
+    /// the host keeps a way back to its state before it answers again.
+    set_aside: bool,
+    events: Vec<HostControl>,
+    /// The outermost cut, while the host commits it.
+    committing: Option<CutFrame<S>>,
+    result: Option<HostedResult>,
+}
+
+impl<S: TaskSpecialization> Default for HostedCuts<S> {
+    fn default() -> Self {
+        Self {
+            version: 0,
+            set_aside: false,
+            events: Vec::new(),
+            committing: None,
+            result: None,
+        }
+    }
 }
 
 pub(super) enum EffectTaskPoll {
@@ -6200,19 +6463,19 @@ fn effect_api<R: Clone>(
                 request_function_in(access, tags.shift.clone(), 2, Vec::new(), false),
             ),
         ];
+        entries.extend([
+            entry(
+                "alt",
+                request_function_in(access, tags.alt.clone(), 2, Vec::new(), false),
+            ),
+            entry("fail", nullary_request(access, tags.fail.clone())),
+            entry(
+                "cut",
+                request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
+            ),
+        ]);
         if serve_host_families {
-            entries.extend([
-                entry(
-                    "alt",
-                    request_function_in(access, tags.alt.clone(), 2, Vec::new(), false),
-                ),
-                entry("fail", nullary_request(access, tags.fail.clone())),
-                entry(
-                    "cut",
-                    request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
-                ),
-                entry("promise", promise_api),
-            ]);
+            entries.push(entry("promise", promise_api));
             if expose_shared_heap {
                 entries.push(entry("heap", heap_api));
                 entries.push(entry("vol", volume_api));

@@ -4,18 +4,20 @@
 //! among them, and each host request it makes returns to the turn. The
 //! machine serves the host families that the provider passes through, and
 //! the provider answers the rest outside any evaluation, so it may evaluate
-//! too. Branching, with the host checkpointing its alternatives, follows.
+//! too. The effect searches as machines do (`alt-cuts-its-first-operand`),
+//! and the turn keeps a way back to its state for each alternative the
+//! effect sets aside: its cuts are the turn's transactions.
 
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::{DIAGNOSTICS, Machine};
+use super::{CutCheckpoint, CutRetry, DIAGNOSTICS, Machine, TransactionStart};
 use crate::api::{Diagnostic, Error, ErrorKind, PromiseResolver, Value as HandleValue};
 use crate::core::{EvaluationHalt, Key};
 use crate::core_net::CoreWaitToken;
 use crate::evaluation::{EvaluationPumpOutcome, EvaluationWaitToken, ExactDemandRoute};
 use crate::reflection::{
-    EffectRequestSpec, IsolatedEffectSearch, IsolatedSearchPoll, IsolatedTaskHost,
+    EffectRequestSpec, HostControl, HostedEffectRun, HostedPoll, IsolatedTaskHost,
     KeyListRequestWork, PreparationPoll, RequestContext, RequestResult, SpecializationRequestInput,
     SpecializationRequestPoll, SpecializationRequestWork, TaskHalt, TaskSpecialization,
     parse_evaluated_severity,
@@ -23,6 +25,17 @@ use crate::reflection::{
 
 /// Steps the effect's evaluation takes between looks at what it asked for.
 const STEP_BUDGET: usize = 4_096;
+
+/// What the turn keeps for an effect's cuts: the transaction the effect's
+/// outermost cut opened, if the turn was in none, with the version it began
+/// at; where that cut began; and a way back to each version a branch was set
+/// aside at, before the turn answered past it.
+#[derive(Default)]
+struct EffectCuts {
+    owned: Option<(u64, TransactionStart)>,
+    entry: Option<u64>,
+    checkpoints: Vec<(u64, CutCheckpoint)>,
+}
 
 /// Families of the standard host effects, which an [`EffectProvider`] passes
 /// through to the machine, or leaves for itself to define
@@ -94,6 +107,10 @@ pub enum Answer {
     /// `state args -- state' result`: the request returns `result`, and the
     /// effect continues from `state'`.
     Return,
+    /// `state args -- state' r1 … rn`: the request returns each result in
+    /// turn, as a choice of returns does, the effect continuing from
+    /// `state'`. None at all is a failure.
+    Alternatives(usize),
 }
 
 /// A standard host request, which the machine serves where its family
@@ -217,12 +234,12 @@ struct Parked {
     resolver: PromiseResolver,
 }
 
-/// What the turn answered a parked request: a result, and for the
-/// provider's own requests, the branch's state after it.
+/// What the turn answered a parked request: what the request returns, and
+/// for the provider's own requests, the branch's state after it.
 enum Answered {
     Return {
         state: Option<HandleValue>,
-        result: HandleValue,
+        result: RequestResult,
     },
     Fail,
 }
@@ -287,7 +304,7 @@ enum TurnRequestWork {
     Parked(SharedSlot),
     /// Evaluating the state the provider answered with, which the branch
     /// continues from once it is a dict.
-    Settling(HandleValue),
+    Settling(RequestResult),
     Done,
 }
 
@@ -390,18 +407,14 @@ impl SpecializationRequestWork<TurnEffects> for TurnRequestWork {
                     Answered::Return {
                         state: None,
                         result,
-                    } => Ok(SpecializationRequestPoll::Complete(RequestResult::Return(
-                        result,
-                    ))),
+                    } => Ok(SpecializationRequestPoll::Complete(result)),
                     Answered::Fail => Ok(SpecializationRequestPoll::Complete(RequestResult::Fail)),
                 }
             }
             Self::Settling(result) => match input {
                 Some(SpecializationRequestInput::Value(state)) => {
                     context.set_state(state)?;
-                    Ok(SpecializationRequestPoll::Complete(RequestResult::Return(
-                        result,
-                    )))
+                    Ok(SpecializationRequestPoll::Complete(result))
                 }
                 Some(SpecializationRequestInput::Failed(halt)) => Err(halt),
                 None => panic!("an effect's state settles once it is evaluated"),
@@ -417,11 +430,16 @@ impl Machine<'_, '_> {
     /// (`effect-families-pass-through`). The effect serves its pure effects
     /// itself, `.get` and `.set` on its state among them; the machine serves
     /// the host families that `provider` passes through, as its own methods
-    /// do; and `provider` answers its own requests. An effect that fails
-    /// fails as [`Self::fail`] does; one whose evaluation waits is pushback.
+    /// do; and `provider` answers its own requests.
     ///
-    /// Branching, with this machine's cuts checkpointing the alternatives,
-    /// comes with a later slice of `api-effect-providers`.
+    /// The effect searches as machines do (`alt-cuts-its-first-operand`):
+    /// `.alt a b` means `.alt (.cut a) b`, and its own cuts scope its
+    /// choices. An effect's cut is a transaction of this machine's: the
+    /// outermost, which commits or retries as [`Self::cut`]'s does, outside
+    /// a cut, and nested within one. A failed alternative leaves nothing of
+    /// what the turn did for it. An effect that fails fails as
+    /// [`Self::fail`] does; one whose evaluation waits outside a cut of its
+    /// own is pushback.
     pub fn effect_run<P: EffectProvider>(&mut self, provider: &mut P) -> Result<(), Error> {
         self.require(2)?;
         let effect = self.pop()?;
@@ -452,20 +470,46 @@ impl Machine<'_, '_> {
             scoped.wrap(crate::core::Value::Dict(crate::core::Dict::new_sync()))
         });
         let host = Arc::new(IsolatedTaskHost::new(&values, environment, ())?);
-        let context = self.runtime.assembler.eval_context();
-        let mut search = IsolatedEffectSearch::new_with_state_in_context(
+        let mut run = HostedEffectRun::new_with_state_in_context(
             &effect,
             &state,
             effects,
             host,
-            context.clone(),
+            self.runtime.assembler.eval_context(),
         )
         .map_err(|halt| Error::new(halt.to_string()))?;
+        let mut cuts = EffectCuts::default();
+        let ran = self.drive_effect(&mut run, &mut cuts, provider, &names, &slot);
+        if let (Err(_), Some((_, start))) = (&ran, cuts.owned.take()) {
+            self.transaction_abort(start);
+        }
+        let (state, result) = ran?;
+        self.push(state);
+        self.push(result);
+        Ok(())
+    }
+
+    /// Runs the effect to its end, answering what it asks and handling
+    /// what it tells the turn of its cuts.
+    fn drive_effect<P: EffectProvider>(
+        &mut self,
+        run: &mut HostedEffectRun<TurnEffects>,
+        cuts: &mut EffectCuts,
+        provider: &mut P,
+        names: &[P::Request],
+        slot: &SharedSlot,
+    ) -> Result<(HandleValue, HandleValue), Error> {
+        let values = self.runtime.assembler.values();
+        let context = self.runtime.assembler.eval_context();
         let mut route = ExactDemandRoute::default();
-        let branches = loop {
-            match search.poll(STEP_BUDGET) {
-                IsolatedSearchPoll::BudgetExhausted => {}
-                IsolatedSearchPoll::Blocked(blocked) => {
+        loop {
+            let poll = run.poll(STEP_BUDGET);
+            for event in run.take_events() {
+                self.effect_cut_event(run, cuts, event)?;
+            }
+            match poll {
+                HostedPoll::BudgetExhausted | HostedPoll::Paused => {}
+                HostedPoll::Blocked(blocked) => {
                     let parked = slot
                         .lock()
                         .unwrap_or_else(PoisonError::into_inner)
@@ -479,11 +523,22 @@ impl Machine<'_, '_> {
                         resolver,
                     }) = parked
                     {
-                        let answered =
-                            self.answer_parked(provider, &names, request, state, path, arguments)?;
-                        slot.lock().unwrap_or_else(PoisonError::into_inner).answered =
-                            Some(answered);
-                        resolver.resolve(values.unit())?;
+                        // A way back to the state before the answer, for
+                        // the branches set aside at it.
+                        if run.needs_checkpoint() && self.cut.is_some() {
+                            cuts.checkpoints.push((run.version(), self.checkpoint()));
+                        }
+                        match self.answer_parked(provider, names, request, state, path, arguments) {
+                            Ok(answered) => {
+                                slot.lock().unwrap_or_else(PoisonError::into_inner).answered =
+                                    Some(answered);
+                                resolver.resolve(values.unit())?;
+                            }
+                            Err(error) if error.kind() == ErrorKind::Retry => {
+                                self.effect_pushback(run, cuts, error)?;
+                            }
+                            Err(error) => return Err(error),
+                        }
                         continue;
                     }
                     let Some(wait) = blocked.dependency().cloned() else {
@@ -497,28 +552,103 @@ impl Machine<'_, '_> {
                         | EvaluationPumpOutcome::Busy
                         | EvaluationPumpOutcome::BudgetExhausted => {}
                         EvaluationPumpOutcome::NoProgress => {
-                            return self.note_evaluation(Err(self.awaiting(wait)));
+                            let pushback = self.awaiting(wait);
+                            let pushback = self
+                                .note_evaluation::<()>(Err(pushback))
+                                .expect_err("pushback stays an error");
+                            self.effect_pushback(run, cuts, pushback)?;
                         }
                     }
                 }
-                IsolatedSearchPoll::Complete(branches) => break branches,
-                IsolatedSearchPoll::Failed(halt) => return Err(Error::new(halt.to_string())),
-                IsolatedSearchPoll::Cancelled => {
-                    return Err(Error::new("the effect was cancelled"));
+                HostedPoll::Complete { value, state } => return Ok((state, value)),
+                HostedPoll::Backtracked => return Err(self.fail()),
+                HostedPoll::Failed(halt) => return Err(Error::new(halt.to_string())),
+                HostedPoll::Cancelled => return Err(Error::new("the effect was cancelled")),
+            }
+        }
+    }
+
+    /// Handles what the effect tells the turn of its cuts.
+    fn effect_cut_event(
+        &mut self,
+        run: &mut HostedEffectRun<TurnEffects>,
+        cuts: &mut EffectCuts,
+        event: HostControl,
+    ) -> Result<(), Error> {
+        match event {
+            HostControl::CutBegin(entry) => {
+                cuts.entry = Some(entry);
+                // Outside a cut of the turn's, the effect's opens one.
+                if self.cut.is_none() {
+                    cuts.owned = Some((entry, self.transaction_begin()));
                 }
             }
-        };
-        let completed = branches
-            .iter()
-            .find_map(|branch| Some((branch.state()?, branch.value()?)));
-        match completed {
-            Some((state, result)) => {
-                self.push(state.clone());
-                self.push(result.clone());
-                Ok(())
+            HostControl::Restore(version) => self.effect_restore(cuts, version),
+            HostControl::CutAbort(entry) => {
+                cuts.entry = None;
+                match cuts.owned.take() {
+                    Some((_, start)) => {
+                        cuts.checkpoints.clear();
+                        self.transaction_abort(start);
+                    }
+                    None => self.effect_restore(cuts, entry),
+                }
             }
-            None => Err(self.fail()),
+            HostControl::CutCommit => {
+                let entry = cuts.entry.take().expect("a committing cut began before it");
+                cuts.checkpoints.retain(|(version, _)| *version < entry);
+                match cuts.owned.take() {
+                    Some((entry, start)) => match self.transaction_end(start, Ok(())) {
+                        Ok(()) => run.cut_committed(),
+                        Err(CutRetry::Now) => {
+                            cuts.entry = Some(entry);
+                            cuts.owned = Some((entry, self.transaction_begin()));
+                            run.restart_outermost_cut();
+                        }
+                        Err(CutRetry::Never(error)) => return Err(error),
+                        Err(CutRetry::AfterChange(_) | CutRetry::AfterEvaluation(..)) => {
+                            unreachable!("a commit runs again at once or never")
+                        }
+                    },
+                    None => run.cut_committed(),
+                }
+            }
         }
+        Ok(())
+    }
+
+    /// Returns the turn to its state at `version`, as a failed nested cut
+    /// returns, where it kept a way back. Outside a cut, what the turn did
+    /// stands.
+    fn effect_restore(&mut self, cuts: &mut EffectCuts, version: u64) {
+        cuts.checkpoints.retain(|(kept, _)| *kept <= version);
+        if let Some((kept, checkpoint)) = cuts.checkpoints.last()
+            && *kept == version
+        {
+            self.rollback(checkpoint.clone());
+        }
+    }
+
+    /// Handles pushback within the effect: within the transaction its own
+    /// cut opened, the cut runs again once what it waited on can progress,
+    /// as [`Self::cut`] does; otherwise the pushback is the turn's.
+    fn effect_pushback(
+        &mut self,
+        run: &mut HostedEffectRun<TurnEffects>,
+        cuts: &mut EffectCuts,
+        pushback: Error,
+    ) -> Result<(), Error> {
+        let Some((entry, start)) = cuts.owned.take() else {
+            return Err(pushback);
+        };
+        cuts.checkpoints.clear();
+        if let Err(retry) = self.transaction_end::<()>(start, Err(pushback)) {
+            self.transaction_await(retry)?;
+        }
+        cuts.entry = Some(entry);
+        cuts.owned = Some((entry, self.transaction_begin()));
+        run.restart_outermost_cut();
+        Ok(())
     }
 
     /// Answers `request` on a stack of its own, as a commit hook runs:
@@ -547,24 +677,26 @@ impl Machine<'_, '_> {
         };
         let mut frame = std::mem::replace(&mut self.state.stack, stack);
         let frame_stash = std::mem::replace(&mut self.state.stash, stash);
-        match answer {
-            Ok(Answer::Return) => {
-                if frame.len() != usize::from(stateful) + 1 || !frame_stash.is_empty() {
-                    return Err(Error::new(format!(
-                        "an effect provider's return must replace the effect's state and its \
-                         request's {arity} arguments with a state and a result, and leave its \
-                         stash empty"
-                    )));
-                }
-                let result = frame.pop().expect("the frame holds the result");
-                Ok(Answered::Return {
-                    state: frame.pop(),
-                    result,
-                })
-            }
-            Err(error) if error.kind() == ErrorKind::Backtrack => Ok(Answered::Fail),
-            Err(error) => Err(error),
+        let results = match answer {
+            Ok(Answer::Return) => 1,
+            Ok(Answer::Alternatives(count)) => count,
+            Err(error) if error.kind() == ErrorKind::Backtrack => return Ok(Answered::Fail),
+            Err(error) => return Err(error),
+        };
+        if frame.len() != usize::from(stateful) + results || !frame_stash.is_empty() {
+            return Err(Error::new(format!(
+                "an effect provider's answer must replace the effect's state and its \
+                 request's {arity} arguments with a state and its {results} results, and \
+                 leave its stash empty"
+            )));
         }
+        let mut results = frame.split_off(usize::from(stateful));
+        let state = frame.pop();
+        let result = match answer {
+            Ok(Answer::Alternatives(_)) => RequestResult::Alternatives(results),
+            _ => RequestResult::Return(results.pop().expect("one result")),
+        };
+        Ok(Answered::Return { state, result })
     }
 
     /// Serves a standard request, whose arguments but its path are on the

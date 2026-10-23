@@ -329,6 +329,16 @@ Their sections hold their earlier evidence.
   yet, such as an unresolved promise, wakes on any change of the
   observation epoch and evaluates again (`api-machine-environment`); a wake
   on the evaluation's own dependency keeps that contract too.
+- **Undo for turn checkpoints** (`perf-undo-checkpoints`), to explore
+  (maintainer, 2026-10-23). An effect a turn runs restores the turn after a
+  failed alternative from a snapshot, taken only when the turn is about to
+  answer a host request with a branch set aside (`api-effect-providers`),
+  as a nested `m.cut` saves its machine's state and journals by cloning.
+  An undo approach should fit the common case better: modify in place, and
+  track just enough to undo efficiently, such as an undo log of the locals,
+  stack and journal entries changed. Copy-on-write cuts, copying each part
+  at its first change, are the other candidate. Measure once effects with
+  host requests search in numbers, as the CLI's do.
 - **Port routing** (`perf-port-routing`), not measured, after the
   representations, as the runtime API plan goes ahead of performance
   (maintainer, 2026-10-19). As `api-ports` built them, each write walks

@@ -185,10 +185,9 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
     /// Whether the effect machine serves the host families itself: the heap
     /// and its volumes, and promises. One that does not leaves them to the
     /// specialization's own requests, and keeps the pure effects: `.r`,
-    /// `.seq`, `.fix`, `.get`, `.set`, `.reset` and `.shift`
-    /// (`effect-families-pass-through`). Since the machine could not undo
-    /// the host effects of a failed alternative, it has no search either,
-    /// until the host checkpoints its alternatives.
+    /// `.seq`, `.fix`, `.get`, `.set`, `.reset`, `.shift` and search
+    /// (`effect-families-pass-through`), whose host undoes what a failed
+    /// alternative asked of it (`alt-cuts-its-first-operand`).
     fn serves_host_families(&self) -> bool {
         true
     }

@@ -1232,6 +1232,24 @@ struct Hook {
 type HookFn = dyn FnOnce(&mut Machine<'_, '_>) + Send;
 
 /// When an aborted outermost cut runs again.
+/// The start of an outermost transaction: the machine's state, and the
+/// observation epoch the transaction began at.
+struct TransactionStart {
+    state: MachineState,
+    generation: u64,
+}
+
+/// A point within a cut that a machine can return to: its state, and its
+/// transaction's journals and hooks as they stood.
+#[derive(Clone)]
+struct CutCheckpoint {
+    state: MachineState,
+    journal: StoreJournal,
+    events: RuntimeEventJournal,
+    commit_hooks: usize,
+    abort_hooks: usize,
+}
+
 enum CutRetry {
     /// At once: its commit conflicted.
     Now,
@@ -2990,78 +3008,117 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         if self.cut.is_some() {
             return self.nested_cut(&mut body);
         }
-        let resources = self.resources();
         loop {
-            let start = self.state.clone();
-            let (generation, store, events) = resources.transaction_snapshot();
-            self.cut = Some(CutTransaction {
-                journal: StoreJournal::new(store),
-                events: RuntimeEventJournal::new(events),
-                observed: false,
-                conflicted: false,
-                awaits_evaluation: false,
-                awaited: Vec::new(),
-                commit_hooks: Vec::new(),
-                abort_hooks: Vec::new(),
-            });
+            let start = self.transaction_begin();
             let outcome = self.within_scope(|m| body(m));
-            let cut = self
-                .cut
-                .take()
-                .expect("the outermost cut keeps its transaction");
-            let next = match outcome {
-                // An attempt whose forks merged in no serial order is
-                // inconsistent, whatever it returned.
-                _ if cut.conflicted => CutRetry::Now,
-                Ok(result) => match resources.try_commit_transaction(&cut.journal, &cut.events) {
-                    StoreCommitResult::Committed => {
-                        self.run_hooks(cut.commit_hooks);
-                        return Ok(result);
-                    }
-                    StoreCommitResult::Conflict => CutRetry::Now,
-                    StoreCommitResult::MissingVolume(volume) => {
-                        CutRetry::Never(Error::new(format!(
-                            "reflection volume {} was revoked before the cut committed",
-                            volume.get()
-                        )))
-                    }
-                },
-                // With no alternative left, a failure diverges as pushback
-                // does: the cut waits for a change in what it observed.
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
-                        && cut.awaits_evaluation =>
-                {
-                    CutRetry::AfterEvaluation(generation, cut.awaited.clone())
-                }
-                Err(error)
-                    if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
-                        && cut.observed =>
-                {
-                    CutRetry::AfterChange(Box::new((cut.journal.clone(), cut.events.clone())))
-                }
-                Err(error) if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry) => {
-                    CutRetry::Never(Error::new(
-                        "a cut failed or retried without observing shared state, so no \
-                         change could wake it",
-                    ))
-                }
-                Err(error) => CutRetry::Never(error),
-            };
-            self.state = start;
-            self.run_hooks(cut.abort_hooks.into_iter().rev());
-            match next {
-                CutRetry::Now => {}
-                CutRetry::AfterChange(journals) => {
-                    let (journal, events) = &*journals;
-                    self.await_change(&resources, journal, events)
-                }
-                CutRetry::AfterEvaluation(generation, awaited) => {
-                    self.await_evaluation(&resources, generation, &awaited);
-                }
-                CutRetry::Never(error) => return Err(error),
+            match self.transaction_end(start, outcome) {
+                Ok(result) => return Ok(result),
+                Err(retry) => self.transaction_await(retry)?,
             }
         }
+    }
+
+    /// Begins the outermost transaction, which [`Self::transaction_end`]
+    /// or [`Self::transaction_abort`] ends.
+    fn transaction_begin(&mut self) -> TransactionStart {
+        debug_assert!(self.cut.is_none(), "one outermost transaction at a time");
+        let state = self.state.clone();
+        let (generation, store, events) = self.resources().transaction_snapshot();
+        self.cut = Some(CutTransaction {
+            journal: StoreJournal::new(store),
+            events: RuntimeEventJournal::new(events),
+            observed: false,
+            conflicted: false,
+            awaits_evaluation: false,
+            awaited: Vec::new(),
+            commit_hooks: Vec::new(),
+            abort_hooks: Vec::new(),
+        });
+        TransactionStart { state, generation }
+    }
+
+    /// Ends the outermost transaction as the `outcome` of its body says: it
+    /// commits after a success, or returns the machine to its start and
+    /// says when to run the body again. A failure or pushback, with no
+    /// alternative left, diverges: it waits for a change in what it
+    /// observed.
+    fn transaction_end<R>(
+        &mut self,
+        start: TransactionStart,
+        outcome: Result<R, Error>,
+    ) -> Result<R, CutRetry> {
+        let resources = self.resources();
+        let cut = self
+            .cut
+            .take()
+            .expect("the outermost cut keeps its transaction");
+        let next = match outcome {
+            // An attempt whose forks merged in no serial order is
+            // inconsistent, whatever it returned.
+            _ if cut.conflicted => CutRetry::Now,
+            Ok(result) => match resources.try_commit_transaction(&cut.journal, &cut.events) {
+                StoreCommitResult::Committed => {
+                    self.run_hooks(cut.commit_hooks);
+                    return Ok(result);
+                }
+                StoreCommitResult::Conflict => CutRetry::Now,
+                StoreCommitResult::MissingVolume(volume) => CutRetry::Never(Error::new(format!(
+                    "reflection volume {} was revoked before the cut committed",
+                    volume.get()
+                ))),
+            },
+            Err(error)
+                if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
+                    && cut.awaits_evaluation =>
+            {
+                CutRetry::AfterEvaluation(start.generation, cut.awaited.clone())
+            }
+            Err(error)
+                if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry)
+                    && cut.observed =>
+            {
+                CutRetry::AfterChange(Box::new((cut.journal.clone(), cut.events.clone())))
+            }
+            Err(error) if matches!(error.kind(), ErrorKind::Backtrack | ErrorKind::Retry) => {
+                CutRetry::Never(Error::new(
+                    "a cut failed or retried without observing shared state, so no \
+                     change could wake it",
+                ))
+            }
+            Err(error) => CutRetry::Never(error),
+        };
+        self.state = start.state;
+        self.run_hooks(cut.abort_hooks.into_iter().rev());
+        Err(next)
+    }
+
+    /// Abandons the outermost transaction, returning the machine to its
+    /// start, for a failure that something else handles.
+    fn transaction_abort(&mut self, start: TransactionStart) {
+        let cut = self
+            .cut
+            .take()
+            .expect("the outermost cut keeps its transaction");
+        self.state = start.state;
+        self.run_hooks(cut.abort_hooks.into_iter().rev());
+    }
+
+    /// Waits as `retry` says before the outermost cut runs again, or
+    /// returns the error that ended it.
+    fn transaction_await(&mut self, retry: CutRetry) -> Result<(), Error> {
+        let resources = self.resources();
+        match retry {
+            CutRetry::Now => {}
+            CutRetry::AfterChange(journals) => {
+                let (journal, events) = &*journals;
+                self.await_change(&resources, journal, events)
+            }
+            CutRetry::AfterEvaluation(generation, awaited) => {
+                self.await_evaluation(&resources, generation, &awaited);
+            }
+            CutRetry::Never(error) => return Err(error),
+        }
+        Ok(())
     }
 
     /// Waits, for a cut whose evaluation waited, until anything has changed
@@ -3225,26 +3282,40 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     where
         'scope: 'b,
     {
-        let start = self.state.clone();
-        let cut = self.cut.as_ref().expect("a nested cut runs within a cut");
-        let journal = cut.journal.clone();
-        let events = cut.events.clone();
-        let (commit_hooks, abort_hooks) = (cut.commit_hooks.len(), cut.abort_hooks.len());
+        let checkpoint = self.checkpoint();
         let outcome = self.within_scope(|m| body(m));
         if outcome.is_err() {
-            self.state = start;
-            let cut = self
-                .cut
-                .as_mut()
-                .expect("a nested cut's transaction outlives it");
-            // The journals' clones share their reads, which stay recorded.
-            cut.journal = journal;
-            cut.events = events;
-            cut.commit_hooks.truncate(commit_hooks);
-            let aborted = cut.abort_hooks.split_off(abort_hooks);
-            self.run_hooks(aborted.into_iter().rev());
+            self.rollback(checkpoint);
         }
         outcome
+    }
+
+    /// A point within a cut that this machine can return to.
+    fn checkpoint(&self) -> CutCheckpoint {
+        let cut = self.cut.as_ref().expect("a checkpoint lies within a cut");
+        CutCheckpoint {
+            state: self.state.clone(),
+            journal: cut.journal.clone(),
+            events: cut.events.clone(),
+            commit_hooks: cut.commit_hooks.len(),
+            abort_hooks: cut.abort_hooks.len(),
+        }
+    }
+
+    /// Returns the machine to `checkpoint`, as a failed nested cut does,
+    /// running the abort hooks registered since.
+    fn rollback(&mut self, checkpoint: CutCheckpoint) {
+        self.state = checkpoint.state;
+        let cut = self
+            .cut
+            .as_mut()
+            .expect("a checkpoint's transaction outlives it");
+        // The journals' clones share their reads, which stay recorded.
+        cut.journal = checkpoint.journal;
+        cut.events = checkpoint.events;
+        cut.commit_hooks.truncate(checkpoint.commit_hooks);
+        let aborted = cut.abort_hooks.split_off(checkpoint.abort_hooks);
+        self.run_hooks(aborted.into_iter().rev());
     }
 
     /// Waits until something a failed cut observed has changed. The thread
