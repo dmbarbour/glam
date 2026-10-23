@@ -1718,12 +1718,13 @@ pub(crate) enum ListEffectComputation {
         control: HandlerControl,
         api: Value,
     },
-    /// Returns each success of `outcomes` to `control`, and passes each
-    /// failure through.
+    /// Returns each success of `outcomes` to `control`, or `value` in place
+    /// of each success's own, and passes each failure through.
     HandlerContinue {
         outcomes: List,
         control: HandlerControl,
         api: Value,
+        value: Option<Value>,
     },
     /// A cut's outcomes through the first to reach it: the outcomes before
     /// it, then it, continued.
@@ -2260,6 +2261,23 @@ pub enum Builtin {
     /// alternative's run, and that run.
     HandlerFixApply,
     HandlerFixRun,
+    /// A scoped request, which the run answers: `HandlerScoped open
+    /// operation close` runs the request `open`, then `operation`, then the
+    /// request `close`, answering with `operation`'s value; a failure
+    /// within keeps what `open` changed (`pure-handler-macro-ops`).
+    HandlerScoped,
+    /// A frame of a scoped request: the constant continuation that runs its
+    /// operation, and the mark of its close.
+    HandlerConst,
+    HandlerClose,
+    /// Source macros' operations (`pure-handler-macro-ops`): `MacroOperation
+    /// code state` and `MacroOperationOn code argument state`, each a
+    /// request of a pure handler, `MacroScoped code argument operation`, a
+    /// scoped request, and `MacroLog severity message`, a request.
+    MacroOperation,
+    MacroOperationOn,
+    MacroScoped,
+    MacroLog,
     /// The CLI's token parser's operations (`pure-handler-token`), each
     /// applied to its argument, if any, and a pure handler's state.
     TokenText,
@@ -2406,6 +2424,13 @@ impl Builtin {
             Self::HandlerResume => 7,
             Self::HandlerFixApply => 5,
             Self::HandlerFixRun => 6,
+            Self::HandlerScoped => 4,
+            Self::HandlerConst => 2,
+            Self::HandlerClose => 2,
+            Self::MacroOperation => 2,
+            Self::MacroOperationOn => 3,
+            Self::MacroScoped => 3,
+            Self::MacroLog => 2,
             Self::TokenText => 2,
             Self::TokenRegex => 2,
             Self::TokenTextSpan => 1,

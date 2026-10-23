@@ -45,6 +45,7 @@ mod list_effect_machine;
 mod list_machine;
 mod list_observation_machine;
 mod list_transform_machine;
+mod macro_machine;
 mod net;
 mod object_builtin_machine;
 mod object_composition_machine;
@@ -67,7 +68,11 @@ pub(crate) use application::apply_values;
 #[cfg(test)]
 pub(crate) use builtins::assert_construction_port_family_shape;
 #[cfg(test)]
-pub(crate) use operator::constant_effect;
+pub(crate) use macro_machine::validate_written_text;
+pub(crate) use macro_machine::{
+    MacroCursor, MacroDelimiter, MacroElement, MacroElementKind, MacroLayout, MacroShape,
+    MacroText, macro_api_in, macro_state_in,
+};
 pub(crate) use operator::{
     LIST_OPERATOR_MAX_ARITY, access_operator, apply_arity_operator, builtin_operator,
     constant_effect_in, function_capture_operator, list_operator, request_operator,

@@ -1,24 +1,23 @@
+//! Runs a source macro by the pure handler (`pure-handler-macro-run`): its
+//! successes, at most one accepted, and otherwise its failures' furthest
+//! frontier and active cases, read from the run's two views.
+
 use std::sync::Arc;
 
-use crate::api::{CompilationExecution, Diagnostic, Value as PublicValue, Values};
-use crate::core::CoreValueFactory;
-use crate::core::{EvaluationHalt, ManagedPromiseRoot, Value};
+use crate::api::{CompilationExecution, Diagnostic, EvaluatedValue, Value as PublicValue, Values};
+use crate::core::{
+    Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluationHalt, Key, LazyValue,
+    ManagedPromiseRoot, Value, keys,
+};
 use crate::diagnostic::Severity;
-use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute};
-use crate::reflection::{IsolatedEffectSearch, IsolatedSearchPoll};
+use crate::eval::{MacroCursor, MacroShape};
 use crate::runtime::RuntimeValueRoot;
 
-use super::effects::MacroEffects;
-use super::host::{MacroHost, MacroSnapshot};
 use super::io::{MacroInput, MacroOutput};
-
-const STEP_BUDGET: usize = 256;
 
 #[derive(Debug)]
 pub(in crate::g_syntax) struct MacroRun {
     diagnostics: Vec<Diagnostic>,
-    #[cfg(test)]
-    visited_cases: Vec<PublicValue>,
     consumed_end: usize,
     output: Vec<MacroOutput>,
 }
@@ -85,11 +84,6 @@ impl MacroRun {
         &self.diagnostics
     }
 
-    #[cfg(test)]
-    pub(super) fn visited_cases(&self) -> &[PublicValue] {
-        &self.visited_cases
-    }
-
     pub(in crate::g_syntax) fn consumed_end(&self) -> usize {
         self.consumed_end
     }
@@ -99,6 +93,12 @@ impl MacroRun {
     }
 }
 
+/// Runs `effect`, a macro, over `input` with `environment`.
+///
+/// The run is a lazy value in the macro demand session, so a demanded
+/// `anno refl:` within a helper runs once, however many branches read it:
+/// reflection work commits outside the branches, so no branch is replayed
+/// to collect failure diagnostics.
 pub(in crate::g_syntax) fn run_macro_effect(
     execution: &CompilationExecution,
     effect: RuntimeValueRoot,
@@ -106,117 +106,80 @@ pub(in crate::g_syntax) fn run_macro_effect(
     input: MacroInput,
 ) -> Result<MacroRun, Box<MacroFailure>> {
     let values = execution.macro_context().values();
-    let effect = PublicValue::from_runtime_root(effect);
-    let environment = PublicValue::from_runtime_root(environment);
-    let host = Arc::new(MacroHost::new_core(
-        values.clone(),
-        environment.clone(),
-        MacroSnapshot {
-            environment,
-            input: Arc::new(input.clone()),
-        },
-    ));
-    let mut search = IsolatedEffectSearch::new_in_context(
-        &effect,
-        MacroEffects,
-        host,
-        execution.macro_context().clone(),
-    )
-    .map_err(|error| {
-        macro_error(
-            values,
-            format!("selected macro value is not a runnable effect: {error}"),
-        )
-    })?;
+    let (text, data) = input.split();
+    let text = Arc::new(text);
+    let run = values.construct_runtime_value_root(|access| {
+        let data = data
+            .iter()
+            .map(|value| value.clone().into_runtime_root().clone_core_with(access))
+            .collect();
+        Value::Lazy(LazyValue::from_builtin_in(
+            access,
+            BuiltinCall {
+                builtin: Builtin::Handler,
+                arguments: Arc::from([
+                    crate::eval::macro_api_in(access),
+                    Value::Dict(Dict::new_sync()),
+                    crate::eval::macro_state_in(
+                        access,
+                        values,
+                        Arc::clone(&text),
+                        data,
+                        environment.clone_core_with(access),
+                    ),
+                    effect.clone_core_with(access),
+                ]),
+            },
+        ))
+    });
+    let reader = Reader { execution };
+    let results = reader.whnf(run)?;
+    let successes = reader.items(reader.field(&results, &keys::OK)?)?;
 
-    let mut exact_demand_route = ExactDemandRoute::default();
-    let branches = loop {
-        match search.poll(STEP_BUDGET) {
-            IsolatedSearchPoll::BudgetExhausted => {}
-            IsolatedSearchPoll::Blocked(blocked) => {
-                let Some(dependency) = blocked.dependency().cloned() else {
-                    return Err(match blocked.error() {
-                        Some(error) => macro_error(
-                            values,
-                            "macro effect became blocked after evaluation failed",
-                        )
-                        .caused_by(Some(
-                            error.diagnostic(&Values::from_core_factory(values.clone())),
-                        )),
-                        None => macro_error(
-                            values,
-                            "macro effect became blocked without a lazy dependency",
-                        ),
-                    });
-                };
-                match execution.macro_context().pump_wait_on_route(
-                    &dependency,
-                    STEP_BUDGET,
-                    &mut exact_demand_route,
-                ) {
-                    EvaluationPumpOutcome::TargetReady
-                    | EvaluationPumpOutcome::Busy
-                    | EvaluationPumpOutcome::BudgetExhausted => {}
-                    EvaluationPumpOutcome::NoProgress => {
-                        return Err(macro_error(
-                            values,
-                            "macro effect is waiting on a lazy producer unavailable to the macro demand session",
-                        )
-                        .waiting_on(execution.awaited_dependency(
-                            &crate::evaluation::WorkDependency::Wait(dependency.clone()),
-                        )));
-                    }
-                }
-            }
-            IsolatedSearchPoll::Complete(branches) => break branches,
-            IsolatedSearchPoll::Failed(error) => {
-                return Err(macro_error(values, "macro effect failed").caused_by(Some(
-                    error.diagnostic(&Values::from_core_factory(values.clone())),
-                )));
-            }
-            IsolatedSearchPoll::Cancelled => {
-                return Err(macro_error(values, "macro effect was cancelled"));
-            }
+    let mut successes = successes.into_iter();
+    let Some(success) = successes.next() else {
+        let mut branches = Vec::new();
+        for failure in reader.items(reader.field(&results, &keys::FAILED)?)? {
+            let failure = reader.whnf(failure)?;
+            let handler = reader.whnf(reader.field(&failure, &keys::HANDLER)?)?;
+            let end = reader.cursor(&handler)?.consumed_end(&text);
+            branches.push((end, reader.cases(&handler)?));
         }
-    };
-
-    // Do not replay a macro merely to collect failure diagnostics: demanded
-    // reflection annotations commit outside the branch journal and would run
-    // twice. Cases remain lazy handles, so retaining the furthest branch
-    // frontier in this single execution is the inexpensive safe path.
-    let mut successful = branches.iter().filter(|branch| branch.value().is_some());
-    let Some(branch) = successful.next() else {
         let frontier = branches
             .iter()
-            .map(|branch| branch.journal().cursor.consumed_end(&input))
+            .map(|(end, _)| *end)
             .max()
-            .unwrap_or_else(|| input.start());
+            .unwrap_or_else(|| text.start());
         let cases = branches
-            .iter()
-            .filter(|branch| branch.journal().cursor.consumed_end(&input) == frontier)
-            .flat_map(|branch| branch.journal().active_cases.iter().cloned());
+            .into_iter()
+            .filter(|(end, _)| *end == frontier)
+            .flat_map(|(_, cases)| cases);
         return Err(macro_error(
             values,
             "macro input did not match any successful alternative",
         )
         .with_context(values, frontier, cases));
     };
-    if successful.next().is_some() {
+    if successes.next().is_some() {
         return Err(macro_error(
             values,
             "macro effect produced multiple results; use `.cut` to select one",
         ));
     }
-    let value = branch
-        .value()
-        .expect("successful branch was selected above");
-    let value = force_result(execution, value.clone().into_runtime_root()).map_err(|error| {
-        error.with_context(
-            execution.macro_context().values(),
-            branch.journal().cursor.consumed_end(&input),
-            branch.journal().active_cases.iter().cloned(),
-        )
-    })?;
+    let success = reader.whnf(success)?;
+    let handler = reader.whnf(reader.field(&success, &keys::HANDLER)?)?;
+    let cursor = reader.cursor(&handler)?;
+    let shape = reader.shape(&handler)?;
+    let value = match force_result(execution, reader.field(&success, &keys::VALUE)?) {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(error.with_context(
+                values,
+                cursor.consumed_end(&text),
+                reader.cases(&handler)?,
+            ));
+        }
+    };
     let (is_unit, kind) = values.with_boundary_access(|access| {
         value
             .with_core(&access, |value| {
@@ -233,31 +196,258 @@ pub(in crate::g_syntax) fn run_macro_effect(
             format!("macro effect terminated with {kind}, expected unit"),
         ));
     }
-    if !branch.journal().cursor.balanced() {
+    if !cursor.balanced() {
         return Err(macro_error(
             values,
             "macro reader left an input delimiter unclosed",
         ));
     }
-    if !branch.journal().output_is_complete() {
+    if !shape.output_is_complete() {
         return Err(macro_error(
             values,
             "macro writer left an empty or unclosed layout item",
         ));
     }
-    if branch.journal().is_anchor_expansion() && !branch.journal().cursor.at_end(&input) {
+    if shape.is_anchor_expansion() && !cursor.at_end(&text) {
         return Err(macro_error(
             values,
             "anchored macro output requires consuming the complete input item",
         ));
     }
+    let mut output = Vec::new();
+    for item in reader.items(reader.field(&handler, &keys::OUTPUT)?)? {
+        output.push(reader.output(item)?);
+    }
+    output.reverse();
+    let mut diagnostics = Vec::new();
+    for entry in reader.items(reader.field(&handler, &keys::LOGS)?)? {
+        diagnostics.push(reader.log(entry)?);
+    }
+    diagnostics.reverse();
     Ok(MacroRun {
-        diagnostics: branch.journal().diagnostics().to_vec(),
-        #[cfg(test)]
-        visited_cases: branch.journal().visited_cases.clone(),
-        consumed_end: branch.journal().cursor.consumed_end(&input),
-        output: branch.journal().output().to_vec(),
+        diagnostics,
+        consumed_end: cursor.consumed_end(&text),
+        output,
     })
+}
+
+/// Reads a macro's run, evaluating as it goes in the macro demand session.
+struct Reader<'a> {
+    execution: &'a CompilationExecution,
+}
+
+impl Reader<'_> {
+    fn values(&self) -> &CoreValueFactory {
+        self.execution.macro_context().values()
+    }
+
+    /// `root` evaluated: a failure of the macro's evaluation is the macro's,
+    /// and a wait the compile's.
+    fn whnf(&self, root: RuntimeValueRoot) -> Result<RuntimeValueRoot, Box<MacroFailure>> {
+        self.execution
+            .macro_context()
+            .evaluate_root_whnf(root)
+            .map_err(|error| self.failure(&error))
+    }
+
+    fn failure(&self, error: &EvaluationHalt) -> Box<MacroFailure> {
+        // A panic is never a macro failure: it re-raises to the enclosing
+        // poll boundary instead.
+        if let Some(report) = error.panic_report() {
+            report.resume();
+        }
+        let values = self.values();
+        if error.blocked_on().is_some() {
+            return macro_error(
+                values,
+                "macro effect is waiting on a lazy producer unavailable to the macro demand session",
+            )
+            .waiting_on(self.execution.awaited_reply(error));
+        }
+        match evaluation_cause(values, error) {
+            Some(cause) => macro_error(values, "macro effect failed").caused_by(Some(cause)),
+            None => macro_error(values, format!("macro effect failed: {error}")),
+        }
+    }
+
+    /// The member `key` of `dict`, evaluated already.
+    fn field(
+        &self,
+        dict: &RuntimeValueRoot,
+        key: &Key,
+    ) -> Result<RuntimeValueRoot, Box<MacroFailure>> {
+        self.values()
+            .with_boundary_access(|access| {
+                dict.with_core(&access, |value| match value {
+                    Value::Dict(dict) => dict
+                        .get(key)
+                        .map(|value| access.root_runtime_value(access.duplicate_value(value))),
+                    _ => None,
+                })
+                .flatten()
+            })
+            .ok_or_else(|| macro_error(self.values(), format!("macro run has no `{key:?}`")))
+    }
+
+    /// The items of the list `list`, each unevaluated.
+    fn items(&self, list: RuntimeValueRoot) -> Result<Vec<RuntimeValueRoot>, Box<MacroFailure>> {
+        let public = Values::from_core_factory(self.values().clone());
+        let array = public
+            .anno_array(PublicValue::from_runtime_root(list))
+            .map_err(|error| macro_error(self.values(), error.to_string()))?;
+        let array = self.whnf(array.into_runtime_root())?;
+        self.values()
+            .with_boundary_access(|access| {
+                array
+                    .with_core(&access, |value| match value {
+                        Value::List(list) => list.value_slice().map(|items| {
+                            items
+                                .iter()
+                                .map(|item| access.root_runtime_value(access.duplicate_value(item)))
+                                .collect::<Vec<_>>()
+                        }),
+                        _ => None,
+                    })
+                    .flatten()
+            })
+            .ok_or_else(|| macro_error(self.values(), "macro run's results are not a list"))
+    }
+
+    fn opaque<T: std::any::Any + Send + Sync>(
+        &self,
+        handler: &RuntimeValueRoot,
+        key: &Key,
+    ) -> Result<Arc<T>, Box<MacroFailure>> {
+        let field = self.field(handler, key)?;
+        let values = self.values();
+        values
+            .with_boundary_access(|access| {
+                field
+                    .with_core(&access, |value| match value {
+                        Value::Opaque(value) => value.downcast::<T>(values),
+                        _ => None,
+                    })
+                    .flatten()
+            })
+            .ok_or_else(|| macro_error(values, "macro run's state is not its own"))
+    }
+
+    fn cursor(&self, handler: &RuntimeValueRoot) -> Result<Arc<MacroCursor>, Box<MacroFailure>> {
+        self.opaque(handler, &keys::CURSOR)
+    }
+
+    fn shape(&self, handler: &RuntimeValueRoot) -> Result<Arc<MacroShape>, Box<MacroFailure>> {
+        self.opaque(handler, &keys::SHAPE)
+    }
+
+    /// A branch's active cases, outermost first.
+    fn cases(&self, handler: &RuntimeValueRoot) -> Result<Vec<PublicValue>, Box<MacroFailure>> {
+        let mut cases: Vec<_> = self
+            .items(self.field(handler, &keys::CASES)?)?
+            .into_iter()
+            .map(PublicValue::from_runtime_root)
+            .collect();
+        cases.reverse();
+        Ok(cases)
+    }
+
+    /// One written item, `{text}`, `{data}`, `{sep}`, `{anchor}`,
+    /// `{layout_start}` or `{layout_end}`.
+    fn output(&self, item: RuntimeValueRoot) -> Result<MacroOutput, Box<MacroFailure>> {
+        let item = self.whnf(item)?;
+        let values = self.values();
+        let kind = values.with_boundary_access(|access| {
+            item.with_core(&access, |value| match value {
+                Value::Dict(item) => [
+                    &*keys::TEXT,
+                    &*keys::DATA,
+                    &*keys::SEP,
+                    &*keys::ANCHOR,
+                    &*keys::LAYOUT_START,
+                    &*keys::LAYOUT_END,
+                ]
+                .into_iter()
+                .find(|key| item.get(key).is_some())
+                .cloned(),
+                _ => None,
+            })
+            .flatten()
+        });
+        let foreign = || macro_error(values, "macro run's output is not its own");
+        let kind = kind.ok_or_else(foreign)?;
+        Ok(if kind == *keys::TEXT {
+            let text = self.whnf(self.field(&item, &keys::TEXT)?)?;
+            let text = values
+                .with_boundary_access(|access| {
+                    text.with_core(&access, |value| match value {
+                        Value::Binary(bytes) => String::from_utf8(bytes.to_vec()).ok(),
+                        _ => None,
+                    })
+                    .flatten()
+                })
+                .ok_or_else(foreign)?;
+            MacroOutput::Text(text)
+        } else if kind == *keys::DATA {
+            MacroOutput::Data(PublicValue::from_runtime_root(
+                self.field(&item, &keys::DATA)?,
+            ))
+        } else if kind == *keys::SEP {
+            MacroOutput::Separator
+        } else if kind == *keys::ANCHOR {
+            MacroOutput::Anchor
+        } else if kind == *keys::LAYOUT_START {
+            MacroOutput::LayoutStart
+        } else {
+            MacroOutput::LayoutEnd
+        })
+    }
+
+    /// One `.log` entry, `{severity, message}`, as its diagnostic: the
+    /// message an object, its `msg` evaluated.
+    fn log(&self, entry: RuntimeValueRoot) -> Result<Diagnostic, Box<MacroFailure>> {
+        let entry = self.whnf(entry)?;
+        let values = self.values();
+        let public = Values::from_core_factory(values.clone());
+        let invalid = |message: String| {
+            macro_error(values, "macro effect failed").caused_by(Some(
+                Diagnostic::new_with_factory(values, Severity::Error, message),
+            ))
+        };
+        let severity = self.whnf(self.field(&entry, &keys::SEVERITY)?)?;
+        let severity = EvaluatedValue::from_whnf(&public, PublicValue::from_runtime_root(severity));
+        let severity = crate::reflection::parse_evaluated_severity(&severity)
+            .map_err(|error| invalid(error.to_string()))?;
+        let message = self.whnf(self.field(&entry, &keys::MESSAGE)?)?;
+        let interface = values.with_boundary_access(|access| {
+            message
+                .with_core(&access, |value| match value {
+                    Value::Dict(message) => Some(message.get(&keys::MSG).map(|interface| {
+                        access.root_runtime_value(access.duplicate_value(interface))
+                    })),
+                    _ => None,
+                })
+                .flatten()
+        });
+        let Some(interface) = interface else {
+            return Err(invalid(
+                "`.log` message must evaluate to an object".to_owned(),
+            ));
+        };
+        let message = match interface {
+            None => message,
+            Some(interface) => {
+                let interface = self.whnf(interface)?;
+                values.construct_runtime_value_root(|access| {
+                    let Value::Dict(dict) = message.clone_core_with(access) else {
+                        unreachable!("checked to be a dictionary above")
+                    };
+                    Value::Dict(dict.insert(keys::MSG.clone(), interface.clone_core_with(access)))
+                })
+            }
+        };
+        Diagnostic::from_emission(&public, severity, PublicValue::from_runtime_root(message))
+            .map_err(|error| invalid(error.to_string()))
+    }
 }
 
 fn force_result(
@@ -432,12 +622,10 @@ mod owner_tests {
     fn assert_macro_run_owner(run: &MacroRun) {
         let MacroRun {
             diagnostics,
-            visited_cases,
             consumed_end,
             output,
         } = run;
         let _: &Vec<Diagnostic> = diagnostics;
-        let _: &Vec<PublicValue> = visited_cases;
         let _: &usize = consumed_end;
         let _: &Vec<MacroOutput> = output;
     }
@@ -476,21 +664,17 @@ mod owner_tests {
         let core = crate::core::private_test_value_factory();
         let values = Values::from_core_factory(core.clone());
         let domain = EffectTokenDomain::new(&values);
-        let (visited, retained_visited) = retained_value(&domain);
         let (output, retained_output) = retained_value(&domain);
         let run = MacroRun {
             diagnostics: Vec::new(),
-            visited_cases: vec![visited],
             consumed_end: 0,
             output: vec![MacroOutput::Data(output)],
         };
 
         domain.collect_and_drain_retired_external_owners_for_test();
-        assert!(retained_visited.upgrade().is_some());
         assert!(retained_output.upgrade().is_some());
         drop(run);
         domain.collect_and_drain_retired_external_owners_for_test();
-        assert!(retained_visited.upgrade().is_none());
         assert!(retained_output.upgrade().is_none());
 
         let (case, retained_case) = retained_value(&domain);

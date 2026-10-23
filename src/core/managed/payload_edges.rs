@@ -161,10 +161,14 @@ impl CompatibilityValueEdges for ListEffectComputation {
                 outcomes,
                 control,
                 api,
+                value,
             } => {
                 outcomes.visit_compatibility_value_edges(visit);
                 control.sequence.visit_compatibility_value_edges(visit);
                 visit(api);
+                if let Some(value) = value {
+                    visit(value);
+                }
             }
             Self::HandlerCut { outcomes, api } => {
                 outcomes.visit_compatibility_value_edges(visit);

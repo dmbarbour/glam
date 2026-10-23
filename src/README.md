@@ -50,7 +50,7 @@ not define language semantics or collect subsystem invariants.
 | `g_syntax/recursive_do.rs` | Forward-name registry and declaration/fulfillment plan for recursive `do` |
 | `g_syntax/resolve/`, `resolved.rs`, `analysis.rs`, `name_analysis.rs` | Resolution, affine IR, and source analysis |
 | `g_syntax/compiler_values.rs` | Atomically published, runtime-rooted closed compiler helpers and modules |
-| `g_syntax/macro_expansion/` | Macro effect API, journals, and isolated search |
+| `g_syntax/macro_expansion/` | Macro input and output structures, and the macro's run by the pure handler: its accepted success, or its failures' furthest frontier and cases |
 | `g_syntax/module_lowering/` | Imports, definitions, objects, module fixpoint |
 | `g_syntax/net_lowering.rs` | Resolved functions and applications to closed nets |
 | `g_syntax/diagnostic_formatter.rs` | Cached Glam `Diagnostic -> Bytes` formatter |
@@ -80,6 +80,7 @@ not define language semantics or collect subsystem invariants.
 | `eval/list_machine.rs` | Pollable logical-list front and back projection shared by other machines |
 | `eval/list_effect_machine.rs` | Regional reducer for the lazy list-effect recipe family: `list.pure`, its fixpoint, and the pure handler's states, reduced by `handler_machine` |
 | `eval/handler_machine.rs` | A pure handler's run and walks: threads a user's and a handler's state through each branch, keeps every branch, failed ones with their state, and carries its continuation, whose reset frames live in the user's state, for `.fix`, `.reset` and `.shift` |
+| `eval/macro_machine.rs` | Source macros' operations as private builtins over an opaque input and each branch's reader, output shape, output, cases and logs; `.case` and the layouts as scoped requests |
 | `eval/token_machine.rs` | The CLI token parser's operations as private builtins over an opaque token context and each branch's cursor and evidence |
 | `eval/list_transform_machine.rs` | Non-forcing structural `map` and `list.concat` |
 | `eval/tagged_machine.rs` | Shared resumable tagged-payload recognition and iterative semantic-undefined traversal |

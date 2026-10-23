@@ -299,6 +299,8 @@ pub(in crate::eval) struct RegionalHandlerRun {
     state: Value,
     control: HandlerControl,
     api: Value,
+    /// The value a scoped request's close answers with in place of its own.
+    value: Option<Value>,
 }
 
 impl RegionalHandlerRun {
@@ -315,6 +317,7 @@ impl RegionalHandlerRun {
             source_owner,
             phase: RunPhase::Effect(values.duplicate_value(effect)),
             demand: None,
+            value: None,
             state: values.duplicate_value(state),
             control: control.clone(),
             api: values.duplicate_value(api),
@@ -342,6 +345,7 @@ impl RegionalHandlerRun {
                 ),
             },
             demand: None,
+            value: None,
             state: values.duplicate_value(state),
             control,
             api: values.duplicate_value(api),
@@ -466,6 +470,7 @@ impl RegionalHandlerRun {
                         outcomes,
                         control: self.control.clone(),
                         api: values.duplicate_value(&self.api),
+                        value: self.value.take(),
                     },
                 )))
             }
@@ -494,6 +499,17 @@ impl RegionalHandlerRun {
                         unreachable!("a continuation's sequence keeps a list tail")
                     };
                     let value = values.duplicate_value(value);
+                    if let Value::PartialBuiltin(call) = &frame
+                        && call.builtin == Builtin::HandlerClose
+                        && let [close] = &*call.arguments
+                    {
+                        // A scoped request's close, which answers with its
+                        // operation's value.
+                        self.phase = RunPhase::Outcomes(values.duplicate_value(close));
+                        self.control.sequence = rest;
+                        self.value = Some(value);
+                        return RegionalListEffectPoll::Continue;
+                    }
                     if is_cut_mark(access, &frame) {
                         // The cut's walk continues the first outcome to stop
                         // here.
@@ -649,6 +665,21 @@ impl RegionalHandlerRun {
                 value: duplicate(value),
                 front: self.front_in(access),
             },
+            (Builtin::HandlerScoped, [open, operation, close]) => {
+                let frames = [Builtin::HandlerConst, Builtin::HandlerClose]
+                    .into_iter()
+                    .zip([operation, close])
+                    .map(|(builtin, argument)| {
+                        Value::PartialBuiltin(BuiltinCall {
+                            builtin,
+                            arguments: Arc::from([duplicate(argument)]),
+                        })
+                    })
+                    .collect();
+                self.control.sequence =
+                    List::concat(List::from_values(frames), self.control.sequence.clone());
+                RunPhase::Outcomes(duplicate(open))
+            }
             (Builtin::HandlerSeq, [operation, continuation]) => {
                 self.control.sequence = List::concat(
                     List::from_values(vec![duplicate(continuation)]),
@@ -948,6 +979,7 @@ impl RegionalHandlerRun {
                 outcomes: fixed,
                 control: self.control.clone(),
                 api: values.duplicate_value(&self.api),
+                value: None,
             },
         )
     }
@@ -1031,6 +1063,9 @@ impl RegionalHandlerRun {
             visitor,
         );
         trace_compatibility_value_managed_edges(&self.api, visitor);
+        if let Some(value) = &self.value {
+            trace_compatibility_value_managed_edges(value, visitor);
+        }
     }
 }
 
@@ -1062,8 +1097,13 @@ fn decode_stop(_access: &EvaluationValueAccess<'_>, stop: &Value) -> Option<Hand
 
 /// What a walk of outcomes does with each.
 enum Walk {
-    /// Returns each success to `control`; passes each failure.
-    Continue { control: HandlerControl, api: Value },
+    /// Returns each success, or `value` in its place, to `control`; passes
+    /// each failure.
+    Continue {
+        control: HandlerControl,
+        api: Value,
+        value: Option<Value>,
+    },
     /// Continues the first outcome stopped at this cut, after passing those
     /// before it; ends there.
     Cut { api: Value },
@@ -1095,10 +1135,12 @@ impl RegionalHandlerWalk {
                 outcomes,
                 control,
                 api,
+                value,
             } => (
                 Walk::Continue {
                     control: control.clone(),
                     api: values.duplicate_value(api),
+                    value: value.as_ref().map(|value| values.duplicate_value(value)),
                 },
                 outcomes,
             ),
@@ -1198,11 +1240,16 @@ impl RegionalHandlerWalk {
         let stop = fields.get(&STOP);
         let rest = |walk: ListEffectComputation| deferred_list_in(access, walk);
         match &self.walk {
-            Walk::Continue { control, api } => {
+            Walk::Continue {
+                control,
+                api,
+                value: answer,
+            } => {
                 let rest = rest(ListEffectComputation::HandlerContinue {
                     outcomes: tail,
                     control: control.clone(),
                     api: values.duplicate_value(api),
+                    value: answer.as_ref().map(|value| values.duplicate_value(value)),
                 });
                 if failed {
                     return RegionalListEffectPoll::Ready(cons_in(access, outcome, rest));
@@ -1214,7 +1261,7 @@ impl RegionalHandlerWalk {
                 };
                 let continued = return_list_in(
                     access,
-                    values.duplicate_value(value),
+                    values.duplicate_value(answer.as_ref().unwrap_or(value)),
                     values.duplicate_value(state),
                     control.clone(),
                     values.duplicate_value(api),
@@ -1293,7 +1340,14 @@ impl RegionalHandlerWalk {
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match &self.walk {
-            Walk::Continue { control, api } => {
+            Walk::Continue {
+                control,
+                api,
+                value,
+            } => {
+                if let Some(value) = value {
+                    trace_compatibility_value_managed_edges(value, visitor);
+                }
                 trace_compatibility_value_managed_edges(
                     &Value::List(control.sequence.clone()),
                     visitor,
@@ -1426,8 +1480,10 @@ pub(in crate::eval) fn apply_handler_builtin_in(
         | Builtin::HandlerFix
         | Builtin::HandlerReset
         | Builtin::HandlerShift
-        | Builtin::HandlerResume => Err(EvaluationHalt::new(
-            "`.seq`, `.alt`, `.cut`, `.fix`, `.reset`, `.shift` and a continuation run only within their pure handler",
+        | Builtin::HandlerResume
+        | Builtin::HandlerScoped
+        | Builtin::HandlerClose => Err(EvaluationHalt::new(
+            "`.seq`, `.alt`, `.cut`, `.fix`, `.reset`, `.shift`, scoped requests and continuations run only within their pure handler",
         )),
         Builtin::HandlerFail => {
             let [state] = exact(arguments, "handler fail")?;
@@ -1474,6 +1530,10 @@ pub(in crate::eval) fn apply_handler_builtin_in(
         Builtin::HandlerFixApply => {
             let arguments: [Value; 5] = exact(arguments, "handler fix")?;
             Ok(effect(Builtin::HandlerFixRun, arguments.into()))
+        }
+        Builtin::HandlerConst => {
+            let [value, _] = exact(arguments, "handler const")?;
+            Ok(value)
         }
         Builtin::HandlerFixRun => {
             let [function, state, api, resets, future, _list_api] =

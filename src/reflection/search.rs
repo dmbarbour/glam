@@ -8,7 +8,6 @@ use super::protocol::{
 use super::requests::ReflectionServices;
 use super::store::{ExactConflictAnalysis, ReflectionStore, StoreSnapshot};
 use crate::api::{Diagnostic, Value as PublicValue, Values};
-use crate::core::CoreValueFactory;
 use crate::evaluation::{EvalContext, EvaluationWaitToken, WorkDependency};
 
 /// Immutable host for one all-results effect search.
@@ -38,14 +37,6 @@ impl<X> IsolatedTaskHost<X> {
                 .snapshot(),
             extra,
         })
-    }
-
-    pub(crate) fn new_core(values: CoreValueFactory, environment: PublicValue, extra: X) -> Self {
-        Self {
-            environment,
-            store: ReflectionStore::new(values, Arc::new(ExactConflictAnalysis)).snapshot(),
-            extra,
-        }
     }
 }
 
@@ -694,7 +685,8 @@ mod tests {
         let values = crate::core::test_value_factory();
         let public_values = Values::from_core_factory(values.clone());
         let environment = public_values.empty_dict();
-        let host = IsolatedTaskHost::new_core(values, environment.clone(), ());
+        let host = IsolatedTaskHost::new(&public_values, environment.clone(), ())
+            .expect("the environment belongs to the runtime");
         let snapshot = <IsolatedTaskHost<()> as TaskHost<StandardEffects>>::snapshot(&host);
 
         assert_eq!(snapshot.generation(), 1);

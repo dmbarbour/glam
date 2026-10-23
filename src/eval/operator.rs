@@ -485,8 +485,3 @@ pub(crate) fn constant_effect_in(
     ));
     Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
 }
-
-#[cfg(test)]
-pub(crate) fn constant_effect(values: &impl crate::core::TestAccess, request: Value) -> Value {
-    values.test_access(|access| constant_effect_in(access, request))
-}

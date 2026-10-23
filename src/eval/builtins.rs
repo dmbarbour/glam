@@ -47,6 +47,12 @@ pub(super) fn apply_builtin_in(
     }
 
     let deferred = |arguments| {
+        // A deferred builtin reduces only by its regional machine: one
+        // without would be applied again on demand, and defer again, forever.
+        debug_assert!(
+            super::builtin_machine::RegionalBuiltinMachine::supports(builtin),
+            "{builtin:?} defers without a regional machine"
+        );
         Value::Lazy(LazyValue::from_builtin_in(
             access.values(),
             BuiltinCall {
@@ -166,9 +172,16 @@ pub(super) fn apply_builtin_in(
         | Builtin::HandlerContinuation
         | Builtin::HandlerResume
         | Builtin::HandlerFixApply
-        | Builtin::HandlerFixRun => {
+        | Builtin::HandlerFixRun
+        | Builtin::HandlerScoped
+        | Builtin::HandlerConst
+        | Builtin::HandlerClose => {
             super::handler_machine::apply_handler_builtin_in(access, builtin, arguments)
         }
+        Builtin::MacroScoped | Builtin::MacroLog => {
+            super::macro_machine::apply_macro_builtin_in(access, builtin, arguments)
+        }
+        Builtin::MacroOperation | Builtin::MacroOperationOn => Ok(deferred(arguments)),
         Builtin::TokenText
         | Builtin::TokenRegex
         | Builtin::TokenTextSpan

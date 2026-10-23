@@ -47,9 +47,7 @@ pub use token_parse::{TokenCandidate, TokenExpectation, TokenRun, run_token_pars
 pub(crate) use requests::assert_task_handle_family_shape;
 #[cfg(test)]
 pub(crate) use requests::task_status_public_value_for_test;
-pub(crate) use requests::{
-    KeyListRequestWork, PreparationPoll, ValuePathRequestWork, parse_evaluated_severity,
-};
+pub(crate) use requests::{KeyListRequestWork, PreparationPoll, parse_evaluated_severity};
 pub use requests::{
     ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
     ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionTransaction,

@@ -97,7 +97,8 @@ search object: about 700 lines in all.
      - `pure-handler-macro-resume`: a macro's run, a lazy value, stays in
        the compile's replay cache, so a compile replayed after a wait on
        an import resumes the macro where it waited rather than running it
-       again; only while that stays small.
+       again; only while that stays small. Not built (2026-10-23): see
+       Built, below.
      - Imports stay evaluation dependencies, not macro effects: a macro is
        a pure function of its input and environment. Were macros ever to
        make the front end's requests, the shape is a pass-through to the
@@ -190,6 +191,50 @@ search object: about 700 lines in all.
     has ended returns through a mark no walk awaits; the run fails with a
     diagnostic rather than guess. The effect machine orders its delimiters
     to decide this; the pure handler has no such order yet.
+
+- `pure-handler-macro-ops` and `pure-handler-macro-run` (2026-10-23):
+  macros run by the pure handler within the macro demand session, and
+  `MacroEffects`, `MacroHost` and the macro's isolated search are gone.
+  - The core gained a scoped request, held by the run as `.seq` is: an
+    opening request, an operation, then a closing request, answering with
+    the operation's value. `.case`, `.read.layout` and `.write.layout` are
+    scoped requests over hidden operations, so a failure within keeps what
+    the opening changed, the case pushed or the layout entered, as
+    evidence; the CLI's `.case` can reuse it.
+  - The operations, `eval/macro_machine.rs`, are private builtins: two
+    families dispatched by an operation's code, with or without an
+    argument, as the token parser's are one builtin each. The input's
+    structure is an opaque, edge-free payload; the reader's position and
+    the output's shape are opaque per branch; the embedded data, the
+    environment, the output, the active cases and the logs are plain
+    values in the handler's state. The cursor moved there from
+    `g_syntax`, which builds the input as before and splits out its data.
+  - The runner reads every success, rejecting more than one, as the
+    search did by running every branch; otherwise every failure, for the
+    furthest frontier and the cases active there. `.log` entries are
+    validated and become diagnostics only for the accepted branch, where
+    the search validated each as it ran: a malformed `.log` in a branch
+    that fails no longer fails the macro.
+  - A macro's waits surface as before: a run blocked on a reply the macro
+    session cannot produce fails with the reply, for the compile to wait
+    on and replay.
+  - Tests that built macro effects from reflection request records now
+    build them as the front end lowers `.r`, a call of the API's member;
+    the test-only record of visited cases went with the journal.
+  - The macro session's evaluation stays patient, as the old runner's
+    pumping was: it waits while other work progresses, and returns a wait
+    when nothing can.
+- `pure-handler-macro-resume` not built (2026-10-23), as the maintainer
+  allowed where macros interact badly with the compile's replay. A macro
+  that forces an import while it runs, not while it is looked up, never
+  yields its wait to the compile: from the macro's demand session the
+  pending reply looks owned by work in progress, the root's own suspended
+  turn. The isolated search spun on it at full CPU; the pure handler's run
+  blocks. Lookup's waits, as in `a_macro_that_forces_an_import_while_
+  compiling_waits_and_compiles_again`, are unaffected. Keeping a macro's
+  run across replays only pays once such a wait reaches the compile, so it
+  waits on a fix to how a demand session classifies a reply that another
+  session's suspended demand awaits; a roadmap item, `macro-import-waits`.
 
 ## Answers (maintainer, 2026-10-23)
 

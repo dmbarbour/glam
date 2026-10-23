@@ -977,6 +977,13 @@ Later, beyond this plan (2026-10-21):
   bootstrap loop with small changes; the builtin then converts `scope`,
   `lang` and `source` to a key and passes `compiler`, a function, as a
   value.
+- `macro-import-waits` (found 2026-10-23, `pure-handler-macro-resume`): a
+  macro that forces an import while it runs never yields its wait to the
+  compile. From the macro's demand session, the pending reply looks owned
+  by work in progress, which is the root's own suspended turn, so the run
+  waits on it; the isolated search, before it, spun on it instead. A wait
+  during a macro's lookup is unaffected. Until this is fixed, keeping a
+  macro's run across a compile's replays would not help.
 - `origin-meta-refl` — compilation origins as `meta_refl` metadata, not
   opaque payloads that `glam.origin.inspect` opens (maintainer).
 - `api-dict-ops` — a review of the machine's dict operations, for building

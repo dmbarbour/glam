@@ -9,11 +9,11 @@ use crate::diagnostic::Severity;
 use crate::eval;
 use crate::runtime::RuntimeValueRoot;
 
-use super::effects::validate_written_text;
 use super::io::{
     MacroDelimiter, MacroInput, MacroInputElement, MacroInputKind, MacroInputLayout, MacroOutput,
 };
 use super::{MacroFailure, MacroRun, run_macro_effect};
+use crate::eval::validate_written_text;
 
 /// Collects each published diagnostic's text, evaluating it as a renderer
 /// does (`senders-never-evaluate-diagnostics`).
@@ -161,26 +161,18 @@ fn environment_root(execution: &CompilationExecution, environment: Value) -> Run
     RuntimeValueRoot::new(execution.macro_context().values(), environment)
 }
 
-fn request_effect(
-    values: &impl crate::core::TestAccess,
-    path: &[&str],
-    arguments: Vec<Value>,
-) -> Value {
-    eval::constant_effect(
-        values,
-        Value::Dict(Dict::new_sync().insert(
-            Key::atom_from_key(&Key::abstract_global_path(path.iter().copied())),
-            Value::List(List::from_values(arguments)),
-        )),
-    )
-}
-
-fn return_effect(values: &impl crate::core::TestAccess, value: Value) -> Value {
-    request_effect(
-        values,
-        &["reflection_runtime", "v0", "request", "r"],
-        vec![value],
-    )
+/// `.r value`, as the front end lowers it: an effect calling the API's `r`.
+fn return_effect(_values: &impl crate::core::TestAccess, value: Value) -> Value {
+    Value::Dict(Dict::new_sync().insert(
+        Key::atom_from_text("eff"),
+        Value::PartialBuiltin(crate::core::BuiltinCall {
+            builtin: crate::core::Builtin::EffectCall,
+            arguments: Arc::from([
+                Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text("r"))),
+                Value::List(List::from_values(vec![value])),
+            ]),
+        }),
+    ))
 }
 
 #[test]
@@ -201,7 +193,6 @@ fn macro_runner_exposes_environment_log_and_scoped_cases() {
         result.diagnostics()[0].rendered_text_for_test(&assembler.values()),
         "visible"
     );
-    assert_eq!(result.visited_cases().len(), 1);
 }
 
 #[test]
@@ -258,7 +249,7 @@ fn macro_runner_distinguishes_a_non_effect_value() {
         .expect("the effect's own failure is the macro failure's cause");
     let text = cause.rendered_text_for_test(&assembler.values());
     assert!(
-        text.contains("reflection task requires an effect object"),
+        text.contains("requires an effect dictionary"),
         "unexpected diagnostic: {text}"
     );
 }

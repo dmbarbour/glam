@@ -95,6 +95,19 @@ protocol_key!(OFFSET, "offset");
 protocol_key!(LABEL, "label");
 protocol_key!(REPLACEMENT, "replacement");
 protocol_key!(SPAN, "span");
+// Source macros' handler state, output and logs (`pure-handler-macro-ops`).
+protocol_key!(INPUT, "input");
+protocol_key!(DATA, "data");
+protocol_key!(ENV, "env");
+protocol_key!(SHAPE, "shape");
+protocol_key!(OUTPUT, "output");
+protocol_key!(CASES, "cases");
+protocol_key!(LOGS, "logs");
+protocol_key!(MESSAGE, "message");
+protocol_key!(SEP, "sep");
+protocol_key!(ANCHOR, "anchor");
+protocol_key!(LAYOUT_START, "layout_start");
+protocol_key!(LAYOUT_END, "layout_end");
 
 pub(crate) static UNIT: LazyLock<Key> =
     LazyLock::new(|| Key::abstract_global_path(["builtin", "unit"]));

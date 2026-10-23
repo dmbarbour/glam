@@ -1,10 +1,8 @@
-//! Restricted effect execution used by the built-in compiler's source macros.
-//!
-//! It owns the isolated effect runner, branch-local cursor and output journals,
-//! and the logical input/output structures used by staged source expansion.
+//! Source macros for the built-in compiler: the logical input and output
+//! structures of staged source expansion, and the macro's run by the pure
+//! handler, whose operations live in `eval::macro_machine`
+//! (`pure-handler-macro-run`).
 
-mod effects;
-mod host;
 mod io;
 mod runner;
 

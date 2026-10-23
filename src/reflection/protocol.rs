@@ -1090,7 +1090,6 @@ mod root_inventory_tests {
             include_str!("protocol.rs"),
             include_str!("machine/tests.rs"),
             include_str!("search.rs"),
-            include_str!("../g_syntax/macro_expansion/effects.rs"),
             include_str!("../bin/glam/configuration/logger/effects.rs"),
             include_str!("../bin/glam/command_line/configured/effects.rs"),
             include_str!("../api/turn/effects.rs"),
@@ -1103,11 +1102,11 @@ mod root_inventory_tests {
                 .sum::<usize>()
         };
 
-        assert_eq!(count(concat!("impl Task", "Specialization for ")), 10);
-        assert_eq!(count(concat!("type Request", "Work =")), 10);
+        assert_eq!(count(concat!("impl Task", "Specialization for ")), 9);
+        assert_eq!(count(concat!("type Request", "Work =")), 9);
         // One declaration belongs to the trait; every implementation supplies
-        // the remaining ten constructors.
-        assert_eq!(count(concat!("fn start", "_request(")), 11);
+        // the remaining nine constructors.
+        assert_eq!(count(concat!("fn start", "_request(")), 10);
         assert_eq!(count(concat!("SynchronousRequest", "Work<Self>")), 0);
         assert_eq!(count(concat!("SynchronousTask", "Specialization for ")), 0);
         assert_eq!(
