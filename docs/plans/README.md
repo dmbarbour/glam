@@ -76,6 +76,13 @@ flags a step for discussion when work reaches it, not a decision.
   Drafted 2026-10-22 at the maintainer's request; open questions wait for
   the maintainer, and the build waits for a use case or the end of the
   runtime API transition.
+- [`PureHandlers_2026-10-23.md`](PureHandlers_2026-10-23.md): `pure-handler-`
+  steps, a sketch for the maintainer: specialized pure handlers, after
+  `list.pure`'s pattern, to replace the CLI's argument and token parsers
+  and source macros, which run under the isolated search. A shared core
+  keeps every branch with its state; each handler adds a table of
+  operations; host facts are gathered before a parse. Drafted 2026-10-23;
+  open questions wait for the maintainer.
 - [`PollBudget_2026-10-22.md`](PollBudget_2026-10-22.md): `budget-` steps
   from an audit of how polls spend and report their budget: coarse-grained
   steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`
