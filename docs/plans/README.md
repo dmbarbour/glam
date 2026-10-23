@@ -97,6 +97,10 @@ flags a step for discussion when work reaches it, not a decision.
   machines, the effects mapped to machine operations, obligations in place
   of `.exit`, and which waits settlement reports as unresolved. Its
   implementation is `api-reflection-machines`.
+- [`TagTailSyntax_2026-10-23.md`](TagTailSyntax_2026-10-23.md): `tags-tail-`
+  steps, a tentative experiment (maintainer, 2026-10-23): a tag reads as a
+  tail form whether its `:` is joint or spaced, and appears only where a
+  tail can, to see whether tags grow clearer. On a branch until judged.
 - [`TagPrefixSyntax_2026-10-16.md`](TagPrefixSyntax_2026-10-16.md):
   `path:` is a prefix operator and `:name` a pun everywhere, so braces lost
   their member grammar; follow-ups retired bare tags, rejected tags as
