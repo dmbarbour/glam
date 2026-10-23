@@ -156,97 +156,140 @@ pub(in crate::eval) struct RegionalStrategyMachine {
 }
 
 impl RegionalBuiltinMachine {
+    /// Whether `builtin` reduces by a regional machine: every builtin that
+    /// defers its application, and only those. The match names every builtin,
+    /// so a new one must choose; one that defers without a machine would be
+    /// applied again on demand, and defer again, forever.
     pub(in crate::eval) fn supports(builtin: Builtin) -> bool {
-        matches!(
-            builtin,
+        match builtin {
             Builtin::AssertUnit
-                | Builtin::Anno
-                | Builtin::IfResult
-                | Builtin::MatchResult
-                | Builtin::Greater
-                | Builtin::GreaterEqual
-                | Builtin::Equal
-                | Builtin::NotEqual
-                | Builtin::LessEqual
-                | Builtin::Less
-                | Builtin::Add
-                | Builtin::Subtract
-                | Builtin::Multiply
-                | Builtin::Divide
-                | Builtin::Floor
-                | Builtin::Mod
-                | Builtin::InspectOrigin
-                | Builtin::CompileSource
-                | Builtin::InteractionNet
-                | Builtin::InteractionNetFromNetlist
-                | Builtin::InteractionNetBuilderGet
-                | Builtin::InteractionNetBuilderSet
-                | Builtin::InteractionNetBuilderReset
-                | Builtin::InteractionNetBuilderShift
-                | Builtin::InteractionNetBuilderBind
-                | Builtin::InteractionNetBuilderCopy
-                | Builtin::InteractionNetBuilderData
-                | Builtin::InteractionNetBuilderWire
-                | Builtin::InteractionNetBuilderRun
-                | Builtin::NetArity
-                | Builtin::Seq
-                | Builtin::Spark
-                | Builtin::DictSingleton
-                | Builtin::DictUnion
-                | Builtin::DictUpdate
-                | Builtin::DictPairs
-                | Builtin::DictFromEntries
-                | Builtin::DictFromPairs
-                | Builtin::Default
-                | Builtin::MergeDuplicate
-                | Builtin::Slice
-                | Builtin::ListLen
-                | Builtin::ListSplit
-                | Builtin::ListSplitEnd
-                | Builtin::ListAt
-                | Builtin::ListHead
-                | Builtin::ListTail
-                | Builtin::ListReverse
-                | Builtin::Map
-                | Builtin::ListConcat
-                | Builtin::TextLines
-                | Builtin::JournalConflicts
-                | Builtin::PatternIsList
-                | Builtin::PatternListTryUncons
-                | Builtin::PatternListTryUnsnoc
-                | Builtin::PatternListIsEmpty
-                | Builtin::PatternIsDict
-                | Builtin::PatternDictIsEmpty
-                | Builtin::PatternDictTryTake
-                | Builtin::PatternDictTryTakeOptional
-                | Builtin::PatternEqual
-                | Builtin::PatternPathEqual
-                | Builtin::EffectApply
-                | Builtin::EffectCall
-                | Builtin::EffectMap
-                | Builtin::EffectMapRun
-                | Builtin::EffectMapContinue
-                | Builtin::Fixpoint
-                | Builtin::ObjectSpec
-                | Builtin::ObjectLocalName
-                | Builtin::DiagnosticObject
-                | Builtin::DiagnosticContextDefs
-                | Builtin::ObjectInstance
-                | Builtin::ObjectInstanceFromParts
-                | Builtin::ObjectDefaultDefs
-                | Builtin::ObjectDictDefs
-                | Builtin::ObjectFromDict
-                | Builtin::ObjectWithDefs
-                | Builtin::ObjectComposedDefs
-                | Builtin::ObjectOverrideDefs
-                | Builtin::TokenText
-                | Builtin::TokenRegex
-                | Builtin::TokenTextSpan
-                | Builtin::TokenAny
-                | Builtin::TokenEnd
-                | Builtin::MacroOperation
-                | Builtin::MacroOperationOn
-        )
+            | Builtin::Anno
+            | Builtin::IfResult
+            | Builtin::MatchResult
+            | Builtin::Greater
+            | Builtin::GreaterEqual
+            | Builtin::Equal
+            | Builtin::NotEqual
+            | Builtin::LessEqual
+            | Builtin::Less
+            | Builtin::Add
+            | Builtin::Subtract
+            | Builtin::Multiply
+            | Builtin::Divide
+            | Builtin::Floor
+            | Builtin::Mod
+            | Builtin::InspectOrigin
+            | Builtin::CompileSource
+            | Builtin::InteractionNet
+            | Builtin::InteractionNetFromNetlist
+            | Builtin::InteractionNetBuilderGet
+            | Builtin::InteractionNetBuilderSet
+            | Builtin::InteractionNetBuilderReset
+            | Builtin::InteractionNetBuilderShift
+            | Builtin::InteractionNetBuilderBind
+            | Builtin::InteractionNetBuilderCopy
+            | Builtin::InteractionNetBuilderData
+            | Builtin::InteractionNetBuilderWire
+            | Builtin::InteractionNetBuilderRun
+            | Builtin::NetArity
+            | Builtin::Seq
+            | Builtin::Spark
+            | Builtin::DictSingleton
+            | Builtin::DictUnion
+            | Builtin::DictUpdate
+            | Builtin::DictPairs
+            | Builtin::DictFromEntries
+            | Builtin::DictFromPairs
+            | Builtin::Default
+            | Builtin::MergeDuplicate
+            | Builtin::Slice
+            | Builtin::ListLen
+            | Builtin::ListSplit
+            | Builtin::ListSplitEnd
+            | Builtin::ListAt
+            | Builtin::ListHead
+            | Builtin::ListTail
+            | Builtin::ListReverse
+            | Builtin::Map
+            | Builtin::ListConcat
+            | Builtin::TextLines
+            | Builtin::JournalConflicts
+            | Builtin::PatternIsList
+            | Builtin::PatternListTryUncons
+            | Builtin::PatternListTryUnsnoc
+            | Builtin::PatternListIsEmpty
+            | Builtin::PatternIsDict
+            | Builtin::PatternDictIsEmpty
+            | Builtin::PatternDictTryTake
+            | Builtin::PatternDictTryTakeOptional
+            | Builtin::PatternEqual
+            | Builtin::PatternPathEqual
+            | Builtin::EffectApply
+            | Builtin::EffectCall
+            | Builtin::EffectMap
+            | Builtin::EffectMapRun
+            | Builtin::EffectMapContinue
+            | Builtin::Fixpoint
+            | Builtin::ObjectSpec
+            | Builtin::ObjectLocalName
+            | Builtin::DiagnosticObject
+            | Builtin::DiagnosticContextDefs
+            | Builtin::ObjectInstance
+            | Builtin::ObjectInstanceFromParts
+            | Builtin::ObjectDefaultDefs
+            | Builtin::ObjectDictDefs
+            | Builtin::ObjectFromDict
+            | Builtin::ObjectWithDefs
+            | Builtin::ObjectComposedDefs
+            | Builtin::ObjectOverrideDefs
+            | Builtin::TokenText
+            | Builtin::TokenRegex
+            | Builtin::TokenTextSpan
+            | Builtin::TokenAny
+            | Builtin::TokenEnd
+            | Builtin::MacroOperation
+            | Builtin::MacroOperationOn => true,
+            Builtin::Append
+            | Builtin::InteractionNetBuilderReturn
+            | Builtin::InteractionNetBuilderSeq
+            | Builtin::InteractionNetBuilderContinue
+            | Builtin::InteractionNetBuilderAlt
+            | Builtin::InteractionNetBuilderFail
+            | Builtin::InteractionNetBuilderCut
+            | Builtin::InteractionNetBuilderResume
+            | Builtin::InteractionNetBuilderResumeApply
+            | Builtin::InteractionNetBuilderFix
+            | Builtin::InteractionNetBuilderFixApply
+            | Builtin::InteractionNetBuilderFixRun
+            | Builtin::InteractionNetBuilderFixRestore
+            | Builtin::MixinCompose
+            | Builtin::ListEffect
+            | Builtin::ListEffectReturn
+            | Builtin::ListEffectSeq
+            | Builtin::ListEffectAlt
+            | Builtin::ListEffectCut
+            | Builtin::ListEffectFix
+            | Builtin::Handler
+            | Builtin::HandlerReturn
+            | Builtin::HandlerSeq
+            | Builtin::HandlerAlt
+            | Builtin::HandlerFail
+            | Builtin::HandlerCut
+            | Builtin::HandlerGet
+            | Builtin::HandlerSet
+            | Builtin::HandlerFix
+            | Builtin::HandlerReset
+            | Builtin::HandlerShift
+            | Builtin::HandlerContinuation
+            | Builtin::HandlerResume
+            | Builtin::HandlerFixApply
+            | Builtin::HandlerFixRun
+            | Builtin::HandlerScoped
+            | Builtin::HandlerConst
+            | Builtin::HandlerClose
+            | Builtin::MacroScoped
+            | Builtin::MacroLog => false,
+        }
     }
 
     pub(in crate::eval) fn new_in(
@@ -472,7 +515,12 @@ impl RegionalBuiltinMachine {
             Builtin::PatternPathEqual => Self::PatternPath(Box::new(
                 RegionalPatternPathMachine::new_in(access, source_owner, arguments),
             )),
-            _ => Self::Numeric(RegionalNumericMachine {
+            Builtin::Add
+            | Builtin::Subtract
+            | Builtin::Multiply
+            | Builtin::Divide
+            | Builtin::Floor
+            | Builtin::Mod => Self::Numeric(RegionalNumericMachine {
                 builtin,
                 arguments: arguments
                     .iter()
@@ -483,6 +531,7 @@ impl RegionalBuiltinMachine {
                 numbers: Vec::with_capacity(arguments.len()),
                 source_owner,
             }),
+            _ => unreachable!("{builtin:?} reduces regionally but has no machine"),
         }
     }
 

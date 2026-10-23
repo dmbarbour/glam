@@ -49,17 +49,18 @@ pub(super) fn apply_builtin_in(
     let deferred = |arguments| {
         // A deferred builtin reduces only by its regional machine: one
         // without would be applied again on demand, and defer again, forever.
-        debug_assert!(
-            super::builtin_machine::RegionalBuiltinMachine::supports(builtin),
-            "{builtin:?} defers without a regional machine"
-        );
-        Value::Lazy(LazyValue::from_builtin_in(
+        if !super::builtin_machine::RegionalBuiltinMachine::supports(builtin) {
+            return Err(EvaluationHalt::new(format!(
+                "internal error: {builtin:?} defers without a regional machine"
+            )));
+        }
+        Ok(Value::Lazy(LazyValue::from_builtin_in(
             access.values(),
             BuiltinCall {
                 builtin,
                 arguments: Arc::from(arguments),
             },
-        ))
+        )))
     };
 
     match builtin {
@@ -76,9 +77,9 @@ pub(super) fn apply_builtin_in(
         | Builtin::LessEqual
         | Builtin::Less
         | Builtin::Seq
-        | Builtin::Spark => Ok(deferred(arguments)),
+        | Builtin::Spark => deferred(arguments),
         Builtin::Map | Builtin::ListConcat | Builtin::TextLines | Builtin::JournalConflicts => {
-            Ok(deferred(arguments))
+            deferred(arguments)
         }
         Builtin::Append => {
             let [left, right] = exact(arguments, "append")?;
@@ -91,7 +92,7 @@ pub(super) fn apply_builtin_in(
         | Builtin::ListAt
         | Builtin::ListHead
         | Builtin::ListTail
-        | Builtin::ListReverse => Ok(deferred(arguments)),
+        | Builtin::ListReverse => deferred(arguments),
         Builtin::PatternIsList
         | Builtin::PatternListTryUncons
         | Builtin::PatternListTryUnsnoc
@@ -101,7 +102,7 @@ pub(super) fn apply_builtin_in(
         | Builtin::PatternDictIsEmpty
         | Builtin::PatternDictTryTake
         | Builtin::PatternDictTryTakeOptional
-        | Builtin::PatternEqual => Ok(deferred(arguments)),
+        | Builtin::PatternEqual => deferred(arguments),
         Builtin::ListEffect
         | Builtin::ListEffectReturn
         | Builtin::ListEffectSeq
@@ -181,13 +182,13 @@ pub(super) fn apply_builtin_in(
         Builtin::MacroScoped | Builtin::MacroLog => {
             super::macro_machine::apply_macro_builtin_in(access, builtin, arguments)
         }
-        Builtin::MacroOperation | Builtin::MacroOperationOn => Ok(deferred(arguments)),
+        Builtin::MacroOperation | Builtin::MacroOperationOn => deferred(arguments),
         Builtin::TokenText
         | Builtin::TokenRegex
         | Builtin::TokenTextSpan
         | Builtin::TokenAny
-        | Builtin::TokenEnd => Ok(deferred(arguments)),
-        Builtin::IfResult | Builtin::MatchResult => Ok(deferred(arguments)),
+        | Builtin::TokenEnd => deferred(arguments),
+        Builtin::IfResult | Builtin::MatchResult => deferred(arguments),
         Builtin::DictSingleton
         | Builtin::DictUnion
         | Builtin::DictUpdate
@@ -195,7 +196,7 @@ pub(super) fn apply_builtin_in(
         | Builtin::DictFromEntries
         | Builtin::DictFromPairs
         | Builtin::MergeDuplicate
-        | Builtin::Default => Ok(deferred(arguments)),
+        | Builtin::Default => deferred(arguments),
         Builtin::ObjectSpec
         | Builtin::ObjectLocalName
         | Builtin::DiagnosticObject
@@ -207,15 +208,15 @@ pub(super) fn apply_builtin_in(
         | Builtin::ObjectInstanceFromParts
         | Builtin::ObjectDefaultDefs
         | Builtin::ObjectDictDefs
-        | Builtin::ObjectFromDict => Ok(deferred(arguments)),
+        | Builtin::ObjectFromDict => deferred(arguments),
         Builtin::Fixpoint
         | Builtin::EffectApply
         | Builtin::EffectCall
         | Builtin::EffectMap
         | Builtin::EffectMapRun
-        | Builtin::EffectMapContinue => Ok(deferred(arguments)),
+        | Builtin::EffectMapContinue => deferred(arguments),
         Builtin::InteractionNet | Builtin::InteractionNetFromNetlist | Builtin::NetArity => {
-            Ok(deferred(arguments))
+            deferred(arguments)
         }
         Builtin::InteractionNetBuilderReturn
         | Builtin::InteractionNetBuilderSeq
@@ -239,8 +240,8 @@ pub(super) fn apply_builtin_in(
         | Builtin::InteractionNetBuilderCopy
         | Builtin::InteractionNetBuilderData
         | Builtin::InteractionNetBuilderWire
-        | Builtin::InteractionNetBuilderRun => Ok(deferred(arguments)),
-        Builtin::InspectOrigin | Builtin::CompileSource => Ok(deferred(arguments)),
+        | Builtin::InteractionNetBuilderRun => deferred(arguments),
+        Builtin::InspectOrigin | Builtin::CompileSource => deferred(arguments),
         Builtin::MixinCompose => {
             let [outer, inner, base, self_value] = exact(arguments, "mixin composition")?;
             let values = access.values();
@@ -255,8 +256,8 @@ pub(super) fn apply_builtin_in(
                 Arc::from([inner, self_value]),
             )))
         }
-        Builtin::AssertUnit => Ok(deferred(arguments)),
-        Builtin::Anno => Ok(deferred(arguments)),
+        Builtin::AssertUnit => deferred(arguments),
+        Builtin::Anno => deferred(arguments),
     }
 }
 
