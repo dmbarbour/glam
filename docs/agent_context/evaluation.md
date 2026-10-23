@@ -129,8 +129,9 @@ control-flow overview.
   diagnostics stay outside pure reproducibility either way.
 - Managed `Drop` is passive: it may release Rust shells but cannot observe or
   preserve dying managed edges, enter the heap/runtime, invoke callbacks, or
-  perform active retirement. Put active cleanup in the external-owner registry
-  with explicit registered roots instead.
+  perform active retirement. It may queue plain data on a runtime's notice
+  channel for the runtime to act on at a safe point. Put other active cleanup
+  in the external-owner registry with explicit registered roots instead.
 - Compatibility shells (lists, dictionaries, builtin arguments, metadata, lazy
   sources, failures) stay immutable, and acyclic once lazies, promises, and
   nets are removed. The compatibility walk recurses through shells and stops

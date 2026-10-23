@@ -105,8 +105,10 @@ domain once retirement returns.
 requires. `Trace` does not constrain `Drop`, so a family also supplies a
 `ManagedDropRecord` (see the admission table below). Destruction is passive:
 it may release Rust resources but never reach a runtime, heap, scheduler,
-service or callback, or touch a `Gc` it holds. Active cleanup belongs to an
-external owner.
+service or callback, or touch a `Gc` it holds. It may queue plain data on a
+runtime's notice channel, for the runtime to act on at a safe point. Active
+cleanup belongs to an external owner, or to the runtime acting on a notice
+(`passive-managed-destruction-with-drop-records`, with its reasons).
 
 Ownership classes: *managed node* (traced); *external root owner* (outside the
 graph, deliberately extends rooted lifetimes); *companion* (edge-free

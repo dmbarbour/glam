@@ -304,8 +304,10 @@ impl ManagedDropRecord {
 /// must be passive: they may release ordinary Rust resources, but must not
 /// obtain or invoke a Glam runtime, value domain, heap, evaluator, scheduler,
 /// diagnostic/event service, host callback, or equivalent active semantic
-/// capability. Destruction must not observe or preserve a `Gc` edge held by
-/// the dying representation.
+/// capability. They may queue plain data, never a `Gc`, on a runtime's
+/// unbounded notice channel for the runtime to act on at a safe point
+/// (`passive-managed-destruction-with-drop-records`). Destruction must not
+/// observe or preserve a `Gc` edge held by the dying representation.
 ///
 /// Any external owner which performs active retirement must remain outside
 /// the managed graph and hold its runtime capability and registered roots

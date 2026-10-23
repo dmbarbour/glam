@@ -339,6 +339,18 @@ Their sections hold their earlier evidence.
   stack and journal entries changed. Copy-on-write cuts, copying each part
   at its first change, are the other candidate. Measure once effects with
   host requests search in numbers, as the CLI's do.
+- **Draining external owners** (`perf-external-owner-drain`), not
+  measured, after the runtime API (found 2026-10-23, in
+  `api-promise-cells-review`). `ExternalOwnerRegistry::drain_retired`
+  checks every live owner for a dead lease, under the registry's lock,
+  after each runtime collection and at every host call
+  (`HostCallProducer::invoke`). Creating or opening an opaque value takes
+  the same lock. The work grows with the opaque values alive, at every
+  drain. A lease could queue its key on a notice channel when its last
+  clone drops, as passive destruction now allows
+  (`passive-managed-destruction-with-drop-records`), so that a drain visits
+  only the dead. Measure once host calls are frequent with many opaque
+  values alive.
 - **Port routing** (`perf-port-routing`), not measured, after the
   representations, as the runtime API plan goes ahead of performance
   (maintainer, 2026-10-19). As `api-ports` built them, each write walks

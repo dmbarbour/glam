@@ -3246,11 +3246,28 @@ maps the short names used here to file names.
   review GCI-002.
 
 ### Managed destruction is passive; every family carries a mandatory drop record
-`passive-managed-destruction-with-drop-records` · 2026-09-02, extended 2026-10-02 · agent · accepted
+`passive-managed-destruction-with-drop-records` · 2026-09-02, extended 2026-10-02, clarified 2026-10-23 · agent; clarified by maintainer · accepted
 - **Context:** `Trace` does not constrain `Drop`.
 - **Decision:** managed destructors are passive, and active cleanup lives in
   external-owner RAII. Since I13A, `ManagedFamily` requires a non-empty
   `ManagedDropRecord` covering direct and transitive destruction.
+- **Reasons** (recorded 2026-10-23):
+  - Objects that die in one collection are destroyed in no defined order:
+    a destructor that touched a `Gc` it holds could reach one already
+    destroyed, and one that kept a dying edge would resurrect it.
+  - Destructors run without heap authority: during a collection the
+    collector holds the finalizing entry, and at last-owner teardown no
+    mutator exists (glam-gc `SAFETY.md`). One that entered the heap, a
+    runtime, a scheduler or a callback could deadlock or be unsound.
+  - Collection is operational only: its timing never changes Glam results.
+    Whatever a death means to Glam happens later, at a safe point the
+    runtime chooses, with the authority to act.
+- **Clarified** (maintainer, 2026-10-23): the reasons forbid a destructor
+  to act, not to report. A managed destructor may queue plain data, never
+  a `Gc`, on a runtime's unbounded notice channel, for the runtime to act
+  on at a safe point; its record says so. Raised by promise breakers
+  (`PromiseCells_2026-10-23.md`), which would otherwise have reported
+  through an external owner held inside the managed graph.
 - **Consequences:** every new managed family needs a reviewed destruction
   record.
 - **Rule lives in:** `architecture/values.md` "Managed Families";
