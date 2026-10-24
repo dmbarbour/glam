@@ -334,6 +334,8 @@ f >> g              # \h -> g (f h)   (forward composition)
 g << f
 (>>= k)             # Haskell-style operator sections
 (x < y =< z)        # chained comparison: (x < y) and (y =< z)
+# Only numbers, and lists or dicts of them, compare; dicts and atoms by ==/<>
+# only, tuples order too. Comparing a function, volume, resolver... is an ERROR.
 # No mixing of opposing directions (>> vs <<, |> vs <|) without parens.
 # Distinct arithmetic operators have no precedence: a + (b * c), (a * b) / c.
 # `and` and `or` do not mix without parens: A or (B and C).

@@ -9474,9 +9474,31 @@ fn resolvers_cannot_be_compared() {
     );
     let error = effect_text(&assembler, &effect).expect_err("resolvers do not compare");
     assert!(
-        error.to_string().contains("cannot compare resolvers"),
+        error.to_string().contains("cannot compare Resolver"),
         "{error}"
     );
+}
+
+#[test]
+fn volumes_and_resolvers_answer_err_when_compared() {
+    // `only-comparables-compare`: comparing an incomparable is an error, so
+    // `.try` answers `err`, never `'fail` and never a verdict, whether it
+    // is compared directly, against a comparable, or within a list or dict.
+    for make in [".vol.new {}", ".promise.new >>= (\\p -> .r p.resolver)"] {
+        for comparison in [
+            "v == v",
+            "v <> 1",
+            "1 < v",
+            "[v] == [v]",
+            "{k:v} == {k:v}",
+            "[v] < [v]",
+        ] {
+            let source = format!(
+                "{make} >>= (\\v -> .try ({comparison}) >>= (\\r -> .r (if r == 'fail then \"fail\" else if dict.defines ['err] r then \"err\" else \"verdict\")))"
+            );
+            assert_eq!(try_text(&source), b"err".as_slice(), "{source}");
+        }
+    }
 }
 
 #[test]

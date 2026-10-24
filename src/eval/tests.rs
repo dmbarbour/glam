@@ -3629,7 +3629,58 @@ fn equality_errors_when_dictionary_comparison_reaches_functions() {
     ))
     .expect_err_without_debug("function-valued fields should not be equatable");
 
-    assert!(err.to_string().contains("cannot compare function values"));
+    assert!(err.to_string().contains("cannot compare Function"));
+}
+
+#[test]
+fn only_comparables_compare() {
+    // Comparing anything but numbers, and lists or dicts of comparables, is
+    // an error that reports it incomparable, for equality and order alike,
+    // directly or within a list, a dict or a tuple, and against a comparable
+    // as well (`only-comparables-compare`).
+    let values = crate::core::test_value_factory();
+    let carrier =
+        values.with_boundary_access(|access| access.root_runtime_value(access.initial_metadata()));
+    let incomparables = [
+        ("Function", closed_function_value(1, TestExpr::Local(0))),
+        ("Function", Value::Builtin(Builtin::ListLen)),
+        ("Net", Value::Net(closed_net(|builder| builder.data(n(1))))),
+        (
+            "Opaque",
+            Value::Opaque(crate::core::OpaqueValue::new(&values, Arc::new(7_u64))),
+        ),
+        ("Sealed", carrier.clone_core_for_test()),
+    ];
+    let in_list = |value: Value| Value::List(List::from_values(vec![value]));
+    let in_dict =
+        |value: Value| Value::Dict(Dict::new_sync().insert(Key::atom_from_text("k"), value));
+    let in_tuple =
+        |value: Value| Value::Dict(Dict::new_sync().insert((*keys::TUPLE).clone(), in_list(value)));
+    for (kind, value) in incomparables {
+        let copy = || value.duplicate_for_test(&values);
+        for (builtin, left, right) in [
+            (Builtin::Equal, copy(), copy()),
+            (Builtin::NotEqual, copy(), n(1)),
+            (Builtin::Less, n(1), copy()),
+            (Builtin::Equal, in_list(copy()), in_list(copy())),
+            (Builtin::Equal, in_dict(copy()), in_dict(copy())),
+            (Builtin::Less, in_list(copy()), in_list(copy())),
+            (Builtin::Less, in_tuple(copy()), in_tuple(copy())),
+        ] {
+            let error = eval_closed_expr(&builtin2_expr(
+                builtin,
+                TestExpr::Value(left),
+                TestExpr::Value(right),
+            ))
+            .expect_err_without_debug("an incomparable is no comparison's operand");
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("cannot compare {kind}")),
+                "{kind}: {error}"
+            );
+        }
+    }
 }
 
 #[test]
@@ -4210,7 +4261,7 @@ fn ordinary_observers_do_not_unseal_metadata_carriers() {
         ))
         .expect_err_without_debug("comparison must not expose sealed carrier identity");
         assert!(
-            error.to_string().contains("cannot compare sealed values"),
+            error.to_string().contains("cannot compare Sealed"),
             "{error}"
         );
     }

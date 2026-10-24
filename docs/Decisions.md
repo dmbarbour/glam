@@ -1180,6 +1180,37 @@ maps the short names used here to file names.
 - **Recorded in:** [Dict Semantics](plans/DictSemantics_2026-10-24.md),
   `dict-presence-ops`, `dict-optional-patterns`, `dict-empty-is-a-value`.
 
+### Only comparables compare
+`only-comparables-compare` · 2026-10-24 · maintainer · accepted
+- **Context:** comparisons accepted more than the language specifies:
+  opaque values compared equal by identity and volume handles by the
+  volume they named, and either was unequal to anything else, while
+  functions, nets, sealed carriers and resolvers were errors, each with a
+  message of its own. Definedness was spelled `x == {}`.
+- **Decision:**
+  - Only comparables compare: numbers, and lists or dicts of comparables,
+    texts and binaries being lists and atoms dicts.
+  - Equality takes any two comparables: two of different kinds are
+    unequal, dicts compare structurally, and an atom equals the dict it
+    stands for (`dict-empty-is-a-value`). Ordering is for numbers, lists
+    and tuples, `{tuple:[…]}`, the special case among dicts.
+  - Comparing anything else, for equality or order, directly or within a
+    list or dict, is an evaluation error naming it incomparable: `err`
+    under `.try`, never `'fail` and never `false`.
+- **Reasons:**
+  - An answer about an incomparable would observe what evaluation must
+    not: a resolver's or an opaque value's identity, a function's code.
+  - An error, rather than `false`, keeps a mistaken comparison from
+    passing as a verdict, as `x == {}` did for definedness.
+- **Consequences:** a dict's members are compared only where its keys
+  match, so `{a:f} == {b:g}` is `false`, unforced, and only a reader of
+  the members meets an incomparable within. Definedness is asked with
+  `dict.defines`.
+- **Rule lives in:** `incomparable_in` in `src/eval/comparison_machine.rs`;
+  `Syntax.md`, the comparison operators.
+- **Recorded in:** [Runtime API](plans/RuntimeApi_2026-10-17.md),
+  `api-comparables`.
+
 ### Dict literals introduce their members in order
 `dict-literals-introduce-in-order` · 2026-10-24 · maintainer · accepted
 - **Context:** a dict literal was the hierarchical union of its items: at a

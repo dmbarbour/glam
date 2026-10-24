@@ -373,10 +373,14 @@ fn classify_ordering(
     source_owner: LazyId,
     name: &'static str,
 ) -> FrameAction {
-    match (
+    let (left, right) = (
         left.into_value_in(access.values()),
         right.into_value_in(access.values()),
-    ) {
+    );
+    if let Some(failure) = incomparable_in(access, &left, &right, name) {
+        return failure;
+    }
+    match (left, right) {
         (Value::Lazy(_), _)
         | (_, Value::Lazy(_))
         | (Value::Promised(_), _)
@@ -417,28 +421,6 @@ fn classify_ordering(
         (Value::Dict(left), Value::Dict(right)) => FrameAction::Replace(ComparisonFrame::Tuple(
             TupleOrderingFrame::new_in(access, &left, &right, source_owner),
         )),
-        (Value::Builtin(_), _)
-        | (_, Value::Builtin(_))
-        | (Value::PartialBuiltin(_), _)
-        | (_, Value::PartialBuiltin(_))
-        | (Value::Function(_), _)
-        | (_, Value::Function(_))
-        | (Value::Net(_), _)
-        | (_, Value::Net(_)) => {
-            failure_message(format!("{name} builtin cannot compare function values"))
-        }
-        (Value::Resolver(_), _) | (_, Value::Resolver(_)) => {
-            failure_message(format!("{name} builtin cannot compare resolvers"))
-        }
-        (Value::Opaque(_), _)
-        | (_, Value::Opaque(_))
-        | (Value::Volume(_), _)
-        | (_, Value::Volume(_)) => {
-            failure_message(format!("{name} builtin cannot compare opaque values"))
-        }
-        (Value::Metadata(_), _) | (_, Value::Metadata(_)) => {
-            failure_message(format!("{name} builtin cannot compare sealed values"))
-        }
         (left, right) => failure_message(format!(
             "{name} builtin cannot order values {:?} and {:?}",
             access.values().diagnostic_debug(&left),
@@ -456,10 +438,14 @@ fn classify_equality(
     source_owner: LazyId,
     name: &'static str,
 ) -> FrameAction {
-    match (
+    let (left, right) = (
         left.into_value_in(access.values()),
         right.into_value_in(access.values()),
-    ) {
+    );
+    if let Some(failure) = incomparable_in(access, &left, &right, name) {
+        return failure;
+    }
+    match (left, right) {
         (Value::Lazy(_), _)
         | (_, Value::Lazy(_))
         | (Value::Promised(_), _)
@@ -519,40 +505,44 @@ fn classify_equality(
                 )))
             }
         }
-        (Value::Builtin(_), _)
-        | (_, Value::Builtin(_))
-        | (Value::PartialBuiltin(_), _)
-        | (_, Value::PartialBuiltin(_))
-        | (Value::Function(_), _)
-        | (_, Value::Function(_))
-        | (Value::Net(_), _)
-        | (_, Value::Net(_)) => {
-            failure_message(format!("{name} builtin cannot compare function values"))
-        }
-        // Resolvers are abstract: no evaluation observes their identity
-        // (`promise-cells-are-weakly-resolved`).
-        (Value::Resolver(_), _) | (_, Value::Resolver(_)) => {
-            failure_message(format!("{name} builtin cannot compare resolvers"))
-        }
-        (Value::Opaque(left), Value::Opaque(right)) => {
-            FrameAction::Complete(ComparisonResult::Equality(left == right))
-        }
-        (Value::Volume(left), Value::Volume(right)) => FrameAction::Complete(
-            ComparisonResult::Equality(left.same_volume_in(&right, access.values())),
-        ),
-        (Value::Opaque(_), _)
-        | (_, Value::Opaque(_))
-        | (Value::Volume(_), _)
-        | (_, Value::Volume(_)) => FrameAction::Complete(ComparisonResult::Equality(false)),
-        (Value::Metadata(_), _) | (_, Value::Metadata(_)) => {
-            failure_message(format!("{name} builtin cannot compare sealed values"))
-        }
-        (Value::Atom(_), _)
-        | (Value::Number(_), _)
-        | (Value::Binary(_), _)
-        | (Value::List(_), _)
-        | (Value::Dict(_), _) => FrameAction::Complete(ComparisonResult::Equality(false)),
+        // Values of two comparable kinds differ.
+        _ => FrameAction::Complete(ComparisonResult::Equality(false)),
     }
+}
+
+/// Only comparables compare: numbers, and lists or dicts of comparables,
+/// atoms among the dicts and texts among the lists. Anything else, for
+/// equality or order, is an error that reports it incomparable, never an
+/// answer (`only-comparables-compare`): functions and nets, sealed
+/// carriers, opaque values, volume handles and resolvers, whose identity
+/// no evaluation observes (`promise-cells-are-weakly-resolved`).
+fn incomparable_in(
+    access: &EvaluationValueAccess<'_>,
+    left: &Value,
+    right: &Value,
+    name: &'static str,
+) -> Option<FrameAction> {
+    let incomparable = |value: &Value| match value {
+        Value::Atom(_)
+        | Value::Number(_)
+        | Value::Binary(_)
+        | Value::List(_)
+        | Value::Dict(_)
+        | Value::Lazy(_)
+        | Value::Promised(_) => None,
+        Value::Builtin(_)
+        | Value::PartialBuiltin(_)
+        | Value::Function(_)
+        | Value::Net(_)
+        | Value::Metadata(_)
+        | Value::Opaque(_)
+        | Value::Volume(_)
+        | Value::Resolver(_) => Some(access.values().diagnostic_kind_name(value)),
+    };
+    let kind = incomparable(left).or_else(|| incomparable(right))?;
+    Some(failure_message(format!(
+        "{name} builtin cannot compare {kind}: only numbers, lists and dicts of them are comparable"
+    )))
 }
 
 impl ListComparisonFrame {

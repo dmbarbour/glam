@@ -403,6 +403,18 @@ We may support a few special non-binary forms, e.g. `(x < y =< z)` as shorthand 
 
 Operators may support limited ad-hoc polymorphism. For example, `>` will only compare two numbers, two lists, or two tuples. For lists and tuples, we use a lexicographic comparison of elements. Comparing a number to a list, or even a list to a tuple, would simply diverge with an error. As a rule, ad-hoc polymorphism must preserve laws or intuitions, e.g. don't use `+` to append lists because it does not preserve commutativity of `+` on numbers.
 
+Only comparables compare (`only-comparables-compare`): numbers, and lists or
+dicts of comparables, texts and binaries among the lists and atoms among the
+dicts. `==` and `<>` take any two comparables: two of different kinds are
+unequal, two dicts are equal where they define the same keys with equal
+values, and an atom equals the dict it stands for, `'tag` and `{tag:()}`.
+Ordering is for numbers, lists and tuples, never other dicts. Comparing
+anything else, a function, a net, an opaque value, a volume handle, a
+resolver or a sealed carrier, for equality or order, directly or within a
+list or dict, is an error that reports it incomparable, so `.try` answers it
+`err`, never `'fail`. Nor is `x == {}` a test of definedness: `dict.defines`
+asks that.
+
 Subtraction and division are non-associative. Their repeated chains also
 require parentheses.
 

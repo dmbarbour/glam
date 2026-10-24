@@ -993,8 +993,15 @@ handle API goes.
         Held (2026-10-24) behind [Dict Semantics](DictSemantics_2026-10-24.md),
         which makes `{}` the empty dict rather than undefined, union
         shallow, and adds the definedness operations its checks move to.
-        The incomparable arms in `eval/comparison_machine.rs` are a small
-        change, redone when it resumes.
+        Built 2026-10-24 (`only-comparables-compare`), after Dict Semantics
+        made dict equality structural, atoms equal to their dicts, and
+        moved the definedness checks to `dict.defines`: one check rejects
+        an incomparable operand, a function, net, sealed carrier, opaque
+        value, volume handle or resolver, for equality and order, with one
+        message, "cannot compare Kind"; opaque values and volume handles
+        no longer compare by identity. Tested for each kind under `==`,
+        `<>` and `<`, directly, against a number, and within a list, a dict
+        and a tuple, and, for volumes and resolvers, as `err` under `.try`.
       - `api-refl-child-tasks`: `.child.task`, `.status`, `.recover`,
         `.interrupt` and `.clear`; `.task.*` and task handles retire.
       - `api-refl-call`: `.child.call`, with a child's machine state where
