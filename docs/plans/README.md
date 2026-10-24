@@ -98,6 +98,12 @@ flags a step for discussion when work reaches it, not a decision.
   passive destruction; the store holding each pending cell weakly, by ID,
   and no promise alive.
   Drafted 2026-10-23 at the maintainer's request.
+- [`ChildTasks_2026-10-24.md`](ChildTasks_2026-10-24.md): a design note for
+  the runtime API plan's `api-refl-child-tasks`: where a tasked machine's
+  state lives (delegated subtrees, recommended), and slices from machine
+  identity through the task queue, control, the compiler's migration and
+  the retirement of `.task.*`. Drafted 2026-10-24 for the maintainer's
+  review.
 - [`DictSemantics_2026-10-24.md`](DictSemantics_2026-10-24.md): `dict-`
   steps revising dicts: `{}` as the empty dict rather than undefined,
   shallow union, paths fused by prefix, reads of what is undefined
