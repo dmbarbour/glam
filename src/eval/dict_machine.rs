@@ -15,9 +15,7 @@ use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion, Regio
 use super::application::predicate_effect;
 use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll, item_value_in};
-use super::value::{
-    format_name_part, is_deferred_value, is_error_lazy_value, is_undefined_dict_value,
-};
+use super::value::format_name_part;
 use super::whnf::{
     RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
 };
@@ -31,8 +29,7 @@ enum RegionalDictBuiltinState {
         key: Box<RegionalKeyConversion>,
         value: Value,
     },
-    Union(RegionalSequentialDemands),
-    /// `DictUpdate`, where `{}` removes, or `DictInsert`, where it is a value.
+    /// `DictInsert` or `DictIntroduce`.
     Update {
         builtin: Builtin,
         path: Option<Box<RegionalKeyList>>,
@@ -41,12 +38,11 @@ enum RegionalDictBuiltinState {
         dict: RegionalWhnfWork,
     },
     Walk(Box<RegionalDictPathWalk>),
-    ShallowUnion(RegionalSequentialDemands),
-    /// `DictUpdateWith`'s composition, built at once.
+    Union(RegionalSequentialDemands),
+    /// `DictUpdate`'s composition, built at once.
     Composed(Value),
     IntroduceOptional(Box<RegionalIntroduceOptional>),
     Build(Box<RegionalDictBuild>),
-    MergeDuplicate(RegionalSequentialDemands),
     Pairs(RegionalWhnfWork),
     FromEntries(Box<RegionalDictFromEntries>),
 }
@@ -163,9 +159,6 @@ impl RegionalDictBuiltinMachine {
             Builtin::DictUnion => RegionalDictBuiltinState::Union(
                 RegionalSequentialDemands::new_in(access, source_owner, arguments),
             ),
-            Builtin::DictShallowUnion => RegionalDictBuiltinState::ShallowUnion(
-                RegionalSequentialDemands::new_in(access, source_owner, arguments),
-            ),
             Builtin::DictLookup
             | Builtin::DictDefines
             | Builtin::DictDefault
@@ -190,7 +183,7 @@ impl RegionalDictBuiltinMachine {
                     source_owner,
                 }))
             }
-            Builtin::DictUpdateWith => {
+            Builtin::DictUpdate => {
                 let [path, function, dict] = arguments else {
                     unreachable!("dictionary update retains three operands")
                 };
@@ -249,7 +242,7 @@ impl RegionalDictBuiltinMachine {
                     source_owner,
                 }))
             }
-            Builtin::DictUpdate | Builtin::DictInsert | Builtin::DictIntroduce => {
+            Builtin::DictInsert | Builtin::DictIntroduce => {
                 let [path, new_value, dict] = arguments else {
                     unreachable!("dictionary update retains three operands")
                 };
@@ -269,9 +262,6 @@ impl RegionalDictBuiltinMachine {
                     .with_source_owner(source_owner),
                 }
             }
-            Builtin::MergeDuplicate => RegionalDictBuiltinState::MergeDuplicate(
-                RegionalSequentialDemands::new_in(access, source_owner, arguments),
-            ),
             Builtin::DictPairs => {
                 let [dict] = arguments else {
                     unreachable!("dictionary pairs retain one operand")
@@ -379,12 +369,7 @@ impl RegionalDictBuiltinMachine {
                 match key.poll_in(access, step_budget) {
                     RegionalConversionPoll::Ready(key) => {
                         let value = access.values().duplicate_value(value);
-                        let dict = if is_undefined_dict_value(access.values(), &value) {
-                            Dict::new_sync()
-                        } else {
-                            Dict::new_sync().insert(key, value)
-                        };
-                        RegionalBuiltinPoll::Ready(Value::Dict(dict))
+                        RegionalBuiltinPoll::Ready(Value::Dict(Dict::new_sync().insert(key, value)))
                     }
                     RegionalConversionPoll::Boundary(request) => {
                         RegionalBuiltinPoll::Boundary(request)
@@ -414,27 +399,6 @@ impl RegionalDictBuiltinMachine {
                     unreachable!("dictionary union retains two operands")
                 };
                 finish_union_in(access, left, right)
-            }
-            RegionalDictBuiltinState::ShallowUnion(demands) => {
-                let operands = match demands.poll_in(access, step_budget) {
-                    RegionalSequentialDemandPoll::Ready(operands) => operands,
-                    RegionalSequentialDemandPoll::Boundary(request) => {
-                        return RegionalBuiltinPoll::Boundary(request);
-                    }
-                    RegionalSequentialDemandPoll::Continue => {
-                        return RegionalBuiltinPoll::Continue;
-                    }
-                    RegionalSequentialDemandPoll::BudgetExhausted => {
-                        return RegionalBuiltinPoll::BudgetExhausted;
-                    }
-                    RegionalSequentialDemandPoll::Failed(failure) => {
-                        return RegionalBuiltinPoll::Failed(failure);
-                    }
-                };
-                let [left, right] = operands else {
-                    unreachable!("dictionary union retains two operands")
-                };
-                finish_shallow_union_in(access, left, right)
             }
             RegionalDictBuiltinState::Walk(walk) => walk.poll_in(access, step_budget),
             RegionalDictBuiltinState::Composed(value) => {
@@ -476,9 +440,8 @@ impl RegionalDictBuiltinMachine {
                 if path.is_empty() {
                     return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
                         match builtin {
-                            Builtin::DictInsert => "dict.insert requires a non-empty path",
                             Builtin::DictIntroduce => "dict.introduce requires a non-empty path",
-                            _ => "dict update builtin requires a non-empty path",
+                            _ => "dict.insert requires a non-empty path",
                         },
                     )));
                 }
@@ -500,33 +463,7 @@ impl RegionalDictBuiltinMachine {
                             return RegionalBuiltinPoll::Failed(failure);
                         }
                     };
-                match builtin {
-                    Builtin::DictInsert | Builtin::DictIntroduce => {
-                        finish_insert_in(access, *builtin, path, new_value, &dict)
-                    }
-                    _ => finish_update_in(access, path, new_value, &dict),
-                }
-            }
-            RegionalDictBuiltinState::MergeDuplicate(demands) => {
-                let operands = match demands.poll_in(access, step_budget) {
-                    RegionalSequentialDemandPoll::Ready(operands) => operands,
-                    RegionalSequentialDemandPoll::Boundary(request) => {
-                        return RegionalBuiltinPoll::Boundary(request);
-                    }
-                    RegionalSequentialDemandPoll::Continue => {
-                        return RegionalBuiltinPoll::Continue;
-                    }
-                    RegionalSequentialDemandPoll::BudgetExhausted => {
-                        return RegionalBuiltinPoll::BudgetExhausted;
-                    }
-                    RegionalSequentialDemandPoll::Failed(failure) => {
-                        return RegionalBuiltinPoll::Failed(failure);
-                    }
-                };
-                let [name, left, right] = operands else {
-                    unreachable!("merge duplicate retains three operands")
-                };
-                finish_merge_duplicate_in(access, name, left, right)
+                finish_insert_in(access, *builtin, path, new_value, &dict)
             }
         }
     }
@@ -539,9 +476,7 @@ impl RegionalDictBuiltinMachine {
                 key.trace_managed_edges(visitor);
                 trace_compatibility_value_managed_edges(value, visitor);
             }
-            RegionalDictBuiltinState::Union(demands)
-            | RegionalDictBuiltinState::ShallowUnion(demands)
-            | RegionalDictBuiltinState::MergeDuplicate(demands) => {
+            RegionalDictBuiltinState::Union(demands) => {
                 demands.trace_managed_edges(visitor);
             }
             RegionalDictBuiltinState::Walk(walk) => walk.trace_managed_edges(visitor),
@@ -1000,7 +935,7 @@ impl RegionalDictFromEntries {
         }
     }
 
-    fn finish_in(&mut self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
+    fn finish_in(&mut self, _access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
         if self.converted.len() != self.items.len() {
             return failure("dict from entries builtin requires as many values as keys");
         }
@@ -1010,9 +945,7 @@ impl RegionalDictFromEntries {
             if !seen.insert(key.clone()) {
                 return failure("dict from entries builtin requires distinct keys");
             }
-            if !is_undefined_dict_value(access.values(), &value) {
-                dict = dict.insert(key, value);
-            }
+            dict = dict.insert(key, value);
         }
         RegionalBuiltinPoll::Ready(Value::Dict(dict))
     }
@@ -1238,25 +1171,19 @@ fn finish_union_in(
     left: &Value,
     right: &Value,
 ) -> RegionalBuiltinPoll {
-    let Value::Dict(left) = left else {
-        return failure("dictionary union requires dictionary values");
+    let (Value::Dict(left), Value::Dict(right)) = (left, right) else {
+        return failure("dict.union requires dictionary values");
     };
-    let Value::Dict(right) = right else {
-        return failure("dictionary union requires dictionary values");
-    };
-    RegionalBuiltinPoll::Ready(Value::Dict(merge_dicts_in(access.values(), left, right)))
+    RegionalBuiltinPoll::Ready(Value::Dict(union_dicts_in(access.values(), left, right)))
 }
 
 /// The shallow union: a key both dicts define is an error where it is read,
 /// whatever its values (`dict-presence-ops`).
-fn finish_shallow_union_in(
-    access: &EvaluationValueAccess<'_>,
-    left: &Value,
-    right: &Value,
-) -> RegionalBuiltinPoll {
-    let (Value::Dict(left), Value::Dict(right)) = (left, right) else {
-        return failure("dict.union requires dictionary values");
-    };
+pub(in crate::eval) fn union_dicts_in(
+    access: &crate::core::RuntimeValueAccess<'_>,
+    left: &Dict,
+    right: &Dict,
+) -> Dict {
     let (mut union, other) = if left.size() >= right.size() {
         (left.clone(), right)
     } else {
@@ -1265,36 +1192,19 @@ fn finish_shallow_union_in(
     for (key, value) in other.iter() {
         let value = if union.contains_key(key) {
             Value::Lazy(LazyValue::error_in(
-                access.values(),
+                access,
                 format!("dict.union: both dicts define `{}`", format_name_part(key)),
             ))
         } else {
-            access.values().duplicate_value(value)
+            access.duplicate_value(value)
         };
         union = union.insert(key.clone(), value);
     }
-    RegionalBuiltinPoll::Ready(Value::Dict(union))
+    union
 }
 
 fn failure(message: &str) -> RegionalBuiltinPoll {
     RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(message)))
-}
-
-fn finish_update_in(
-    access: &EvaluationValueAccess<'_>,
-    path: &[Key],
-    new_value: &Value,
-    dict: &Value,
-) -> RegionalBuiltinPoll {
-    let Value::Dict(dict) = dict else {
-        return failure("dict update builtin requires a dictionary");
-    };
-    RegionalBuiltinPoll::Ready(Value::Dict(update_dict_path_in(
-        access.values(),
-        dict,
-        path,
-        access.values().duplicate_value(new_value),
-    )))
 }
 
 fn finish_insert_in(
@@ -1325,8 +1235,8 @@ fn finish_insert_in(
 }
 
 /// `dict` with `new_value` at `path`, adding the dicts on the way where
-/// absent. A lazy dict on the way takes the rest lazily, as
-/// `update_dict_path_in` does, so nothing is forced that would not be.
+/// absent. A lazy dict on the way takes the rest lazily, so nothing is
+/// forced that would not be.
 /// `DictInsert` replaces what is at `path`; `DictIntroduce` fails where
 /// `path` is defined, or a dict on the way is no dict, as soon as it sees
 /// it (`dict-path-fusion`).
@@ -1395,171 +1305,6 @@ fn insert_dict_path_in(
         result = parent.insert(head, Value::Dict(result));
     }
     Ok(result)
-}
-
-fn finish_merge_duplicate_in(
-    access: &EvaluationValueAccess<'_>,
-    name: &Value,
-    left: &Value,
-    right: &Value,
-) -> RegionalBuiltinPoll {
-    let name = render_name(access.values(), name);
-    let result = if is_undefined_dict_value(access.values(), left) {
-        access.values().duplicate_value(right)
-    } else if is_undefined_dict_value(access.values(), right)
-        || is_error_lazy_value(access.values(), left)
-    {
-        access.values().duplicate_value(left)
-    } else if is_error_lazy_value(access.values(), right) {
-        access.values().duplicate_value(right)
-    } else if let (Value::Dict(left), Value::Dict(right)) = (left, right) {
-        Value::Dict(merge_dicts_in(access.values(), left, right))
-    } else {
-        Value::Lazy(LazyValue::error_in(
-            access.values(),
-            format!("dictionary union is ambiguous at key `{name}`"),
-        ))
-    };
-    RegionalBuiltinPoll::Ready(result)
-}
-
-fn render_name(access: &crate::core::RuntimeValueAccess<'_>, value: &Value) -> String {
-    match value {
-        Value::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
-        Value::Atom(atom) => match atom.key() {
-            Key::Binary(bytes) => std::str::from_utf8(bytes)
-                .map(str::to_owned)
-                .unwrap_or_else(|_| format!("{atom:?}")),
-            _ => format!("{atom:?}"),
-        },
-        other => format!("{:?}", access.diagnostic_debug(other)),
-    }
-}
-
-pub(in crate::eval) fn merge_dicts_in(
-    access: &crate::core::RuntimeValueAccess<'_>,
-    left: &Dict,
-    right: &Dict,
-) -> Dict {
-    let (mut merged, updates) = if left.size() >= right.size() {
-        (left.clone(), right)
-    } else {
-        (right.clone(), left)
-    };
-
-    for (key, value) in updates.iter() {
-        let next = match merged.get(key) {
-            Some(existing) => Some(merge_duplicate_value_in(access, key, existing, value)),
-            None if is_undefined_dict_value(access, value) => None,
-            None => Some(access.duplicate_value(value)),
-        };
-        merged = match next {
-            Some(value) if is_undefined_dict_value(access, &value) => merged.remove(key),
-            Some(value) => merged.insert(key.clone(), value),
-            None => merged,
-        };
-    }
-    merged
-}
-
-fn merge_duplicate_value_in(
-    access: &crate::core::RuntimeValueAccess<'_>,
-    key: &Key,
-    left: &Value,
-    right: &Value,
-) -> Value {
-    if is_undefined_dict_value(access, left) {
-        access.duplicate_value(right)
-    } else if is_undefined_dict_value(access, right) {
-        access.duplicate_value(left)
-    } else if matches!((left, right), (Value::Dict(_), Value::Dict(_)))
-        || is_deferred_value(access, left)
-        || is_deferred_value(access, right)
-    {
-        builtin_apply3_value_in(
-            access,
-            Builtin::MergeDuplicate,
-            &Value::binary_from_text(&format_name_part(key)),
-            left,
-            right,
-        )
-    } else {
-        Value::Lazy(LazyValue::error_in(
-            access,
-            format!(
-                "dictionary union is ambiguous at key `{}`",
-                format_name_part(key)
-            ),
-        ))
-    }
-}
-
-fn update_dict_path_in(
-    access: &crate::core::RuntimeValueAccess<'_>,
-    dict: &Dict,
-    path: &[Key],
-    new_value: Value,
-) -> Dict {
-    if path.is_empty() {
-        return dict.clone();
-    }
-
-    let mut parents = Vec::with_capacity(path.len().saturating_sub(1));
-    let mut current = dict.clone();
-    let mut index = 0;
-    let next = loop {
-        let head = &path[index];
-        let rest = &path[index + 1..];
-        if rest.is_empty() {
-            break new_value;
-        }
-
-        let prior = current
-            .get(head)
-            .map(|value| access.duplicate_value(value))
-            .unwrap_or_else(|| Value::Dict(Dict::new_sync()));
-        match prior {
-            Value::Dict(nested) => {
-                parents.push((current, head.clone()));
-                current = nested;
-                index += 1;
-            }
-            Value::Lazy(_) | Value::Promised(_) => {
-                break builtin_apply3_value_in(
-                    access,
-                    Builtin::DictUpdate,
-                    &key_path_value(access, rest),
-                    &new_value,
-                    &prior,
-                );
-            }
-            _ => {
-                break Value::Lazy(LazyValue::error_in(
-                    access,
-                    format!(
-                        "dictionary update path `{}` traverses a non-dictionary value",
-                        format_name_part(head)
-                    ),
-                ));
-            }
-        }
-    };
-
-    let head = &path[index];
-    let mut result = if is_undefined_dict_value(access, &next) {
-        current.remove(head)
-    } else {
-        current.insert(head.clone(), next)
-    };
-    while let Some((parent, head)) = parents.pop() {
-        let next = Value::Dict(result);
-        result = if is_undefined_dict_value(access, &next) {
-            parent.remove(&head)
-        } else {
-            parent.insert(head, next)
-        };
-    }
-    result
 }
 
 fn key_path_value(access: &crate::core::RuntimeValueAccess<'_>, path: &[Key]) -> Value {

@@ -11,7 +11,7 @@ use crate::core::{
 use crate::evaluation::EvaluationValueAccess;
 
 use super::builtin_machine::RegionalBuiltinPoll;
-use super::dict_machine::merge_dicts_in;
+use super::dict_machine::union_dicts_in;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::whnf::{
     RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
@@ -635,7 +635,7 @@ fn finish_dict_defs_in(
     let Value::Dict(dict) = dict else {
         return failure("dictionary union requires dictionary values");
     };
-    RegionalBuiltinPoll::Ready(Value::Dict(merge_dicts_in(access.values(), base, dict)))
+    RegionalBuiltinPoll::Ready(Value::Dict(union_dicts_in(access.values(), base, dict)))
 }
 
 enum ObjectInstanceInput<'a> {

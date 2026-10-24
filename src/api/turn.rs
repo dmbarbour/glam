@@ -1534,7 +1534,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             let dict = items.pop().expect("the dict is on top");
             Ok(vec![
                 keys.iter().zip(items).fold(dict, |dict, (key, item)| {
-                    dict_update_in(access, std::slice::from_ref(key), item, dict)
+                    dict_insert_in(access, std::slice::from_ref(key), item, dict)
                 }),
             ])
         })
@@ -1555,7 +1555,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .map(|key| path_access_in(access, &dict, std::slice::from_ref(key)))
                 .collect::<Vec<_>>();
             extracted.push(keys.iter().fold(dict, |dict, key| {
-                dict_update_in(access, std::slice::from_ref(key), undefined(access), dict)
+                dict_remove_in(access, std::slice::from_ref(key), dict)
             }));
             Ok(extracted)
         })
@@ -1569,7 +1569,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             let path = CoreValue::List(crate::core::List::from_values(vec![key]));
             Ok(vec![builtin_call_in(
                 access,
-                Builtin::DictUpdate,
+                Builtin::DictInsert,
                 [path, item, dict],
             )])
         })
@@ -1587,8 +1587,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 Arc::from([access.duplicate_value(&dict), access.duplicate_value(&key)]),
             ));
             let path = CoreValue::List(crate::core::List::from_values(vec![key]));
-            let rest =
-                builtin_call_in(access, Builtin::DictUpdate, [path, undefined(access), dict]);
+            let rest = builtin_call_in(access, Builtin::DictRemove, [path, dict]);
             Ok(vec![item, rest])
         })
     }
@@ -1602,7 +1601,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .unwrap_or_else(|_| unreachable!("the top two values"));
             Ok(vec![builtin_call_in(
                 access,
-                Builtin::DictShallowUnion,
+                Builtin::DictUnion,
                 [left, right],
             )])
         })
@@ -1702,7 +1701,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.rewrite_top(2, |access, items| {
             let [item, dict] = <[CoreValue; 2]>::try_from(items)
                 .unwrap_or_else(|_| unreachable!("the top two values"));
-            Ok(vec![dict_update_in(access, &path, item, dict)])
+            Ok(vec![dict_insert_in(access, &path, item, dict)])
         })
     }
 
@@ -1717,10 +1716,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             let [dict] =
                 <[CoreValue; 1]>::try_from(items).unwrap_or_else(|_| unreachable!("the top value"));
             let item = path_access_in(access, &dict, &path);
-            Ok(vec![
-                item,
-                dict_update_in(access, &path, undefined(access), dict),
-            ])
+            Ok(vec![item, dict_remove_in(access, &path, dict)])
         })
     }
 
@@ -3762,17 +3758,33 @@ fn path_access_in(access: &RuntimeValueAccess<'_>, dict: &CoreValue, path: &[Key
     ))
 }
 
-/// `dict` with `item` at `path`, lazily; `{}` removes what is there.
-fn dict_update_in(
+/// `dict` with `item` at `path`, lazily, replacing what is there.
+fn dict_insert_in(
     access: &RuntimeValueAccess<'_>,
     path: &[Key],
     item: CoreValue,
     dict: CoreValue,
 ) -> CoreValue {
-    let path = CoreValue::List(crate::core::List::from_values(
+    builtin_call_in(
+        access,
+        Builtin::DictInsert,
+        [path_value_in(access, path), item, dict],
+    )
+}
+
+/// `dict` without what is at `path`, lazily, pruning the dicts that empties.
+fn dict_remove_in(access: &RuntimeValueAccess<'_>, path: &[Key], dict: CoreValue) -> CoreValue {
+    builtin_call_in(
+        access,
+        Builtin::DictRemove,
+        [path_value_in(access, path), dict],
+    )
+}
+
+fn path_value_in(access: &RuntimeValueAccess<'_>, path: &[Key]) -> CoreValue {
+    CoreValue::List(crate::core::List::from_values(
         path.iter().map(|key| key.to_value_in(access)).collect(),
-    ));
-    builtin_call_in(access, Builtin::DictUpdate, [path, item, dict])
+    ))
 }
 
 /// A shuffle's pattern, `"abc-cba"`: the input names' count, and for each

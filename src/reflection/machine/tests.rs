@@ -9555,6 +9555,22 @@ fn try_get_answers_a_defined_path_and_fails_an_undefined_one() {
 }
 
 #[test]
+fn request_keys_keep_an_empty_dict_member() {
+    // `dict-empty-is-a-value`: a key `{a:{}}` is not the key `{}`.
+    for source in [
+        ".heap.set [{a:{}}] 1 =>> .alt (.heap.try_get [{}] =>> .r \"same\") (.r \"distinct\")",
+        ".set [{a:{}}] 1 =>> .alt (.try_get [{}] =>> .r \"same\") (.r \"distinct\")",
+    ] {
+        let (assembler, effect) = compile_effect(source);
+        assert_eq!(
+            effect_text(&assembler, &effect).unwrap(),
+            b"distinct",
+            "{source}"
+        );
+    }
+}
+
+#[test]
 fn a_cut_that_fails_on_try_get_waits_until_the_path_is_defined() {
     // The wait idiom without `{}` as undefined: `.heap.try_get` fails where
     // the path is undefined, its read observed, so the failed cut parks and

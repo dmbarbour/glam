@@ -831,9 +831,7 @@ impl RegionalKeyConversion {
         match parent {
             RegionalKeyConversionParent::Dict(mut dict) => {
                 let (name, _) = &dict.members[dict.next - 1];
-                if !matches!(&key, Key::Dict(entries) if entries.is_empty()) {
-                    dict.converted.push((name.clone(), key));
-                }
+                dict.converted.push((name.clone(), key));
                 self.focus = Some(RegionalKeyConversionState::Dict(dict));
             }
             RegionalKeyConversionParent::List(mut list) => {

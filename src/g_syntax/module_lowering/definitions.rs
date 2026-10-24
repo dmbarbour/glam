@@ -303,7 +303,7 @@ pub(in crate::g_syntax) fn update_module_resolved(
 ) -> ResolvedExpr<Value> {
     apply_builtin_resolved(
         access,
-        Builtin::DictUpdate,
+        Builtin::DictInsert,
         [static_path_resolved(access, target), value, definitions],
     )
 }
@@ -321,7 +321,7 @@ pub(in crate::g_syntax) fn update_definition_target_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     Ok(apply_builtin_resolved(
         access,
-        Builtin::DictUpdate,
+        Builtin::DictInsert,
         [
             definition_target_path_resolved(access, target, line, context, scope, locals)?,
             value,
@@ -453,13 +453,12 @@ pub(in crate::g_syntax) fn update_module_value_in(
     target: &str,
     value: Value,
 ) -> Value {
-    // Module definitions are ordered updates over the incoming namespace.
-    // Ordinary dictionary literals still lower through DictUnion.
+    // Module definitions are ordered insertions into the incoming namespace.
     lower_resolved_expr_in(
         access,
         apply_builtin_resolved(
             access,
-            Builtin::DictUpdate,
+            Builtin::DictInsert,
             [
                 ResolvedExpr::Embedded(path_value(access, target)),
                 ResolvedExpr::Provided(value),
@@ -500,7 +499,7 @@ pub(in crate::g_syntax) fn update_module_dict_entries_in(
                 access,
                 apply_builtin_resolved(
                     access,
-                    Builtin::DictUpdate,
+                    Builtin::DictInsert,
                     [
                         ResolvedExpr::Embedded(Value::List(crate::core::List::from_values(path))),
                         ResolvedExpr::Provided(access.duplicate_value(value)),

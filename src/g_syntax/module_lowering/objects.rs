@@ -460,12 +460,8 @@ pub(in crate::g_syntax) fn remove_object_spec_resolved(
 ) -> ResolvedExpr<Value> {
     apply_builtin_resolved(
         access,
-        Builtin::DictUpdate,
-        [
-            static_path_resolved(access, "spec"),
-            ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
-            value,
-        ],
+        Builtin::DictRemove,
+        [static_path_resolved(access, "spec"), value],
     )
 }
 

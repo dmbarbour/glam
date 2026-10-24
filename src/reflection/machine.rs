@@ -2118,7 +2118,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             let base = access.clone_root(&base);
                             let update = Value::builtin_call_in(
                                 access.values(),
-                                Builtin::DictUpdate,
+                                Builtin::DictInsert,
                                 vec![path, value, base],
                             );
                             access.root_value(update)

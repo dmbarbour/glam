@@ -1512,7 +1512,7 @@ pub(in crate::eval) fn apply_handler_builtin_in(
             let state = Value::Lazy(LazyValue::from_builtin_in(
                 values,
                 BuiltinCall {
-                    builtin: Builtin::DictUpdate,
+                    builtin: Builtin::DictInsert,
                     arguments: Arc::from([path, item, state]),
                 },
             ));

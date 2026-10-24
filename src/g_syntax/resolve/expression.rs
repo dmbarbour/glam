@@ -938,7 +938,7 @@ pub(in crate::g_syntax) fn lower_dict_literal_resolved(
                 ResolvedDictMember::Optional(path, list) => {
                     (Builtin::DictIntroduceOptional, vec![path, list])
                 }
-                ResolvedDictMember::Dict(dict) => (Builtin::DictShallowUnion, vec![dict]),
+                ResolvedDictMember::Dict(dict) => (Builtin::DictUnion, vec![dict]),
             };
             ResolvedExpr::apply(ResolvedExpr::Embedded(Value::Builtin(builtin)), arguments)
         })

@@ -316,7 +316,6 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::InspectOrigin) => "inspect_origin",
         SyntaxOperator::Builtin(crate::core::Builtin::CompileSource) => "compile_source",
         SyntaxOperator::Builtin(crate::core::Builtin::MixinCompose) => "mixin_compose",
-        SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",
         SyntaxOperator::Builtin(crate::core::Builtin::Floor) => "floor",
         SyntaxOperator::Builtin(crate::core::Builtin::Mod) => "mod",
         SyntaxOperator::Builtin(crate::core::Builtin::Slice) => "slice",
@@ -337,8 +336,8 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::DictDefault) => "dict.default",
         SyntaxOperator::Builtin(crate::core::Builtin::DictInsert) => "dict.insert",
         SyntaxOperator::Builtin(crate::core::Builtin::DictRemove) => "dict.remove",
-        SyntaxOperator::Builtin(crate::core::Builtin::DictUpdateWith) => "dict.update",
-        SyntaxOperator::Builtin(crate::core::Builtin::DictShallowUnion) => "dict.union",
+        SyntaxOperator::Builtin(crate::core::Builtin::DictUpdate) => "dict.update",
+        SyntaxOperator::Builtin(crate::core::Builtin::DictUnion) => "dict.union",
         SyntaxOperator::Builtin(crate::core::Builtin::DictIntroduce) => "dict.introduce",
         SyntaxOperator::Builtin(crate::core::Builtin::DictIntroduceOptional) => {
             "dict_introduce_optional"
@@ -406,8 +405,6 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::IfResult) => "if_result",
         SyntaxOperator::Builtin(crate::core::Builtin::MatchResult) => "match_result",
         SyntaxOperator::Builtin(crate::core::Builtin::DictSingleton) => ":",
-        SyntaxOperator::Builtin(crate::core::Builtin::DictUnion) => "{,}",
-        SyntaxOperator::Builtin(crate::core::Builtin::DictUpdate) => "dict_update",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectSpec) => "object_spec",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectFromDict) => "object_from_dict",
         SyntaxOperator::Builtin(crate::core::Builtin::ObjectLocalName) => "object_local_name",

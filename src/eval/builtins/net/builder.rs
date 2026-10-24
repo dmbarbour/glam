@@ -844,7 +844,7 @@ impl RegionalBuilderBuiltinMachine {
                 );
                 Value::builtin_call_in(
                     access.values(),
-                    Builtin::DictUpdate,
+                    Builtin::DictInsert,
                     vec![path, replacement, user_state],
                 )
             };

@@ -2144,20 +2144,6 @@ pub(super) fn index_from_evaluated(
     })
 }
 
-pub(super) fn is_deferred_value(_access: &RuntimeValueAccess<'_>, value: &Value) -> bool {
-    matches!(value, Value::Lazy(_) | Value::Promised(_))
-}
-
-pub(super) fn is_error_lazy_value(access: &RuntimeValueAccess<'_>, value: &Value) -> bool {
-    matches!(value, Value::Lazy(lazy)
-        if lazy.access(access).cached()
-            .is_some_and(|result| result.is_err()))
-}
-
-pub(super) fn is_undefined_dict_value(_access: &RuntimeValueAccess<'_>, value: &Value) -> bool {
-    matches!(value, Value::Dict(dict) if dict.is_empty())
-}
-
 #[cfg(test)]
 mod ownership_tests {
     use super::*;

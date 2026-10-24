@@ -195,8 +195,6 @@ impl RegionalBuiltinMachine {
             | Builtin::Seq
             | Builtin::Spark
             | Builtin::DictSingleton
-            | Builtin::DictUnion
-            | Builtin::DictUpdate
             | Builtin::DictPairs
             | Builtin::DictFromEntries
             | Builtin::DictFromPairs
@@ -205,12 +203,11 @@ impl RegionalBuiltinMachine {
             | Builtin::DictDefault
             | Builtin::DictInsert
             | Builtin::DictRemove
-            | Builtin::DictUpdateWith
-            | Builtin::DictShallowUnion
+            | Builtin::DictUpdate
+            | Builtin::DictUnion
             | Builtin::DictIntroduce
             | Builtin::DictIntroduceOptional
             | Builtin::DictBuild
-            | Builtin::MergeDuplicate
             | Builtin::Slice
             | Builtin::ListLen
             | Builtin::ListSplit
@@ -450,8 +447,6 @@ impl RegionalBuiltinMachine {
                 })
             }
             Builtin::DictSingleton
-            | Builtin::DictUnion
-            | Builtin::DictUpdate
             | Builtin::DictPairs
             | Builtin::DictFromEntries
             | Builtin::DictFromPairs
@@ -460,12 +455,11 @@ impl RegionalBuiltinMachine {
             | Builtin::DictDefault
             | Builtin::DictInsert
             | Builtin::DictRemove
-            | Builtin::DictUpdateWith
-            | Builtin::DictShallowUnion
+            | Builtin::DictUpdate
+            | Builtin::DictUnion
             | Builtin::DictIntroduce
             | Builtin::DictIntroduceOptional
-            | Builtin::DictBuild
-            | Builtin::MergeDuplicate => Self::Dictionary(RegionalDictBuiltinMachine::new_in(
+            | Builtin::DictBuild => Self::Dictionary(RegionalDictBuiltinMachine::new_in(
                 access,
                 source_owner,
                 builtin,

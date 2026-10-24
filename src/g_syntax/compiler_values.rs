@@ -274,14 +274,8 @@ impl GCompilerValues {
                         Value::Builtin(Builtin::DictIntroduce),
                     )
                     .insert(name_as_key("remove"), Value::Builtin(Builtin::DictRemove))
-                    .insert(
-                        name_as_key("update"),
-                        Value::Builtin(Builtin::DictUpdateWith),
-                    )
-                    .insert(
-                        name_as_key("union"),
-                        Value::Builtin(Builtin::DictShallowUnion),
-                    ),
+                    .insert(name_as_key("update"), Value::Builtin(Builtin::DictUpdate))
+                    .insert(name_as_key("union"), Value::Builtin(Builtin::DictUnion)),
             )
         });
         rooted_checkpoint();
@@ -457,7 +451,7 @@ pub(in crate::g_syntax) fn reflection_state_key_resolved(
 ) -> ResolvedExpr<Value> {
     apply_builtin(
         access,
-        Builtin::DictUpdate,
+        Builtin::DictInsert,
         [
             ResolvedExpr::List(vec![
                 name,
@@ -878,7 +872,7 @@ fn build_macro_environment(values: &CoreValueFactory) -> RuntimeValueRoot {
         );
         let extended = apply_builtin(
             access,
-            Builtin::DictUpdate,
+            Builtin::DictInsert,
             [
                 ResolvedExpr::List(vec![ResolvedExpr::Embedded(Value::Atom(atom_from_str(
                     "language",
@@ -904,12 +898,11 @@ fn build_empty_object_defs(values: &CoreValueFactory) -> RuntimeValueRoot {
         let final_self = locals.push_internal_binding("<object-final-self>");
         let without_spec = apply_builtin(
             access,
-            Builtin::DictUpdate,
+            Builtin::DictRemove,
             [
                 ResolvedExpr::List(vec![ResolvedExpr::Embedded(Value::Atom(atom_from_str(
                     "spec",
                 )))]),
-                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
                 ResolvedExpr::Local(prior_self),
             ],
         );
@@ -1582,7 +1575,7 @@ mod tests {
         let definitions = ResolvedExpr::lambda(
             vec![base, self_value],
             ResolvedExpr::apply(
-                ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUpdate)),
+                ResolvedExpr::Embedded(Value::Builtin(Builtin::DictInsert)),
                 [
                     ResolvedExpr::List(vec![ResolvedExpr::Embedded(Value::Atom(atom_from_str(
                         "adapted",

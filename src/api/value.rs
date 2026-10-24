@@ -677,15 +677,16 @@ impl Values {
         self.with_access(|values| {
             Ok(values.wrap(CoreValue::builtin_call_in(
                 values.runtime_access(),
-                Builtin::DictShallowUnion,
+                Builtin::DictUnion,
                 vec![values.clone_core(&left)?, values.clone_core(&right)?],
             )))
         })
     }
 
-    /// Constructs an ordinary semantic dictionary path update without
-    /// demanding the dictionary, path, or replacement value.
-    pub fn dict_update(
+    /// Constructs `dictionary` with `new_value` at `path`, as `dict.insert`
+    /// does, without demanding any of them: it replaces what is at `path`
+    /// and adds the dicts on the way where absent.
+    pub fn dict_insert(
         &self,
         dictionary: Value,
         path: Value,
@@ -694,12 +695,25 @@ impl Values {
         self.with_access(|values| {
             Ok(values.wrap(CoreValue::builtin_call_in(
                 values.runtime_access(),
-                Builtin::DictUpdate,
+                Builtin::DictInsert,
                 vec![
                     values.clone_core(&path)?,
                     values.clone_core(&new_value)?,
                     values.clone_core(&dictionary)?,
                 ],
+            )))
+        })
+    }
+
+    /// Constructs `dictionary` without what is at `path`, as `dict.remove`
+    /// does, without demanding either: it prunes the dicts the removal
+    /// leaves empty, and is `dictionary` where `path` is undefined.
+    pub fn dict_remove(&self, dictionary: Value, path: Value) -> Result<Value, Error> {
+        self.with_access(|values| {
+            Ok(values.wrap(CoreValue::builtin_call_in(
+                values.runtime_access(),
+                Builtin::DictRemove,
+                vec![values.clone_core(&path)?, values.clone_core(&dictionary)?],
             )))
         })
     }

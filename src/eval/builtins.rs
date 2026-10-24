@@ -190,8 +190,6 @@ pub(super) fn apply_builtin_in(
         | Builtin::TokenEnd => deferred(arguments),
         Builtin::IfResult | Builtin::MatchResult => deferred(arguments),
         Builtin::DictSingleton
-        | Builtin::DictUnion
-        | Builtin::DictUpdate
         | Builtin::DictPairs
         | Builtin::DictFromEntries
         | Builtin::DictFromPairs
@@ -200,12 +198,11 @@ pub(super) fn apply_builtin_in(
         | Builtin::DictDefault
         | Builtin::DictInsert
         | Builtin::DictRemove
-        | Builtin::DictUpdateWith
-        | Builtin::DictShallowUnion
+        | Builtin::DictUpdate
+        | Builtin::DictUnion
         | Builtin::DictIntroduce
         | Builtin::DictIntroduceOptional
-        | Builtin::DictBuild
-        | Builtin::MergeDuplicate => deferred(arguments),
+        | Builtin::DictBuild => deferred(arguments),
         Builtin::ObjectSpec
         | Builtin::ObjectLocalName
         | Builtin::DiagnosticObject

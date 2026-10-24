@@ -973,9 +973,7 @@ impl DictKeyRequestWork {
                 PreparationPoll::Demand(value) => Ok(PreparationPoll::Demand(value)),
                 PreparationPoll::Ready(value) => {
                     let (key, _) = &self.members[self.next - 1];
-                    if !matches!(&value, Key::Dict(entries) if entries.is_empty()) {
-                        self.converted.push((key.clone(), value));
-                    }
+                    self.converted.push((key.clone(), value));
                     self.child = None;
                     Ok(PreparationPoll::Progress)
                 }

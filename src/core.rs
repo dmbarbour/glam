@@ -2256,7 +2256,6 @@ pub enum Builtin {
     /// `outer (inner base self) self`, so the outer mixin's definitions
     /// override the inner's.
     MixinCompose,
-    MergeDuplicate,
     Floor,
     Mod,
     Slice,
@@ -2349,13 +2348,11 @@ pub enum Builtin {
     IfResult,
     MatchResult,
     DictSingleton,
-    DictUnion,
-    DictUpdate,
     /// A dictionary's members as `[key, value]` lists, in key order.
     DictPairs,
     /// `keys values`: the dictionary of those members, pairing keys and
     /// values by position. It fails on lists of unequal length or a key
-    /// given twice, and leaves out a member whose value is already `{}`.
+    /// given twice.
     DictFromEntries,
     /// The dictionary of a list of `[key, value]` lists, the twin of
     /// `DictPairs`. A pair of another length fails, as do the failures of
@@ -2381,10 +2378,10 @@ pub enum Builtin {
     /// `dict.update Path Function Dict`: `Dict` with `Function` applied to
     /// the value at `Path`, `insert Path (Function (lookup Path Dict))
     /// Dict`.
-    DictUpdateWith,
+    DictUpdate,
     /// `dict.union Left Right`: the shallow union of two dicts. A key both
     /// define is an error, found where it is read.
-    DictShallowUnion,
+    DictUnion,
     /// `dict.introduce Path Value Dict`: `Dict` with `Value` at `Path`, an
     /// error where `Path` is already defined. It adds the dicts on the way
     /// where absent and defers through a lazy one (`dict-path-fusion`).
@@ -2472,7 +2469,6 @@ impl Builtin {
             Self::InspectOrigin => 1,
             Self::CompileSource => 5,
             Self::MixinCompose => 4,
-            Self::MergeDuplicate => 3,
             Self::Floor => 1,
             Self::Mod => 2,
             Self::Slice => 3,
@@ -2533,8 +2529,6 @@ impl Builtin {
             Self::IfResult => 1,
             Self::MatchResult => 1,
             Self::DictSingleton => 2,
-            Self::DictUnion => 2,
-            Self::DictUpdate => 3,
             Self::DictPairs => 1,
             Self::DictFromEntries => 2,
             Self::DictFromPairs => 1,
@@ -2543,8 +2537,8 @@ impl Builtin {
             Self::DictDefault => 3,
             Self::DictInsert => 3,
             Self::DictRemove => 2,
-            Self::DictUpdateWith => 3,
-            Self::DictShallowUnion => 2,
+            Self::DictUpdate => 3,
+            Self::DictUnion => 2,
             Self::DictIntroduce => 3,
             Self::DictIntroduceOptional => 3,
             Self::DictBuild => 1,
@@ -2987,17 +2981,8 @@ impl RuntimeValueAccess<'_> {
             }
             Value::Dict(dict) => Some(Key::Dict(Arc::from(
                 dict.iter()
-                    .map(|(key, value)| {
-                        let value = self.key_from_value(value)?;
-                        if matches!(&value, Key::Dict(entries) if entries.is_empty()) {
-                            return Some(None);
-                        }
-                        Some(Some((key.clone(), value)))
-                    })
-                    .collect::<Option<Vec<_>>>()?
-                    .into_iter()
-                    .flatten()
-                    .collect::<Vec<_>>(),
+                    .map(|(key, value)| Some((key.clone(), self.key_from_value(value)?)))
+                    .collect::<Option<Vec<_>>>()?,
             ))),
             Value::Builtin(_)
             | Value::PartialBuiltin(_)
@@ -4817,7 +4802,7 @@ mod tests {
     }
 
     #[test]
-    fn empty_dict_values_are_elided_from_dict_keys() {
+    fn empty_dict_values_are_kept_in_dict_keys() {
         let values = values();
         let empty = Value::Dict(Dict::new_sync());
         let with_empty_field = Value::Dict(
@@ -4831,7 +4816,10 @@ mod tests {
             );
             assert_eq!(
                 access.key_from_value(&with_empty_field),
-                Some(Key::Dict(Arc::from([])))
+                Some(Key::Dict(Arc::from([(
+                    Key::atom_from_text("key"),
+                    Key::Dict(Arc::from([]))
+                )])))
             );
         });
     }

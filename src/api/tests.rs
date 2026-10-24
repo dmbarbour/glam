@@ -905,12 +905,15 @@ fn dictionary_composition_is_lazy_and_rejects_foreign_members() {
     let union = values
         .dict_union(promise.clone(), values.empty_dict())
         .expect("union construction should remain lazy");
-    let update = values
-        .dict_update(promise.clone(), promise.clone(), promise.clone())
-        .expect("update construction should remain lazy");
+    let insert = values
+        .dict_insert(promise.clone(), promise.clone(), promise.clone())
+        .expect("insert construction should remain lazy");
+    let remove = values
+        .dict_remove(promise.clone(), promise.clone())
+        .expect("remove construction should remain lazy");
 
     assert_unobserved_promise(&assembler, &promise);
-    for constructed in [&singleton, &union, &update] {
+    for constructed in [&singleton, &union, &insert, &remove] {
         assert_unclaimed_lazy(&assembler, constructed);
     }
     resolver
@@ -931,13 +934,18 @@ fn dictionary_composition_is_lazy_and_rejects_foreign_members() {
     );
     assert!(
         values
-            .dict_update(values.empty_dict(), values.list([]).unwrap(), foreign)
+            .dict_insert(
+                values.empty_dict(),
+                values.list([]).unwrap(),
+                foreign.clone()
+            )
             .is_err()
     );
+    assert!(values.dict_remove(values.empty_dict(), foreign).is_err());
 }
 
 #[test]
-fn dictionary_composition_matches_source_literals_union_and_updates() {
+fn dictionary_composition_matches_source_literals_union_and_paths() {
     let assembler = Assembler::new();
     let values = assembler.values();
     let module = assembler
@@ -945,13 +953,14 @@ fn dictionary_composition_matches_source_literals_union_and_updates() {
         .script(
             "g",
             concat!(
-                "language g0\n",
+                "language g0\nimport 'std\n",
                 "left = {base:1, nested:{x:2}}\n",
                 "right = {added:3, nested:{y:4}}\n",
                 "source_union = {left, right}\n",
                 "source_conflict = {left, {base:3}}\n",
                 "source_update = left with { base := 5; nested.z = 6 }\n",
-                "source_remove = source_update with { base := {} }\n",
+                "source_remove = dict.remove ['base] source_update\n",
+                "source_empty = source_update with { base := {} }\n",
             ),
         )
         .build()
@@ -963,7 +972,7 @@ fn dictionary_composition_matches_source_literals_union_and_updates() {
         .dict_union(left.clone(), right)
         .expect("same-runtime union should construct");
     let update = values
-        .dict_update(
+        .dict_insert(
             left,
             values
                 .list([values.atom_from_text("base")])
@@ -971,20 +980,26 @@ fn dictionary_composition_matches_source_literals_union_and_updates() {
             values.integer(5),
         )
         .and_then(|dictionary| {
-            values.dict_update(
+            values.dict_insert(
                 dictionary,
                 values.list([values.atom_from_text("nested"), values.atom_from_text("z")])?,
                 values.integer(6),
             )
         })
-        .expect("same-runtime nested update should construct");
+        .expect("same-runtime nested insert should construct");
     let removed = values
-        .dict_update(
+        .dict_remove(
+            update.clone(),
+            values.list([values.atom_from_text("base")]).unwrap(),
+        )
+        .expect("removal should construct");
+    let emptied = values
+        .dict_insert(
             update.clone(),
             values.list([values.atom_from_text("base")]).unwrap(),
             values.empty_dict(),
         )
-        .expect("update to undefined should construct removal");
+        .expect("inserting an empty dict should construct");
 
     let assert_field = |actual: &Value, source: &str, path: &[&str]| {
         let expected = access_path(&assembler, module.value(), source).unwrap();
@@ -1044,7 +1059,34 @@ fn dictionary_composition_matches_source_literals_union_and_updates() {
     ] {
         assert_field(&update, "source_update", path);
     }
-    assert_field(&removed, "source_remove", &["base"]);
+    // A removal leaves `base` undefined; an empty dict is a value
+    // (`dict-empty-is-a-value`).
+    let base_or = |dict: &Value| {
+        values
+            .apply(
+                &values.default_function(),
+                [
+                    values.list([values.atom_from_text("base")]).unwrap(),
+                    values.integer(7),
+                    dict.clone(),
+                ],
+            )
+            .and_then(|value| assembler.evaluate(&value))
+            .unwrap()
+    };
+    let source_remove = access_path(&assembler, module.value(), "source_remove").unwrap();
+    for removed in [&removed, &source_remove] {
+        assert_eq!(value_i64(&assembler, &base_or(removed)), Some(7));
+    }
+    assert_field(&removed, "source_remove", &["nested", "z"]);
+    let source_empty = access_path(&assembler, module.value(), "source_empty").unwrap();
+    for emptied in [&emptied, &source_empty] {
+        assert!(same_representation(
+            &assembler,
+            &base_or(emptied),
+            &values.empty_dict()
+        ));
+    }
 
     let singleton = values
         .dict_singleton(values.atom_from_text("only"), values.integer(9))

@@ -1495,7 +1495,7 @@ impl ReflectionStore {
                 .value_in(&access)
                 .expect("the store keeps its runtime volume");
             for path in &paths {
-                root = apply_value_at_path_in(&access, root, path, Value::Dict(Dict::new_sync()));
+                root = remove_path_in(&access, root, path);
             }
             access.volume_version(
                 self.kept
@@ -1744,13 +1744,7 @@ fn apply_edit_in(access: &RuntimeValueAccess<'_>, current: Value, edit: &StoreEd
         }
         StoreEdit::Remove { address } => {
             let (_, path) = address.reflection_parts();
-            let path = Value::List(List::from_values(
-                path.keys()
-                    .iter()
-                    .map(|key| access.value_from_key(key))
-                    .collect(),
-            ));
-            Value::builtin_call_in(access, Builtin::DictRemove, vec![path, current])
+            remove_path_in(access, current, path)
         }
         StoreEdit::Rewrite {
             address,
@@ -1777,13 +1771,29 @@ fn apply_value_at_path_in(
     if path.depth() == 0 {
         return value;
     }
-    let path = Value::List(List::from_values(
+    Value::builtin_call_in(
+        access,
+        Builtin::DictInsert,
+        vec![path_list_in(access, path), value, root],
+    )
+}
+
+/// `root` without what is at `path`, pruning the dicts the removal empties.
+fn remove_path_in(access: &RuntimeValueAccess<'_>, root: Value, path: &ConflictPath) -> Value {
+    Value::builtin_call_in(
+        access,
+        Builtin::DictRemove,
+        vec![path_list_in(access, path), root],
+    )
+}
+
+fn path_list_in(access: &RuntimeValueAccess<'_>, path: &ConflictPath) -> Value {
+    Value::List(List::from_values(
         path.keys()
             .iter()
             .map(|key| access.value_from_key(key))
             .collect(),
-    ));
-    Value::builtin_call_in(access, Builtin::DictUpdate, vec![path, value, root])
+    ))
 }
 
 /// The value at `path` in a volume's `contents`, as a lazy access left to

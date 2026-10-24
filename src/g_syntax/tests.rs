@@ -4462,7 +4462,13 @@ fn abstract_objects_retain_specs_without_instantiating_members() {
     let Value::Dict(expression_spec) = fully_evaluated_value(expression_spec) else {
         panic!("declare expression specification should evaluate to a dictionary");
     };
-    assert!(expression_spec.get(&*keys::NAME).is_none());
+    // An anonymous object's name is `{}`, a value (`dict-empty-is-a-value`).
+    assert_same_value_representation(
+        expression_spec
+            .get(&*keys::NAME)
+            .expect("an anonymous object's spec names it `{}`"),
+        &Value::Dict(Dict::new_sync()),
+    );
     assert_same_value_representation(
         &resolved_value_at_path(&value, &["observed_name"]),
         &Value::Dict(Dict::new_sync()),

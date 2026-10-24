@@ -1071,11 +1071,6 @@ fn immediate_diagnostic_shell_operations_share_one_root_neutral_access_region() 
         };
         access.assert_same_representation_for_test(&split.get(&*keys::LEFT), &Some(&n(1)));
         access.assert_same_representation_for_test(&split.get(&*keys::RIGHT), &Some(&n(2)));
-        assert!(is_undefined_dict_value(
-            &access,
-            &Value::Dict(Dict::new_sync())
-        ));
-        assert!(!is_deferred_value(&access, &n(3)));
     });
 
     assert_eq!(
@@ -3114,8 +3109,8 @@ fn dict_union_expr(left: TestExpr, right: TestExpr) -> TestExpr {
     builtin2_expr(Builtin::DictUnion, left, right)
 }
 
-fn dict_update_expr(path: TestExpr, new_value: TestExpr, dict: TestExpr) -> TestExpr {
-    builtin3_expr(Builtin::DictUpdate, path, new_value, dict)
+fn dict_insert_expr(path: TestExpr, new_value: TestExpr, dict: TestExpr) -> TestExpr {
+    builtin3_expr(Builtin::DictInsert, path, new_value, dict)
 }
 
 fn global_access(path: Vec<TestKey>) -> TestExpr {
@@ -6098,7 +6093,7 @@ fn eval_key_forces_nested_dictionary_values() {
 }
 
 #[test]
-fn eval_key_elides_empty_dictionary_values_from_dict_keys() {
+fn eval_key_keeps_empty_dictionary_values_in_dict_keys() {
     let empty = eval_key(&Value::Dict(crate::core::Dict::new_sync()))
         .expect("empty dict should be keyable");
     let with_empty_field = eval_key(&Value::Dict(crate::core::Dict::new_sync().insert(
@@ -6108,97 +6103,66 @@ fn eval_key_elides_empty_dictionary_values_from_dict_keys() {
     .expect("dict with empty field should be keyable");
 
     assert_eq!(empty, Key::Dict(Arc::from([])));
-    assert_eq!(with_empty_field, Key::Dict(Arc::from([])));
+    assert_eq!(
+        with_empty_field,
+        Key::Dict(Arc::from([(
+            Key::atom_from_text("key"),
+            Key::Dict(Arc::from([]))
+        )]))
+    );
 }
 
 #[test]
-fn singleton_dict_filters_empty_dictionary_values() {
+fn singleton_dict_keeps_an_empty_dictionary_value() {
+    let kept = Key::atom_from_text("kept");
     let value = eval_closed_expr(&singleton_expr(
-        Value::Atom(crate::core::Atom::from_key(
-            &crate::core::Key::binary_from_text("gone"),
-        )),
+        key_value(&kept),
         TestExpr::Value(Value::Dict(crate::core::Dict::new_sync())),
     ))
     .expect("singleton dict should evaluate");
 
-    crate::core::test_value_factory()
-        .assert_same_representation_for_test(&value, &Value::Dict(crate::core::Dict::new_sync()));
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &value.get_key_path(&[kept]),
+        &Some(&Value::Dict(crate::core::Dict::new_sync())),
+    );
 }
 
 #[test]
-fn dictionary_unions_merge_nested_dictionaries_transitively() {
+fn dictionary_unions_are_shallow() {
+    // A key both define is an error where it is read, whether both values
+    // are dicts or one is `{}` (`dict-path-fusion`).
     let key = Key::atom_from_text("greeting");
-    let hello = Key::atom_from_text("hello");
-    let world = Key::atom_from_text("world");
-
-    let expr = dict_union_expr(
+    let nested = |inner: &str, text: &str| {
         TestExpr::Value(Value::Dict(
             crate::core::Dict::new_sync().insert(
                 key.clone(),
                 Value::Dict(
                     crate::core::Dict::new_sync()
-                        .insert(hello.clone(), Value::binary_from_text("Hello")),
+                        .insert(Key::atom_from_text(inner), Value::binary_from_text(text)),
                 ),
             ),
-        )),
-        TestExpr::Value(Value::Dict(
-            crate::core::Dict::new_sync().insert(
-                key.clone(),
-                Value::Dict(
-                    crate::core::Dict::new_sync()
-                        .insert(world.clone(), Value::binary_from_text("World")),
-                ),
-            ),
-        )),
-    );
-
-    let value = eval_closed_expr(&expr).expect("dict union should evaluate");
-    let greeting = value.get_key_path(&[key]).expect("greeting should exist");
-    let Value::Lazy(greeting) = greeting else {
-        panic!("greeting should stay lazy until demanded");
+        ))
     };
-    let greeting = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-        &test_context(),
-        &Value::Lazy(greeting.duplicate_for_test(&crate::core::test_value_factory())),
-    )
-    .expect("nested dict union should evaluate when demanded");
-    let Value::Dict(greeting) = greeting else {
-        panic!("greeting should evaluate to a merged dictionary");
-    };
+    let empty = TestExpr::Value(Value::Dict(
+        crate::core::Dict::new_sync()
+            .insert(key.clone(), Value::Dict(crate::core::Dict::new_sync())),
+    ));
 
-    crate::core::test_value_factory().assert_same_representation_for_test(
-        &greeting.get(&hello),
-        &Some(&Value::binary_from_text("Hello")),
-    );
-    crate::core::test_value_factory().assert_same_representation_for_test(
-        &greeting.get(&world),
-        &Some(&Value::binary_from_text("World")),
-    );
-}
-
-#[test]
-fn dictionary_unions_treat_empty_dictionary_values_as_undefined() {
-    let key = Key::atom_from_text("greeting");
-    let expr = dict_union_expr(
-        singleton_expr(
-            Value::Atom(crate::core::Atom::from_key(
-                &crate::core::Key::binary_from_text("greeting"),
-            )),
-            TestExpr::Value(Value::binary_from_text("Hello")),
-        ),
-        singleton_expr(
-            Value::Atom(crate::core::Atom::from_key(
-                &crate::core::Key::binary_from_text("greeting"),
-            )),
-            TestExpr::Value(Value::Dict(crate::core::Dict::new_sync())),
-        ),
-    );
-
-    let value = eval_closed_expr(&expr).expect("dict union should evaluate");
-    crate::core::test_value_factory().assert_same_representation_for_test(
-        &value.get_key_path(&[key]),
-        &Some(&Value::binary_from_text("Hello")),
-    );
+    for expr in [
+        dict_union_expr(nested("hello", "Hello"), nested("world", "World")),
+        dict_union_expr(nested("hello", "Hello"), empty),
+    ] {
+        let value = eval_closed_expr(&expr).expect("dict union should evaluate");
+        let greeting = value
+            .get_key_path(std::slice::from_ref(&key))
+            .expect("greeting should exist");
+        let err = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+            &test_context(),
+            &greeting.duplicate_for_test(&crate::core::test_value_factory()),
+        )
+        .expect_err_without_debug("a key both define should fail when read");
+        assert_eq!(err.to_string(), "dict.union: both dicts define `greeting`");
+    }
 }
 
 #[test]
@@ -6259,52 +6223,6 @@ fn dictionary_union_resumes_without_replaying_a_completed_operand() {
         1,
         "resumption must retain the completed left operand"
     );
-}
-
-#[test]
-fn dictionary_duplicate_merge_resumes_its_second_operand() {
-    let (owner, observer, _executor) = same_runtime_contexts();
-    let (right, _owner_task, _owner) = owner
-        .task_owned_promise()
-        .expect("the owner should allocate a promised operand");
-    let application = apply_values(
-        &observer,
-        Value::Builtin(Builtin::MergeDuplicate),
-        vec![
-            Value::binary_from_text("nested"),
-            Value::Dict(Dict::new_sync().insert(Key::atom_from_text("left"), n(41))),
-            Value::Promised(right.duplicate_for_test(observer.values())),
-        ],
-    )
-    .expect("duplicate merge application should build");
-
-    let blocked =
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err_without_debug(
-                "the unresolved right operand should suspend duplicate merge",
-            );
-    assert!(blocked.blocked_on().is_some());
-
-    let right_key = Key::atom_from_text("right");
-    set_promise(
-        &owner,
-        &right,
-        Value::Dict(Dict::new_sync().insert(right_key.clone(), n(42))),
-    )
-    .expect_without_debug("the owner should resolve the duplicate operand");
-    let value =
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect("duplicate merge should resume after promise assignment");
-    let Value::Dict(dict) = value else {
-        panic!("duplicate merge should produce a dictionary");
-    };
-    observer.values().assert_same_representation_for_test(
-        &dict.get(&Key::atom_from_text("left")),
-        &Some(&n(41)),
-    );
-    observer
-        .values()
-        .assert_same_representation_for_test(&dict.get(&right_key), &Some(&n(42)));
 }
 
 #[test]
@@ -6477,16 +6395,13 @@ fn dictionary_unions_defer_ambiguous_keys_until_observed() {
     )
     .expect_err_without_debug("ambiguous key should fail only when demanded");
 
-    assert_eq!(
-        err.to_string(),
-        "dictionary union is ambiguous at key `greeting`"
-    );
+    assert_eq!(err.to_string(), "dict.union: both dicts define `greeting`");
 }
 
 #[test]
-fn dictionary_updates_overwrite_duplicate_values() {
+fn dictionary_inserts_overwrite_duplicate_values() {
     let key = Key::atom_from_text("greeting");
-    let expr = dict_update_expr(
+    let expr = dict_insert_expr(
         key_path_expr(vec![key.clone()]),
         TestExpr::Value(Value::binary_from_text("World")),
         TestExpr::Value(Value::Dict(
@@ -6494,7 +6409,7 @@ fn dictionary_updates_overwrite_duplicate_values() {
         )),
     );
 
-    let value = eval_closed_expr(&expr).expect("dict update should evaluate");
+    let value = eval_closed_expr(&expr).expect("dict insert should evaluate");
 
     crate::core::test_value_factory().assert_same_representation_for_test(
         &value.get_key_path(&[key]),
@@ -6503,12 +6418,12 @@ fn dictionary_updates_overwrite_duplicate_values() {
 }
 
 #[test]
-fn dictionary_updates_merge_nested_dictionaries_transitively() {
+fn dictionary_inserts_keep_nested_siblings() {
     let key = Key::atom_from_text("greeting");
     let hello = Key::atom_from_text("hello");
     let world = Key::atom_from_text("world");
 
-    let expr = dict_update_expr(
+    let expr = dict_insert_expr(
         key_path_expr(vec![key.clone(), world.clone()]),
         TestExpr::Value(Value::binary_from_text("World")),
         TestExpr::Value(Value::Dict(
@@ -6522,7 +6437,7 @@ fn dictionary_updates_merge_nested_dictionaries_transitively() {
         )),
     );
 
-    let value = eval_closed_expr(&expr).expect("dict update should evaluate");
+    let value = eval_closed_expr(&expr).expect("dict insert should evaluate");
     let greeting = value.get_key_path(&[key]).expect("greeting should exist");
     let Value::Dict(greeting) = greeting else {
         panic!("greeting should resolve directly to a dictionary");
@@ -6539,9 +6454,9 @@ fn dictionary_updates_merge_nested_dictionaries_transitively() {
 }
 
 #[test]
-fn dictionary_updates_treat_empty_dictionary_values_as_undefined() {
+fn dictionary_inserts_keep_an_empty_dictionary_value() {
     let key = Key::atom_from_text("greeting");
-    let expr = dict_update_expr(
+    let expr = dict_insert_expr(
         key_path_expr(vec![key.clone()]),
         TestExpr::Value(Value::Dict(crate::core::Dict::new_sync())),
         TestExpr::Value(Value::Dict(
@@ -6549,8 +6464,11 @@ fn dictionary_updates_treat_empty_dictionary_values_as_undefined() {
         )),
     );
 
-    let value = eval_closed_expr(&expr).expect("dict update should evaluate");
-    assert!(value.get_key_path(&[key]).is_none());
+    let value = eval_closed_expr(&expr).expect("dict insert should evaluate");
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &value.get_key_path(&[key]),
+        &Some(&Value::Dict(crate::core::Dict::new_sync())),
+    );
 }
 
 #[test]
