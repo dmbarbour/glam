@@ -122,11 +122,15 @@ enum Standard {
     HeapGet,
     HeapSet,
     HeapRewrite,
+    HeapTryGet,
+    HeapDel,
     HeapVolume,
     VolumeNew,
     VolumeGet,
     VolumeSet,
     VolumeRewrite,
+    VolumeTryGet,
+    VolumeDel,
     PromiseNew,
     PromiseStatus,
     PromiseFulfill,
@@ -145,15 +149,19 @@ struct Shape {
 }
 
 impl Standard {
-    const ALL: [Self; 14] = [
+    const ALL: [Self; 18] = [
         Self::HeapGet,
         Self::HeapSet,
         Self::HeapRewrite,
+        Self::HeapTryGet,
+        Self::HeapDel,
         Self::HeapVolume,
         Self::VolumeNew,
         Self::VolumeGet,
         Self::VolumeSet,
         Self::VolumeRewrite,
+        Self::VolumeTryGet,
+        Self::VolumeDel,
         Self::PromiseNew,
         Self::PromiseStatus,
         Self::PromiseFulfill,
@@ -174,11 +182,15 @@ impl Standard {
             Self::HeapGet => shape(F::HEAP, &["heap", "get"], 1, Some(0)),
             Self::HeapSet => shape(F::HEAP, &["heap", "set"], 2, Some(0)),
             Self::HeapRewrite => shape(F::HEAP, &["heap", "rewrite"], 2, Some(0)),
+            Self::HeapTryGet => shape(F::HEAP, &["heap", "try_get"], 1, Some(0)),
+            Self::HeapDel => shape(F::HEAP, &["heap", "del"], 1, Some(0)),
             Self::HeapVolume => shape(F::HEAP, &["heap", "vol"], 0, None),
             Self::VolumeNew => shape(F::HEAP, &["vol", "new"], 1, None),
             Self::VolumeGet => shape(F::HEAP, &["vol", "get"], 2, Some(1)),
             Self::VolumeSet => shape(F::HEAP, &["vol", "set"], 3, Some(1)),
             Self::VolumeRewrite => shape(F::HEAP, &["vol", "rewrite"], 3, Some(1)),
+            Self::VolumeTryGet => shape(F::HEAP, &["vol", "try_get"], 2, Some(1)),
+            Self::VolumeDel => shape(F::HEAP, &["vol", "del"], 2, Some(1)),
             Self::PromiseNew => shape(F::PROMISES, &["promise", "new"], 0, None),
             Self::PromiseStatus => shape(F::PROMISES, &["promise", "status"], 1, None),
             Self::PromiseFulfill => shape(F::PROMISES, &["promise", "fulfill"], 2, None),
@@ -734,6 +746,11 @@ impl Machine<'_, '_> {
                 self.heap_rewrite(path.iter().cloned())?;
                 self.unit_push();
             }
+            Standard::HeapTryGet => self.heap_try_get(path.iter().cloned())?,
+            Standard::HeapDel => {
+                self.heap_del(path.iter().cloned())?;
+                self.unit_push();
+            }
             Standard::HeapVolume => self.heap_volume(),
             Standard::VolumeNew => self.volume_new()?,
             Standard::VolumeGet => self.volume_get(path.iter().cloned())?,
@@ -743,6 +760,11 @@ impl Machine<'_, '_> {
             }
             Standard::VolumeRewrite => {
                 self.volume_rewrite(path.iter().cloned())?;
+                self.unit_push();
+            }
+            Standard::VolumeTryGet => self.volume_try_get(path.iter().cloned())?,
+            Standard::VolumeDel => {
+                self.volume_del(path.iter().cloned())?;
                 self.unit_push();
             }
             Standard::PromiseNew => {

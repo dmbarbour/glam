@@ -67,9 +67,10 @@ fn a_continuation_follows_each_success() {
 #[test]
 fn each_branch_keeps_its_own_state() {
     check(concat!(
-        "found = search {} 0 (.alt (.set ['n] 1) (.r ()) =>> .get ['n])\n",
+        // The second branch never set `n` (`dict-presence-ops`).
+        "found = search {} 0 (.alt (.set ['n] 1) (.r ()) =>> .get [] >>= (\\s -> .r (dict.default ['n] 'unset s)))\n",
         "whole = search {} 0 (.set [] {a:1} =>> .get [])\n",
-        "check = if values found == [1, {}] and values whole == [{a:1}] then \"pass\" else \"fail\"\n",
+        "check = if values found == [1, 'unset] and values whole == [{a:1}] then \"pass\" else \"fail\"\n",
     ));
 }
 

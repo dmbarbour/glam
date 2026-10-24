@@ -65,6 +65,7 @@ mod whnf_inventory;
 
 #[cfg(test)]
 pub(crate) use application::apply_values;
+pub(crate) use application::predicate_effect_holds;
 #[cfg(test)]
 pub(crate) use builtins::assert_construction_port_family_shape;
 #[cfg(test)]

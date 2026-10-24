@@ -316,19 +316,24 @@ object direct_x86_64 extends direct_standard_effects with
             state
         )
 
+  # `{}` is the cursor of a handler with none.
   allocate_split_section kind prior_cursor cursor_id state =
-    x86.allocate_split_section_id
-      kind
-      (x86.cursor_id prior_cursor)
-      cursor_id
-      state
+    match prior_cursor as
+      {} =>
+        x86.handler_error "cannot split an unknown direct-assembly cursor"
+      _ =>
+        x86.allocate_split_section_id
+          kind
+          (x86.cursor_id prior_cursor)
+          cursor_id
+          state
 
   allocate_split_section_id kind prior_cursor_id cursor_id state =
     x86.split_known_cursor
       kind
       prior_cursor_id
       cursor_id
-      state.handler.cursors.[prior_cursor_id]
+      (dict.default [prior_cursor_id] {} state.handler.cursors)
       state
 
   split_known_cursor kind prior_cursor_id cursor_id prior_cursor state =
@@ -480,7 +485,7 @@ object direct_x86_64 extends direct_standard_effects with
         (x86.publish_untraced name label_handle state)
 
   publish_untraced name label_handle state =
-    if state.handler.symbols.[name] == {} then
+    if not (dict.defines [name] state.handler.symbols) then
       {
         result:(),
         state:

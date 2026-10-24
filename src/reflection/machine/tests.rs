@@ -4178,7 +4178,7 @@ fn task_state_set_publishes_only_after_lazy_path_and_replacement_complete() {
 #[test]
 fn task_state_paths_preserve_empty_missing_and_non_dictionary_semantics() {
     let (assembler, value) = completed(
-        ".set [] { present:\"value\" } =>> .get [] >>= (\\whole -> (whole == { present:\"value\" }) =>> .get ['missing] >>= (\\missing -> (missing == {}) =>> .r \"ok\"))",
+        ".set [] { present:\"value\" } =>> .get [] >>= (\\whole -> (whole == { present:\"value\" }) =>> not (.try_get ['missing]) =>> .r \"ok\")",
     );
     assert_eq!(assembler.to_binary(&value).unwrap(), b"ok".as_slice());
 
@@ -4651,8 +4651,9 @@ fn isolated_search_retains_failed_branch_journals_as_parse_evidence() {
 
 #[test]
 fn isolated_search_reports_and_resumes_retryable_state_observations() {
-    let (assembler, effect) =
-        compile_effect(".heap.get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)");
+    let (assembler, effect) = compile_effect(
+        ".heap.try_get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)",
+    );
     let host = Arc::new(TestHost::with_wake_heap(
         assembler.core_values(),
         public_record(&assembler, [("answer", assembler.values().text("ready"))]),
@@ -5178,7 +5179,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
 #[test]
 fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     let (assembler, effect) = compile_effect(
-        ".cut (.heap.get ['ready] >>= (\\ready -> (.heap.set ['attempt] \"committed\") =>> (.write_stderr \"once\") =>> (.log 'warn {msg:{text:\"once\"}}) =>> .alt ((ready == 1) =>> .r \"done\") (.exit.success)))",
+        ".cut (.alt (.heap.try_get ['ready]) (.r ()) >>= (\\ready -> (.heap.set ['attempt] \"committed\") =>> (.write_stderr \"once\") =>> (.log 'warn {msg:{text:\"once\"}}) =>> .alt ((ready == 1) =>> .r \"done\") (.exit.success)))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
@@ -5928,7 +5929,7 @@ fn effectful_metadata_update_observes_environment_and_commits_log_once() {
 #[test]
 fn effectful_metadata_update_retries_after_observed_state_changes() {
     let (assembler, effect) = compile_effect(
-        ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .cut (.heap.get ['ready] >>= (\\ready -> (ready == \"arrived for metadata\") =>> .r [ready]))) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"arrived for metadata\") =>> .r metadata)",
+        ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .cut (.alt (.heap.try_get ['ready]) (.r ()) >>= (\\ready -> (ready == \"arrived for metadata\") =>> .r [ready]))) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"arrived for metadata\") =>> .r metadata)",
     );
     let host = Arc::new(TestHost::with_wake_heap(
         assembler.core_values(),
@@ -6798,7 +6799,7 @@ fn reflection_environment_is_available_as_plain_data() {
 
     let (_, missing) = compile_effect_with_runtime(
         &assembler.evaluation_runtime(),
-        ".env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_MISSING\"] == {}) =>> .r \"missing\")",
+        ".env ['process,'env] >>= (\\environment -> not (dict.defines [\"GLAM_TEST_MISSING\"] environment) =>> .r \"missing\")",
     );
     let (context, task) = schedule_composed_test_task(&assembler, &missing, host);
     assert!(matches!(
@@ -7057,7 +7058,7 @@ fn task_acknowledgement_routes_across_sessions_to_the_producer_ledger() {
 #[test]
 fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
     let (assembler, publish) = compile_effect(
-        ".task.new (.cut (.heap.get ['join_ready] >>= (\\ready -> (ready == \"ready\") =>> .r \"pending result\"))) >>= (\\pending -> .task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\abandoned -> .task.new (.r \"complete result\") >>= (\\complete -> .task.new (.fail) >>= (\\failed -> .task.new (.r ()) >>= (\\canceled -> .task.cancel canceled =>> .heap.set ['join_tasks] { pending:pending, abandoned:abandoned, complete:complete, failed:failed, canceled:canceled })))))",
+        ".task.new (.cut (.alt (.heap.try_get ['join_ready]) (.r ()) >>= (\\ready -> (ready == \"ready\") =>> .r \"pending result\"))) >>= (\\pending -> .task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\abandoned -> .task.new (.r \"complete result\") >>= (\\complete -> .task.new (.fail) >>= (\\failed -> .task.new (.r ()) >>= (\\canceled -> .task.cancel canceled =>> .heap.set ['join_tasks] { pending:pending, abandoned:abandoned, complete:complete, failed:failed, canceled:canceled })))))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (owner, publish_task) = schedule_composed_test_task(&assembler, &publish, host.clone());
@@ -8857,7 +8858,7 @@ fn fixpoint_hides_then_restores_the_reset_stack() {
 #[test]
 fn cut_rolls_back_failed_alternative_user_state() {
     let (assembler, value) = completed(
-        ".cut (.alt ((.set [\"x\"] \"bad\") =>> .fail) ((.get [\"x\"]) >>= (\\x -> (x == {}) =>> .r \"clean\")))",
+        ".cut (.alt ((.set [\"x\"] \"bad\") =>> .fail) (not (.try_get [\"x\"]) =>> .r \"clean\"))",
     );
     assert_eq!(assembler.to_binary(&value).unwrap(), b"clean".as_slice());
 }
@@ -9258,8 +9259,9 @@ fn malformed_nested_heap_updates_do_not_poison_unrelated_reads() {
 
 #[test]
 fn standalone_heap_reads_do_not_make_later_failure_retryable() {
-    let (assembler, heap_effect) =
-        compile_effect(".heap.get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)");
+    let (assembler, heap_effect) = compile_effect(
+        ".heap.try_get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)",
+    );
     let ready_heap = public_record(&assembler, [("answer", assembler.values().text("ready"))]);
     let heap_host = Arc::new(TestHost::with_wake_heap(
         assembler.core_values(),
@@ -9271,7 +9273,7 @@ fn standalone_heap_reads_do_not_make_later_failure_retryable() {
     assert_eq!(heap_host.wait_count(), 0);
 
     let (local_assembler, local_effect) =
-        compile_effect(".get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)");
+        compile_effect(".try_get ['answer] >>= (\\answer -> (answer == \"ready\") =>> .r answer)");
     let local_host = Arc::new(TestHost::with_wake_heap(
         local_assembler.core_values(),
         public_record(
@@ -9719,7 +9721,7 @@ fn try_answers_with_its_operation_s_value_or_failure() {
         ),
         (".try (.alt (.fail) (.r \"B\")) >>= (\\r -> .r r.ok)", "B"),
         (
-            ".try (.heap.set ['k] \"set\" =>> .fail) >>= (\\_ -> .heap.get ['k] >>= (\\k -> .r (if k == {} then \"undone\" else \"kept\")))",
+            ".try (.heap.set ['k] \"set\" =>> .fail) >>= (\\_ -> .alt (.heap.try_get ['k] =>> .r \"kept\") (.r \"undone\"))",
             "undone",
         ),
         (
@@ -9734,8 +9736,8 @@ fn try_answers_with_its_operation_s_value_or_failure() {
 #[test]
 fn try_answers_with_an_evaluation_error_within_it() {
     for source in [
-        ".try (seq (1 / 0) (.r ())) >>= (\\r -> .r (if r.err == {} then \"none\" else \"err\"))",
-        ".try (.cut (seq (1 / 0) (.r ()))) >>= (\\r -> .r (if r.err == {} then \"none\" else \"err\"))",
+        ".try (seq (1 / 0) (.r ())) >>= (\\r -> .r (if dict.defines ['err] r then \"err\" else \"none\"))",
+        ".try (.cut (seq (1 / 0) (.r ()))) >>= (\\r -> .r (if dict.defines ['err] r then \"err\" else \"none\"))",
     ] {
         assert_eq!(try_text(source), b"err".as_slice(), "{source}");
     }
@@ -9745,7 +9747,7 @@ fn try_answers_with_an_evaluation_error_within_it() {
 fn try_answers_wait_until_its_promise_is_kept() {
     assert_eq!(
         try_text(
-            ".promise.new >>= (\\p -> .try (seq p.promise (.r ())) >>= (\\r -> .promise.fulfill p.resolver 1 =>> .try (seq p.promise (.r \"kept\")) >>= (\\s -> .r (if r.wait == {} then \"none\" else s.ok))))"
+            ".promise.new >>= (\\p -> .try (seq p.promise (.r ())) >>= (\\r -> .promise.fulfill p.resolver 1 =>> .try (seq p.promise (.r \"kept\")) >>= (\\s -> .r (if dict.defines ['wait] r then s.ok else \"none\"))))"
         ),
         b"kept".as_slice()
     );
@@ -9755,7 +9757,7 @@ fn try_answers_wait_until_its_promise_is_kept() {
 fn try_within_a_cut_or_a_choice_nests() {
     for (source, expected) in [
         (
-            ".cut (.try (.heap.set ['k] \"set\" =>> .fail) >>= (\\r -> .heap.get ['k] >>= (\\k -> .r (if r == 'fail and k == {} then \"undone\" else \"kept\"))))",
+            ".cut (.try (.heap.set ['k] \"set\" =>> .fail) >>= (\\r -> .alt (.heap.try_get ['k] =>> .r \"kept\") (.r (if r == 'fail then \"undone\" else \"kept\"))))",
             "undone",
         ),
         (
@@ -9772,7 +9774,7 @@ fn a_cut_that_fails_on_a_try_s_wait_parks_until_its_promise_is_kept() {
     // The cut fails on the `.try`'s `wait`: rather than failing
     // permanently, it parks on the promise, and runs again once it is kept.
     let (assembler, watch) = compile_effect(
-        "\\v -> .cut (.try (seq v (.r \"kept\")) >>= (\\r -> if r.wait == {} then .r r.ok else .fail))",
+        "\\v -> .cut (.try (seq v (.r \"kept\")) >>= (\\r -> if dict.defines ['wait] r then .fail else .r r.ok))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (promise, promised, _resolver) = host.promised();
@@ -9814,8 +9816,7 @@ fn eval_answers_wait_alike_for_a_promise_and_a_promise_behind_lazy_values() {
     // In a task the scheduler polls, a promise behind lazy values, or behind
     // a reflection gate that runs as work of its own, is found as a promise
     // held directly is, once the work it waits on comes to rest.
-    let report =
-        "(\\r -> .log 'info { msg:{ text:(if r.wait == {} then \"no wait\" else \"wait\") } })";
+    let report = "(\\r -> .log 'info { msg:{ text:(if dict.defines ['wait] r then \"wait\" else \"no wait\") } })";
     for (source, gated) in [
         (format!("\\v -> .eval v >>= {report}"), false),
         (format!("\\v -> .eval ((\\x -> x) v) >>= {report}"), false),

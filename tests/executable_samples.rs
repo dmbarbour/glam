@@ -70,8 +70,8 @@ fn direct_assembly_exposes_only_the_public_effect_api() {
             "language g0\n\
              import 'std\n\
              asm.result = anno 'binary (\n\
-             \x20\x20if env.x86_64.run == {} and\n\
-             \x20\x20\x20\x20env.x86_64.continue_after == {}\n\
+             \x20\x20if not (dict.defines ['run] env.x86_64) and\n\
+             \x20\x20\x20\x20not (dict.defines ['continue_after] env.x86_64)\n\
              \x20\x20then \"ok\"\n\
              \x20\x20else \"handler internals leaked\"\n\
              )",

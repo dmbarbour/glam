@@ -830,7 +830,7 @@ fn token_parser_rejects_outer_cli_and_host_effects() {
 #[test]
 fn token_task_local_state_is_isolated_from_outer_cli_state() {
     let (assembler, configuration) = configuration(
-        "language g0\nimport 'std\nconf.cli = .set ['scope] \"outer\" =>> .read.token \"stateful token\" (.token.text \"x\" =>> .get ['scope] >>= (\\before -> (before == {}) =>> .set ['scope] \"inner\" =>> .get ['scope])) >>= (\\inside -> (inside == \"inner\") =>> .get ['scope] >>= (\\outside -> (outside == \"outer\") =>> .read.end =>> .write.script \"g\" \"ok\"))\n",
+        "language g0\nimport 'std\nconf.cli = .set ['scope] \"outer\" =>> .read.token \"stateful token\" (.token.text \"x\" =>> .get [] >>= (\\before -> not (dict.defines ['scope] before)) =>> .set ['scope] \"inner\" =>> .get ['scope]) >>= (\\inside -> (inside == \"inner\") =>> .get ['scope] >>= (\\outside -> (outside == \"outer\") =>> .read.end =>> .write.script \"g\" \"ok\"))\n",
     );
     let expansion = expand_configured(&assembler, &configuration, configured_arguments(&["x"]))
         .expect("token and outer CLI local states should not observe each other");
@@ -840,7 +840,7 @@ fn token_task_local_state_is_isolated_from_outer_cli_state() {
 #[test]
 fn each_token_parse_starts_with_fresh_task_local_state() {
     let (assembler, configuration) = configuration(
-        "language g0\nimport 'std\nconf.cli = .read.token \"first token\" (.token.text \"x\" =>> .set ['scope] \"first\") =>> .read.token \"second token\" (.token.text \"y\" =>> .get ['scope] >>= (\\state -> (state == {}) =>> .r ())) =>> .read.end =>> .write.script \"g\" \"ok\"\n",
+        "language g0\nimport 'std\nconf.cli = .read.token \"first token\" (.token.text \"x\" =>> .set ['scope] \"first\") =>> .read.token \"second token\" (.token.text \"y\" =>> .get [] >>= (\\state -> not (dict.defines ['scope] state))) =>> .read.end =>> .write.script \"g\" \"ok\"\n",
     );
     let expansion = expand_configured(
         &assembler,
@@ -854,7 +854,7 @@ fn each_token_parse_starts_with_fresh_task_local_state() {
 #[test]
 fn failed_token_alternatives_discard_their_task_local_state() {
     let (assembler, configuration) = configuration(
-        "language g0\nimport 'std\nconf.cli = .read.token \"choice\" (.token.text \"x\" =>> .alt (.set ['leak] \"bad\" =>> .fail) (.get ['leak] >>= (\\state -> (state == {}) =>> .r ()))) =>> .read.end =>> .write.script \"g\" \"ok\"\n",
+        "language g0\nimport 'std\nconf.cli = .read.token \"choice\" (.token.text \"x\" =>> .alt (.set ['leak] \"bad\" =>> .fail) (.get [] >>= (\\state -> not (dict.defines ['leak] state)))) =>> .read.end =>> .write.script \"g\" \"ok\"\n",
     );
     let expansion = expand_configured(&assembler, &configuration, configured_arguments(&["x"]))
         .expect("failed token alternatives should not leak local writes");

@@ -897,7 +897,7 @@ fn assembler_and_logger_reasoning_sessions_share_the_runtime_heap() {
     let assembly = dir.join("assembly.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\_message -> .heap.get ['marker] >>= (\\marker -> (marker == \"assembler\") =>> .write_stderr (\"SHARED\" ++ [10])))\n",
+        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\_message -> .alt (.heap.try_get ['marker]) (.r ()) >>= (\\marker -> (marker == \"assembler\") =>> .write_stderr (\"SHARED\" ++ [10])))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(

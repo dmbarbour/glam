@@ -4297,14 +4297,14 @@ fn host_try_variants_use_reflection_state_and_rollback_failed_branches() {
     let source = r#"language g0
 import 'std
 refl.try_access = .heap.set ['visible] 42 =>> (try 42 <- .heap.get ['visible] then () else 1 / 0)
-refl.try_rollback = (try (.heap.set ['try_rolled_back] "bad" =>> .fail) then 1 / 0 else ()) =>> (.heap.get ['try_rolled_back] >>= (\value -> (value == {}) =>> .r ()))
+refl.try_rollback = (try (.heap.set ['try_rolled_back] "bad" =>> .fail) then 1 / 0 else ()) =>> (not (.heap.try_get ['try_rolled_back]))
 refl.try_match_rollback = try_match 42 as {
   42 when (.heap.set ['rolled_back] "bad" =>> .fail) => ();
   42 when ({}) <- .heap.get ['rolled_back] => ();
 }
 refl.try_match_when = try_match when { 42 <- .heap.get ['visible] => (); }
 refl.try_match_exhaustion = try (try_match 1 as {}) then 1 / 0 else ()
-refl.try_tentative_rollback = (try _ then? (.heap.set ['tentative_try] "bad" =>> .fail) else ()) =>> (.heap.get ['tentative_try] >>= (\value -> (value == {}) =>> .r ()))
+refl.try_tentative_rollback = (try _ then? (.heap.set ['tentative_try] "bad" =>> .fail) else ()) =>> (not (.heap.try_get ['tentative_try]))
 refl.try_match_tentative_rollback = (try_match when {
   _ =>? (.heap.set ['tentative_match] "bad" =>> .fail);
   {} <- .heap.get ['tentative_match] => ();
@@ -6737,7 +6737,7 @@ fn interaction_net_construction_preserves_standard_state_and_control_semantics()
         parse(concat!(
             "language g0\n",
             "import 'std\n",
-            "rollback = interaction_net (.cut (.alt ((.set ['choice] \"discarded\") =>> .data \"discarded\" >>= (\\_ports -> .fail)) (.get ['choice] >>= (\\choice -> (choice == {}) =>> .data \"clean\" >>= (\\ports -> .r (list.head ports))))))\n",
+            "rollback = interaction_net (.cut (.alt ((.set ['choice] \"discarded\") =>> .data \"discarded\" >>= (\\_ports -> .fail)) (.get [] >>= (\\state -> not (dict.defines ['choice] state)) =>> .data \"clean\" >>= (\\ports -> .r (list.head ports)))))\n",
             "preserved = interaction_net (.data \"preserved\" >>= (\\ports -> .reset \"prompt\" ((.set ['visible] \"state\") =>> .shift \"prompt\" (\\continuation -> continuation (list.head ports)))))\n",
             "restored = interaction_net (.data \"restored\" >>= (\\ports -> .reset \"prompt\" (.get [] >>= (\\checkpoint -> (.set [] {}) =>> (.set [] checkpoint) =>> .shift \"prompt\" (\\continuation -> continuation (list.head ports))))))\n",
             "after_fix = interaction_net (.data \"after fix\" >>= (\\ports -> .reset \"prompt\" ((.cut (.fix (\\_loop -> .r ()))) =>> .shift \"prompt\" (\\continuation -> continuation (list.head ports)))))\n",
@@ -7573,7 +7573,7 @@ refl.notice = .log 'info { msg:{ text:"module reflection" } }
 object foo with
     a = 1
 foo.b = 2
-meta.module_unclaimed = anno { refl:(.heap.get [guard,'claim] >>= (\claim -> if claim == {} then .r () else .fail)) } "module unclaimed"
+meta.module_unclaimed = anno { refl:(not (.heap.try_get [guard,'claim])) } "module unclaimed"
 meta.object_claimed = anno { refl:(.heap.get [[abstract_global_path foo, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "object claimed"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
@@ -7809,7 +7809,7 @@ fn overriding_meta_refl_replaces_the_reflection_operation() {
 import 'std
 refl.notice = .log 'info { msg:{ text:"scanned reflection task" } }
 meta.refl := .r ()
-meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> if tasks == {} then .r () else .fail)))) } "probe"
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> not (.heap.try_get [guard,'tasks])))) } "probe"
 ordinary = "ordinary"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =

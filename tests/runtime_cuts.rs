@@ -5,7 +5,7 @@ use std::cell::Cell;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig, ValueKind};
+use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -20,13 +20,13 @@ fn heap_int(rt: &mut Runtime, path: &[&str]) -> i64 {
     .expect("the heap should hold an integer there")
 }
 
-/// Whether the value at `path` in the shared heap is undefined, read
-/// outside any cut.
+/// Whether the shared heap leaves `path` undefined, read outside any cut
+/// (`dict-presence-ops`).
 fn heap_undefined(rt: &mut Runtime, path: &[&str]) -> bool {
-    rt.run("reader", |m| {
-        m.heap_get(path.iter().copied());
-        m.eval()?;
-        undefined(m)
+    rt.run("reader", |m| match m.heap_try_get(path.iter().copied()) {
+        Ok(()) => m.discard(1).map(|()| false),
+        Err(error) if error.kind() == ErrorKind::Backtrack => Ok(true),
+        Err(error) => Err(error),
     })
     .expect("the read should succeed")
 }
@@ -57,15 +57,6 @@ fn tally(m: &mut Machine<'_, '_>) -> Result<(), Error> {
     m.local_set("count")?;
     m.text_push("left behind");
     Ok(())
-}
-
-/// Whether the top value, evaluated, is `{}`; it is popped.
-fn undefined(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
-    if m.kind()? == ValueKind::Dict && m.dict_unpack(Vec::<&str>::new()).is_ok() {
-        return Ok(true);
-    }
-    m.discard(1)?;
-    Ok(false)
 }
 
 #[test]
@@ -193,9 +184,11 @@ fn nested_cuts_backtrack_alone_and_merge_on_success() {
                 Err(Error::new("the first alternative fails"))
             });
             assert!(first.is_err());
-            m.heap_get(["first"]);
-            m.eval()?;
-            assert!(undefined(m)?, "the failed alternative's write is undone");
+            assert!(
+                m.heap_try_get(["first"])
+                    .is_err_and(|error| error.kind() == ErrorKind::Backtrack),
+                "the failed alternative's write is undone"
+            );
             let failed: Result<(), Error> = m.cut(|m| {
                 m.heap_get(["absent"]);
                 Err(m.fail())
@@ -354,10 +347,10 @@ fn a_failed_cut_waits_until_something_it_observed_changes() {
                 let attempts = Cell::new(0);
                 let value = m.cut(|m| {
                     attempts.set(attempts.get() + 1);
-                    m.heap_get(["ready"]);
-                    m.eval()?;
-                    if m.kind()? == ValueKind::Number {
-                        return m.int_pop();
+                    match m.heap_try_get(["ready"]) {
+                        Ok(()) => return m.int_pop(),
+                        Err(error) if error.kind() == ErrorKind::Backtrack => {}
+                        Err(error) => return Err(error),
                     }
                     // Signals the writer as the failure backtracks, before
                     // the cut waits, forcing the write after the read.

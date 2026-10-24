@@ -2472,6 +2472,59 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
+    /// Pushes the value at `path` in the shared heap, without evaluating
+    /// it, where `path` is defined, and fails where it is not, a
+    /// [`Self::fail`] error (`dict-presence-ops`). It forces the dicts on
+    /// the way, never the value. Within a cut, the read joins the cut's
+    /// transaction, as [`Self::heap_get`]'s does, so a cut that fails on it
+    /// waits for the path's definition.
+    pub fn heap_try_get<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        let (root, value) = match &mut self.cut {
+            Some(cut) => {
+                cut.observed |= cut.journal.observe_read(&path);
+                (cut.journal.heap_value(&[]), cut.journal.heap_value(&path))
+            }
+            None => {
+                let snapshot = self.resources().reflection_snapshot().1;
+                (snapshot.heap_value(&[]), snapshot.heap_value(&path))
+            }
+        };
+        if !self.defines(&root, &path)? {
+            return Err(self.fail());
+        }
+        self.push(value);
+        Ok(())
+    }
+
+    /// Whether `root` defines `path`, forcing the dicts on the way and
+    /// nothing else (`dict-presence-ops`).
+    fn defines(&mut self, root: &HandleValue, path: &[Key]) -> Result<bool, Error> {
+        let values = self.runtime.assembler.values().clone();
+        let defines = values.with_access(|scoped| {
+            let access = scoped.runtime_access();
+            let root = scoped.clone_core(root)?;
+            let path = CoreValue::List(crate::core::List::from_values(
+                path.iter().map(|key| access.value_from_key(key)).collect(),
+            ));
+            Ok::<_, Error>(scoped.wrap(CoreValue::builtin_call_in(
+                access,
+                crate::core::Builtin::DictDefines,
+                vec![path, root],
+            )))
+        })?;
+        let evaluated = self.runtime.assembler.evaluator().eval(&defines);
+        let answer = self.note_evaluation(evaluated)?.into_value();
+        values.with_access(|scoped| {
+            let answer = scoped.clone_core(&answer)?;
+            crate::eval::predicate_effect_holds(scoped.runtime_access(), &answer)
+                .ok_or_else(|| Error::new("a definedness test answers `.r ()` or `.fail`"))
+        })
+    }
+
     /// Removes what is at `path` in the shared heap, pruning the dicts the
     /// removal empties (`dict-presence-ops`). Outside a cut, the removal
     /// commits at once; within one, with the outermost cut. The path is not
@@ -2587,6 +2640,52 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.volume_edit(|journal, access, volume, value| {
             journal.write_volume_in(access, volume, path.clone(), value)
         })
+    }
+
+    /// Replaces the top value, a volume's handle, with the value at `path`
+    /// in the volume where `path` is defined, and fails where it is not, as
+    /// [`Self::heap_try_get`] reads the heap.
+    pub fn volume_try_get<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        let handle = self.volume_handle_at(1)?;
+        let snapshot = self
+            .cut
+            .is_none()
+            .then(|| self.resources().reflection_snapshot().1);
+        let runtime = self.runtime;
+        let cut = &mut self.cut;
+        let (root, value) = runtime.assembler.values().with_access(|scoped| {
+            let access = scoped.runtime_access();
+            let handle = scoped.clone_core(&handle)?;
+            let volume = access
+                .volume_cell(&handle)
+                .expect("the handle names a volume");
+            let contents = match (cut.as_mut(), &snapshot) {
+                (Some(cut), _) => {
+                    cut.observed |= cut.journal.observe_volume_read(volume, &path);
+                    cut.journal.read_volume_in(access, volume)
+                }
+                (None, Some(snapshot)) => snapshot.read_volume_in(access, volume),
+                (None, None) => unreachable!("outside a cut, a turn reads a snapshot"),
+            };
+            contents
+                .map(|contents| {
+                    (
+                        scoped.wrap(contents_at_path(access, contents, &[])),
+                        scoped.wrap(contents_at_path(access, contents, &path)),
+                    )
+                })
+                .ok_or_else(|| revoked(volume.id()))
+        })?;
+        if !self.defines(&root, &path)? {
+            return Err(self.fail());
+        }
+        self.pop()?;
+        self.push(value);
+        Ok(())
     }
 
     /// Pops a volume's handle and removes what is at `path` in the volume,

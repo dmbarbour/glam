@@ -65,7 +65,7 @@ pub(super) fn effect_value(_access: &RuntimeValueAccess<'_>, function: Value) ->
 
 /// Whether `value`, a predicate's answer as [`predicate_effect`] builds it,
 /// holds; `None` for any other value.
-pub(super) fn predicate_effect_holds(
+pub(crate) fn predicate_effect_holds(
     _access: &RuntimeValueAccess<'_>,
     value: &Value,
 ) -> Option<bool> {

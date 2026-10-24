@@ -69,7 +69,7 @@ fn compile(m: &mut Machine<'_, '_>, source: &str) -> Result<(), Error> {
     m.script_object(
         ["effects"],
         "g",
-        format!("language g0\neffect = {source}\n"),
+        format!("language g0\nimport 'std as std\neffect = {source}\n"),
     )?;
     m.dict_get("effect")
 }
@@ -441,6 +441,15 @@ impl EffectProvider for Both {
 }
 
 /// The evaluated kind of the shared heap's value at `key`.
+/// Whether the shared heap defines `key` (`dict-presence-ops`).
+fn heap_defined(m: &mut Machine<'_, '_>, key: &str) -> Result<bool, Error> {
+    match m.heap_try_get([key]) {
+        Ok(()) => m.discard(1).map(|()| true),
+        Err(error) if error.kind() == ErrorKind::Backtrack => Ok(false),
+        Err(error) => Err(error),
+    }
+}
+
 fn heap_kind(m: &mut Machine<'_, '_>, key: &str) -> Result<ValueKind, Error> {
     m.heap_get([key]);
     m.eval()?;
@@ -463,11 +472,7 @@ fn a_failed_first_operand_leaves_nothing_behind() {
             0,
             "the effect's state rolls back with its branch"
         );
-        assert_eq!(
-            heap_kind(m, "written")?,
-            ValueKind::Dict,
-            "the heap rolls back"
-        );
+        assert!(!heap_defined(m, "written")?, "the heap rolls back");
         m.local_get("marked");
         assert_eq!(
             m.kind()?,
@@ -549,7 +554,7 @@ fn within_the_turn_s_cut_a_failed_effect_cut_leaves_nothing_behind() {
                 &mut Standard,
             )?;
             m.discard(1)?;
-            assert_eq!(heap_kind(m, "first")?, ValueKind::Dict);
+            assert!(!heap_defined(m, "first")?);
             let failed = run(
                 m,
                 ".cut ((.heap.set ['second] 1) =>> (.fail))",
@@ -557,7 +562,7 @@ fn within_the_turn_s_cut_a_failed_effect_cut_leaves_nothing_behind() {
             )
             .expect_err("the effect's cut fails");
             assert_eq!(failed.kind(), ErrorKind::Backtrack, "{failed}");
-            assert_eq!(heap_kind(m, "second")?, ValueKind::Dict);
+            assert!(!heap_defined(m, "second")?);
             Ok(())
         })
     })
@@ -571,7 +576,7 @@ fn outside_the_turn_s_cut_a_failed_effect_cut_leaves_nothing_behind() {
         let failed = run(m, ".cut ((.heap.set ['k] 1) =>> (.fail))", &mut Standard)
             .expect_err("the effect's cut fails");
         assert_eq!(failed.kind(), ErrorKind::Backtrack, "{failed}");
-        assert_eq!(heap_kind(m, "k")?, ValueKind::Dict);
+        assert!(!heap_defined(m, "k")?);
         Ok(())
     })
     .expect("the turn should succeed");
@@ -598,7 +603,7 @@ impl EffectProvider for Ready {
 
     fn answer(&mut self, m: &mut Machine<'_, '_>, _request: &()) -> Result<Answer, Error> {
         self.calls += 1;
-        if heap_kind(m, "ready")? == ValueKind::Dict {
+        if !heap_defined(m, "ready")? {
             if let Some(waiting) = self.waiting.take() {
                 waiting
                     .send(())
@@ -678,9 +683,8 @@ fn an_answer_s_forks_join_before_its_cut_ends() {
     rt.run("m", |m| {
         run(m, ".alt (.spawn =>> (.fail)) (.r ())", &mut Spawner)?;
         m.discard(1)?;
-        assert_eq!(
-            heap_kind(m, "forked")?,
-            ValueKind::Dict,
+        assert!(
+            !heap_defined(m, "forked")?,
             "the failed fork's write rolls back"
         );
         run(m, ".alt (.spawn) (.r ())", &mut Spawner)?;
@@ -730,7 +734,7 @@ fn try_answers_with_its_outcome_in_an_effect_a_turn_runs() {
         .run("m", |m| {
             run(
                 m,
-                ".try (.r \"A\") >>= (\\a -> .try (.heap.set ['k] \"set\" =>> .fail) >>= (\\f -> .heap.get ['k] >>= (\\k -> .r (if a.ok == \"A\" and f == 'fail and k == {} then \"pass\" else \"fail\"))))",
+                ".try (.r \"A\") >>= (\\a -> .try (.heap.set ['k] \"set\" =>> .fail) >>= (\\f -> .alt (.heap.try_get ['k] =>> .r \"fail\") (.r (if a.ok == \"A\" and f == 'fail then \"pass\" else \"fail\"))))",
                 &mut Counter,
             )?;
             m.text_pop()
@@ -759,7 +763,7 @@ fn try_answers_conflict_when_another_commit_intervenes() {
                 // The `.try` reads `x`, then pauses before it commits.
                 run(
                     m,
-                    ".try (.heap.get ['x] >>= (\\x -> .pause =>> .heap.set ['y] x)) >>= (\\r -> .r (if r.conflict == {} then \"no conflict\" else \"conflict\"))",
+                    ".try (.heap.get ['x] >>= (\\x -> .pause =>> .heap.set ['y] x)) >>= (\\r -> .r (if std.dict.defines ['conflict] r then \"conflict\" else \"no conflict\"))",
                     &mut pause,
                 )
             })?;
@@ -789,7 +793,7 @@ fn try_answers_wait_on_a_promise_in_an_effect_a_turn_runs() {
         .run("m", |m| {
             run(
                 m,
-                ".promise.new >>= (\\p -> .heap.set ['k] \"set\" =>> .try (if p.promise == 1 then .r \"kept\" else .r \"other\") >>= (\\r -> .promise.fulfill p.resolver 1 =>> .try (if p.promise == 1 then .r \"kept\" else .r \"other\") >>= (\\s -> .heap.get ['k] >>= (\\k -> .r (if r.wait == {} then \"no wait\" else (if s.ok == \"kept\" then k else \"not kept\"))))))",
+                ".promise.new >>= (\\p -> .heap.set ['k] \"set\" =>> .try (if p.promise == 1 then .r \"kept\" else .r \"other\") >>= (\\r -> .promise.fulfill p.resolver 1 =>> .try (if p.promise == 1 then .r \"kept\" else .r \"other\") >>= (\\s -> .heap.get ['k] >>= (\\k -> .r (if std.dict.defines ['wait] r then (if s.ok == \"kept\" then k else \"not kept\") else \"no wait\")))))",
                 &mut Counter,
             )?;
             m.text_pop()
@@ -842,7 +846,7 @@ fn a_cut_that_fails_on_a_try_s_wait_parks_until_the_promise_is_kept() {
                 m.cut(|m| {
                     run(
                         m,
-                        ".heap.get ['p] >>= (\\p -> .try (if p == 1 then .r \"kept\" else .r \"other\") >>= (\\r -> if r.wait == {} then .r r.ok else (.signal =>> .fail)))",
+                        ".heap.get ['p] >>= (\\p -> .try (if p == 1 then .r \"kept\" else .r \"other\") >>= (\\r -> if std.dict.defines ['wait] r then (.signal =>> .fail) else .r r.ok))",
                         &mut signal,
                     )
                 })

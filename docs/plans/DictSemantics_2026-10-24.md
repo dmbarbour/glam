@@ -222,6 +222,20 @@ Slices keep the old semantics working until the last flips them.
      replaces `defined_or_function()`, and `require_defined_function()`
      takes `name path dict`. The CLI's `conf.env`, `conf.log`,
      `conf.completion_script.*` and `conf.cli` select by path.
+   - Tests and samples: `== {}` checks in Glam snippets become
+     `dict.defines`, `not (.heap.try_get P)` or `.get [] >>= dict.…`
+     (the token parser has no `.try_get`); the wait idiom reads that
+     compare a value use `.heap.try_get`, and those that ignore it stay,
+     since an error value unobserved is no error. The turn API gains
+     `heap_try_get` and `volume_try_get`, which force the dicts on the way,
+     never the value, and the effects a turn runs serve `heap.try_get`,
+     `heap.del`, `vol.try_get` and `vol.del`; Rust tests detect the heap's
+     absences with them. `direct_assembly.g` asks `dict.defines` and
+     `dict.default` where it read a missing symbol or cursor.
+   - Left for the flip, whose meaning they test or change: the turn API's
+     `local_get`, `dict_get`, `dict_unpack` and environment reads of what is
+     missing; `_self` and `_spec` as `{}`; the old semantics' own Rust
+     tests (deep union, `{foo:{}}` ≡ `{}`, key elision).
 4. `dict-path-fusion` — the front end groups static paths; a run-time
    builtin fuses computed paths by shared prefix, rejecting a prefix or a
    repeat; literals stop relying on deep union.
