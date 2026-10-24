@@ -54,7 +54,6 @@ mod operator;
 mod pattern_machine;
 mod sequence;
 pub(crate) mod strategy_machine;
-mod tagged_machine;
 #[cfg(test)]
 mod test_support;
 mod token_machine;

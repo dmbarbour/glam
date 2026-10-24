@@ -2938,7 +2938,6 @@ impl RuntimeValueAccess<'_> {
             Value::Number(_) => "Number",
             Value::Binary(_) => "Binary",
             Value::List(_) => "List",
-            Value::Dict(dict) if dict.is_empty() => "Undefined",
             Value::Dict(_) => "Dict",
             Value::Builtin(_) | Value::PartialBuiltin(_) | Value::Function(_) => "Function",
             Value::Net(_) => "Net",
@@ -4413,7 +4412,7 @@ mod tests {
             );
             assert_eq!(
                 access.diagnostic_kind_name(&Value::Dict(Dict::new_sync())),
-                "Undefined"
+                "Dict"
             );
             assert_eq!(access.diagnostic_kind_name(&deferred_list), "List");
         });

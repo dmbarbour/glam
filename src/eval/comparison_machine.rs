@@ -6,7 +6,7 @@ use std::sync::Arc;
 use glam_gc::Visitor;
 
 use crate::core::{
-    Builtin, Dict, EvaluatedValue, EvaluationFailure, LazyId, List, Value, keys,
+    Atom, Builtin, Dict, EvaluatedValue, EvaluationFailure, LazyId, List, Value, keys,
     trace_compatibility_value_managed_edges,
 };
 use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
@@ -14,7 +14,6 @@ use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use super::application::predicate_effect;
 use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
-use super::tagged_machine::{RegionalTaggedPayload, RegionalTaggedPayloadPoll};
 use super::whnf::{
     RegionalBoundaryRequest, RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place,
     reduce_semantic_shell,
@@ -40,7 +39,7 @@ pub(in crate::eval) struct RegionalComparisonMachine {
 
 enum ComparisonFrame {
     Value(ValueComparisonFrame),
-    List(ListComparisonFrame),
+    List(Box<ListComparisonFrame>),
     Dict(DictEqualityFrame),
     Tuple(TupleOrderingFrame),
 }
@@ -67,22 +66,22 @@ struct ListComparisonFrame {
 
 struct DictEqualityFrame {
     pairs: Vec<(Value, Value)>,
+    /// Whether the key sets differ, which decides at once.
+    unequal: bool,
     next: usize,
     awaiting_child: bool,
     source_owner: LazyId,
 }
 
 enum TupleOrderingPhase {
-    LeftTag,
-    RightTag,
+    /// One side is no tuple: exactly `{tuple: list}`.
+    NotTuples,
     LeftPayload,
     RightPayload,
     Comparing,
 }
 
 struct TupleOrderingFrame {
-    left_tag: RegionalTaggedPayload,
-    right_tag: RegionalTaggedPayload,
     left_payload: Option<Value>,
     right_payload: Option<Value>,
     left_list: Option<Value>,
@@ -389,31 +388,31 @@ fn classify_ordering(
             FrameAction::Complete(ComparisonResult::Ordering(left.cmp(&right)))
         }
         (Value::Binary(left), Value::List(_)) => {
-            FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+            FrameAction::Replace(ComparisonFrame::List(Box::new(ListComparisonFrame::new(
                 access,
                 ComparisonMode::Ordering,
                 Value::List(List::from_bytes(left)),
                 access.values().duplicate_value(right_root),
                 Some(source_owner),
-            )))
+            ))))
         }
         (Value::List(_), Value::Binary(right)) => {
-            FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+            FrameAction::Replace(ComparisonFrame::List(Box::new(ListComparisonFrame::new(
                 access,
                 ComparisonMode::Ordering,
                 access.values().duplicate_value(left_root),
                 Value::List(List::from_bytes(right)),
                 Some(source_owner),
-            )))
+            ))))
         }
         (Value::List(_), Value::List(_)) => {
-            FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+            FrameAction::Replace(ComparisonFrame::List(Box::new(ListComparisonFrame::new(
                 access,
                 ComparisonMode::Ordering,
                 access.values().duplicate_value(left_root),
                 access.values().duplicate_value(right_root),
                 Some(source_owner),
-            )))
+            ))))
         }
         (Value::Dict(left), Value::Dict(right)) => FrameAction::Replace(ComparisonFrame::Tuple(
             TupleOrderingFrame::new_in(access, &left, &right, source_owner),
@@ -475,35 +474,51 @@ fn classify_equality(
             FrameAction::Complete(ComparisonResult::Equality(left == right))
         }
         (Value::Binary(left), Value::List(_)) => {
-            FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+            FrameAction::Replace(ComparisonFrame::List(Box::new(ListComparisonFrame::new(
                 access,
                 ComparisonMode::Equality,
                 Value::List(List::from_bytes(left)),
                 access.values().duplicate_value(right_root),
                 Some(source_owner),
-            )))
+            ))))
         }
         (Value::List(_), Value::Binary(right)) => {
-            FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+            FrameAction::Replace(ComparisonFrame::List(Box::new(ListComparisonFrame::new(
                 access,
                 ComparisonMode::Equality,
                 access.values().duplicate_value(left_root),
                 Value::List(List::from_bytes(right)),
                 Some(source_owner),
-            )))
+            ))))
         }
         (Value::List(_), Value::List(_)) => {
-            FrameAction::Replace(ComparisonFrame::List(ListComparisonFrame::new(
+            FrameAction::Replace(ComparisonFrame::List(Box::new(ListComparisonFrame::new(
                 access,
                 ComparisonMode::Equality,
                 access.values().duplicate_value(left_root),
                 access.values().duplicate_value(right_root),
                 Some(source_owner),
-            )))
+            ))))
         }
         (Value::Dict(left), Value::Dict(right)) => FrameAction::Replace(ComparisonFrame::Dict(
             DictEqualityFrame::new_in(access, &left, &right, source_owner),
         )),
+        // An atom is the dict it stands for, `[key]:()`, but unit, a
+        // primitive atom, stands for none (`dict-empty-is-a-value`).
+        (Value::Atom(atom), Value::Dict(dict)) | (Value::Dict(dict), Value::Atom(atom)) => {
+            if atom.key() == &*keys::UNIT {
+                FrameAction::Complete(ComparisonResult::Equality(false))
+            } else {
+                let unit = Value::Atom(Atom::from_key(&keys::UNIT));
+                let atom_dict = Dict::new_sync().insert(atom.key().clone(), unit);
+                FrameAction::Replace(ComparisonFrame::Dict(DictEqualityFrame::new_in(
+                    access,
+                    &atom_dict,
+                    &dict,
+                    source_owner,
+                )))
+            }
+        }
         (Value::Builtin(_), _)
         | (_, Value::Builtin(_))
         | (Value::PartialBuiltin(_), _)
@@ -661,27 +676,27 @@ impl DictEqualityFrame {
         right: &Dict,
         source_owner: LazyId,
     ) -> Self {
-        let empty = Value::Dict(Dict::new_sync());
-        let mut pairs = Vec::new();
-        for (key, left_value) in left.iter() {
-            pairs.push((
-                access.values().duplicate_value(left_value),
-                right.get(key).map_or_else(
-                    || access.values().duplicate_value(&empty),
-                    |value| access.values().duplicate_value(value),
-                ),
-            ));
-        }
-        for (key, right_value) in right.iter() {
-            if !left.contains_key(key) {
-                pairs.push((
-                    access.values().duplicate_value(&empty),
-                    access.values().duplicate_value(right_value),
-                ));
-            }
-        }
+        // Structural: the same keys, then equal values. Keys that differ
+        // answer at once, forcing no value (`dict-empty-is-a-value`).
+        let same_keys =
+            left.size() == right.size() && left.iter().all(|(key, _)| right.contains_key(key));
+        let pairs = if same_keys {
+            left.iter()
+                .map(|(key, left_value)| {
+                    (
+                        access.values().duplicate_value(left_value),
+                        access.values().duplicate_value(
+                            right.get(key).expect("both dicts hold the same keys"),
+                        ),
+                    )
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
         Self {
             pairs,
+            unequal: !same_keys,
             next: 0,
             awaiting_child: false,
             source_owner,
@@ -691,6 +706,9 @@ impl DictEqualityFrame {
     fn poll(&mut self, access: &EvaluationValueAccess<'_>) -> FrameAction {
         if self.awaiting_child {
             unreachable!("dictionary comparison must receive its child before polling again")
+        }
+        if self.unequal {
+            return FrameAction::Complete(ComparisonResult::Equality(false));
         }
         let Some((left, right)) = self.pairs.get(self.next) else {
             return FrameAction::Complete(ComparisonResult::Equality(true));
@@ -733,14 +751,26 @@ impl TupleOrderingFrame {
         right: &Dict,
         source_owner: LazyId,
     ) -> Self {
+        // A tuple is exactly `{tuple: list}`, by its keys alone, forcing
+        // nothing (`dict-empty-is-a-value`).
+        let payload = |dict: &Dict| {
+            (dict.size() == 1)
+                .then(|| dict.get(&keys::TUPLE))
+                .flatten()
+                .map(|payload| access.values().duplicate_value(payload))
+        };
+        let (left_payload, right_payload) = (payload(left), payload(right));
+        let phase = if left_payload.is_some() && right_payload.is_some() {
+            TupleOrderingPhase::LeftPayload
+        } else {
+            TupleOrderingPhase::NotTuples
+        };
         Self {
-            left_tag: RegionalTaggedPayload::new_in(access, left, &keys::TUPLE, source_owner),
-            right_tag: RegionalTaggedPayload::new_in(access, right, &keys::TUPLE, source_owner),
-            left_payload: None,
-            right_payload: None,
+            left_payload,
+            right_payload,
             left_list: None,
             demand: None,
-            phase: TupleOrderingPhase::LeftTag,
+            phase,
             source_owner,
         }
     }
@@ -752,34 +782,9 @@ impl TupleOrderingFrame {
         name: &'static str,
     ) -> FrameAction {
         match self.phase {
-            TupleOrderingPhase::LeftTag => match self.left_tag.poll_in(access, step_budget) {
-                RegionalTaggedPayloadPoll::Ready(Some(payload)) => {
-                    self.left_payload = Some(payload);
-                    self.phase = TupleOrderingPhase::RightTag;
-                    FrameAction::Continue
-                }
-                RegionalTaggedPayloadPoll::Ready(None) => failure_message(format!(
-                    "{name} builtin can only order dictionaries tagged as `tuple`"
-                )),
-                RegionalTaggedPayloadPoll::Boundary(request) => FrameAction::Boundary(request),
-                RegionalTaggedPayloadPoll::Continue => FrameAction::Continue,
-                RegionalTaggedPayloadPoll::BudgetExhausted => FrameAction::BudgetExhausted,
-                RegionalTaggedPayloadPoll::Failed(failure) => FrameAction::Failed(failure),
-            },
-            TupleOrderingPhase::RightTag => match self.right_tag.poll_in(access, step_budget) {
-                RegionalTaggedPayloadPoll::Ready(Some(payload)) => {
-                    self.right_payload = Some(payload);
-                    self.phase = TupleOrderingPhase::LeftPayload;
-                    FrameAction::Continue
-                }
-                RegionalTaggedPayloadPoll::Ready(None) => failure_message(format!(
-                    "{name} builtin can only order dictionaries tagged as `tuple`"
-                )),
-                RegionalTaggedPayloadPoll::Boundary(request) => FrameAction::Boundary(request),
-                RegionalTaggedPayloadPoll::Continue => FrameAction::Continue,
-                RegionalTaggedPayloadPoll::BudgetExhausted => FrameAction::BudgetExhausted,
-                RegionalTaggedPayloadPoll::Failed(failure) => FrameAction::Failed(failure),
-            },
+            TupleOrderingPhase::NotTuples => failure_message(format!(
+                "{name} builtin can only order dictionaries tagged as `tuple`"
+            )),
             TupleOrderingPhase::LeftPayload => {
                 match demand_tuple_payload(
                     &mut self.demand,
@@ -814,16 +819,18 @@ impl TupleOrderingFrame {
                 ) {
                     TuplePayloadPoll::Ready(list) => {
                         self.phase = TupleOrderingPhase::Comparing;
-                        FrameAction::Push(ComparisonFrame::List(ListComparisonFrame::new(
-                            access,
-                            ComparisonMode::Ordering,
-                            access.values().duplicate_value(
-                                self.left_list
-                                    .as_ref()
-                                    .expect("left tuple list must be ready"),
+                        FrameAction::Push(ComparisonFrame::List(Box::new(
+                            ListComparisonFrame::new(
+                                access,
+                                ComparisonMode::Ordering,
+                                access.values().duplicate_value(
+                                    self.left_list
+                                        .as_ref()
+                                        .expect("left tuple list must be ready"),
+                                ),
+                                list,
+                                Some(self.source_owner),
                             ),
-                            list,
-                            Some(self.source_owner),
                         )))
                     }
                     TuplePayloadPoll::Boundary(request) => FrameAction::Boundary(request),
@@ -843,8 +850,6 @@ impl TupleOrderingFrame {
     }
 
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
-        self.left_tag.trace_managed_edges(visitor);
-        self.right_tag.trace_managed_edges(visitor);
         for value in [&self.left_payload, &self.right_payload, &self.left_list]
             .into_iter()
             .flatten()

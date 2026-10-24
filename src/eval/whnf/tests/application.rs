@@ -171,8 +171,10 @@ fn function_application_batches_arguments_without_intermediate_roots() {
     assert_eq!(function.remaining_arity(), 1);
 }
 
+/// Exactly `{eff:P}` applies as an effect, by its keys alone: its payload,
+/// even unresolved, is never forced (`dict-empty-is-a-value`).
 #[test]
-fn effect_payload_undefined_check_resumes_from_the_exact_promise() {
+fn an_effect_applies_without_forcing_its_payload() {
     let context = context();
     let promise = PromisedValue::new(context.values());
     let effect = Value::Dict(Dict::new_sync().insert(
@@ -181,19 +183,9 @@ fn effect_payload_undefined_check_resumes_from_the_exact_promise() {
     ));
     let mut computation = application(&context, effect, &[Value::Number(23.into())]);
 
-    let WhnfPoll::Deferred(WhnfDeferredRequest::Promise(root)) =
-        poll(&context, &mut computation, 2)
-    else {
-        panic!("tag recognition must suspend on the exact unresolved payload")
-    };
-    let expected = promise.id(context.values());
-    assert_eq!(root.id(), expected);
-
-    crate::core::set_test_promise(context.values(), &promise, Value::Number(29.into()))
-        .expect_without_debug("the effect payload should accept its assignment");
     let result = ready_after_yields(&context, &mut computation, 4).clone_core_for_test();
     let Value::Dict(effect) = result else {
-        panic!("a semantically defined singleton tag must produce an effect")
+        panic!("a singleton `eff` dict must produce an effect")
     };
     let Value::PartialBuiltin(call) = effect
         .get(&Key::atom_from_text("eff"))
@@ -207,33 +199,36 @@ fn effect_payload_undefined_check_resumes_from_the_exact_promise() {
         .assert_same_representation_for_test(&call.arguments[1], &Value::Number(23.into()));
 }
 
+/// A dict with `eff` and more is no function, which a handler still
+/// recognizes as an effect; one with `apply` applies it, whatever else it
+/// holds (`dict-empty-is-a-value`).
 #[test]
-fn nested_undefined_extra_resumes_without_restarting_tag_recognition() {
+fn an_effect_with_other_members_applies_only_through_apply() {
     let context = context();
-    let promise = PromisedValue::new(context.values());
-    let nested = Value::Dict(Dict::new_sync().insert(
-        Key::atom_from_text("nested"),
-        Value::Promised(promise.duplicate_for_test(context.values())),
-    ));
-    let effect = Value::Dict(
+    let extra = Value::Dict(
         Dict::new_sync()
             .insert(Key::atom_from_text("eff"), Value::Number(31.into()))
-            .insert(Key::atom_from_text("extra"), nested),
+            .insert(Key::atom_from_text("extra"), Value::Dict(Dict::new_sync())),
     );
-    let mut computation = application(&context, effect, &[Value::Number(37.into())]);
+    let mut computation = application(&context, extra, &[Value::Number(37.into())]);
+    let WhnfPoll::Failed(failure) = poll(&context, &mut computation, 8) else {
+        panic!("an `eff` dict with other members is no function")
+    };
+    assert!(failure.to_string().contains("received Dict"), "{failure}");
 
-    assert!(matches!(
-        poll(&context, &mut computation, 8),
-        WhnfPoll::Deferred(WhnfDeferredRequest::Promise(_))
-    ));
-    crate::core::set_test_promise(context.values(), &promise, Value::Dict(Dict::new_sync()))
-        .expect_without_debug("the nested extra should accept its undefined assignment");
-
-    let result = ready_after_yields(&context, &mut computation, 8).clone_core_for_test();
-    assert!(
-        matches!(result, Value::Dict(ref dict) if dict.get(&Key::atom_from_text("eff")).is_some()),
-        "a recursively undefined extra must not disqualify the effect tag"
+    let applicable = Value::Dict(
+        Dict::new_sync()
+            .insert(Key::atom_from_text("eff"), Value::Number(31.into()))
+            .insert(Key::atom_from_text("apply"), Value::Builtin(Builtin::Add))
+            .insert(Key::atom_from_text("extra"), Value::Number(1.into())),
     );
+    let mut computation = application(&context, applicable, &[Value::Number(19.into())]);
+    let Value::PartialBuiltin(call) =
+        ready_after_yields(&context, &mut computation, 16).clone_core_for_test()
+    else {
+        panic!("the dict should apply its `apply` member")
+    };
+    assert_eq!(call.builtin, Builtin::Add);
 }
 
 #[test]

@@ -29,21 +29,6 @@ fn retained_values(work: &WhnfState) -> Vec<&Value> {
     for frame in &work.frames {
         match frame {
             WhnfContinuation::Application { arguments, .. } => values.extend(arguments),
-            WhnfContinuation::DictionaryApplication {
-                effect_payload,
-                remaining_effect_values,
-                apply_member,
-                ..
-            } => {
-                values.push(effect_payload);
-                values.extend(remaining_effect_values);
-                values.extend(apply_member);
-            }
-            WhnfContinuation::SemanticUndefined { ancestors, .. } => {
-                for ancestor in ancestors {
-                    values.extend(&ancestor.members);
-                }
-            }
             WhnfContinuation::StaticAccess { .. } => {}
         }
     }
@@ -92,31 +77,6 @@ fn container_identities(work: &WhnfState) -> Vec<(&'static str, usize, usize, us
                 arguments.len(),
                 arguments.capacity(),
             )),
-            WhnfContinuation::DictionaryApplication {
-                remaining_effect_values,
-                ..
-            } => identities.push((
-                "remaining effect values",
-                remaining_effect_values.as_ptr() as usize,
-                remaining_effect_values.len(),
-                remaining_effect_values.capacity(),
-            )),
-            WhnfContinuation::SemanticUndefined { ancestors, .. } => {
-                identities.push((
-                    "undefined ancestors",
-                    ancestors.as_ptr() as usize,
-                    ancestors.len(),
-                    ancestors.capacity(),
-                ));
-                for ancestor in ancestors {
-                    identities.push((
-                        "undefined members",
-                        ancestor.members.as_ptr() as usize,
-                        ancestor.members.len(),
-                        ancestor.members.capacity(),
-                    ));
-                }
-            }
             WhnfContinuation::StaticAccess { keys, .. } => identities.push((
                 "static keys",
                 keys.as_ptr() as usize,
@@ -147,20 +107,6 @@ fn regional_net_role_handoffs_preserve_every_container_allocation() {
             WhnfContinuation::Application {
                 arguments: Vec::with_capacity(4),
                 next: 0,
-            },
-            WhnfContinuation::DictionaryApplication {
-                effect_payload: Value::Number(1.into()),
-                remaining_effect_values: Vec::with_capacity(5),
-                next_effect_value: 0,
-                apply_member: None,
-            },
-            WhnfContinuation::SemanticUndefined {
-                purpose: UndefinedPurpose::EffectExtra,
-                ancestors: vec![WhnfUndefinedDictionary {
-                    members: Vec::with_capacity(6),
-                    next: 0,
-                }],
-                phase: UndefinedPhase::Inspect,
             },
             WhnfContinuation::StaticAccess {
                 keys: Arc::from([crate::core::Key::atom_from_text("key")]),
@@ -220,24 +166,11 @@ fn net_state_trace_retains_every_value_position_through_collection() {
 
             let focus = make();
             let application = vec![make(), make()];
-            let effect_payload = make();
-            let remaining_effect_values = vec![make(), make()];
-            let apply_member = make();
-            let first_ancestor = vec![make(), make()];
-            let second_ancestor = vec![make(), make()];
-            let expected_lazy_ids = [
-                std::slice::from_ref(&focus),
-                application.as_slice(),
-                std::slice::from_ref(&effect_payload),
-                remaining_effect_values.as_slice(),
-                std::slice::from_ref(&apply_member),
-                first_ancestor.as_slice(),
-                second_ancestor.as_slice(),
-            ]
-            .into_iter()
-            .flatten()
-            .map(|value| lazy_id(&access, value))
-            .collect::<Vec<_>>();
+            let expected_lazy_ids = [std::slice::from_ref(&focus), application.as_slice()]
+                .into_iter()
+                .flatten()
+                .map(|value| lazy_id(&access, value))
+                .collect::<Vec<_>>();
             assert_eq!(expected_lazy_ids.len(), next);
 
             let source_owner = expected_lazy_ids[1];
@@ -256,26 +189,6 @@ fn net_state_trace_retains_every_value_position_through_collection() {
                     WhnfContinuation::Application {
                         arguments: application,
                         next: 1,
-                    },
-                    WhnfContinuation::DictionaryApplication {
-                        effect_payload,
-                        remaining_effect_values,
-                        next_effect_value: 1,
-                        apply_member: Some(apply_member),
-                    },
-                    WhnfContinuation::SemanticUndefined {
-                        purpose: UndefinedPurpose::EffectExtra,
-                        ancestors: vec![
-                            WhnfUndefinedDictionary {
-                                members: first_ancestor,
-                                next: 1,
-                            },
-                            WhnfUndefinedDictionary {
-                                members: second_ancestor,
-                                next: 2,
-                            },
-                        ],
-                        phase: UndefinedPhase::ReturnTrue,
                     },
                     WhnfContinuation::StaticAccess {
                         keys: Arc::from([
@@ -317,7 +230,7 @@ fn net_state_trace_retains_every_value_position_through_collection() {
             .map(|value| lazy_id(&access, value))
             .collect::<Vec<_>>();
         assert_eq!(actual_lazy_ids, expected_lazy_ids);
-        assert_eq!(state.0.frames.len(), 4);
+        assert_eq!(state.0.frames.len(), 2);
         assert_eq!(state.0.source_owner, Some(source_owner));
         assert_eq!(
             state

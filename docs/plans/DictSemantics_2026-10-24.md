@@ -283,6 +283,15 @@ Slices keep the old semantics working until the last flips them.
    what is undefined diverge, union is shallow, with eager and lazy forms
    by annotation, normalization and elision of `{}` go, dict equality is
    structural, and an atom equals the dict it stands for.
+   Built in slices:
+   - 6a (2026-10-24): dict equality is structural, the same keys and
+     then equal values, keys that differ answering unforced; an atom
+     equals the dict it stands for, `[key]:()`, unit standing for none.
+     Applying a dict decides by keys alone: exactly `{eff:P}` is an
+     effect, a dict with `apply` applies it, anything else is no function;
+     a handler recognizes any dict with `eff`. A tuple is exactly
+     `{tuple: list}`. WHNF's semantic-undefined walk and the tagged
+     payload machine retire, and `{}` reports as `Dict`, not `Undefined`.
 7. `dict-docs` — the syntax and design docs, the agent context, and an
    ADR revising `dict-literals-compose`.
 

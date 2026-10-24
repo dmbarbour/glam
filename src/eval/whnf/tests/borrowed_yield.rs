@@ -18,23 +18,24 @@ fn multi_frame_work(access: &EvaluationValueAccess<'_>) -> RegionalWhnfWork {
         access,
         Value::Number(0.into()),
         vec![
-            WhnfContinuation::DictionaryApplication {
-                effect_payload: Value::Number(9.into()),
-                remaining_effect_values: vec![Value::Number(10.into()), Value::Number(11.into())],
-                next_effect_value: 0,
-                apply_member: None,
+            WhnfContinuation::Application {
+                arguments: vec![
+                    Value::Number(9.into()),
+                    Value::Number(10.into()),
+                    Value::Number(11.into()),
+                ],
+                next: 0,
             },
             WhnfContinuation::Application {
                 arguments: vec![Value::Number(20.into()), Value::Number(21.into())],
                 next: 0,
             },
-            WhnfContinuation::SemanticUndefined {
-                purpose: UndefinedPurpose::EffectExtra,
-                ancestors: vec![WhnfUndefinedDictionary {
-                    members: vec![Value::Number(30.into()), Value::Number(31.into())],
-                    next: 0,
-                }],
-                phase: UndefinedPhase::Inspect,
+            WhnfContinuation::StaticAccess {
+                keys: std::sync::Arc::from([
+                    crate::core::Key::atom_from_text("first"),
+                    crate::core::Key::atom_from_text("second"),
+                ]),
+                next: 0,
             },
         ],
         BTreeSet::new(),
@@ -54,13 +55,10 @@ fn borrowed_multi_frame_yield_preserves_containers_without_projection_or_roots()
         let identities = work.container_identities_for_test();
         let mut budget = WhnfStepBudget::new(1);
         let status = drive_regional_in_place(&access, &mut work, &mut budget, |_access, state| {
-            let WhnfContinuation::DictionaryApplication {
-                next_effect_value, ..
-            } = &mut state.frames[0]
-            else {
+            let WhnfContinuation::Application { next, .. } = &mut state.frames[0] else {
                 unreachable!()
             };
-            *next_effect_value = 1;
+            *next = 1;
             let WhnfContinuation::Application { next, .. } = &mut state.frames[1] else {
                 unreachable!()
             };
@@ -119,8 +117,8 @@ fn owned_and_borrowed_drivers_preserve_boundary_identity_and_budget() {
 
         assert_eq!(borrowed_request.id(), expected.id());
         assert_eq!(owned_request.id(), expected.id());
-        assert_eq!(borrowed.container_identities_for_test().len(), 5);
-        assert_eq!(owned.container_identities_for_test().len(), 5);
+        assert_eq!(borrowed.container_identities_for_test().len(), 4);
+        assert_eq!(owned.container_identities_for_test().len(), 4);
         assert_eq!(borrowed_budget.spent(), owned_budget.spent());
         assert_eq!(borrowed_budget.remaining(), owned_budget.remaining());
     });

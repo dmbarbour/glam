@@ -5938,7 +5938,7 @@ fn non_callable_application_reports_semantic_value_kinds() {
     for (value, expected) in [
         (
             Value::Dict(Dict::new_sync()),
-            "application requires a function value, received Undefined",
+            "application requires a function value, received Dict",
         ),
         (
             unit_value(),
@@ -6778,7 +6778,7 @@ fn assert_unit_builtin_uses_its_diagnostic_context() {
     .expect_err_without_debug("non-unit assertion value should fail");
     assert_eq!(
         error.to_string(),
-        "test operation result: unit expected, received Undefined"
+        "test operation result: unit expected, received Dict"
     );
 }
 
@@ -7222,7 +7222,7 @@ fn metadata_annotation_rejects_non_unit_and_existing_carriers() {
 
     for (target, expected_kind) in [
         (n(42), "Number"),
-        (Value::Dict(Dict::new_sync()), "Undefined"),
+        (Value::Dict(Dict::new_sync()), "Dict"),
         (initial_metadata(), "Sealed"),
     ] {
         let result = apply_values(

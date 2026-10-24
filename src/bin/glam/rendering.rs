@@ -590,17 +590,8 @@ fn diagnostic_value_kind(assembler: &Assembler, value: &HandleValue) -> &'static
         Ok(glam::ValueKind::Number) => "Number",
         Ok(glam::ValueKind::Binary) => "Binary",
         Ok(glam::ValueKind::List) => "List",
-        Ok(glam::ValueKind::Dict) => {
-            if assembler
-                .reflection()
-                .dictionary_items(value)
-                .is_ok_and(|items| items.is_empty())
-            {
-                "Undefined"
-            } else {
-                "Dict"
-            }
-        }
+        // `{}` is the empty dict, no kind of its own (`dict-empty-is-a-value`).
+        Ok(glam::ValueKind::Dict) => "Dict",
         Ok(glam::ValueKind::Function) => "Function",
         Ok(glam::ValueKind::Net) => "Net",
         Ok(glam::ValueKind::Lazy) => "Lazy",

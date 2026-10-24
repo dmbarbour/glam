@@ -18,7 +18,6 @@ use crate::evaluation::EvaluationValueAccess;
 use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion};
 use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
-use super::value::is_undefined_dict_value;
 use super::whnf::{
     RegionalWhnfStatus, RegionalWhnfWork, drive_regional_in_place, reduce_semantic_shell,
 };
@@ -39,16 +38,13 @@ pub(in crate::eval) fn effect_function_in(
             access.values().diagnostic_debug(effect)
         )));
     };
+    // A handler recognizes any dict with `eff`, whatever else it holds
+    // (`dict-empty-is-a-value`).
     let Some(function) = dict.get(&*keys::EFF) else {
         return Err(EvaluationHalt::new(format!(
             "{purpose} requires an `eff` member"
         )));
     };
-    if is_undefined_dict_value(access.values(), function) {
-        return Err(EvaluationHalt::new(format!(
-            "{purpose} requires an `eff` member"
-        )));
-    }
     Ok(access.values().duplicate_value(function))
 }
 
