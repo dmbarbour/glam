@@ -829,30 +829,17 @@ impl ValuePathRequestWork {
             let CoreValue::Dict(dict) = value else {
                 return Err(TaskHalt::new("state path traverses a non-dictionary value"));
             };
-            // What is undefined reads as an error value, which only an
-            // observer of the value meets (`dict-empty-is-a-value`).
-            Ok(match dict.get(key) {
-                Some(value) => (
-                    context
-                        .values()
-                        .wrap_in(access, access.duplicate_value(value)),
-                    true,
-                ),
-                None => (
-                    context
-                        .values()
-                        .wrap_in(access, crate::eval::undefined_path_value(access, walked)),
-                    false,
-                ),
-            })
+            // Reading what is undefined is an error, at the read
+            // (`dict-empty-is-a-value`).
+            let value = dict.get(key).ok_or_else(|| {
+                TaskHalt::failure(Arc::new(crate::core::EvaluationFailure::undefined(walked)))
+            })?;
+            Ok(context
+                .values()
+                .wrap_in(access, access.duplicate_value(value)))
         })??;
-        let (selected, defined) = selected;
         self.current = selected;
-        self.next = if defined {
-            self.next + 1
-        } else {
-            self.path.len()
-        };
+        self.next += 1;
         self.awaiting = false;
         Ok(PreparationPoll::Progress)
     }

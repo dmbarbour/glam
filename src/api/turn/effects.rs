@@ -737,7 +737,7 @@ impl Machine<'_, '_> {
     /// stack, as this machine's own methods do, leaving its result.
     fn serve_standard(&mut self, standard: Standard, path: &[Key]) -> Result<(), Error> {
         match standard {
-            Standard::HeapGet => self.heap_get(path.iter().cloned()),
+            Standard::HeapGet => self.heap_get(path.iter().cloned())?,
             Standard::HeapSet => {
                 self.heap_set(path.iter().cloned())?;
                 self.unit_push();

@@ -43,7 +43,7 @@ fn a_turn_forks_descendants_and_joins_them() {
     for index in 0..4 {
         let kept = rt
             .run(["parent".to_owned(), format!("worker{index}")], |w| {
-                w.local_get("index");
+                w.local_get("index")?;
                 w.int_pop()
             })
             .expect("a joined machine keeps what its fork did");
@@ -155,7 +155,7 @@ fn a_panic_in_a_fork_resumes_at_its_join_and_marks_each_machine_it_unwinds() {
     );
     let kept = rt
         .recover(["m", "p"], |p| {
-            p.local_get("before");
+            p.local_get("before")?;
             p.int_pop()
         })
         .expect("the machine recovers after a panic");

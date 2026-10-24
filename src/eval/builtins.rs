@@ -202,7 +202,8 @@ pub(super) fn apply_builtin_in(
         | Builtin::DictUnion
         | Builtin::DictIntroduce
         | Builtin::DictIntroduceOptional
-        | Builtin::DictBuild => deferred(arguments),
+        | Builtin::DictBuild
+        | Builtin::DictRequire => deferred(arguments),
         Builtin::ObjectSpec
         | Builtin::ObjectLocalName
         | Builtin::DiagnosticObject

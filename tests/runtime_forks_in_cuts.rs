@@ -14,7 +14,7 @@ fn runtime() -> Runtime {
 
 fn heap_int(rt: &mut Runtime, key: &str) -> i64 {
     rt.run("reader", |m| {
-        m.heap_get([key]);
+        m.heap_get([key])?;
         m.int_pop()
     })
     .expect("the heap should hold an integer there")
@@ -40,7 +40,7 @@ fn copy_add(
     read: mpsc::Sender<()>,
 ) -> impl FnOnce(&mut Machine<'_, '_>) -> Result<(), Error> + Send + 'static {
     move |f| {
-        f.heap_get([from]);
+        f.heap_get([from])?;
         let value = f.int_pop()?;
         read.send(()).expect("the cut listens");
         f.int_push(value + add);
@@ -56,7 +56,7 @@ fn forks_within_a_cut_join_its_transaction() {
             m.int_push(1);
             m.heap_set(["before"])?;
             let left = m.fork("left", |l| {
-                l.heap_get(["before"]);
+                l.heap_get(["before"])?;
                 let before = l.int_pop()?;
                 l.int_push(before + 10);
                 l.heap_set(["left"])?;
@@ -74,7 +74,7 @@ fn forks_within_a_cut_join_its_transaction() {
             })?;
             m.join(left)?;
             m.join(right)?;
-            m.heap_get(["left"]);
+            m.heap_get(["left"])?;
             assert_eq!(m.int_pop()?, 11, "the cut sees what its forks merged");
             Ok(())
         })
@@ -91,7 +91,7 @@ fn forks_within_a_cut_join_its_transaction() {
     );
     let mark = rt
         .run(["m", "right"], |r| {
-            r.local_get("mark");
+            r.local_get("mark")?;
             r.int_pop()
         })
         .expect("the joined machine keeps its state");
@@ -205,7 +205,7 @@ fn a_fork_s_hooks_run_on_its_machine() {
                 f.text_push("forked");
                 f.local_set("name")?;
                 f.on_commit(0, move |f| {
-                    f.local_get("name");
+                    f.local_get("name").expect("the fork holds its name");
                     log.lock()
                         .unwrap()
                         .push(f.text_pop().expect("the name is text"));

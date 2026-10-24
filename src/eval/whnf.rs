@@ -871,9 +871,7 @@ fn resume_static_access(
         .get(&keys[next])
         .map(|value| access.values().duplicate_value(value))
     else {
-        return RegionalWhnfStep::Failed(Arc::new(EvaluationFailure::message(
-            super::value::undefined_path_message(&keys[..=next]),
-        )));
+        return RegionalWhnfStep::Failed(Arc::new(EvaluationFailure::undefined(&keys[..=next])));
     };
     let next = next + 1;
     if next < keys.len() {

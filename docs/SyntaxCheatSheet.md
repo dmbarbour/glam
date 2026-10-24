@@ -380,7 +380,7 @@ foo <| .bar         # equivalent alternative without parentheses
 ```
 .op                 # sugar for eff:(\api -> api.op)
 .heap.get Path       # dotted effect path: eff:(\api -> api.heap.get Path)
-                     # an error value where Path is undefined
+                     # an ERROR at the read where Path is undefined
 .heap.set Path Value # blind replacement of shared heap state
 .heap.rewrite Path F # commit-ordered lazy rewrite of shared heap state
 .heap.try_get Path  # the value where defined; .fail where not (also .try_get, .vol.try_get)

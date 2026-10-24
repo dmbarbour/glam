@@ -70,7 +70,7 @@ struct RegionalDictBuild {
 }
 
 /// A walk down a path, forcing each dict on the way and nothing else:
-/// `DictLookup`, `DictDefines`, `DictDefault` and `DictRemove`
+/// `DictLookup`, `DictDefines`, `DictDefault`, `DictRequire` and `DictRemove`
 /// (`dict-empty-is-a-value`).
 struct RegionalDictPathWalk {
     builtin: Builtin,
@@ -79,7 +79,7 @@ struct RegionalDictPathWalk {
     keys: Vec<Key>,
     /// The dict operand, never forced where the path is empty.
     dict: Value,
-    /// `DictDefault`'s fallback.
+    /// `DictDefault`'s fallback, or `DictRequire`'s answer.
     fallback: Option<Value>,
     /// The dicts walked, the operand's first, each a key deeper.
     walked: Vec<Value>,
@@ -162,6 +162,7 @@ impl RegionalDictBuiltinMachine {
             Builtin::DictLookup
             | Builtin::DictDefines
             | Builtin::DictDefault
+            | Builtin::DictRequire
             | Builtin::DictRemove => {
                 let (path, fallback, dict) = match arguments {
                     [path, dict] => (path, None, dict),
@@ -663,6 +664,7 @@ impl RegionalDictPathWalk {
             Builtin::DictLookup => "dict.lookup",
             Builtin::DictDefines => "dict.defines",
             Builtin::DictDefault => "dict.default",
+            Builtin::DictRequire => "dict_require",
             Builtin::DictRemove => "dict.remove",
             _ => unreachable!("a path walk serves only its builtins"),
         }
@@ -716,6 +718,13 @@ impl RegionalDictPathWalk {
         self.demand = None;
         let depth = self.walked.len();
         let Value::Dict(dict) = &value else {
+            // A read names the whole path it reads.
+            if self.builtin == Builtin::DictRequire {
+                return failure(&format!(
+                    "reading `{}` traverses a non-dictionary value",
+                    render_path(&self.keys)
+                ));
+            }
             return failure(&format!(
                 "{} path `{}` traverses a non-dictionary value",
                 self.name(),
@@ -748,15 +757,15 @@ impl RegionalDictPathWalk {
             Builtin::DictDefines => {
                 RegionalBuiltinPoll::Ready(predicate_effect(access.values(), true))
             }
+            Builtin::DictRequire => RegionalBuiltinPoll::Ready(self.duplicate_then(access)),
             _ => failure("dict.remove requires a non-empty path"),
         }
     }
 
     fn finish_undefined(&self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
         match self.builtin {
-            Builtin::DictLookup => failure(&format!(
-                "dict.lookup path `{}` is undefined",
-                render_path(&self.keys)
+            Builtin::DictLookup | Builtin::DictRequire => RegionalBuiltinPoll::Failed(Arc::new(
+                EvaluationFailure::undefined(self.keys.as_slice()),
             )),
             Builtin::DictDefines => {
                 RegionalBuiltinPoll::Ready(predicate_effect(access.values(), false))
@@ -782,6 +791,7 @@ impl RegionalDictPathWalk {
             Builtin::DictDefines => {
                 RegionalBuiltinPoll::Ready(predicate_effect(access.values(), true))
             }
+            Builtin::DictRequire => RegionalBuiltinPoll::Ready(self.duplicate_then(access)),
             _ => {
                 // Remove the leaf, then prune each dict on the way that the
                 // removal left empty.
@@ -798,6 +808,16 @@ impl RegionalDictPathWalk {
                 RegionalBuiltinPoll::Ready(Value::Dict(result))
             }
         }
+    }
+
+    /// `DictRequire`'s answer where the path is defined, which it holds
+    /// where `DictDefault` holds its fallback.
+    fn duplicate_then(&self, access: &EvaluationValueAccess<'_>) -> Value {
+        access.values().duplicate_value(
+            self.fallback
+                .as_ref()
+                .expect("a requirement retains its answer"),
+        )
     }
 
     fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {

@@ -344,7 +344,19 @@ pub(crate) fn failure_diagnostic_in(
     let emission = match failure.emission_value_in(access) {
         Some(Value::Binary(text)) => text_message_in(access, None, String::from_utf8_lossy(text)),
         Some(emission) => access.duplicate_value(emission),
-        None => text_message_in(access, None, failure.to_string()),
+        None => match (
+            text_message_in(access, None, failure.to_string()),
+            failure.undefined_path(),
+        ) {
+            // An undefined read names its path as data too.
+            (Value::Dict(message), Some(path)) => Value::Dict(message.insert(
+                (*keys::UNDEFINED).clone(),
+                Value::List(List::from_values(
+                    path.iter().map(|key| access.value_from_key(key)).collect(),
+                )),
+            )),
+            (message, _) => message,
+        },
     };
     let frames = failure
         .contexts_in(access)

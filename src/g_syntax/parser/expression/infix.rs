@@ -343,6 +343,7 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
             "dict_introduce_optional"
         }
         SyntaxOperator::Builtin(crate::core::Builtin::DictBuild) => "dict_build",
+        SyntaxOperator::Builtin(crate::core::Builtin::DictRequire) => "dict_require",
         SyntaxOperator::Builtin(crate::core::Builtin::PatternIsList) => "pattern_is_list",
         SyntaxOperator::Builtin(crate::core::Builtin::PatternListTryUncons) => {
             "pattern_list_try_uncons"

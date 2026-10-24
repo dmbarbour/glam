@@ -906,7 +906,8 @@ constructor read in them as anywhere:
         {:foo Value}         # applies the pun foo:foo to Value
         {opt?:[x], none?:[]} # {opt:x}
 
-Reading a missing key is an error rather than `{}` (`dict-empty-is-a-value`).
+Reading a missing key is an error rather than `{}` (`dict-empty-is-a-value`),
+which names the path read, in its text and as data, `undefined: Path`.
 `dict.defines Path D` asks whether a path is defined, never reading its value,
 and answers as a comparison does, `.r ()` or `.fail`. `dict.default Path
 Fallback D` reads with a fallback, `dict.lookup Path D` reads, failing where

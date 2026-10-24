@@ -349,7 +349,8 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.cut op` - scope for `.alt`, selects first success
 - `.fix fn` - `fn` receives result as input but hides `.reset` scope
 - `.get Path` - copy data from state; where `Path` is undefined, an error
-  value that only a reader of it meets, so the effect goes on
+  at the read that names `Path`, so nothing after it runs; within a cut
+  whose read was observed, the error waits for a change
 - `.try_get Path` - the value where `Path` is defined; `.fail` where not, so
   it composes with `.alt` and `.try`
 - `.set Path Val` - overwrite data in state; `{}` is a value like any other

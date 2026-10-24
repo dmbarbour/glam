@@ -1384,10 +1384,11 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
 }
 
 #[test]
-fn hidden_builder_get_reads_lazily_and_answers_undefined_paths_with_error_values() {
-    // `get` resumes a lazy path, and answers with a lazy read, as the pure
-    // handler's does: an undefined path, or one through a value that is no
-    // dict, is an error only its reader meets (`dict-empty-is-a-value`).
+fn hidden_builder_get_reads_lazily_and_fails_where_undefined() {
+    // `get` resumes a lazy path and forces the dicts on it, answering a lazy
+    // read where the path is defined; an undefined path, or one through a
+    // value that is no dict, is an error at the read, as `.get` is
+    // (`dict-empty-is-a-value`).
     let context = EvalContext::standalone();
     let outer = crate::core::Key::atom_from_text("outer");
     let inner = crate::core::Key::atom_from_text("inner");
@@ -1433,8 +1434,8 @@ fn hidden_builder_get_reads_lazily_and_answers_undefined_paths_with_error_values
         &read(&ready).expect("a defined path reads through its lazy intermediate"),
         &Value::binary_from_text("ready"),
     );
-    let [missing, _] = run_builder_at(&context, get_missing, state, 0);
-    let error = read(&missing).expect_err_without_debug("an undefined path reads as an error");
+    let error = builder_result_at(&context, get_missing, state, 0)
+        .expect_err_without_debug("an undefined path is an error at the read");
     assert_eq!(error.to_string(), "`missing` is undefined");
 
     let (invalid_state, invalid_get) = with_access(&context, |access| {
@@ -1456,10 +1457,9 @@ fn hidden_builder_get_reads_lazily_and_answers_undefined_paths_with_error_values
         );
         (state, get)
     });
-    let [invalid, _] = run_builder_at(&context, invalid_get, invalid_state, 0);
-    let error = read(&invalid)
-        .expect_err_without_debug("a path through a value that is no dict reads as an error");
-    assert!(error.to_string().contains("not a dictionary"), "{error}");
+    let error = builder_result_at(&context, invalid_get, invalid_state, 0)
+        .expect_err_without_debug("a path through a value that is no dict is an error");
+    assert!(error.to_string().contains("non-dictionary"), "{error}");
 }
 
 #[test]

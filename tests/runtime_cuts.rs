@@ -14,7 +14,7 @@ fn runtime() -> Runtime {
 /// The integer at `path` in the shared heap, read outside any cut.
 fn heap_int(rt: &mut Runtime, path: &[&str]) -> i64 {
     rt.run("reader", |m| {
-        m.heap_get(path.iter().copied());
+        m.heap_get(path.iter().copied())?;
         m.int_pop()
     })
     .expect("the heap should hold an integer there")
@@ -49,7 +49,7 @@ fn tally(m: &mut Machine<'_, '_>) -> Result<(), Error> {
     );
     let (top, below) = (m.int_pop()?, m.int_pop()?);
     assert_eq!((below, top), (20, 30), "the items keep their order");
-    m.local_get("count");
+    m.local_get("count")?;
     let count = m.int_pop()?;
     m.int_push(count + below + top);
     m.heap_set(["total"])?;
@@ -123,7 +123,7 @@ fn a_cut_commits_its_writes_together_and_reads_its_own() {
                 m.heap_set(["a"])?;
                 m.int_push(2);
                 m.heap_set(["b"])?;
-                m.heap_get(["a"]);
+                m.heap_get(["a"])?;
                 m.int_pop()
             })
         })
@@ -151,7 +151,7 @@ fn a_failed_cut_undoes_its_writes_and_the_machine_s_state() {
         });
         assert!(failed.is_err());
         assert_eq!(m.depth(), 0, "the cut's pushes are undone");
-        m.local_get("kept");
+        m.local_get("kept")?;
         assert_eq!(m.int_pop()?, 7, "the cut's state changes are undone");
         Ok(())
     })
@@ -162,7 +162,7 @@ fn a_failed_cut_undoes_its_writes_and_the_machine_s_state() {
         .run("writer", |m| -> Result<(), Error> {
             m.cut(|m| {
                 attempts.set(attempts.get() + 1);
-                m.heap_get(["a"]);
+                m.heap_get(["a"])?;
                 Err(Error::new("an error, not a failure"))
             })
         })
@@ -190,7 +190,7 @@ fn nested_cuts_backtrack_alone_and_merge_on_success() {
                 "the failed alternative's write is undone"
             );
             let failed: Result<(), Error> = m.cut(|m| {
-                m.heap_get(["absent"]);
+                m.heap_get(["outer"])?;
                 Err(m.fail())
             });
             assert_eq!(
@@ -276,7 +276,7 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
             "the machine's stack and stash return after the hook"
         );
         assert_eq!(m.int_pop()?, 10);
-        m.local_get("count");
+        m.local_get("count")?;
         assert_eq!(m.int_pop()?, 3, "the hook's state change stays");
 
         m.cut(|m| {
@@ -291,7 +291,7 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
                 Err(m.fail())
             });
             assert!(failed.is_err());
-            m.heap_get(["undone"]);
+            m.heap_get(["undone"])?;
             assert_eq!(
                 m.text_pop()?,
                 "compensation",
@@ -308,7 +308,7 @@ fn a_hook_runs_on_the_machine_with_the_items_it_captured() {
     );
     let undone = rt
         .run("reader", |m| {
-            m.heap_get(["undone"]);
+            m.heap_get(["undone"])?;
             m.text_pop()
         })
         .expect("the heap should hold a text there");
@@ -389,7 +389,7 @@ fn a_conflicting_commit_reruns_the_cut_at_once() {
                 let attempts = Cell::new(0);
                 m.cut(|m| {
                     attempts.set(attempts.get() + 1);
-                    m.heap_get(["x"]);
+                    m.heap_get(["x"])?;
                     let x = m.int_pop()?;
                     if attempts.get() == 1 {
                         // Forces another commit between this read and this
@@ -442,7 +442,7 @@ fn a_child_turn_joins_its_parent_s_cut() {
             m.int_push(3);
             m.heap_set(["by_parent"])?;
             m.run("child", |c| {
-                c.heap_get(["by_parent"]);
+                c.heap_get(["by_parent"])?;
                 assert_eq!(c.int_pop()?, 3, "a child reads its parent's staged write");
                 c.int_push(2);
                 c.heap_set(["by_child"])
@@ -482,7 +482,7 @@ fn hooks_run_on_the_machine_that_registered_them() {
                 c.local_set("name")?;
                 let log = log.clone();
                 c.on_commit(0, move |c| {
-                    c.local_get("name");
+                    c.local_get("name").expect("the child holds its name");
                     let name = c.text_pop().expect("the name is text");
                     log.lock().unwrap().push(if name == "child" {
                         "the child's hook ran on the child"
@@ -497,7 +497,7 @@ fn hooks_run_on_the_machine_that_registered_them() {
     assert_eq!(*log.lock().unwrap(), ["the child's hook ran on the child"]);
     let compensated = rt
         .run(["parent", "child"], |c| {
-            c.local_get("compensated");
+            c.local_get("compensated")?;
             c.int_pop()
         })
         .expect("the abort hook ran on the child, after the undo");
@@ -582,14 +582,14 @@ fn a_conflicting_atomic_commit_returns_a_conflict() {
     let outcome = rt.run((), |root| {
         let doubler = root.fork("doubler", move |m| {
             let double = |m: &mut Machine<'_, '_>| {
-                m.heap_get(["x"]);
+                m.heap_get(["x"])?;
                 let x = m.int_pop()?;
                 m.int_push(x * 2);
                 m.heap_set(["doubled"])
             };
             let conflict = m
                 .atomic(|m| {
-                    m.heap_get(["x"]);
+                    m.heap_get(["x"])?;
                     m.int_pop()?;
                     // Forces another commit between this read and this
                     // transaction's commit.

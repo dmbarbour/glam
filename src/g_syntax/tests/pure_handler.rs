@@ -75,6 +75,20 @@ fn each_branch_keeps_its_own_state() {
 }
 
 #[test]
+fn get_is_an_error_at_the_read_where_undefined() {
+    // As `.get` is for reflection tasks (`dict-empty-is-a-value`): the run
+    // stops at the read, naming the path, and never reaches the `.set`.
+    check_failure(
+        "failing = (list.head (search {} 0 (.set ['a] {} =>> .get ['a, 'b] =>> .r \"ran on\")).ok).value\n",
+        "`a.b` is undefined",
+    );
+    check(concat!(
+        "found = search {} 0 (.set ['a] {} =>> .get ['a])\n",
+        "check = if values found == [{}] then \"pass\" else \"fail\"\n",
+    ));
+}
+
+#[test]
 fn a_handler_s_operations_thread_its_state() {
     check(concat!(
         "next s = [{value: s.handler, state: (s with { handler ::= \\h -> h + 1 })}]\n",

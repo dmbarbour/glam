@@ -1390,7 +1390,10 @@ fn handler_result_in(access: &EvaluationValueAccess<'_>, outcome: &Dict, success
             .get(key)
             .map(|value| access.values().duplicate_value(value))
             .unwrap_or_else(|| {
-                super::value::undefined_path_value(access.values(), std::slice::from_ref(key))
+                Value::Lazy(LazyValue::error_in(
+                    access.values(),
+                    EvaluationFailure::undefined(std::slice::from_ref(key)).to_string(),
+                ))
             })
     };
     let state = member(if success { &keys::STATE } else { &keys::FAILED });
@@ -1497,9 +1500,20 @@ pub(in crate::eval) fn apply_handler_builtin_in(
             let value = Value::Lazy(LazyValue::from_access_in(
                 values,
                 Arc::from([CoreDataKey::Key(keys::USER.clone()), CoreDataKey::PathIndex]),
-                Arc::from([values.duplicate_value(&state), path]),
+                Arc::from([
+                    values.duplicate_value(&state),
+                    values.duplicate_value(&path),
+                ]),
             ));
-            Ok(Value::List(one(access, success(access, value, state))))
+            let user = state_member_in(access, &state, &keys::USER);
+            let outcomes = Value::List(one(access, success(access, value, state)));
+            // The outcome where the user's state defines `path`, and an error
+            // naming it where not, as `.get` is (`dict-empty-is-a-value`).
+            Ok(Value::builtin_call_in(
+                values,
+                Builtin::DictRequire,
+                vec![path, outcomes, user],
+            ))
         }
         Builtin::HandlerSet => {
             let [path, item, state] = exact(arguments, "handler set")?;

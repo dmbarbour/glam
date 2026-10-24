@@ -22,14 +22,6 @@ fn push(m: &mut Machine<'_, '_>, values: &[i64]) {
 }
 
 /// Whether the top value is `{}`, popping it.
-/// Whether the top value, which it drops, is an error where evaluated, as
-/// reading what is undefined is (`dict-empty-is-a-value`).
-fn errs(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
-    let errs = m.eval().is_err();
-    m.discard(1)?;
-    Ok(errs)
-}
-
 #[test]
 fn shuffles_copy_drop_and_reorder_by_pattern() {
     let mut rt = runtime();
@@ -120,8 +112,12 @@ fn dicts_pack_and_unpack_as_twins_that_drop_nothing() {
             "unpacking only `a` would drop `b`"
         );
         assert_eq!(m.depth(), 2, "the failed unpack changes nothing");
-        m.dict_unpack(["b", "a", "c"])?;
-        assert!(errs(m)?, "an absent key unpacks as an error");
+        assert!(
+            m.dict_unpack(["b", "a", "c"]).is_err(),
+            "an absent key is an error, as a dict pattern requires its entries"
+        );
+        assert_eq!(m.depth(), 2, "the failed unpack changes nothing");
+        m.dict_unpack(["b", "a"])?;
         assert_eq!(ints(m, 2)?, [2, 1]);
 
         // Keys are any keys, byte strings among them.
@@ -233,20 +229,25 @@ fn tags_pack_and_unpack_only_as_themselves() {
 }
 
 #[test]
-fn local_state_reads_an_error_where_absent_and_moves_out() {
+fn local_state_reads_are_errors_where_absent_and_move_out() {
     let mut rt = runtime();
     rt.run("m", |m| {
         assert!(!m.local_defines("missing"));
-        m.local_get("missing");
-        assert!(errs(m)?, "absent local state reads as an error");
+        assert!(
+            m.local_get("missing").is_err(),
+            "absent local state is an error"
+        );
+        assert_eq!(m.depth(), 0, "a failed read pushes nothing");
         m.int_push(3);
         m.local_set("x")?;
         assert!(m.local_defines("x"));
-        m.local_take("x");
+        m.local_take("x")?;
         assert_eq!(m.int_pop()?, 3);
         assert!(!m.local_defines("x"), "taking it left nothing");
-        m.local_take("x");
-        assert!(errs(m)?, "taking what is absent pushes an error");
+        assert!(
+            m.local_take("x").is_err(),
+            "taking what is absent is an error"
+        );
         Ok(())
     })
     .expect("the turn should succeed");

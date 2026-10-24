@@ -5877,6 +5877,29 @@ fn dict_literals_introduce_their_members_in_order() {
 }
 
 #[test]
+fn reading_what_is_undefined_names_the_whole_path() {
+    // Static and computed access alike name the path they read, in the
+    // error's text and as data (`dict-empty-is-a-value`).
+    let parsed = parse(concat!(
+        "language g0\nimport 'std\n",
+        "d = { a:{ b:1 } }\n",
+        "k = 'a\n",
+        "m = 'missing\n",
+        "static = d.a.missing\n",
+        "computed = d.[k].[m]\n",
+    ));
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+    let value = evaluated_module_value(&context, &lowered);
+    for path in ["static", "computed"] {
+        let binding = value_at_atom_path(&value, &[path]).expect("binding should exist");
+        let error = fully_evaluated_error(binding);
+        assert_eq!(error.to_string(), "`a.missing` is undefined", "{path}");
+    }
+}
+
+#[test]
 fn std_dict_path_operations_keep_an_empty_dict_as_a_value() {
     // `dict-empty-is-a-value`: path first, dict last; `defines` answers as
     // comparisons do; `insert` keeps `{}` as a value, and `remove` prunes
@@ -5944,7 +5967,7 @@ fn std_dict_path_operations_keep_an_empty_dict_as_a_value() {
         );
     }
     for (path, expected) in [
-        ("missing", "dict.lookup path `a.z` is undefined"),
+        ("missing", "`a.z` is undefined"),
         ("shared", "dict.union: both dicts define `p`"),
         ("shallow", "dict.union: both dicts define `a`"),
         (

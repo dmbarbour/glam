@@ -208,6 +208,7 @@ impl RegionalBuiltinMachine {
             | Builtin::DictIntroduce
             | Builtin::DictIntroduceOptional
             | Builtin::DictBuild
+            | Builtin::DictRequire
             | Builtin::Slice
             | Builtin::ListLen
             | Builtin::ListSplit
@@ -459,7 +460,8 @@ impl RegionalBuiltinMachine {
             | Builtin::DictUnion
             | Builtin::DictIntroduce
             | Builtin::DictIntroduceOptional
-            | Builtin::DictBuild => Self::Dictionary(RegionalDictBuiltinMachine::new_in(
+            | Builtin::DictBuild
+            | Builtin::DictRequire => Self::Dictionary(RegionalDictBuiltinMachine::new_in(
                 access,
                 source_owner,
                 builtin,

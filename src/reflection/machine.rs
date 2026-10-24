@@ -19,7 +19,7 @@ use crate::core::{
     LazyValue, List, ManagedResolverRoot, NetValue, PromisedValue, RuntimeValueAccess, Value,
     VolumeCellView, VolumeContentsView, keys,
 };
-use crate::core_net::{CoreDataKey, CoreSpecialization};
+use crate::core_net::CoreSpecialization;
 use crate::eval;
 use crate::eval::whnf::WhnfComputation;
 #[cfg(test)]
@@ -2165,30 +2165,12 @@ impl<S: TaskSpecialization> EffectTask<S> {
         mut branch: Branch<S>,
         scope_depth: usize,
     ) -> StatePathStep<S> {
+        // `.get` is an error where its path is undefined, `.try_get` fails.
+        let path_read = match &operation {
+            StorePathOperation::HeapGet | StorePathOperation::VolumeGet(_) => PathRead::Get,
+            _ => PathRead::TryGet,
+        };
         let result = match operation {
-            StorePathOperation::HeapGet => {
-                let checkpoint = branch.retry_candidate();
-                let heap = if let Some(transaction) = branch.transaction.as_mut() {
-                    let generation = transaction.snapshot.generation();
-                    let observed = transaction.store.observe_read(&path);
-                    let heap =
-                        context.with_runtime_access(|access| transaction.store.view_in(&access));
-                    if observed {
-                        branch.observe(checkpoint, generation);
-                    }
-                    heap
-                } else {
-                    context.suspend(|| self.host.snapshot().store().root().clone())
-                };
-                let value = context.with_runtime_access(|access| {
-                    lazy_value_path_root(&access, &heap.clone().into_runtime_root(), &path)
-                });
-                return StatePathStep::Complete(MachineWork::deliver_root(
-                    value,
-                    branch,
-                    scope_depth,
-                ));
-            }
             StorePathOperation::HeapSet(value) => {
                 if let Some(transaction) = branch.transaction.as_mut() {
                     context.with_runtime_access(|access| {
@@ -2241,7 +2223,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ))
                 })
             }
-            StorePathOperation::HeapTryGet => {
+            StorePathOperation::HeapGet | StorePathOperation::HeapTryGet => {
                 let checkpoint = branch.retry_candidate();
                 let heap = if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
@@ -2255,10 +2237,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 } else {
                     context.suspend(|| self.host.snapshot().store().root().clone())
                 };
+                // The root path names the whole heap, which is always defined.
+                if path.is_empty() {
+                    return StatePathStep::Complete(MachineWork::deliver_root(
+                        heap.into_runtime_root(),
+                        branch,
+                        scope_depth,
+                    ));
+                }
                 return StatePathStep::Complete(context.with_runtime_access(|access| {
                     let heap = heap.into_runtime_root().clone_core_with(&access);
                     let path = key_path_in(&access, &path);
-                    try_get_work(&access, &heap, path, branch, scope_depth)
+                    path_read_work(&access, &heap, path, path_read, branch, scope_depth)
                 }));
             }
             StorePathOperation::HeapDel => {
@@ -2282,8 +2272,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ))
                 })
             }
-            StorePathOperation::VolumeTryGet(target) => {
+            StorePathOperation::VolumeGet(target) | StorePathOperation::VolumeTryGet(target) => {
                 let checkpoint = branch.retry_candidate();
+                // A read roots only its result; within a transaction, the
+                // journal keeps the volume it read (`api-volume-cells`).
                 let read = if let Some(transaction) = branch.transaction.as_mut() {
                     let generation = transaction.snapshot.generation();
                     let (observed, read) = context.with_runtime_access(|access| {
@@ -2313,10 +2305,14 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     })
                 };
                 return StatePathStep::Complete(context.with_runtime_access(|access| match read {
+                    // The root path names the volume's whole contents.
+                    Some(contents) if path.is_empty() => {
+                        MachineWork::deliver_root(contents, branch, scope_depth)
+                    }
                     Some(contents) => {
                         let contents = contents.clone_core_with(&access);
                         let path = key_path_in(&access, &path);
-                        try_get_work(&access, &contents, path, branch, scope_depth)
+                        path_read_work(&access, &contents, path, path_read, branch, scope_depth)
                     }
                     None => {
                         let volume = target.id_in(&access);
@@ -2349,52 +2345,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         S::Journal::default(),
                     ))
                 })
-            }
-            StorePathOperation::VolumeGet(target) => {
-                let checkpoint = branch.retry_candidate();
-                // A read roots only its result; within a transaction, the
-                // journal keeps the volume it read (`api-volume-cells`).
-                let read = if let Some(transaction) = branch.transaction.as_mut() {
-                    let generation = transaction.snapshot.generation();
-                    let (observed, read) = context.with_runtime_access(|access| {
-                        let observed = target.observe_read(&mut transaction.store, &access, &path);
-                        let read =
-                            target
-                                .read_in(&mut transaction.store, &access)
-                                .map(|contents| {
-                                    access.root_runtime_value(contents_at_path(
-                                        &access, contents, &path,
-                                    ))
-                                });
-                        (observed, read)
-                    });
-                    if observed {
-                        branch.observe(checkpoint, generation);
-                    }
-                    read
-                } else {
-                    let snapshot = context.suspend(|| self.host.snapshot().store().clone());
-                    context.with_runtime_access(|access| {
-                        target.read_snapshot_in(&snapshot, &access).map(|contents| {
-                            access.root_runtime_value(contents_at_path(&access, contents, &path))
-                        })
-                    })
-                };
-                let value = match read {
-                    Some(value) => value,
-                    None => context.with_runtime_access(|access| {
-                        let volume = target.id_in(&access);
-                        access.root_runtime_value(Value::Lazy(LazyValue::error_in(
-                            &access,
-                            format!("reflection volume {} has been revoked", volume.get()),
-                        )))
-                    }),
-                };
-                return StatePathStep::Complete(MachineWork::deliver_root(
-                    value,
-                    branch,
-                    scope_depth,
-                ));
             }
             StorePathOperation::VolumeSet(target, value) => {
                 let value = PublicValue::from_runtime_root(value);
@@ -2910,7 +2860,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             Request::TryGet(path) => context.with_runtime_access(|access| {
                 let state = branch.state.clone_core_with(&access);
                 let path = path.clone_core_with(&access);
-                try_get_work(&access, &state, path, branch, scope_depth)
+                path_read_work(&access, &state, path, PathRead::TryGet, branch, scope_depth)
             }),
             Request::Del(path) => {
                 let update = context.with_runtime_access(|access| {
@@ -5601,28 +5551,18 @@ impl ValuePathMachine {
                 let Value::Dict(dict) = current else {
                     return Err(TaskHalt::new("state path traverses a non-dictionary value"));
                 };
-                // What is undefined reads as an error value, which only an
-                // observer of the value meets (`dict-empty-is-a-value`).
-                Ok(match dict.get(key) {
-                    Some(value) => (
-                        access.root_value(access.values().duplicate_value(value)),
-                        true,
-                    ),
-                    None => (
-                        access.root_value(eval::undefined_path_value(access.values(), walked)),
-                        false,
-                    ),
-                })
+                // Reading what is undefined is an error, at the read
+                // (`dict-empty-is-a-value`).
+                let value = dict.get(key).ok_or_else(|| {
+                    TaskHalt::failure(Arc::new(EvaluationFailure::undefined(walked)))
+                })?;
+                Ok(access.root_value(access.values().duplicate_value(value)))
             })
         });
         match selected {
-            Ok((selected, defined)) => {
+            Ok(selected) => {
                 self.current = selected;
-                self.next = if defined {
-                    self.next + 1
-                } else {
-                    self.path.len()
-                };
+                self.next += 1;
                 self.demand = None;
                 ValuePathPoll::Continue
             }
@@ -5842,13 +5782,24 @@ struct TryTrace {
 }
 
 /// `seq value (.r value)`, the operation `.eval value` tries.
-/// `.try_get`'s work (`dict-empty-is-a-value`): hold the value at `path` in
-/// `root`, then run `dict.defines`, which fails where `path` is undefined
-/// and otherwise returns unit, on which the held value is delivered.
-fn try_get_work<S: TaskSpecialization>(
+/// What a read of state answers where its path is undefined: `.get` is an
+/// error naming the path, and `.try_get` fails (`dict-empty-is-a-value`).
+#[derive(Clone, Copy)]
+enum PathRead {
+    Get,
+    TryGet,
+}
+
+/// `.get`'s or `.try_get`'s work: hold the value at `path` in `root`, then
+/// check that `root` defines `path`, forcing the dicts on the way and never
+/// the value: `.try_get`'s check, `dict.defines`, fails where `path` is
+/// undefined, and `.get`'s is an error naming it. Where `path` is defined,
+/// the check returns unit, on which the held value is delivered.
+fn path_read_work<S: TaskSpecialization>(
     access: &RuntimeValueAccess<'_>,
     root: &Value,
     path: Value,
+    read: PathRead,
     mut branch: Branch<S>,
     scope_depth: usize,
 ) -> MachineWork<S> {
@@ -5860,19 +5811,28 @@ fn try_get_work<S: TaskSpecialization>(
             vec![access.duplicate_value(&path), access.duplicate_value(root)],
         ),
     );
-    let defines = branch.root_value(
-        access,
-        Value::builtin_call_in(
+    let check = match read {
+        PathRead::TryGet => Value::builtin_call_in(
             access,
             Builtin::DictDefines,
             vec![path, access.duplicate_value(root)],
         ),
-    );
+        PathRead::Get => Value::builtin_call_in(
+            access,
+            Builtin::DictRequire,
+            vec![
+                path,
+                eval::predicate_effect(access, true),
+                access.duplicate_value(root),
+            ],
+        ),
+    };
+    let check = branch.root_value(access, check);
     branch
         .control
         .sequence
         .push(Continuation::RestoreScopedValue(lookup));
-    branch.set_effect_root(defines);
+    branch.set_effect_root(check);
     MachineWork::Drive {
         branch,
         scope_depth,
@@ -7456,27 +7416,6 @@ fn missing_volume_error(volume: VolumeId) -> TaskHalt {
         "reflection volume {} was revoked before its edits committed",
         volume.get()
     ))
-}
-
-fn lazy_value_path_root(
-    access: &RuntimeValueAccess<'_>,
-    value: &RuntimeValueRoot,
-    path: &[Key],
-) -> RuntimeValueRoot {
-    let value = value.clone_core_with(access);
-    if path.is_empty() {
-        return access.root_runtime_value(value);
-    }
-    access.root_runtime_value(Value::Lazy(LazyValue::from_access_in(
-        access,
-        Arc::from(
-            path.iter()
-                .cloned()
-                .map(CoreDataKey::Key)
-                .collect::<Vec<_>>(),
-        ),
-        Arc::from([value]),
-    )))
 }
 
 fn reset_stack_root_in(

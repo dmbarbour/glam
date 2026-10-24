@@ -258,7 +258,7 @@ pub(crate) fn render_unread(
 /// The logger `conf.log` selects, evaluated, or none.
 fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<HandleValue>, Error> {
     m.list_pack(0)?;
-    m.local_get("configuration");
+    m.local_get("configuration")?;
     select_entry(m, "log", &["conf", "log"])?;
     m.eval()?;
     if selects_nothing(m)? {

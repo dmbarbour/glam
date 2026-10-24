@@ -39,7 +39,7 @@ impl PreparedAssembly {
     pub(super) fn configuration(&mut self) -> HandleValue {
         self.runtime
             .run(CLI, |m| {
-                m.local_get("configuration");
+                m.local_get("configuration")?;
                 glam::transition::pop_value(m)
             })
             .expect("a prepared assembly's machine holds its configuration")
@@ -62,7 +62,7 @@ impl PreparedAssembly {
         }
         let _ = self.runtime.run((), |root| {
             for resolver in ["args_resolver", "refl_args_resolver"] {
-                root.local_get(resolver);
+                root.local_get(resolver)?;
                 root.text_push(message);
                 root.promise_break()?;
             }
@@ -147,7 +147,7 @@ fn bind_process(root: &mut Machine<'_, '_>, cli_arguments: &CliArguments) -> Res
     root.dict_pack(["args"])?;
     root.dict_pack(["args", "env", "refl_args", "cli"])?;
     root.run(CLI, |m| {
-        m.local_get("prelude");
+        m.local_get("prelude")?;
         m.dict_get("process_share")
     })?;
     root.take(CLI, 1)?;
@@ -162,10 +162,10 @@ fn fulfill_process(
     args: &[std::ffi::OsString],
     refl_args: &[std::ffi::OsString],
 ) -> Result<(), Error> {
-    root.local_get("args_resolver");
+    root.local_get("args_resolver")?;
     push_arguments(root, args)?;
     root.promise_fulfill()?;
-    root.local_get("refl_args_resolver");
+    root.local_get("refl_args_resolver")?;
     push_arguments(root, refl_args)?;
     root.promise_fulfill()
 }
@@ -190,7 +190,7 @@ fn load(
         Ok(())
     })?;
     runtime.run(CLI, |m| {
-        m.local_get("prelude");
+        m.local_get("prelude")?;
         m.dict_get("configuration_definitions")?;
         glam::transition::compile_over(
             m,
@@ -198,9 +198,9 @@ fn load(
             configuration_paths().into_iter().map(ModuleInput::file),
         )?;
         m.local_set("configuration")?;
-        m.local_get("prelude");
+        m.local_get("prelude")?;
         m.dict_get("empty_env")?;
-        m.local_get("configuration");
+        m.local_get("configuration")?;
         select_entry(m, "env", &["conf", "env"])?;
         m.eval()?;
         m.local_set("environment")
@@ -216,7 +216,7 @@ pub(super) fn select_entry(
     keys: &[&str],
 ) -> Result<(), Error> {
     m.stash(2)?;
-    m.local_get("prelude");
+    m.local_get("prelude")?;
     m.dict_get("entry")?;
     m.text_push(entry);
     m.text_push(keys.join("."));

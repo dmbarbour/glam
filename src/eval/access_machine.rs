@@ -47,6 +47,8 @@ pub(in crate::eval) struct AccessMachine {
     next_part: usize,
     next_argument: usize,
     pending_keys: VecDeque<Key>,
+    /// The keys selected so far, which an undefined read names.
+    walked: Vec<Key>,
     current: Value,
     demand: Option<RegionalWhnfWork>,
     conversion: Option<AccessConversion>,
@@ -188,6 +190,7 @@ impl AccessMachine {
             next_part: 0,
             next_argument: 1,
             pending_keys: VecDeque::new(),
+            walked: Vec::new(),
             current,
             demand: None,
             conversion: None,
@@ -262,7 +265,8 @@ impl AccessMachine {
                 debug_assert_eq!(self.next_part, self.path.len());
                 return AccessRegionalPoll::Ready(current);
             };
-            return match select_dict_member_in(access, &current, &key) {
+            self.walked.push(key);
+            return match select_dict_member_in(access, &current, &self.walked) {
                 Ok(value) => {
                     self.current = value;
                     if !self.pending_keys.is_empty() {
@@ -1113,22 +1117,20 @@ unsafe impl ManagedFamily for ManagedKeyConversionCell {
     );
 }
 
+/// The member of `current` at the last of `walked`, the keys selected so
+/// far, which an undefined read names (`dict-empty-is-a-value`).
 fn select_dict_member_in(
     access: &EvaluationValueAccess<'_>,
     current: &Value,
-    key: &Key,
+    walked: &[Key],
 ) -> Result<Value, EvaluationHalt> {
     let Value::Dict(dict) = current else {
         return Err(EvaluationHalt::new("value access base is not a dictionary"));
     };
-    // Reading what is undefined is an error (`dict-empty-is-a-value`).
+    let key = walked.last().expect("a selection names its key");
     dict.get(key)
         .map(|value| access.values().duplicate_value(value))
-        .ok_or_else(|| {
-            EvaluationHalt::new(super::value::undefined_path_message(std::slice::from_ref(
-                key,
-            )))
-        })
+        .ok_or_else(|| EvaluationHalt::failure(Arc::new(EvaluationFailure::undefined(walked))))
 }
 
 fn root_message(context: &EvaluatorStepContext<'_>, message: &str) -> RuntimeFailureRoot {

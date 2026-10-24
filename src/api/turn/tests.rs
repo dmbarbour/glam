@@ -393,7 +393,7 @@ fn a_volume_lives_while_any_copy_of_its_handle_does() {
         m.heap_volume();
         m.discard(1)?;
         collect(m);
-        m.heap_get(["x"]);
+        m.heap_get(["x"])?;
         assert_eq!(m.int_pop()?, 3, "the shared heap outlives its handles");
         Ok(())
     })
@@ -495,7 +495,7 @@ fn waiter_wakes_on_fulfillment(
                 .recv_timeout(Duration::from_secs(10))
                 .expect("the resolving commit wakes the waiter, which reads it pending again");
         });
-        p.local_get("resolver");
+        p.local_get("resolver")?;
         p.int_push(7);
         p.promise_fulfill()?;
         let woke = finished.recv_timeout(Duration::from_secs(5));
@@ -514,7 +514,7 @@ fn waiter_wakes_on_fulfillment(
 fn a_cut_waiting_on_a_promised_value_wakes_to_its_fulfillment() {
     assert!(
         waiter_wakes_on_fulfillment(|w| {
-            w.local_get("promised");
+            w.local_get("promised")?;
             w.int_pop()
         }),
         "the waiter missed the fulfillment"
@@ -525,11 +525,54 @@ fn a_cut_waiting_on_a_promised_value_wakes_to_its_fulfillment() {
 fn a_cut_waiting_on_a_lazy_value_wakes_to_the_fulfillment_it_needs() {
     assert!(
         waiter_wakes_on_fulfillment(|w| {
-            w.local_get("promised");
+            w.local_get("promised")?;
             w.dict_pack(["value"])?;
             w.dict_get("value")?;
             w.int_pop()
         }),
         "the waiter missed the fulfillment"
     );
+}
+
+#[test]
+fn undefined_reads_are_errors_naming_their_path() {
+    // `dict-empty-is-a-value`: a turn's reads mirror `.get`: an error where
+    // the path is undefined, whose diagnostic names the path, in its text and
+    // as data, and the read pushes nothing.
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let values = rt.assembler().values();
+    let errors = rt
+        .run("m", |m| {
+            m.dict_pack(Vec::<&str>::new())?;
+            m.heap_set(["a"])?;
+            let heap = m.heap_get(["a", "b"]).expect_err("`a.b` is undefined");
+            let local = m.local_get("missing").expect_err("`missing` is undefined");
+            m.dict_pack(Vec::<&str>::new())?;
+            let unpacked = m.dict_unpack(["k"]).expect_err("`k` is undefined");
+            m.discard(1)?;
+            assert_eq!(m.depth(), 0, "the failed reads pushed nothing");
+            Ok([
+                (heap, "`a.b`", vec!["a", "b"]),
+                (local, "`missing`", vec!["missing"]),
+                (unpacked, "`k`", vec!["k"]),
+            ])
+        })
+        .expect("the turn should succeed");
+    for (error, path, keys) in errors {
+        let diagnostic = error
+            .diagnostic(&values)
+            .expect("the error has a diagnostic");
+        assert_eq!(
+            diagnostic.rendered_text_for_test(&values),
+            format!("{path} is undefined")
+        );
+        let named = values
+            .access_names(diagnostic.emission(), ["undefined"])
+            .and_then(|path| rt.assembler().evaluator().eval(&path))
+            .expect("the diagnostic names the path as data");
+        let keys = values
+            .list(keys.into_iter().map(|key| values.atom_from_text(key)))
+            .expect("the path should construct");
+        assert!(named.same_representation(&keys).unwrap(), "{path}");
+    }
 }

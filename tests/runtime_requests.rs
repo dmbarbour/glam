@@ -26,9 +26,9 @@ fn serve(p: &mut Machine<'_, '_>, server: &str) -> Result<(), Error> {
     p.run(server, |s| {
         s.port_read("in", 1)?;
         s.local_set("received")?;
-        s.local_get("received");
+        s.local_get("received")?;
         s.dict_get("reply")?;
-        s.local_get("received");
+        s.local_get("received")?;
         s.dict_get("request")?;
         let request = s.int_pop()?;
         s.int_push(request * 2);
@@ -68,7 +68,7 @@ fn a_requester_waits_in_a_cut_for_its_answer() {
             let fork = p.fork("client", move |c| {
                 let mut attempts = 0;
                 let answer = c.cut(|c| {
-                    c.local_get("answer");
+                    c.local_get("answer")?;
                     let answer = c.int_pop();
                     if let Err(error) = &answer {
                         assert_eq!(error.kind(), ErrorKind::Retry, "{error}");
@@ -175,11 +175,11 @@ fn a_resolver_reads_its_promise_s_status() {
             .expect_err("a promised value stands for its value, which waits");
         assert_eq!(error.kind(), ErrorKind::Retry, "{error}");
 
-        m.local_get("resolver");
+        m.local_get("resolver")?;
         assert_eq!(m.promise_status()?, PromiseStatus::Pending);
         m.int_push(7);
         m.promise_fulfill()?;
-        m.local_get("resolver");
+        m.local_get("resolver")?;
         assert_eq!(m.promise_status()?, PromiseStatus::Fulfilled);
         m.discard(1)?;
         let error = m
@@ -190,10 +190,10 @@ fn a_resolver_reads_its_promise_s_status() {
 
         m.promise_new();
         m.local_set("broken")?;
-        m.local_get("broken");
+        m.local_get("broken")?;
         m.text_push("why");
         m.promise_break()?;
-        m.local_get("broken");
+        m.local_get("broken")?;
         assert_eq!(m.promise_status()?, PromiseStatus::Broken);
         Ok(())
     })
@@ -209,7 +209,7 @@ fn a_cut_waiting_on_a_status_wakes_when_the_promise_resolves() {
             p.promise_new();
             p.local_set("resolver")?;
             p.discard(1)?;
-            p.local_get("resolver");
+            p.local_get("resolver")?;
             p.give("watcher", 1)?;
             let fork = p.fork("watcher", move |w| {
                 let mut attempts = 0;
@@ -228,7 +228,7 @@ fn a_cut_waiting_on_a_status_wakes_when_the_promise_resolves() {
                 })
             })?;
             waited.recv().expect("the watcher's first attempt waits");
-            p.local_get("resolver");
+            p.local_get("resolver")?;
             p.int_push(1);
             p.promise_fulfill()?;
             p.join(fork)?;
@@ -248,7 +248,7 @@ fn a_cut_that_read_a_promise_pending_conflicts_with_its_resolution() {
             p.promise_new();
             p.local_set("resolver")?;
             p.discard(1)?;
-            p.local_get("resolver");
+            p.local_get("resolver")?;
             p.give("watcher", 1)?;
             let fork = p.fork("watcher", move |w| {
                 let mut attempts = 0;
@@ -268,7 +268,7 @@ fn a_cut_that_read_a_promise_pending_conflicts_with_its_resolution() {
             resolving
                 .recv()
                 .expect("the watcher reads the promise pending");
-            p.local_get("resolver");
+            p.local_get("resolver")?;
             p.int_push(1);
             p.promise_fulfill()?;
             resolved

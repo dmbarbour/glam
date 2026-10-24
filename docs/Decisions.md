@@ -1132,10 +1132,15 @@ maps the short names used here to file names.
 - **Decision:**
   - `{}` is the empty dict, a value like any other: `{foo:{}}` defines
     `foo`, and no construction, key or write drops it.
-  - Reading what is undefined is an error, "`a.b` is undefined". `.get`
-    and `.env` answer it with an error value, so the effect goes on and
-    only a reader of the value fails; `.try_get` gives the value where
-    defined and fails where not.
+  - Reading what is undefined is an error, "`a.b` is undefined", which
+    names the path in its text and as data, `undefined: Path`. `.get`,
+    `.heap.get`, `.vol.get`, `.env` and the handlers' `get` are errors at
+    the read, which forces the dicts on the way and never the value, so
+    nothing after the read runs: `.try` answers `err`, and within a cut
+    whose read was observed the error waits for a change. `.try_get` gives
+    the value where defined and fails where not. (Revised the same day by
+    the maintainer: `.get` first answered an error value, which only a
+    reader of the value met.)
   - Definedness is asked, never read: `dict.defines Path Dict` answers as
     a comparison does, `.r ()` or `.fail`, forcing only the dicts on the
     way; `dict.default Path Fallback Dict` reads with a fallback, and
@@ -1162,13 +1167,17 @@ maps the short names used here to file names.
     `{foo:{}}`, `{}` and a missing key indistinguishable and surprising.
   - An error read where it is noticed reports a mistake that `{}` hid,
     and `.try_get` or `dict.default` say when absence is expected.
+  - An error at the read reports a missing state where it is read, before
+    the effect acts on it: an error value surfaced later, far from its
+    cause, often after the effect had stored it or a cut had committed it.
   - Shallow union finds conflicts from keys, without a recursive merge; a
     deep merge is a function's to write.
 - **Consequences:**
   - The wait idiom reads with `.try_get` inside a cut, whose failure parks
     on the observed read.
-  - Rust APIs mirror it: the turn's `local_get`, `local_take` and
-    `dict_unpack` push an error value where absent, `dict_defines`,
+  - Turns mirror reflection tasks: `heap_get`, `volume_get`, `local_get`,
+    `local_take` and `dict_unpack` return the error where something is
+    undefined, `heap_try_get` and `volume_try_get` fail, `dict_defines`,
     `dict_defines_path` and `local_defines` ask, and `Values::dict_insert`
     and `dict_remove` build.
   - A spec's `name`, `deps` and `defs` keep their defaults where absent;
@@ -1176,7 +1185,8 @@ maps the short names used here to file names.
 - **Rule lives in:** `src/eval/dict_machine.rs` (path walks, insertion,
   union), `src/eval/whnf.rs` and `src/eval/access_machine.rs` (access),
   `src/eval/comparison_machine.rs` (equality), `src/eval/pattern_machine.rs`
-  (takes), and `src/reflection/machine.rs` (`.get`, `.try_get`, `.del`).
+  (takes), `src/reflection/machine.rs` (`.get`, `.try_get`, `.del`), and
+  `EvaluationFailure::undefined` in `src/core.rs` (the error).
 - **Recorded in:** [Dict Semantics](plans/DictSemantics_2026-10-24.md),
   `dict-presence-ops`, `dict-optional-patterns`, `dict-empty-is-a-value`.
 

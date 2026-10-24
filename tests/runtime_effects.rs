@@ -286,7 +286,7 @@ fn the_heap_passes_through_to_the_shared_heap() {
             m.list_unpack(2)?;
             m.discard(1)?;
             let read = m.int_pop()?;
-            m.heap_get(["shared", "n"]);
+            m.heap_get(["shared", "n"])?;
             m.list_unpack(2)?;
             m.discard(1)?;
             Ok((read, m.int_pop()?))
@@ -448,7 +448,7 @@ fn heap_defined(m: &mut Machine<'_, '_>, key: &str) -> Result<bool, Error> {
 }
 
 fn heap_kind(m: &mut Machine<'_, '_>, key: &str) -> Result<ValueKind, Error> {
-    m.heap_get([key]);
+    m.heap_get([key])?;
     m.eval()?;
     let kind = m.kind()?;
     m.discard(1)?;
@@ -490,7 +490,7 @@ fn a_choice_commits_its_first_operand_once_it_succeeds() {
                 &mut Standard,
             )?;
             m.discard(1)?;
-            m.heap_get(["written"]);
+            m.heap_get(["written"])?;
             m.text_pop()
         })
         .expect("the turn should succeed");
@@ -508,7 +508,7 @@ fn within_a_cut_a_later_failure_reaches_the_second_operand() {
                 &mut Standard,
             )?;
             let read = m.int_pop()?;
-            m.heap_get(["k"]);
+            m.heap_get(["k"])?;
             Ok((read, m.int_pop()?))
         })
         .expect("the turn should succeed");
@@ -606,7 +606,7 @@ impl EffectProvider for Ready {
             }
             return Err(m.retry());
         }
-        m.heap_get(["ready"]);
+        m.heap_get(["ready"])?;
         Ok(Answer::Return)
     }
 }
@@ -637,7 +637,7 @@ fn an_effect_cut_that_meets_pushback_runs_again_once_what_it_read_changes() {
             p.take("reader", 2)?;
             let calls = p.int_pop()?;
             let result = p.int_pop()?;
-            p.heap_get(["attempted"]);
+            p.heap_get(["attempted"])?;
             Ok((result, calls, p.int_pop()?))
         })
         .expect("the turn should succeed");
@@ -848,7 +848,7 @@ fn a_cut_that_fails_on_a_try_s_wait_parks_until_the_promise_is_kept() {
             })?;
             // The worker's `.try` answered `wait`; its cut fails and parks.
             signal.recv().expect("the worker waits once");
-            root.local_get("resolver");
+            root.local_get("resolver")?;
             root.int_push(1);
             root.promise_fulfill()?;
             root.join(worker)?;

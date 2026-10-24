@@ -1489,37 +1489,37 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// Evaluates the top value to a dict holding no keys but these, and
-    /// replaces it with their values, an error value where absent:
-    /// `{k1:v1 … kn:vn} -- v1 … vn`, the twin of [`Self::dict_pack`]. A dict
-    /// with any other key fails, changing nothing, as would dropping it.
+    /// Evaluates the top value to a dict holding these keys and no others,
+    /// and replaces it with their values: `{k1:v1 … kn:vn} -- v1 … vn`, the
+    /// twin of [`Self::dict_pack`]. A dict with any other key fails, changing
+    /// nothing, as would dropping it, and so does one that leaves a key
+    /// undefined, an error naming it, as a dict pattern requires its entries.
     pub fn dict_unpack<K: Into<Key>>(
         &mut self,
         keys: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
         let keys = distinct_keys(keys)?;
-        let items = self.peek_core_evaluated(|access, scoped, value| {
-            let CoreValue::Dict(dict) = value else {
-                return Err(Error::new("the top value is not a dict"));
-            };
-            if let Some((extra, _)) = dict.iter().find(|(key, _)| !keys.contains(key)) {
-                return Err(Error::new(format!(
-                    "the dict holds `{extra:?}`, which unpacking would drop"
-                )));
-            }
-            Ok(keys
-                .iter()
-                .map(|key| {
-                    scoped.wrap(
+        let items = self
+            .peek_core_evaluated(|access, scoped, value| {
+                let CoreValue::Dict(dict) = value else {
+                    return Err(Error::new("the top value is not a dict"));
+                };
+                if let Some((extra, _)) = dict.iter().find(|(key, _)| !keys.contains(key)) {
+                    return Err(Error::new(format!(
+                        "the dict holds `{extra:?}`, which unpacking would drop"
+                    )));
+                }
+                // An absent key is returned, its error built once the access ends.
+                Ok(keys
+                    .iter()
+                    .map(|key| {
                         dict.get(key)
-                            .map(|value| access.duplicate_value(value))
-                            .unwrap_or_else(|| {
-                                crate::eval::undefined_path_value(access, std::slice::from_ref(key))
-                            }),
-                    )
-                })
-                .collect::<Vec<_>>())
-        })?;
+                            .map(|value| scoped.wrap(access.duplicate_value(value)))
+                            .ok_or_else(|| key.clone())
+                    })
+                    .collect::<Result<Vec<_>, Key>>())
+            })?
+            .map_err(|key| undefined_error(&self.runtime.assembler.values(), &[key]))?;
         self.pop()?;
         self.state.stack.extend(items);
         Ok(())
@@ -2457,19 +2457,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Pushes the value at `path` in the shared heap, without evaluating
-    /// it: what is undefined reads as an error. Within a cut, the read joins the cut's
-    /// transaction and sees its writes; outside one, it reads the heap as it
-    /// stands.
-    pub fn heap_get<K: Into<Key>>(&mut self, path: impl IntoIterator<Item = K>) {
-        let path = key_path(path);
-        let value = match &mut self.cut {
-            Some(cut) => {
-                cut.observed |= cut.journal.observe_read(&path);
-                cut.journal.heap_value(&path)
-            }
-            None => self.resources().reflection_snapshot().1.heap_value(&path),
-        };
-        self.push(value);
+    /// it, where `path` is defined, and is an error naming `path` where it
+    /// is not, as `.heap.get` is (`dict-empty-is-a-value`). It forces the
+    /// dicts on the way, never the value. Within a cut, the read joins the
+    /// cut's transaction and sees its writes; outside one, it reads the heap
+    /// as it stands.
+    pub fn heap_get<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        self.heap_read(key_path(path), Absent::Error)
     }
 
     /// Pops a value and writes it at `path` in the shared heap. Outside a
@@ -2486,17 +2483,17 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
-    /// Pushes the value at `path` in the shared heap, without evaluating
-    /// it, where `path` is defined, and fails where it is not, a
-    /// [`Self::fail`] error (`dict-empty-is-a-value`). It forces the dicts on
-    /// the way, never the value. Within a cut, the read joins the cut's
-    /// transaction, as [`Self::heap_get`]'s does, so a cut that fails on it
-    /// waits for the path's definition.
+    /// As [`Self::heap_get`], but fails where `path` is undefined, a
+    /// [`Self::fail`] error, as `.heap.try_get` does, so a cut that fails on
+    /// it waits for the path's definition.
     pub fn heap_try_get<K: Into<Key>>(
         &mut self,
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
-        let path = key_path(path);
+        self.heap_read(key_path(path), Absent::Fail)
+    }
+
+    fn heap_read(&mut self, path: Vec<Key>, absent: Absent) -> Result<(), Error> {
         let (root, value) = match &mut self.cut {
             Some(cut) => {
                 cut.observed |= cut.journal.observe_read(&path);
@@ -2507,11 +2504,26 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 (snapshot.heap_value(&[]), snapshot.heap_value(&path))
             }
         };
-        if !self.defines(&root, &path)? {
-            return Err(self.fail());
-        }
+        self.require_defined(&root, &path, absent)?;
         self.push(value);
         Ok(())
+    }
+
+    /// Nothing where `root` defines `path`; where it does not, a
+    /// [`Self::fail`] error or an error naming `path`, as `absent` says.
+    fn require_defined(
+        &mut self,
+        root: &HandleValue,
+        path: &[Key],
+        absent: Absent,
+    ) -> Result<(), Error> {
+        if self.defines(root, path)? {
+            return Ok(());
+        }
+        Err(match absent {
+            Absent::Fail => self.fail(),
+            Absent::Error => undefined_error(&self.runtime.assembler.values(), path),
+        })
     }
 
     /// Whether `root` defines `path`, forcing the dicts on the way and
@@ -2612,37 +2624,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         &mut self,
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
-        let path = key_path(path);
-        let handle = self.volume_handle_at(1)?;
-        let snapshot = self
-            .cut
-            .is_none()
-            .then(|| self.resources().reflection_snapshot().1);
-        let runtime = self.runtime;
-        let cut = &mut self.cut;
-        let value = runtime.assembler.values().with_access(|scoped| {
-            let access = scoped.runtime_access();
-            let handle = scoped.clone_core(&handle)?;
-            let volume = access
-                .volume_cell(&handle)
-                .expect("the handle names a volume");
-            let contents = match (cut.as_mut(), &snapshot) {
-                (Some(cut), _) => {
-                    cut.observed |= cut.journal.observe_volume_read(volume, &path);
-                    // The cut's journal keeps the volume it read until the
-                    // cut ends (`api-volume-cells`).
-                    cut.journal.read_volume_in(access, volume)
-                }
-                (None, Some(snapshot)) => snapshot.read_volume_in(access, volume),
-                (None, None) => unreachable!("outside a cut, a turn reads a snapshot"),
-            };
-            contents
-                .map(|contents| scoped.wrap(contents_at_path(access, contents, &path)))
-                .ok_or_else(|| revoked(volume.id()))
-        })?;
-        self.pop()?;
-        self.push(value);
-        Ok(())
+        self.volume_read(key_path(path), Absent::Error)
     }
 
     /// Pops a value, then a volume's handle, and writes the value at `path`
@@ -2664,7 +2646,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         &mut self,
         path: impl IntoIterator<Item = K>,
     ) -> Result<(), Error> {
-        let path = key_path(path);
+        self.volume_read(key_path(path), Absent::Fail)
+    }
+
+    fn volume_read(&mut self, path: Vec<Key>, absent: Absent) -> Result<(), Error> {
         let handle = self.volume_handle_at(1)?;
         let snapshot = self
             .cut
@@ -2695,9 +2680,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 })
                 .ok_or_else(|| revoked(volume.id()))
         })?;
-        if !self.defines(&root, &path)? {
-            return Err(self.fail());
-        }
+        self.require_defined(&root, &path, absent)?;
         self.pop()?;
         self.push(value);
         Ok(())
@@ -3584,40 +3567,37 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
-    /// Pushes the local state at `key`, or an error value where the machine
-    /// holds none there (`dict-empty-is-a-value`).
-    pub fn local_get(&mut self, key: impl Into<Key>) {
+    /// Pushes the local state at `key`; where the machine holds none there,
+    /// an error naming `key`, as `.get` is (`dict-empty-is-a-value`).
+    pub fn local_get(&mut self, key: impl Into<Key>) -> Result<(), Error> {
         let key = key.into();
-        let value = match self.state.locals.get(&key) {
-            Some(value) => value.clone(),
-            None => self.undefined_local(key),
-        };
+        let value = self
+            .state
+            .locals
+            .get(&key)
+            .cloned()
+            .ok_or_else(|| undefined_error(&self.runtime.assembler.values(), &[key]))?;
         self.push(value);
+        Ok(())
     }
 
-    /// Moves the local state at `key` to the stack, or pushes an error value
-    /// where the machine holds none there: the twin of [`Self::local_set`].
-    pub fn local_take(&mut self, key: impl Into<Key>) {
+    /// Moves the local state at `key` to the stack, the twin of
+    /// [`Self::local_set`]; where the machine holds none there, an error
+    /// naming `key`.
+    pub fn local_take(&mut self, key: impl Into<Key>) -> Result<(), Error> {
         let key = key.into();
-        let value = match self.state.locals.remove(&key) {
-            Some(value) => value,
-            None => self.undefined_local(key),
-        };
+        let value = self
+            .state
+            .locals
+            .remove(&key)
+            .ok_or_else(|| undefined_error(&self.runtime.assembler.values(), &[key]))?;
         self.push(value);
+        Ok(())
     }
 
     /// Whether the machine holds local state at `key`.
     pub fn local_defines(&self, key: impl Into<Key>) -> bool {
         self.state.locals.contains_key(&key.into())
-    }
-
-    fn undefined_local(&self, key: Key) -> HandleValue {
-        self.runtime.assembler.values().with_access(|scoped| {
-            scoped.wrap(crate::eval::undefined_path_value(
-                scoped.runtime_access(),
-                &[key],
-            ))
-        })
     }
 
     /// Returns the machine to its initial state: an empty stack, stash,
@@ -3759,6 +3739,25 @@ fn nonempty_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Result<Vec<
         return Err(Error::new("a path names at least one key"));
     }
     Ok(path)
+}
+
+/// What a read answers where its path is undefined: an error naming the
+/// path, as `.get` is, or a [`Machine::fail`] error, as `.try_get` fails.
+#[derive(Clone, Copy)]
+enum Absent {
+    Error,
+    Fail,
+}
+
+/// The error of reading `path` where it is undefined, whose diagnostic
+/// names the path (`dict-empty-is-a-value`).
+fn undefined_error(values: &crate::api::Values, path: &[Key]) -> Error {
+    Error::from_eval(
+        values.core(),
+        crate::core::EvaluationHalt::failure(Arc::new(crate::core::EvaluationFailure::undefined(
+            path,
+        ))),
+    )
 }
 
 /// The lazy application of `builtin` to `arguments`.

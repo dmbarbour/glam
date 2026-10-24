@@ -343,3 +343,21 @@ Slices keep the old semantics working until the last flips them.
    gains a **Reasons** line.
 
 Then `api-comparables` resumes, its definedness checks already moved.
+
+8. `dict-get-errors` — `.get` is an error at the read, not an error value
+   (maintainer, 2026-10-24, on reconsideration: an error value surfaces far
+   from its cause, after the effect has acted on it). Turns mirror
+   reflection tasks, returning the error, and the pure handler's `get`
+   agrees. The error carries its path, which is cheap: an `Undefined`
+   failure holding the keys, whose diagnostic adds `undefined: Path`.
+   Built 2026-10-24: static and computed access, `dict.lookup`, `.get`,
+   `.heap.get`, `.vol.get`, `.env`, the pure handler's and the net
+   builder's `get` and macros' `.env` fail with it; computed access names
+   the keys it walked. A private builtin, `DictRequire Path Then Dict`,
+   checks presence for the reads that answer lazily, forcing the dicts on
+   the way and never the value. The turn's `heap_get`, `volume_get`,
+   `local_get`, `local_take` and `dict_unpack` return the error. Within a
+   reflection task's cut whose read was observed, the error waits for a
+   change, as reflection retries any error after an observed read; a
+   turn's cut ends on an error, waiting only after `fail` or `retry`, a
+   difference left as it was.

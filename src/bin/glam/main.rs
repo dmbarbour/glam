@@ -214,7 +214,7 @@ fn run_completion_script(
 ) -> Result<Result<Vec<u8>, String>, Error> {
     runtime.run(CLI, |m| {
         m.list_pack(0)?;
-        m.local_get("configuration");
+        m.local_get("configuration")?;
         select_entry(m, "completion_script", &["conf", "completion_script", name])?;
         // An undefined binding falls back to the built-in script. A
         // configured binding that fails to evaluate is reported, never
@@ -227,7 +227,7 @@ fn run_completion_script(
                 .ok_or_else(|| format!("unknown completion script binding `{name}`")));
         }
         let executable = env::args_os().next().unwrap_or_else(|| "glam".into());
-        m.local_get("prelude");
+        m.local_get("prelude")?;
         m.dict_get("completion_request")?;
         m.bytes_push(executable.as_encoded_bytes().to_vec());
         m.apply(1)?;

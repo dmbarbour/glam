@@ -180,6 +180,23 @@ enum EvaluationFailureKind {
     Message(Arc<str>),
     Emission(Value),
     DependencyCycle(Arc<LazyCycle>),
+    /// A read of what is undefined, naming the path read
+    /// (`dict-empty-is-a-value`).
+    Undefined(Arc<[Key]>),
+}
+
+/// A key as a name part: text as written, any other key as its debug form.
+pub(crate) fn format_name_part(key: &Key) -> String {
+    match key {
+        Key::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+        Key::AbstractGlobalPath(parts) => parts.join("."),
+        Key::Atom(atom) => match atom.key() {
+            Key::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
+            Key::AbstractGlobalPath(parts) => parts.join("."),
+            other => format!("{other:?}"),
+        },
+        other => format!("{other:?}"),
+    }
 }
 
 impl EvaluationFailure {
@@ -204,12 +221,29 @@ impl EvaluationFailure {
         }
     }
 
+    /// Reading `path` where it is undefined (`dict-empty-is-a-value`).
+    pub(crate) fn undefined(path: impl Into<Arc<[Key]>>) -> Self {
+        Self {
+            kind: EvaluationFailureKind::Undefined(path.into()),
+            contexts: Arc::from([]),
+        }
+    }
+
+    /// The path an undefined read named.
+    pub(crate) fn undefined_path(&self) -> Option<&[Key]> {
+        match &self.kind {
+            EvaluationFailureKind::Undefined(path) => Some(path),
+            _ => None,
+        }
+    }
+
     #[cfg(test)]
     pub(crate) fn emission_value(&self) -> Option<&Value> {
         match &self.kind {
-            EvaluationFailureKind::Message(_) => None,
+            EvaluationFailureKind::Message(_)
+            | EvaluationFailureKind::DependencyCycle(_)
+            | EvaluationFailureKind::Undefined(_) => None,
             EvaluationFailureKind::Emission(emission) => Some(emission),
-            EvaluationFailureKind::DependencyCycle(_) => None,
         }
     }
 
@@ -252,6 +286,9 @@ impl EvaluationFailure {
             EvaluationFailureKind::DependencyCycle(cycle) => {
                 EvaluationFailureKind::DependencyCycle(Arc::clone(cycle))
             }
+            EvaluationFailureKind::Undefined(path) => {
+                EvaluationFailureKind::Undefined(Arc::clone(path))
+            }
         };
         Self {
             kind,
@@ -266,9 +303,10 @@ impl EvaluationFailure {
         _access: &'access RuntimeValueAccess<'_>,
     ) -> Option<&'access Value> {
         match &self.kind {
-            EvaluationFailureKind::Message(_) => None,
+            EvaluationFailureKind::Message(_)
+            | EvaluationFailureKind::DependencyCycle(_)
+            | EvaluationFailureKind::Undefined(_) => None,
             EvaluationFailureKind::Emission(emission) => Some(emission),
-            EvaluationFailureKind::DependencyCycle(_) => None,
         }
     }
 
@@ -284,9 +322,10 @@ impl EvaluationFailure {
     #[cfg(test)]
     pub(crate) fn dependency_cycle_value(&self) -> Option<&Arc<LazyCycle>> {
         match &self.kind {
-            EvaluationFailureKind::Message(_) => None,
             EvaluationFailureKind::DependencyCycle(cycle) => Some(cycle),
-            EvaluationFailureKind::Emission(_) => None,
+            EvaluationFailureKind::Message(_)
+            | EvaluationFailureKind::Emission(_)
+            | EvaluationFailureKind::Undefined(_) => None,
         }
     }
 }
@@ -296,6 +335,14 @@ impl fmt::Display for EvaluationFailure {
         match &self.kind {
             EvaluationFailureKind::Message(message) => formatter.write_str(message),
             EvaluationFailureKind::Emission(_) => formatter.write_str("evaluation failed"),
+            EvaluationFailureKind::Undefined(path) => write!(
+                formatter,
+                "`{}` is undefined",
+                path.iter()
+                    .map(format_name_part)
+                    .collect::<Vec<_>>()
+                    .join(".")
+            ),
             EvaluationFailureKind::DependencyCycle(cycle) => {
                 formatter.write_str("lazy dependency cycle")?;
                 for member in cycle.members.iter() {
@@ -2393,6 +2440,11 @@ pub enum Builtin {
     /// Compiler-private: `DictBuild Members` applies each member, a function
     /// of the dict built so far, in order, from `{}`: a dict literal.
     DictBuild,
+    /// Runtime-private: `DictRequire Path Then Dict` is `Then` where `Dict`
+    /// defines `Path`, and an error naming `Path` where not, forcing the
+    /// dicts on the way and nothing else: a read that fails where what it
+    /// reads is undefined (`dict-empty-is-a-value`).
+    DictRequire,
     ObjectSpec,
     ObjectFromDict,
     ObjectLocalName,
@@ -2542,6 +2594,7 @@ impl Builtin {
             Self::DictIntroduce => 3,
             Self::DictIntroduceOptional => 3,
             Self::DictBuild => 1,
+            Self::DictRequire => 3,
             Self::ObjectSpec => 1,
             Self::ObjectFromDict => 1,
             Self::ObjectLocalName => 2,
@@ -3619,6 +3672,10 @@ mod tests {
             }
             EvaluationFailureKind::DependencyCycle(cycle) => {
                 let _: &Arc<LazyCycle> = cycle;
+            }
+            // Keys only: no managed edge.
+            EvaluationFailureKind::Undefined(path) => {
+                let _: &Arc<[Key]> = path;
             }
         }
         let _: &Arc<[Value]> = contexts;

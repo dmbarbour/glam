@@ -38,7 +38,7 @@ fn a_machine_keeps_its_stack_and_state_between_turns() {
     let (count, left) = rt
         .run("counter", |m| {
             let left = m.text_pop()?;
-            m.local_get("count");
+            m.local_get("count")?;
             Ok((m.int_pop()?, left))
         })
         .expect("the second turn should succeed");
@@ -311,7 +311,7 @@ fn a_turn_reaches_its_descendants_and_moves_values_to_and_from_them() {
     .expect("the turn should succeed");
     let (sum, deep) = rt
         .run(["parent", "child"], |c| {
-            c.local_get("sum");
+            c.local_get("sum")?;
             let sum = c.int_pop()?;
             c.take("grandchild", 1)?;
             Ok((sum, c.text_pop()?))
@@ -321,7 +321,7 @@ fn a_turn_reaches_its_descendants_and_moves_values_to_and_from_them() {
     let sum = rt
         .run((), |root| {
             root.run(["parent", "child"], |c| {
-                c.local_get("sum");
+                c.local_get("sum")?;
                 c.int_pop()
             })
         })
@@ -504,7 +504,7 @@ fn a_runtime_moves_to_a_thread_that_takes_turns_and_retires_it() {
     let kept = std::thread::spawn(move || {
         let kept = rt
             .run("m", |m| {
-                m.local_get("x");
+                m.local_get("x")?;
                 m.int_pop()
             })
             .expect("the turn should succeed on the new thread");

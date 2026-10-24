@@ -709,7 +709,7 @@ impl RegionalBuilderBuiltinMachine {
         }
 
         match &self.operation {
-            BuilderStateOperation::Get => self.poll_get_in(access),
+            BuilderStateOperation::Get => self.poll_get_in(access, step_budget),
             BuilderStateOperation::Set { .. } => self.poll_set_in(access, step_budget),
             BuilderStateOperation::Reset { .. } => self.poll_reset_in(access),
             BuilderStateOperation::Shift { .. } => self.poll_shift_in(access),
@@ -720,11 +720,15 @@ impl RegionalBuilderBuiltinMachine {
         }
     }
 
-    /// The value at the path in the user's state, as a lazy access: the
-    /// effect goes on, and only an observer of the value meets an undefined
-    /// path's error, as with the pure handler's `get`
-    /// (`dict-empty-is-a-value`).
-    fn poll_get_in(&mut self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
+    /// The value at the path in the user's state, a lazy read where the
+    /// state defines the path, and an error naming it where not, as `.get`
+    /// is (`dict-empty-is-a-value`): the dicts on the way are forced, never
+    /// the value.
+    fn poll_get_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
         let keys = self
             .keys
             .as_ref()
@@ -736,15 +740,50 @@ impl RegionalBuilderBuiltinMachine {
                 .expect("builder state decoding must finish")
                 .user_state,
         );
-        let value = if keys.is_empty() {
-            state
-        } else {
-            Value::Lazy(LazyValue::from_access_in(
+        if keys.is_empty() {
+            return self.finish_in(access, state, None);
+        }
+        if self.result_demand.is_none() {
+            let path = Value::List(List::from_values(
+                keys.iter()
+                    .map(|key| access.values().key_value(key))
+                    .collect(),
+            ));
+            let required = Value::builtin_call_in(
                 access.values(),
-                keys.iter().cloned().map(CoreDataKey::Key).collect(),
-                Arc::from([state]),
-            ))
-        };
+                Builtin::DictRequire,
+                vec![
+                    path,
+                    access.values().unit(),
+                    access.values().duplicate_value(&state),
+                ],
+            );
+            self.result_demand = Some(
+                RegionalWhnfWork::from_focus(access, required).with_source_owner(self.source_owner),
+            );
+        }
+        match drive_regional_in_place(
+            access,
+            self.result_demand
+                .as_mut()
+                .expect("builder state read must install its demand"),
+            step_budget,
+            reduce_semantic_shell,
+        ) {
+            RegionalWhnfStatus::Ready(_) => {}
+            RegionalWhnfStatus::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
+            }
+            RegionalWhnfStatus::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
+            RegionalWhnfStatus::Failed(failure) => {
+                return RegionalBuiltinPoll::Failed(failure);
+            }
+        }
+        let value = Value::Lazy(LazyValue::from_access_in(
+            access.values(),
+            keys.iter().cloned().map(CoreDataKey::Key).collect(),
+            Arc::from([state]),
+        ));
         self.finish_in(access, value, None)
     }
 

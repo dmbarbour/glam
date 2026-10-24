@@ -100,8 +100,8 @@ Macros select values with `.env Path`:
 .env '.language.base
 ```
 
-A missing path reads as an error value under ordinary dictionary access
-semantics: the macro goes on, and only a reader of the value fails.
+A missing path is an error at the read, naming the path, as `.get` is for
+reflection tasks: the macro stops there.
 Every original macro invocation in one declaration sees the same environment
 snapshot. `meta.macro.env` may be an adapting object; the ordinary `with`
 operation re-instantiates it after adding `language`.

@@ -196,6 +196,23 @@ fn macro_runner_exposes_environment_log_and_scoped_cases() {
 }
 
 #[test]
+fn macro_env_is_an_error_at_the_read_where_undefined() {
+    // As `.get` is (`dict-empty-is-a-value`): the macro stops at the read,
+    // naming the path, though the rest ignores the value it would read.
+    let (assembler, effect) = compile_effects(
+        ".env '.missing >>= (\\_ -> .log 'info { msg:{ text:\"ran on\" } } =>> .r ())",
+    );
+    let execution = assembler.test_compilation_execution();
+    let error = run(&execution, &effect, Value::Dict(Dict::new_sync()))
+        .expect_err("an undefined environment path is an error");
+    let cause = error
+        .cause()
+        .expect("the macro's own failure is the cause")
+        .rendered_text_for_test(&assembler.values());
+    assert_eq!(cause, "`missing` is undefined");
+}
+
+#[test]
 fn macro_runner_selects_one_unit_branch_and_discards_other_journals() {
     let (assembler, effect) = compile_effects(
         ".alt (.log 'warn { msg:{ text:\"discarded\" } } =>> .fail) (.log 'info { msg:{ text:\"selected\" } } =>> .r ())",

@@ -848,7 +848,9 @@ impl RegionalMacroMachine {
         };
         if operation == MacroOperation::Env {
             // The environment at a path, read as `.get` reads the user's
-            // state: lazily, and without the rest of the state.
+            // state: an error naming the path where the environment leaves
+            // it undefined, and otherwise lazily, without the rest of the
+            // state (`dict-empty-is-a-value`).
             let path = self.argument.as_ref().expect("`.env` takes its path");
             let value = Value::Lazy(LazyValue::from_access_in(
                 values,
@@ -862,8 +864,24 @@ impl RegionalMacroMachine {
                     values.duplicate_value(path),
                 ]),
             ));
+            let environment = Value::Lazy(LazyValue::from_access_in(
+                values,
+                Arc::from([
+                    CoreDataKey::Key(keys::HANDLER.clone()),
+                    CoreDataKey::Key(keys::ENV.clone()),
+                ]),
+                Arc::from([values.duplicate_value(&self.state)]),
+            ));
             let state = values.duplicate_value(&self.state);
-            return RegionalBuiltinPoll::Ready(outcome(values, Some(value), state));
+            return RegionalBuiltinPoll::Ready(Value::builtin_call_in(
+                values,
+                Builtin::DictRequire,
+                vec![
+                    values.duplicate_value(path),
+                    outcome(values, Some(value), state),
+                    environment,
+                ],
+            ));
         }
         loop {
             let pending = match &self.phase {

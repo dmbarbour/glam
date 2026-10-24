@@ -6718,32 +6718,63 @@ fn effect_map_runs_left_to_right_and_preserves_result_order() {
 }
 
 #[test]
-fn an_undefined_environment_path_reads_as_an_error_value() {
-    // `.env` answers an undefined path with an error value, so the effect
-    // goes on and only a reader of the value fails (`dict-empty-is-a-value`).
+fn reads_of_what_is_undefined_are_errors_at_the_read() {
+    // `.get`, `.heap.get`, `.vol.get` and `.env` are errors at the read where
+    // their paths are undefined, so nothing after the read runs, `.try`
+    // answers `err`, and the error names its path, in its text and as data
+    // (`dict-empty-is-a-value`).
+    for (source, expected) in [
+        (
+            ".try (.get ['missing] =>> .heap.set ['after] 1) >>= (\\r -> .r (if r.err.undefined == ['missing] then r.err.msg.text else \"unnamed\"))",
+            "`missing` is undefined",
+        ),
+        (
+            ".heap.set ['a] {} =>> .try (.heap.get ['a, 'b] =>> .heap.set ['after] 1) >>= (\\r -> .r (if r.err.undefined == ['a, 'b] then r.err.msg.text else \"unnamed\"))",
+            "`a.b` is undefined",
+        ),
+        (
+            ".vol.new {} >>= (\\v -> .try (.vol.get v ['x] =>> .heap.set ['after] 1) >>= (\\r -> .r (if r.err.undefined == ['x] then r.err.msg.text else \"unnamed\")))",
+            "`x` is undefined",
+        ),
+        // An error does not give way, as a failure does.
+        (
+            ".try (.alt (.get ['missing]) (.r \"gave way\")) >>= (\\r -> .r (if dict.defines ['err] r then \"err\" else \"gave way\"))",
+            "err",
+        ),
+    ] {
+        let (assembler, effect) = compile_effect(source);
+        let host = Arc::new(TestHost::with_values(assembler.core_values()));
+        let TaskOutcome::Complete(text) = run_standard_on(&assembler, &effect, host.clone())
+            .unwrap_or_else(|error| panic!("{source}: {error}"))
+        else {
+            panic!("`.try` answers the error: {source}")
+        };
+        let text = assembler.to_binary(&text).unwrap();
+        assert!(
+            String::from_utf8_lossy(&text).contains(expected),
+            "{source}: {}",
+            String::from_utf8_lossy(&text)
+        );
+        assert!(
+            assembler.get(&host.heap(), "after").is_err(),
+            "nothing after the read ran: {source}"
+        );
+    }
+
+    // `.env` reads the reflection environment, which a composed task has.
     let (assembler, effect) = compile_effect(
-        ".env ['glam,'missing] >>= (\\missing -> .r { missing:missing, went_on:\"yes\" })",
+        ".try (.env ['glam, 'missing] =>> .heap.set ['after] 1) >>= (\\r -> .r (if r.err.undefined == ['glam, 'missing] then r.err.msg.text else \"unnamed\"))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("an undefined environment path should not stop the effect")
+    let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
+    let EvaluationWaitPoll::Complete(text) = pump_composed_test_task(&context, &task) else {
+        panic!("`.try` answers the error")
     };
-    let value = PublicValue::from_runtime_root(*value);
-    assert_eq!(
-        assembler
-            .to_binary(&assembler.get(&value, "went_on").unwrap())
-            .unwrap(),
-        b"yes".as_slice()
-    );
-    let error = assembler
-        .get(&value, "missing")
-        .expect_err("reading the undefined path is an error");
-    let text = error
-        .diagnostic(&assembler.values())
-        .unwrap()
-        .rendered_text_for_test(&assembler.values());
-    assert!(text.contains("`glam.missing` is undefined"), "{text}");
+    let text = assembler
+        .to_binary(&PublicValue::from_runtime_root(*text))
+        .unwrap();
+    assert_eq!(text, b"`glam.missing` is undefined".as_slice());
+    assert!(assembler.get(&host.heap(), "after").is_err());
 }
 
 #[test]
@@ -7731,11 +7762,11 @@ fn effect_dispatch_preserves_application_and_request_stage_contexts() {
 fn failed_and_cancelled_joins_retain_retryable_errors() {
     for (source, expected) in [
         (
-            ".task.new (.fail) >>= (\\task -> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
+            ".task.new (.fail) >>= (\\task -> .cut (.heap.get [] >>= (\\_ -> .task.join task)))",
             "failed permanently",
         ),
         (
-            ".task.new (.read_log) >>= (\\task -> (.task.cancel task) =>> .cut (.heap.get ['observed] >>= (\\_ -> .task.join task)))",
+            ".task.new (.read_log) >>= (\\task -> (.task.cancel task) =>> .cut (.heap.get [] >>= (\\_ -> .task.join task)))",
             "was cancelled",
         ),
     ] {
@@ -9013,7 +9044,7 @@ fn root_local_state_replacement_does_not_replace_shared_heap() {
 #[test]
 fn child_tasks_start_with_fresh_local_state_and_share_heap() {
     let (assembler, effect) = compile_effect(
-        ".heap.set ['shared] \"visible\" =>> .set ['local] \"private\" =>> .task.new (.get ['local] >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))) >>= (\\task -> .task.join task)",
+        ".heap.set ['shared] \"visible\" =>> .set ['local] \"private\" =>> .task.new (.alt (.try_get ['local] =>> .r \"inherited\") (.r \"fresh\") >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))) >>= (\\task -> .task.join task)",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
@@ -9021,8 +9052,11 @@ fn child_tasks_start_with_fresh_local_state_and_share_heap() {
         panic!("child task should complete")
     };
     let value = PublicValue::from_runtime_root(*value);
-    assert!(
-        assembler.get(&value, "local").is_err(),
+    assert_eq!(
+        assembler
+            .to_binary(&assembler.get(&value, "local").unwrap())
+            .unwrap(),
+        b"fresh".as_slice(),
         "a child's fresh local state defines nothing"
     );
     assert_eq!(
@@ -9088,18 +9122,22 @@ fn child_tasks_inherit_same_session_volume_capabilities() {
 #[test]
 fn failed_alternative_rolls_back_local_and_heap_changes() {
     let (assembler, effect) = compile_effect(
-        ".cut (.alt ((.set ['local] \"bad\") =>> .heap.set ['shared] \"bad\" =>> .fail) (.get ['local] >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))))",
+        ".cut (.alt ((.set ['local] \"bad\") =>> .heap.set ['shared] \"bad\" =>> .fail) (.alt (.try_get ['local] =>> .r \"kept\") (.r \"undone\") >>= (\\local -> .alt (.heap.try_get ['shared] =>> .r \"kept\") (.r \"undone\") >>= (\\shared -> .r { local:local, shared:shared }))))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let TaskOutcome::Complete(value) = run_standard_on(&assembler, &effect, host.clone()).unwrap()
     else {
         panic!("clean alternative should complete")
     };
-    // `.get` answers what is undefined with an error value, so the
-    // effect completes and only a reader of the value fails
-    // (`dict-empty-is-a-value`).
-    assert!(assembler.get(&value, "local").is_err());
-    assert!(assembler.get(&value, "shared").is_err());
+    for member in ["local", "shared"] {
+        assert_eq!(
+            assembler
+                .to_binary(&assembler.get(&value, member).unwrap())
+                .unwrap(),
+            b"undone".as_slice(),
+            "{member}"
+        );
+    }
     assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
 }
 
@@ -9182,28 +9220,17 @@ fn heap_root_get_and_set_are_explicit_whole_heap_operations() {
 }
 
 #[test]
-fn heap_root_replacement_and_path_errors_remain_lazy() {
+fn heap_path_errors_are_errors_at_the_read() {
+    // A read forces the dicts on its path, so one that is no dict is an
+    // error at the read (`dict-empty-is-a-value`).
     let (assembler, effect) = compile_effect(".cut ((.heap.set [] 42) =>> .heap.get ['x])");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let TaskOutcome::Complete(value) = run_standard_on(&assembler, &effect, host.clone()).unwrap()
-    else {
-        panic!("heap access should return its latent error value")
-    };
-    assert!(matches!(value.clone_core_for_test(), Value::Lazy(_)));
-    assert_same_value!(assembler, host.heap(), assembler.values().integer(42));
-    let error = assembler.evaluate(&value).unwrap_err_without_debug();
-    assert_eq!(error.to_string(), "glam evaluation failed");
-    assert!(
-        error
-            .diagnostic(&assembler.values())
-            .unwrap()
-            .rendered_text_for_test(&assembler.values())
-            .contains("not a dictionary")
-    );
+    let error = run_standard_on(&assembler, &effect, host.clone()).unwrap_err_without_debug();
+    assert!(error.to_string().contains("non-dictionary"), "{error}");
 
     let (_, caught) = compile_effect_with_runtime(
         &assembler.evaluation_runtime(),
-        ".cut ((.heap.set [] 42) =>> .heap.get ['x] >>= (\\value -> .eval value >>= (\\result -> .r result.err)))",
+        ".cut ((.heap.set [] 42) =>> .try (.heap.get ['x]) >>= (\\result -> .r result.err))",
     );
     let TaskOutcome::Complete(error) = run_reflection_test(
         &assembler,
@@ -9211,12 +9238,12 @@ fn heap_root_replacement_and_path_errors_remain_lazy() {
         Arc::new(TestHost::with_values(assembler.core_values())),
     )
     .unwrap() else {
-        panic!("reflection eval should catch a latent heap access error")
+        panic!("`.try` should catch the read's error")
     };
     let error_text = assembler.get(&error, "msg.text").unwrap();
     assert!(
         String::from_utf8_lossy(&assembler.to_binary(&error_text).unwrap())
-            .contains("not a dictionary")
+            .contains("reading `x` traverses a non-dictionary value")
     );
 }
 
@@ -9241,10 +9268,10 @@ fn malformed_nested_heap_updates_do_not_poison_unrelated_reads() {
 
     let (_, bad) = compile_effect_with_runtime(
         &assembler.evaluation_runtime(),
-        ".heap.get ['x, 'b] >>= (\\value -> .eval value >>= (\\result -> .r result.err))",
+        ".try (.heap.get ['x, 'b]) >>= (\\result -> .r result.err)",
     );
     let TaskOutcome::Complete(error) = run_reflection_test(&assembler, &bad, host).unwrap() else {
-        panic!("reflection eval should catch the nested update error")
+        panic!("`.try` should catch the nested update error")
     };
     let error_text = assembler.get(&error, "msg.text").unwrap();
     assert!(
@@ -9336,7 +9363,7 @@ fn a_choice_outside_every_cut_is_final_once_its_first_operand_succeeds() {
 #[test]
 fn a_failed_first_operand_rolls_back_and_gives_way_without_waiting() {
     let (assembler, effect) = compile_effect(
-        ".alt ((.heap.set ['written] 1) =>> .heap.get ['never] >>= (\\_ -> .fail)) (.heap.get ['written])",
+        ".alt ((.heap.set ['written] 1) =>> .heap.try_get ['never] >>= (\\_ -> .fail)) (.r ())",
     );
     let host = Arc::new(TestHost::with_wake_heap(
         assembler.core_values(),
@@ -9591,10 +9618,18 @@ fn request_keys_keep_an_empty_dict_member() {
 #[test]
 fn a_cut_that_fails_on_try_get_waits_until_the_path_is_defined() {
     // The wait idiom without `{}` as undefined: `.heap.try_get` fails where
-    // the path is undefined, its read observed, so the failed cut parks and
-    // runs again once a commit defines the path.
-    let (assembler, watch) =
-        compile_effect(".cut (.heap.try_get ['ready] >>= (\\ready -> .r ready))");
+    // the path is undefined, and `.heap.get` is an error, its read observed,
+    // so the cut parks and runs again once a commit defines the path.
+    for source in [
+        ".cut (.heap.try_get ['ready] >>= (\\ready -> .r ready))",
+        ".cut (.heap.get ['ready] >>= (\\ready -> .r ready))",
+    ] {
+        wait_until_ready_is_defined(source);
+    }
+}
+
+fn wait_until_ready_is_defined(source: &str) {
+    let (assembler, watch) = compile_effect(source);
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let mut search = IsolatedEffectSearch::new(
         &assembler.evaluation_runtime(),

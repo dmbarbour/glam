@@ -45,7 +45,7 @@ fn request(path: &[&str]) -> Request {
 /// by path, breaking its promise where `files` has no such source.
 fn answer(s: &mut Machine<'_, '_>, files: &[(&str, &str)]) -> Result<Request, Error> {
     s.local_set("received")?;
-    s.local_get("received");
+    s.local_get("received")?;
     s.dict_get("request")?;
     s.dup(1)?;
     s.dict_get("package")?;
@@ -60,7 +60,7 @@ fn answer(s: &mut Machine<'_, '_>, files: &[(&str, &str)]) -> Result<Request, Er
         .map(|_| s.text_pop())
         .collect::<Result<Vec<_>, _>>()?;
     path.reverse();
-    s.local_get("received");
+    s.local_get("received")?;
     s.dict_get("reply")?;
     let name = path.join("/");
     match files.iter().find(|(file, _)| *file == name) {

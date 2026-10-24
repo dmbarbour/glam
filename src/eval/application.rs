@@ -96,7 +96,7 @@ pub(crate) fn predicate_effect_holds(
 
 /// The effect a predicate answers, as comparisons do: `.r ()` where it
 /// holds, and `.fail` where it does not.
-pub(super) fn predicate_effect(access: &RuntimeValueAccess<'_>, holds: bool) -> Value {
+pub(crate) fn predicate_effect(access: &RuntimeValueAccess<'_>, holds: bool) -> Value {
     let (effect, arguments) = if holds {
         (
             "r",
