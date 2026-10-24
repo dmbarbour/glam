@@ -61,6 +61,14 @@ scripts/check.sh full   # all + aggressive GC, cursor stress
 Use `all` (the default) as the pre-commit gate. Run `full` before performance
 work and after changes to runtime, collector, or unsafe-sensitive code.
 
+Gate a commit with `--record`, then guard it with `--verify`, which passes
+only when the staged tree is the one a gate at that level (or higher) passed:
+
+```sh
+scripts/check.sh full --record      # cargo fmt, timeout, fresh target/check-full.log, stamp
+git add -A && scripts/check.sh --verify full && git commit ...
+```
+
 glam-gc is a separate crate with its own gate. Run it only when changing
 glam-gc, beside Glam's at the matching level:
 

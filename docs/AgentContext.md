@@ -142,6 +142,17 @@ checks the `glam` package; glam-gc is a separate crate with its own gate
   Running it only periodically once let a regression stay unnoticed for
   weeks.
 
+A commit's gate runs as `scripts/check.sh <level> --record`: it runs
+`cargo fmt`, then the level under a timeout (`--timeout SECONDS` overrides
+the level's default) into a fresh `target/check-<level>.log` ending in
+`exit <status>`, and on success stamps the tree a commit of the whole
+working tree would record. `scripts/check.sh --verify <level>` passes only
+when the staged tree carries a stamp of that level or a higher one, so a
+commit guarded by it holds exactly what a gate passed. The setup lives in
+the script so each run gets it right once: a stale log once read as a pass
+after a chained check failed before the gate began, and a guard reading a
+log cannot tell which tree it describes.
+
 glam-gc's gate, `crates/glam-gc/scripts/check.sh`, runs only when glam-gc
 changes, beside Glam's at the matching level, since Glam builds on it:
 
