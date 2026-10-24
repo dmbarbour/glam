@@ -58,14 +58,20 @@ struct Tags {
     fix: Key,
     get: Key,
     set: Key,
+    try_get: Key,
+    del: Key,
     heap_get: Key,
     heap_set: Key,
     heap_rewrite: Key,
+    heap_try_get: Key,
+    heap_del: Key,
     heap_vol: Key,
     vol_new: Key,
     vol_get: Key,
     vol_set: Key,
     vol_rewrite: Key,
+    vol_try_get: Key,
+    vol_del: Key,
     promise_new: Key,
     promise_status: Key,
     promise_fulfill: Key,
@@ -99,14 +105,20 @@ impl Tags {
             fix: tag("fix"),
             get: tag("get"),
             set: tag("set"),
+            try_get: tag("try_get"),
+            del: tag("del"),
             heap_get: tag("heap_get"),
             heap_set: tag("heap_set"),
             heap_rewrite: tag("heap_rewrite"),
+            heap_try_get: tag("heap_try_get"),
+            heap_del: tag("heap_del"),
             heap_vol: tag("heap_vol"),
             vol_new: tag("vol_new"),
             vol_get: tag("vol_get"),
             vol_set: tag("vol_set"),
             vol_rewrite: tag("vol_rewrite"),
+            vol_try_get: tag("vol_try_get"),
+            vol_del: tag("vol_del"),
             promise_new: tag("promise_new"),
             promise_status: tag("promise_status"),
             promise_fulfill: tag("promise_fulfill"),
@@ -2007,6 +2019,17 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             .take()
                             .expect("key path continuation must remain owned");
                         if let StatePathAfterKeys::Store(operation) = after {
+                            if keys.is_empty()
+                                && matches!(
+                                    operation,
+                                    StorePathOperation::HeapDel | StorePathOperation::VolumeDel(_)
+                                )
+                            {
+                                return StatePathStep::Failed(
+                                    pathing,
+                                    TaskHalt::new("`.del` needs a non-empty path"),
+                                );
+                            }
                             return self.store_path_step(
                                 context,
                                 operation,
@@ -2211,6 +2234,115 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     let snapshot = self.host.snapshot();
                     let mut store = StoreJournal::new(snapshot.store().clone());
                     store.rewrite(path, PublicValue::from_runtime_root(updater));
+                    self.host.commit(TaskCommit::new(
+                        store,
+                        snapshot.extra().clone(),
+                        S::Journal::default(),
+                    ))
+                })
+            }
+            StorePathOperation::HeapTryGet => {
+                let checkpoint = branch.retry_candidate();
+                let heap = if let Some(transaction) = branch.transaction.as_mut() {
+                    let generation = transaction.snapshot.generation();
+                    let observed = transaction.store.observe_read(&path);
+                    let heap =
+                        context.with_runtime_access(|access| transaction.store.view_in(&access));
+                    if observed {
+                        branch.observe(checkpoint, generation);
+                    }
+                    heap
+                } else {
+                    context.suspend(|| self.host.snapshot().store().root().clone())
+                };
+                return StatePathStep::Complete(context.with_runtime_access(|access| {
+                    let heap = heap.into_runtime_root().clone_core_with(&access);
+                    let path = key_path_in(&access, &path);
+                    try_get_work(&access, &heap, path, branch, scope_depth)
+                }));
+            }
+            StorePathOperation::HeapDel => {
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    context
+                        .with_runtime_access(|access| transaction.store.remove_in(&access, path));
+                    return StatePathStep::Complete(context.with_runtime_access(|access| {
+                        MachineWork::deliver_unit(&access, branch, scope_depth)
+                    }));
+                }
+                // One suspension covers the snapshot, the edit and the
+                // commit.
+                context.suspend(|| {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.remove(path);
+                    self.host.commit(TaskCommit::new(
+                        store,
+                        snapshot.extra().clone(),
+                        S::Journal::default(),
+                    ))
+                })
+            }
+            StorePathOperation::VolumeTryGet(target) => {
+                let checkpoint = branch.retry_candidate();
+                let read = if let Some(transaction) = branch.transaction.as_mut() {
+                    let generation = transaction.snapshot.generation();
+                    let (observed, read) = context.with_runtime_access(|access| {
+                        let observed = target.observe_read(&mut transaction.store, &access, &path);
+                        let read =
+                            target
+                                .read_in(&mut transaction.store, &access)
+                                .map(|contents| {
+                                    access.root_runtime_value(contents_at_path(
+                                        &access,
+                                        contents,
+                                        &[],
+                                    ))
+                                });
+                        (observed, read)
+                    });
+                    if observed {
+                        branch.observe(checkpoint, generation);
+                    }
+                    read
+                } else {
+                    let snapshot = context.suspend(|| self.host.snapshot().store().clone());
+                    context.with_runtime_access(|access| {
+                        target.read_snapshot_in(&snapshot, &access).map(|contents| {
+                            access.root_runtime_value(contents_at_path(&access, contents, &[]))
+                        })
+                    })
+                };
+                return StatePathStep::Complete(context.with_runtime_access(|access| match read {
+                    Some(contents) => {
+                        let contents = contents.clone_core_with(&access);
+                        let path = key_path_in(&access, &path);
+                        try_get_work(&access, &contents, path, branch, scope_depth)
+                    }
+                    None => {
+                        let volume = target.id_in(&access);
+                        let error = access.root_runtime_value(Value::Lazy(LazyValue::error_in(
+                            &access,
+                            format!("reflection volume {} has been revoked", volume.get()),
+                        )));
+                        MachineWork::deliver_root(error, branch, scope_depth)
+                    }
+                }));
+            }
+            StorePathOperation::VolumeDel(target) => {
+                if let Some(transaction) = branch.transaction.as_mut() {
+                    context.with_runtime_access(|access| {
+                        target.remove_in(&mut transaction.store, &access, path)
+                    });
+                    return StatePathStep::Complete(context.with_runtime_access(|access| {
+                        MachineWork::deliver_unit(&access, branch, scope_depth)
+                    }));
+                }
+                // One suspension covers the snapshot, the edit and the
+                // commit, while the target keeps the volume.
+                context.suspend(|| {
+                    let snapshot = self.host.snapshot();
+                    let mut store = StoreJournal::new(snapshot.store().clone());
+                    store.with_access(|store, access| target.remove_in(store, access, path));
                     self.host.commit(TaskCommit::new(
                         store,
                         snapshot.extra().clone(),
@@ -2770,6 +2902,59 @@ impl<S: TaskSpecialization> EffectTask<S> {
             Request::HeapGet(path) => {
                 return Ok(MachineStep::StatePath(Box::new(StatePathWork::heap_get(
                     path,
+                    branch,
+                    scope_depth,
+                ))));
+            }
+            // The user's state is the task's own: no read to observe.
+            Request::TryGet(path) => context.with_runtime_access(|access| {
+                let state = branch.state.clone_core_with(&access);
+                let path = path.clone_core_with(&access);
+                try_get_work(&access, &state, path, branch, scope_depth)
+            }),
+            Request::Del(path) => {
+                let update = context.with_runtime_access(|access| {
+                    let path = path.clone_core_with(&access);
+                    let state = branch.state.clone_core_with(&access);
+                    branch.root_value(
+                        &access,
+                        Value::builtin_call_in(&access, Builtin::DictRemove, vec![path, state]),
+                    )
+                });
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::del(
+                    update,
+                    branch,
+                    scope_depth,
+                ))));
+            }
+            Request::HeapTryGet(path) => {
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::store(
+                    path,
+                    StorePathOperation::HeapTryGet,
+                    branch,
+                    scope_depth,
+                ))));
+            }
+            Request::HeapDel(path) => {
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::store(
+                    path,
+                    StorePathOperation::HeapDel,
+                    branch,
+                    scope_depth,
+                ))));
+            }
+            Request::VolumeTryGet(volume, path) => {
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::store(
+                    path,
+                    StorePathOperation::VolumeTryGet(volume),
+                    branch,
+                    scope_depth,
+                ))));
+            }
+            Request::VolumeDel(volume, path) => {
+                return Ok(MachineStep::StatePath(Box::new(StatePathWork::store(
+                    path,
+                    StorePathOperation::VolumeDel(volume),
                     branch,
                     scope_depth,
                 ))));
@@ -5203,9 +5388,13 @@ enum StorePathOperation {
     HeapGet,
     HeapSet(RuntimeValueRoot),
     HeapRewrite(RuntimeValueRoot),
+    HeapTryGet,
+    HeapDel,
     VolumeGet(VolumeTarget),
     VolumeSet(VolumeTarget, RuntimeValueRoot),
     VolumeRewrite(VolumeTarget, RuntimeValueRoot),
+    VolumeTryGet(VolumeTarget),
+    VolumeDel(VolumeTarget),
 }
 
 impl<S: TaskSpecialization> StatePathWork<S> {
@@ -5243,6 +5432,31 @@ impl<S: TaskSpecialization> StatePathWork<S> {
             branch,
             scope_depth,
         )
+    }
+
+    /// A store operation at `path`, once its keys are converted.
+    fn store(
+        path: RuntimeValueRoot,
+        operation: StorePathOperation,
+        branch: Branch<S>,
+        scope_depth: usize,
+    ) -> Self {
+        Self::keys(
+            path,
+            StatePathAfterKeys::Store(operation),
+            branch,
+            scope_depth,
+        )
+    }
+
+    /// `.del Path` on the user's state: `update`, the state without `Path`,
+    /// pruning the dicts the removal empties, becomes the state.
+    fn del(update: RuntimeValueRoot, branch: Branch<S>, scope_depth: usize) -> Self {
+        Self {
+            operation: StatePathOperation::SetUpdate(WhnfComputation::from_root(update)),
+            branch,
+            scope_depth,
+        }
     }
 
     fn heap_get(path: RuntimeValueRoot, branch: Branch<S>, scope_depth: usize) -> Self {
@@ -5616,6 +5830,50 @@ struct TryTrace {
 }
 
 /// `seq value (.r value)`, the operation `.eval value` tries.
+/// `.try_get`'s work (`dict-presence-ops`): hold the value at `path` in
+/// `root`, then run `dict.defines`, which fails where `path` is undefined
+/// and otherwise returns unit, on which the held value is delivered.
+fn try_get_work<S: TaskSpecialization>(
+    access: &RuntimeValueAccess<'_>,
+    root: &Value,
+    path: Value,
+    mut branch: Branch<S>,
+    scope_depth: usize,
+) -> MachineWork<S> {
+    let lookup = branch.root_value(
+        access,
+        Value::builtin_call_in(
+            access,
+            Builtin::DictLookup,
+            vec![access.duplicate_value(&path), access.duplicate_value(root)],
+        ),
+    );
+    let defines = branch.root_value(
+        access,
+        Value::builtin_call_in(
+            access,
+            Builtin::DictDefines,
+            vec![path, access.duplicate_value(root)],
+        ),
+    );
+    branch
+        .control
+        .sequence
+        .push(Continuation::RestoreScopedValue(lookup));
+    branch.set_effect_root(defines);
+    MachineWork::Drive {
+        branch,
+        scope_depth,
+    }
+}
+
+/// `keys` as a path value.
+fn key_path_in(access: &RuntimeValueAccess<'_>, keys: &[Key]) -> Value {
+    Value::List(List::from_values(
+        keys.iter().map(|key| access.value_from_key(key)).collect(),
+    ))
+}
+
 fn evaluation_effect_in(access: &RuntimeValueAccess<'_>, value: Value) -> Value {
     let returned = Value::Dict(Dict::new_sync().insert(
         keys::EFF.clone(),
@@ -6011,6 +6269,14 @@ enum Request<R, V = RuntimeValueRoot> {
     HeapSet(V, V),
     HeapRewrite(V, V),
     HeapVolume,
+    /// The value at a path where defined, a failure where not, and a
+    /// removal (`dict-presence-ops`).
+    TryGet(V),
+    Del(V),
+    HeapTryGet(V),
+    HeapDel(V),
+    VolumeTryGet(VolumeTarget<V>, V),
+    VolumeDel(VolumeTarget<V>, V),
     VolumeGet(VolumeTarget<V>, V),
     VolumeSet(VolumeTarget<V>, V, V),
     VolumeRewrite(VolumeTarget<V>, V, V),
@@ -6038,6 +6304,8 @@ enum VolumeOperation {
     Get,
     Set,
     Rewrite,
+    TryGet,
+    Del,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -6158,6 +6426,21 @@ impl VolumeTarget {
         }
     }
 
+    /// As [`Self::write_in`], for a removal.
+    fn remove_in(
+        &self,
+        journal: &mut StoreJournal,
+        access: &RuntimeValueAccess<'_>,
+        path: Vec<Key>,
+    ) {
+        match self {
+            Self::Kept(volume) => journal.remove_kept_volume_in(access, *volume, path),
+            Self::Handle(handle) => {
+                journal.remove_volume_in(access, Self::handle_cell(access, handle), path)
+            }
+        }
+    }
+
     /// As [`Self::write_in`], for a rewrite.
     fn rewrite_in(
         &self,
@@ -6190,6 +6473,10 @@ enum RequestSelection<R> {
     HeapSet,
     HeapRewrite,
     HeapVolume,
+    TryGet,
+    Del,
+    HeapTryGet,
+    HeapDel,
     Volume(VolumeRequestIdentity),
     Handle(HandleOperation),
     VolumeNew,
@@ -6213,15 +6500,21 @@ impl<R> RequestSelection<R> {
             | Self::Fix
             | Self::Get
             | Self::HeapGet
+            | Self::TryGet
+            | Self::Del
+            | Self::HeapTryGet
+            | Self::HeapDel
             | Self::ExitError
             | Self::VolumeNew
             | Self::Handle(HandleOperation::Promise(PromiseOperation::Status))
             | Self::Volume(VolumeRequestIdentity {
-                operation: VolumeOperation::Get,
+                operation: VolumeOperation::Get | VolumeOperation::TryGet | VolumeOperation::Del,
                 ..
             }) => 1,
             Self::Handle(
-                HandleOperation::Volume(VolumeOperation::Get)
+                HandleOperation::Volume(
+                    VolumeOperation::Get | VolumeOperation::TryGet | VolumeOperation::Del,
+                )
                 | HandleOperation::Promise(PromiseOperation::Fulfill | PromiseOperation::Break),
             ) => 2,
             Self::Handle(HandleOperation::Volume(
@@ -6265,6 +6558,18 @@ impl<R> RequestSelection<R> {
             Self::HeapSet => Request::HeapSet(next(), next()),
             Self::HeapRewrite => Request::HeapRewrite(next(), next()),
             Self::HeapVolume => Request::HeapVolume,
+            Self::TryGet => Request::TryGet(next()),
+            Self::Del => Request::Del(next()),
+            Self::HeapTryGet => Request::HeapTryGet(next()),
+            Self::HeapDel => Request::HeapDel(next()),
+            Self::Volume(VolumeRequestIdentity {
+                volume,
+                operation: VolumeOperation::TryGet,
+            }) => Request::VolumeTryGet(VolumeTarget::Kept(volume), next()),
+            Self::Volume(VolumeRequestIdentity {
+                volume,
+                operation: VolumeOperation::Del,
+            }) => Request::VolumeDel(VolumeTarget::Kept(volume), next()),
             Self::Volume(VolumeRequestIdentity {
                 volume,
                 operation: VolumeOperation::Get,
@@ -6504,6 +6809,8 @@ impl<R: Clone> RequestDecodeWork<R> {
                             VolumeOperation::Rewrite => {
                                 Request::VolumeRewrite(volume, next(), next())
                             }
+                            VolumeOperation::TryGet => Request::VolumeTryGet(volume, next()),
+                            VolumeOperation::Del => Request::VolumeDel(volume, next()),
                         })
                     }
                     HandleOperation::Promise(operation) => {
@@ -6651,6 +6958,18 @@ fn select_request_from_whnf<R: Clone>(
     select!(&tags.heap_set, RequestSelection::HeapSet);
     select!(&tags.heap_rewrite, RequestSelection::HeapRewrite);
     select!(&tags.heap_vol, RequestSelection::HeapVolume);
+    select!(&tags.try_get, RequestSelection::TryGet);
+    select!(&tags.del, RequestSelection::Del);
+    select!(&tags.heap_try_get, RequestSelection::HeapTryGet);
+    select!(&tags.heap_del, RequestSelection::HeapDel);
+    select!(
+        &tags.vol_try_get,
+        RequestSelection::Handle(HandleOperation::Volume(VolumeOperation::TryGet))
+    );
+    select!(
+        &tags.vol_del,
+        RequestSelection::Handle(HandleOperation::Volume(VolumeOperation::Del))
+    );
     select!(&tags.vol_new, RequestSelection::VolumeNew);
     select!(
         &tags.vol_get,
@@ -6709,6 +7028,8 @@ fn volume_request_tag(volume: VolumeId, operation: VolumeOperation) -> Key {
         VolumeOperation::Get => "get",
         VolumeOperation::Set => "set",
         VolumeOperation::Rewrite => "rewrite",
+        VolumeOperation::TryGet => "try_get",
+        VolumeOperation::Del => "del",
     };
     Key::abstract_global_path([
         VOLUME_REQUEST_PREFIX[0].to_owned(),
@@ -6743,6 +7064,8 @@ fn parse_volume_request_tag(tag: &Key) -> Result<Option<VolumeRequestIdentity>, 
         "get" => VolumeOperation::Get,
         "set" => VolumeOperation::Set,
         "rewrite" => VolumeOperation::Rewrite,
+        "try_get" => VolumeOperation::TryGet,
+        "del" => VolumeOperation::Del,
         _ => return Err(TaskHalt::new("volume capability has an invalid operation")),
     };
     Ok(Some(VolumeRequestIdentity { volume, operation }))
@@ -6767,6 +7090,8 @@ pub(crate) fn volume_effects(values: &CoreValueFactory, volume: VolumeId) -> Pub
                 entry("get", VolumeOperation::Get, 1),
                 entry("set", VolumeOperation::Set, 2),
                 entry("rewrite", VolumeOperation::Rewrite, 2),
+                entry("try_get", VolumeOperation::TryGet, 1),
+                entry("del", VolumeOperation::Del, 1),
             ]
             .into_iter()
             .fold(Dict::new_sync(), |dict, (key, value)| {
@@ -6801,6 +7126,14 @@ fn effect_api<R: Clone>(
                     "rewrite",
                     request_function_in(access, tags.heap_rewrite.clone(), 2, Vec::new(), false),
                 ),
+                entry(
+                    "try_get",
+                    request_function_in(access, tags.heap_try_get.clone(), 1, Vec::new(), false),
+                ),
+                entry(
+                    "del",
+                    request_function_in(access, tags.heap_del.clone(), 1, Vec::new(), false),
+                ),
                 entry("vol", nullary_request(access, tags.heap_vol.clone())),
             ]
             .into_iter()
@@ -6826,6 +7159,14 @@ fn effect_api<R: Clone>(
                 entry(
                     "rewrite",
                     request_function_in(access, tags.vol_rewrite.clone(), 3, Vec::new(), false),
+                ),
+                entry(
+                    "try_get",
+                    request_function_in(access, tags.vol_try_get.clone(), 2, Vec::new(), false),
+                ),
+                entry(
+                    "del",
+                    request_function_in(access, tags.vol_del.clone(), 2, Vec::new(), false),
                 ),
             ]
             .into_iter()
@@ -6876,6 +7217,14 @@ fn effect_api<R: Clone>(
             entry(
                 "set",
                 request_function_in(access, tags.set.clone(), 2, Vec::new(), false),
+            ),
+            entry(
+                "try_get",
+                request_function_in(access, tags.try_get.clone(), 1, Vec::new(), false),
+            ),
+            entry(
+                "del",
+                request_function_in(access, tags.del.clone(), 1, Vec::new(), false),
             ),
             entry(
                 "reset",

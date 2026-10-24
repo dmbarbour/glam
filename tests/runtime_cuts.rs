@@ -88,6 +88,41 @@ fn heap_actions_outside_a_cut_commit_at_once() {
 }
 
 #[test]
+fn a_heap_removal_prunes_what_it_empties_and_undoes_with_its_cut() {
+    // `dict-presence-ops`: removing `a.b` prunes `a`, left empty, and keeps
+    // `c`; within a failed cut, the removal is undone.
+    let mut rt = runtime();
+    rt.run("writer", |m| {
+        m.int_push(1);
+        m.heap_set(["a", "b"])?;
+        m.int_push(2);
+        m.heap_set(["c", "d"])?;
+        m.int_push(3);
+        m.heap_set(["c", "e"])?;
+        m.heap_del(["a", "b"])?;
+        m.heap_del(["c", "d"])?;
+        assert!(
+            m.heap_del(Vec::<&str>::new()).is_err(),
+            "the root is no path"
+        );
+        let failed = m.cut(|m| {
+            m.heap_del(["c", "e"])?;
+            Err::<(), _>(m.fail())
+        });
+        assert!(failed.is_err());
+        Ok(())
+    })
+    .expect("the removals should commit");
+    assert!(heap_undefined(&mut rt, &["a"]), "a is pruned");
+    assert!(heap_undefined(&mut rt, &["c", "d"]));
+    assert_eq!(
+        heap_int(&mut rt, &["c", "e"]),
+        3,
+        "the failed cut's removal is undone"
+    );
+}
+
+#[test]
 fn a_cut_commits_its_writes_together_and_reads_its_own() {
     let mut rt = runtime();
     let seen = rt

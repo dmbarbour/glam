@@ -115,6 +115,9 @@ fn assert_store_root_boundary_inventory(
             let _: &ConflictAddress = address;
             let _: &Option<PublicValue> = updater;
         }
+        StoreEdit::Remove { address } => {
+            let _: &ConflictAddress = address;
+        }
         StoreEdit::Create {
             address,
             initial,

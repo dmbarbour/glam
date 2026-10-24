@@ -1846,6 +1846,10 @@ fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>)
         | RequestSelection::HeapSet
         | RequestSelection::HeapRewrite
         | RequestSelection::HeapVolume
+        | RequestSelection::TryGet
+        | RequestSelection::Del
+        | RequestSelection::HeapTryGet
+        | RequestSelection::HeapDel
         | RequestSelection::Reset
         | RequestSelection::Shift
         | RequestSelection::Resume
@@ -1933,7 +1937,14 @@ fn assert_state_path_root_inventory(
             let _: &RuntimeValueRoot = value;
         }
         StatePathAfterKeys::Store(operation) => match operation {
-            StorePathOperation::HeapGet => {}
+            StorePathOperation::HeapGet
+            | StorePathOperation::HeapTryGet
+            | StorePathOperation::HeapDel => {}
+            StorePathOperation::VolumeTryGet(volume) | StorePathOperation::VolumeDel(volume) => {
+                assert_volume_target(volume, |handle| {
+                    let _: &RuntimeValueRoot = handle;
+                });
+            }
             StorePathOperation::HeapSet(value) | StorePathOperation::HeapRewrite(value) => {
                 let _: &RuntimeValueRoot = value;
             }
@@ -3293,8 +3304,16 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
         | Request::Fix(value)
         | Request::Get(value)
         | Request::HeapGet(value)
+        | Request::TryGet(value)
+        | Request::Del(value)
+        | Request::HeapTryGet(value)
+        | Request::HeapDel(value)
         | Request::ExitError(value)
         | Request::VolumeNew(value) => assert_request_value(value),
+        Request::VolumeTryGet(volume, value) | Request::VolumeDel(volume, value) => {
+            assert_volume_target(volume, assert_request_value);
+            assert_request_value(value);
+        }
         Request::PromiseStatus(promise) => {
             let _: &ManagedResolverRoot = promise;
         }
@@ -3357,7 +3376,11 @@ fn assert_protocol_handoff_inventory(
     let _: &TestRequest = request;
 
     match volume_operation {
-        VolumeOperation::Get | VolumeOperation::Set | VolumeOperation::Rewrite => {}
+        VolumeOperation::Get
+        | VolumeOperation::Set
+        | VolumeOperation::Rewrite
+        | VolumeOperation::TryGet
+        | VolumeOperation::Del => {}
     }
     let VolumeRequestIdentity { volume, operation } = volume_request;
     let _: &VolumeId = volume;
@@ -9476,6 +9499,100 @@ fn a_cut_s_resolution_commits_with_it() {
         effect_text(&assembler, &effect).unwrap(),
         b"unsent",
         "the failed alternative's resolution is undone with it"
+    );
+}
+
+#[test]
+fn try_get_answers_a_defined_path_and_fails_an_undefined_one() {
+    // `dict-presence-ops`: `.try_get` gives the value where the path is
+    // defined and fails where not; `.del` removes, pruning what it empties.
+    for (source, expected) in [
+        (
+            ".set ['a] 1 =>> .try_get ['a] >>= (\\v -> .r (if v == 1 then \"got\" else \"other\"))",
+            "got",
+        ),
+        (
+            ".alt (.try_get ['missing] =>> .r \"found\") (.r \"absent\")",
+            "absent",
+        ),
+        (
+            ".set ['k, 'v] 1 =>> .del ['k, 'v] =>> .alt (.try_get ['k] =>> .r \"kept\") (.r \"pruned\")",
+            "pruned",
+        ),
+        (
+            ".heap.set ['h] 2 =>> .heap.try_get ['h] >>= (\\v -> .r (if v == 2 then \"heap\" else \"other\"))",
+            "heap",
+        ),
+        (
+            ".heap.set ['h, 'x] 2 =>> .heap.del ['h, 'x] =>> .alt (.heap.try_get ['h] =>> .r \"kept\") (.r \"gone\")",
+            "gone",
+        ),
+        (
+            ".cut (.heap.set ['c] 3 =>> .heap.del ['c] =>> .alt (.heap.try_get ['c] =>> .r \"kept\") (.r \"gone\"))",
+            "gone",
+        ),
+        (
+            ".vol.new {} >>= (\\v -> .vol.set v ['x] 3 =>> .vol.try_get v ['x] >>= (\\x -> .r (if x == 3 then \"vol\" else \"other\")))",
+            "vol",
+        ),
+        (
+            ".vol.new {} >>= (\\v -> .vol.set v ['x] 3 =>> .vol.del v ['x] =>> .alt (.vol.try_get v ['x] =>> .r \"kept\") (.r \"gone\"))",
+            "gone",
+        ),
+    ] {
+        let (assembler, effect) = compile_effect(source);
+        assert_eq!(
+            effect_text(&assembler, &effect).unwrap(),
+            expected.as_bytes(),
+            "{source}"
+        );
+    }
+    let (assembler, effect) = compile_effect(".heap.del []");
+    let error = effect_text(&assembler, &effect).expect_err("the root is no path to remove");
+    assert!(error.to_string().contains("non-empty path"), "{error}");
+}
+
+#[test]
+fn a_cut_that_fails_on_try_get_waits_until_the_path_is_defined() {
+    // The wait idiom without `{}` as undefined: `.heap.try_get` fails where
+    // the path is undefined, its read observed, so the failed cut parks and
+    // runs again once a commit defines the path.
+    let (assembler, watch) =
+        compile_effect(".cut (.heap.try_get ['ready] >>= (\\ready -> .r ready))");
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let mut search = IsolatedEffectSearch::new(
+        &assembler.evaluation_runtime(),
+        &watch,
+        TestEffects,
+        host.clone(),
+    )
+    .expect("the watcher should initialize");
+    let generation = loop {
+        match search.poll(256) {
+            IsolatedSearchPoll::BudgetExhausted => {}
+            IsolatedSearchPoll::Blocked(blocked) => {
+                assert!(!blocked.waiting_on_dependency());
+                break blocked
+                    .observed_generation()
+                    .expect("the undefined read is an observation");
+            }
+            IsolatedSearchPoll::Complete(_) => panic!("the path is undefined"),
+            IsolatedSearchPoll::Failed(error) => panic!("the watcher failed: {error}"),
+            IsolatedSearchPoll::Cancelled => panic!("the watcher was cancelled"),
+        }
+    };
+    host.set_heap_path(
+        vec![Key::atom_from_text("ready")],
+        assembler.values().text("arrived"),
+    );
+    assert!(host.wait_for_change(generation));
+    let results = poll_isolated_search(&mut search);
+    assert_eq!(results.len(), 1);
+    assert_eq!(
+        assembler
+            .to_binary(results[0].value().expect("the retry finds it defined"))
+            .unwrap(),
+        b"arrived".as_slice()
     );
 }
 

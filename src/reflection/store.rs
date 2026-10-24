@@ -293,6 +293,10 @@ enum StoreEdit {
         address: ConflictAddress,
         updater: Option<PublicValue>,
     },
+    /// Removes what is at the address, pruning the dicts the removal
+    /// empties (`dict-presence-ops`). For conflict analysis it is a set: it
+    /// decides everything below its address.
+    Remove { address: ConflictAddress },
     /// Allocates a volume whose ID the transaction reserved, with its
     /// initial root, at the volume's root address. The edit holds the
     /// volume's cell until the commit keys its first version on it.
@@ -320,6 +324,7 @@ impl StoreEdit {
             Self::Set { address, .. }
             | Self::Rewrite { address, .. }
             | Self::Create { address, .. }
+            | Self::Remove { address }
             | Self::Resolve { address, .. } => address,
         }
     }
@@ -459,7 +464,7 @@ impl StoreJournal {
             | StoreEdit::Resolve { .. } => {
                 self.edits.push(edit);
             }
-            StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } => {
+            StoreEdit::Set { .. } | StoreEdit::Rewrite { .. } | StoreEdit::Remove { .. } => {
                 let volume = edit.address().reflection_parts().0;
                 self.push_edit(access, volume, edit);
             }
@@ -573,6 +578,28 @@ impl StoreJournal {
     ) {
         self.keep_volume_in(access, volume);
         self.rewrite_by_id_in(access, volume.id(), path, updater);
+    }
+
+    /// Removes what is at `path` in `volume`, as [`Self::write_volume_in`]
+    /// writes.
+    pub(crate) fn remove_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeCellView<'_>,
+        path: Vec<Key>,
+    ) {
+        self.keep_volume_in(access, volume);
+        self.remove_by_id_in(access, volume.id(), path);
+    }
+
+    /// As [`Self::write_kept_volume_in`], for a removal.
+    pub(crate) fn remove_kept_volume_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+        path: Vec<Key>,
+    ) {
+        self.remove_by_id_in(access, volume, path);
     }
 
     /// Records a read at `path` in a host's protected volume, which its
@@ -980,6 +1007,34 @@ impl StoreJournal {
         value: PublicValue,
     ) {
         let edit = self.set_edit(volume, path, value);
+        self.push_edit(access, volume, edit);
+    }
+
+    /// Removes what is at `path` in the shared heap, pruning the dicts the
+    /// removal empties (`dict-presence-ops`). The path is not empty.
+    pub(crate) fn remove(&mut self, path: Vec<Key>) {
+        self.remove_by_id(self.snapshot.heap_volume, path);
+    }
+
+    /// As [`Self::remove`], for a caller that holds `access`.
+    pub(crate) fn remove_in(&mut self, access: &RuntimeValueAccess<'_>, path: Vec<Key>) {
+        self.remove_by_id_in(access, self.snapshot.heap_volume, path);
+    }
+
+    fn remove_by_id(&mut self, volume: VolumeId, path: Vec<Key>) {
+        self.with_access(|journal, access| journal.remove_by_id_in(access, volume, path));
+    }
+
+    fn remove_by_id_in(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        volume: VolumeId,
+        path: Vec<Key>,
+    ) {
+        debug_assert!(!path.is_empty(), "a removal names a path");
+        let edit = StoreEdit::Remove {
+            address: ConflictAddress::reflection(volume, ConflictPath::from_keys(path)),
+        };
         self.push_edit(access, volume, edit);
     }
 
@@ -1495,6 +1550,7 @@ fn written_volumes(edits: &[StoreEdit]) -> BTreeSet<VolumeId> {
                         updater: Some(_),
                         ..
                     }
+                    | StoreEdit::Remove { .. }
                     | StoreEdit::Create { .. }
             )
         })
@@ -1573,7 +1629,7 @@ fn dependency(edits: &[StoreEdit], volume: VolumeId, path: ConflictPath) -> Opti
     for edit in edits.iter().rev() {
         let (edit_volume, edit_path) = edit.address().reflection_parts();
         match edit {
-            StoreEdit::Set { .. } | StoreEdit::Resolve { .. }
+            StoreEdit::Set { .. } | StoreEdit::Remove { .. } | StoreEdit::Resolve { .. }
                 if edit_volume == volume && edit_path.is_prefix_of(&dependency) =>
             {
                 return None;
@@ -1587,6 +1643,7 @@ fn dependency(edits: &[StoreEdit], volume: VolumeId, path: ConflictPath) -> Opti
             }
             StoreEdit::Set { .. }
             | StoreEdit::Rewrite { .. }
+            | StoreEdit::Remove { .. }
             | StoreEdit::Create { .. }
             | StoreEdit::Resolve { .. } => {}
         }
@@ -1684,6 +1741,16 @@ fn apply_edit_in(access: &RuntimeValueAccess<'_>, current: Value, edit: &StoreEd
                 path,
                 value.runtime_root().clone_core_with(access),
             )
+        }
+        StoreEdit::Remove { address } => {
+            let (_, path) = address.reflection_parts();
+            let path = Value::List(List::from_values(
+                path.keys()
+                    .iter()
+                    .map(|key| access.value_from_key(key))
+                    .collect(),
+            ));
+            Value::builtin_call_in(access, Builtin::DictRemove, vec![path, current])
         }
         StoreEdit::Rewrite {
             address,

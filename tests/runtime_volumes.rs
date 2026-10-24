@@ -25,6 +25,35 @@ fn a_volume_is_allocated_written_and_read_through_its_handle() {
 }
 
 #[test]
+fn a_volume_removal_prunes_what_it_empties() {
+    // `dict-presence-ops`: removing `a.b` prunes `a`, which the removal
+    // left empty, and keeps `c`.
+    let mut rt = runtime();
+    let (pruned, kept) = rt
+        .run("m", |m| {
+            m.dict_pack(Vec::<&str>::new())?;
+            m.volume_new()?;
+            m.dup(1)?;
+            m.int_push(1);
+            m.volume_set(["a", "b"])?;
+            m.dup(1)?;
+            m.int_push(2);
+            m.volume_set(["c"])?;
+            m.dup(1)?;
+            m.volume_del(["a", "b"])?;
+            m.dup(1)?;
+            m.volume_get(["a"])?;
+            m.eval()?;
+            let pruned = m.dict_unpack(Vec::<&str>::new()).is_ok();
+            m.volume_get(["c"])?;
+            Ok((pruned, m.int_pop()?))
+        })
+        .expect("the turn should succeed");
+    assert!(pruned, "`a` reads as missing");
+    assert_eq!(kept, 2);
+}
+
+#[test]
 fn a_handle_passes_between_machines() {
     let mut rt = runtime();
     let read = rt

@@ -96,8 +96,10 @@ effect value
 ```
 
 Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
-task-local `get`/`set`, shared `heap.get`/`heap.set`/`heap.rewrite`, volume
-handles' `heap.vol` and `vol.new`/`vol.get`/`vol.set`/`vol.rewrite`,
+task-local `get`/`set`/`try_get`/`del`, shared
+`heap.get`/`heap.set`/`heap.rewrite`/`heap.try_get`/`heap.del`, volume
+handles' `heap.vol` and
+`vol.new`/`vol.get`/`vol.set`/`vol.rewrite`/`vol.try_get`/`vol.del`,
 `promise.new`/`promise.status`/`promise.fulfill`/`promise.break`, and indexed
 `reset`/`shift`.
 Local user state, including the reset stack, is ordinary task state. Shared
@@ -215,7 +217,12 @@ widens a descendant read to the updater's complete input path. An earlier
 covering set can still make that widened dependency entirely local.
 `.heap.get` returns an unforced access value; malformed roots, updates, and
 updaters therefore remain latent evaluator errors, which `.eval` can observe
-as data.
+as data. `.try_get Path` gives the value where `Path` is defined and fails
+where not, forcing the dicts on the way, never the value; within a cut its
+read is observed as `.heap.get`'s is, so a cut that fails on it waits for
+the path's definition. `.del Path` removes what is there, pruning the dicts
+the removal empties, a store edit that conflicts as a set does
+(`dict-presence-ops`). The heap's and volumes' forms are alike.
 
 Volumes are first-class capabilities (`requests-travel-on-ports`): a handle
 is an opaque value naming one volume of one runtime, the same that machines'

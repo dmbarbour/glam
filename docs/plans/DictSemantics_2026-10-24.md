@@ -184,6 +184,26 @@ Slices keep the old semantics working until the last flips them.
    definedness query, for dicts and for heap, local and volume paths,
    observed as a read; `.try_get`, failing where undefined; `.del`; dict
    removal; their turn and public API counterparts.
+   Built 2026-10-24:
+   - `std.dict`: `lookup Path Dict` (fails where undefined), `defines Path
+     Dict` (`.r ()` or `.fail`, as comparisons answer), `default Path
+     Fallback Dict`, `insert Path Value Dict` (keeps `{}` as a value,
+     deferring through a lazy dict on the way), `remove Path Dict`
+     (pruning what it empties, forcing the dicts on the way), `update Path
+     Function Dict`, and `union Left Right` (shallow, a shared key an error
+     where read). A dict on the way that is no dict is an error, not
+     "undefined".
+   - The reflection machine: `.try_get`, `.del`, `.heap.try_get`,
+     `.heap.del`, `.vol.try_get` and `.vol.del`. `.try_get` holds
+     `dict.lookup` and runs `dict.defines`; the heap's and volumes' observe
+     the path's read, so the wait idiom parks on it (tested, and checked by
+     removing the observation). A store edit, `Remove`, conflicts as a set.
+   - The turn API: `heap_del` and `volume_del`.
+   - Not yet: `.try_get`/`.del` in the pure handler, the net builder and
+     the other handlers of `.get`/`.set`, where `.get [] >>= dict.…`
+     serves meanwhile; a turn and public API `try_get` or definedness
+     query; the public value API. Each comes with the migration that needs
+     it.
 3. `dict-presence-migration` — definedness checks move to them: the
    compiler's guards, override checks and defaults, `std.default` and the
    CLI's configuration, the wait idiom, `.try` outcome checks, tests,

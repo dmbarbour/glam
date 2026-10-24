@@ -373,6 +373,8 @@ foo <| .bar         # equivalent alternative without parentheses
 .heap.get Path       # dotted effect path: eff:(\api -> api.heap.get Path)
 .heap.set Path Value # blind replacement of shared heap state
 .heap.rewrite Path F # commit-ordered lazy rewrite of shared heap state
+.heap.try_get Path  # the value where defined; .fail where not (also .try_get, .vol.try_get)
+.heap.del Path      # removes, pruning what it empties (also .del, .vol.del)
 .heap.vol >>= (\h -> .vol.get h Path)  # volume handles: .vol.new/get/set/rewrite
 .promise.new >>= (\p -> .promise.fulfill p.resolver 7)  # {promise, resolver}
 .promise.status R   # 'pending, 'fulfilled or 'broken, from resolver R

@@ -2472,6 +2472,21 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
+    /// Removes what is at `path` in the shared heap, pruning the dicts the
+    /// removal empties (`dict-presence-ops`). Outside a cut, the removal
+    /// commits at once; within one, with the outermost cut. The path is not
+    /// empty.
+    pub fn heap_del<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        if path.is_empty() {
+            return Err(Error::new("a heap removal needs a non-empty path"));
+        }
+        self.store_edit(|journal| journal.remove(path.clone()))
+    }
+
     /// Pops a function and rewrites the value at `path` in the shared heap
     /// with it. The function applies lazily to the value the write finds
     /// when it commits, so rewrites compose rather than conflict.
@@ -2572,6 +2587,35 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.volume_edit(|journal, access, volume, value| {
             journal.write_volume_in(access, volume, path.clone(), value)
         })
+    }
+
+    /// Pops a volume's handle and removes what is at `path` in the volume,
+    /// as [`Self::heap_del`] removes from the heap.
+    pub fn volume_del<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
+        let path = key_path(path);
+        if path.is_empty() {
+            return Err(Error::new("a volume removal needs a non-empty path"));
+        }
+        let depth = self.require(1)?;
+        let handle = self.volume_handle_at(1)?;
+        let values = self.runtime.assembler.values().clone();
+        self.store_edit(|journal| {
+            values.with_access(|scoped| {
+                let handle = scoped
+                    .clone_core(&handle)
+                    .expect("the handle belongs to this runtime");
+                let access = scoped.runtime_access();
+                let volume = access
+                    .volume_cell(&handle)
+                    .expect("the handle names a volume");
+                journal.remove_volume_in(access, volume, path.clone());
+            })
+        })?;
+        self.state.stack.truncate(depth - 1);
+        Ok(())
     }
 
     /// Pops a function, then a volume's handle, and rewrites the value at
