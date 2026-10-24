@@ -43,8 +43,11 @@ What that costs:
   cannot be expressed as merging dicts: lowering fuses them at run time by
   their shared prefixes, so `{[1,2]:B, [1,3,4]:C}` is `{1:{2:B, 3:{4:C}}}`.
   A path that is a prefix of another, or appears twice, is an error.
-- **Reading what is undefined diverges.** A missing key, or an undefined
-  heap, local or volume path, is an error, not `{}`. New operations:
+- **Reading what is undefined is an error.** A missing key, or an undefined
+  heap, local or volume path, reads as an error value, not `{}`: `.get`
+  answers the error value rather than diverging, so the effect goes on and
+  only an observer of the value fails (maintainer, 2026-10-24). New
+  operations:
   - query whether a path is defined without observing its value;
   - `.try_get Path`, the value where defined, and `.fail` where not, so it
     composes with `.alt` and `.try`; optional values do not suit every
@@ -145,27 +148,32 @@ SyntaxCheatSheet.md, DistilledDesign.md, Design.md (`.get` defaults,
 "set `{}` to erase", `conf.*`), Macros.md, CLI.md, the agent context's
 g_syntax, reflection and objects notes, and `dict-literals-compose`.
 
-## Open questions
+## Answers (maintainer, 2026-10-24)
 
-1. Names: the definedness query, for dicts and for heap, local and volume
-   paths, and the dict-level removal.
-2. The annotations choosing eager or lazy union.
-3. What replaces the explicit override checks (`=` against an undefined
-   name, `:=` against a defined one), today `assert_undefined` and
-   `assert_defined` on the prior value: presumably the definedness query on
-   the prior namespace's path.
-4. What replaces a default for an undefined value (`std.default`,
-   `defined_or`, the CLI's optional `conf.*`): a default for an undefined
-   path, since a value is never undefined.
-5. Exact path patterns: once a pattern takes `root.[key]`, are the parents
-   it emptied pruned from the remainder? Without it,
-   `{selector:key, root.[key]:value}` stops matching `{root:{k:1}, …}`.
-6. Effect and method recognition: Syntax wants `{eff:_, _}` and
-   `{apply:f, _}`, with a rest; the code requires every other member to be
-   undefined. Under the new model, exactly `{eff:P}`, or any rest?
-7. The wait idiom: `.try_get` failing within a cut must record its read
-   of the path's definedness, so the cut parks and wakes once the path is
-   defined. Confirm that is the intended replacement.
+1. **Names.** Path-based builtins in `std.dict`, as needed: lookup,
+   insert, remove, delete, defines, update and so on, and a shallow union.
+   No syntax is optimized for them yet.
+2. **Eager or lazy union.** Errors are found opportunistically, where
+   evaluation meets them; no annotations to tune it yet.
+3. **Override checks** become simpler definedness checks, on the prior
+   namespace's path.
+4. **Defaults** are for an undefined path, which raises the arity:
+   `default Path DefaultVal Dict`, in that order, for pipelining and
+   partial application.
+5. **Exact path patterns.** The common `dict.remove` prunes the
+   hierarchical components it empties, as insert adds them: the two are
+   symmetric. Finer-grained functions can come where needed. Patterns
+   take a path as `dict.remove` does, so
+   `{selector:key, root.[key]:value}` leaves no `{root:{}}` behind.
+6. **Effect and method recognition.** A handler recognizes
+   `{eff:…, foo:1}` as an effect, which the `.g` compiler does not apply;
+   `{apply:…, foo:1}` is applicable but no effect; `{eff:…}` alone is
+   both, as is `{eff:…, apply:…, foo:1}`. That holds today too. Ideally
+   `.op` would lower to an object defining both `eff` and `apply`, with no
+   special case for `{eff:…}`, but performance does not allow it yet.
+7. **The wait idiom.** `.try_get` failing within a cut, its read of the
+   path's definedness observed, serves; waiting through divergence is
+   valid in some cases too.
 
 ## Steps
 

@@ -6,12 +6,12 @@ use std::sync::Arc;
 use glam_gc::Visitor;
 
 use crate::core::{
-    Builtin, BuiltinCall, Dict, EvaluatedValue, EvaluationFailure, Key, LazyId, List, Value, keys,
+    Builtin, Dict, EvaluatedValue, EvaluationFailure, LazyId, List, Value, keys,
     trace_compatibility_value_managed_edges,
 };
 use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 
-use super::application::effect_value;
+use super::application::predicate_effect;
 use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::tagged_machine::{RegionalTaggedPayload, RegionalTaggedPayloadPoll};
@@ -199,24 +199,7 @@ impl RegionalComparisonMachine {
             (Builtin::NotEqual, ComparisonResult::Equality(equal)) => !equal,
             _ => unreachable!("comparison result kind must match its builtin"),
         };
-        let effect = if success { "r" } else { "fail" };
-        let arguments = if success {
-            vec![Value::Atom(crate::core::Atom::from_key(
-                &Key::abstract_global_path(["builtin", "unit"]),
-            ))]
-        } else {
-            Vec::new()
-        };
-        RegionalBuiltinPoll::Ready(effect_value(
-            access.values(),
-            Value::PartialBuiltin(BuiltinCall {
-                builtin: Builtin::EffectCall,
-                arguments: Arc::from([
-                    Value::Atom(crate::core::Atom::from_key(&Key::binary_from_text(effect))),
-                    Value::List(List::from_values(arguments)),
-                ]),
-            }),
-        ))
+        RegionalBuiltinPoll::Ready(predicate_effect(access.values(), success))
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {

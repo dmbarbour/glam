@@ -2364,6 +2364,30 @@ pub enum Builtin {
     /// `DictPairs`. A pair of another length fails, as do the failures of
     /// `DictFromEntries`.
     DictFromPairs,
+    /// `dict.lookup Path Dict`: the value at `Path`, which fails where
+    /// `Path` is undefined (`dict-presence-ops`).
+    DictLookup,
+    /// `dict.defines Path Dict`: an effect, as comparisons answer: `.r ()`
+    /// where `Path` is defined and `.fail` where it is not.
+    DictDefines,
+    /// `dict.default Path Fallback Dict`: the value at `Path`, or `Fallback`
+    /// where `Path` is undefined.
+    DictDefault,
+    /// `dict.insert Path Value Dict`: `Dict` with `Value` at `Path`,
+    /// replacing what was there and adding the dicts on the way where
+    /// absent. An empty dict is a value like any other.
+    DictInsert,
+    /// `dict.remove Path Dict`: `Dict` without `Path`, pruning the dicts on
+    /// the way that the removal leaves empty, as `DictInsert` adds them;
+    /// `Dict` itself where `Path` is undefined.
+    DictRemove,
+    /// `dict.update Path Function Dict`: `Dict` with `Function` applied to
+    /// the value at `Path`, `insert Path (Function (lookup Path Dict))
+    /// Dict`.
+    DictUpdateWith,
+    /// `dict.union Left Right`: the shallow union of two dicts. A key both
+    /// define is an error, found where it is read.
+    DictShallowUnion,
     ObjectSpec,
     ObjectFromDict,
     ObjectLocalName,
@@ -2507,6 +2531,13 @@ impl Builtin {
             Self::DictPairs => 1,
             Self::DictFromEntries => 2,
             Self::DictFromPairs => 1,
+            Self::DictLookup => 2,
+            Self::DictDefines => 2,
+            Self::DictDefault => 3,
+            Self::DictInsert => 3,
+            Self::DictRemove => 2,
+            Self::DictUpdateWith => 3,
+            Self::DictShallowUnion => 2,
             Self::ObjectSpec => 1,
             Self::ObjectFromDict => 1,
             Self::ObjectLocalName => 2,

@@ -200,6 +200,13 @@ impl RegionalBuiltinMachine {
             | Builtin::DictPairs
             | Builtin::DictFromEntries
             | Builtin::DictFromPairs
+            | Builtin::DictLookup
+            | Builtin::DictDefines
+            | Builtin::DictDefault
+            | Builtin::DictInsert
+            | Builtin::DictRemove
+            | Builtin::DictUpdateWith
+            | Builtin::DictShallowUnion
             | Builtin::Default
             | Builtin::MergeDuplicate
             | Builtin::Slice
@@ -446,6 +453,13 @@ impl RegionalBuiltinMachine {
             | Builtin::DictPairs
             | Builtin::DictFromEntries
             | Builtin::DictFromPairs
+            | Builtin::DictLookup
+            | Builtin::DictDefines
+            | Builtin::DictDefault
+            | Builtin::DictInsert
+            | Builtin::DictRemove
+            | Builtin::DictUpdateWith
+            | Builtin::DictShallowUnion
             | Builtin::MergeDuplicate
             | Builtin::Default => Self::Dictionary(RegionalDictBuiltinMachine::new_in(
                 access,

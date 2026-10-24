@@ -5784,6 +5784,88 @@ fn effect_then_requires_unit_result_when_observed() {
 }
 
 #[test]
+fn std_dict_path_operations_keep_an_empty_dict_as_a_value() {
+    // `dict-presence-ops`: path first, dict last; `defines` answers as
+    // comparisons do; `insert` keeps `{}` as a value, and `remove` prunes
+    // only the dicts it empties.
+    let parsed = parse(concat!(
+        "language g0\nimport 'std\n",
+        "d = { a:{ b:1, c:2 }, x:3 }\n",
+        "with_empty = dict.insert ['e] {} d\n",
+        "only_v = dict.insert ['k, 'v] 1 d\n",
+        "v_and_w = dict.insert ['k, 'w] {} only_v\n",
+        "asm.lookup = list.pure ((dict.lookup ['a, 'b] d == 1) =>> .r \"L\")\n",
+        "asm.lookup_root = list.pure ((dict.lookup [] d == d) =>> .r \"P\")\n",
+        "asm.defined = list.pure (dict.defines ['a, 'c] d =>> .r \"D\")\n",
+        "asm.undefined = list.pure (dict.defines ['a, 'z] d =>> .r \"bad\")\n",
+        "asm.empty_value = list.pure (dict.defines ['e] with_empty =>> .r \"E\")\n",
+        "asm.default_absent = list.pure ((dict.default ['a, 'z] 7 d == 7) =>> .r \"F\")\n",
+        "asm.default_present = list.pure ((dict.default ['a, 'b] 7 d == 1) =>> .r \"G\")\n",
+        "asm.insert = list.pure ((dict.lookup ['a, 'z] (dict.insert ['a, 'z] 9 d) == 9) =>> .r \"I\")\n",
+        "asm.insert_deep = list.pure ((dict.lookup ['n, 'm] (dict.insert ['n, 'm] 4 d) == 4) =>> .r \"J\")\n",
+        "asm.remove = list.pure ((dict.remove ['a, 'b] d == { a:{ c:2 }, x:3 }) =>> .r \"R\")\n",
+        "asm.remove_absent = list.pure ((dict.remove ['a, 'z] d == d) =>> .r \"S\")\n",
+        "asm.pruned = list.pure (dict.defines ['k] (dict.remove ['k, 'v] only_v) =>> .r \"bad\")\n",
+        "asm.kept = list.pure (dict.defines ['k, 'w] (dict.remove ['k, 'v] v_and_w) =>> .r \"K\")\n",
+        "asm.update = list.pure ((dict.lookup ['x] (dict.update ['x] (\\v -> v + 1) d) == 4) =>> .r \"U\")\n",
+        "asm.union = list.pure ((dict.lookup ['q] (dict.union { p:1, q:2 } { p:1 }) == 2) =>> .r \"N\")\n",
+        "lazy = { l:(dict.insert ['y] 1 {}) }\n",
+        "asm.insert_lazy = list.pure ((dict.lookup ['l, 'z] (dict.insert ['l, 'z] 5 lazy) == 5) =>> .r \"Z\")\n",
+        "asm.remove_lazy = list.pure (dict.defines ['l] (dict.remove ['l, 'y] lazy) =>> .r \"bad\")\n",
+        "missing = dict.lookup ['a, 'z] d\n",
+        "shared = dict.lookup ['p] (dict.union { p:1 } { p:1 })\n",
+        "shallow = dict.lookup ['a, 'b] (dict.union { a:{ b:1 } } { a:{ c:2 } })\n",
+        "through = dict.defines ['x, 'y] d\n",
+    ));
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("lookup", b"L".as_slice()),
+        ("lookup_root", b"P"),
+        ("defined", b"D"),
+        ("undefined", b""),
+        ("empty_value", b"E"),
+        ("default_absent", b"F"),
+        ("default_present", b"G"),
+        ("insert", b"I"),
+        ("insert_deep", b"J"),
+        ("remove", b"R"),
+        ("remove_absent", b"S"),
+        ("pruned", b""),
+        ("kept", b"K"),
+        ("update", b"U"),
+        ("union", b"N"),
+        ("insert_lazy", b"Z"),
+        ("remove_lazy", b""),
+    ] {
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+    for (path, expected) in [
+        ("missing", "dict.lookup path `a.z` is undefined"),
+        ("shared", "dict.union: both dicts define `p`"),
+        ("shallow", "dict.union: both dicts define `a`"),
+        (
+            "through",
+            "dict.defines path `x` traverses a non-dictionary value",
+        ),
+    ] {
+        let binding = value_at_atom_path(&value, &[path]).expect("binding should exist");
+        let error = fully_evaluated_error(binding);
+        assert!(error.to_string().contains(expected), "{path}: {error}");
+    }
+}
+
+#[test]
 fn comparisons_and_boolean_operators_evaluate_as_effects() {
     let parsed = parse(
         "language g0\nimport 'std\ntuple_left = { tuple:[1,2] }\ntuple_right = { tuple:[1,3] }\nasm.gt = list.pure ((3 > 2) =>> .r \"G\")\nasm.ge = list.pure ((3 >= 3) =>> .r \"E\")\nasm.eq = list.pure ((3 == 3) =>> .r \"Q\")\nasm.ne = list.pure ((3 <> 4) =>> .r \"N\")\nasm.le = list.pure ((3 =< 3) =>> .r \"L\")\nasm.lt = list.pure ((2 < 3) =>> .r \"T\")\nasm.fail = list.pure ((3 < 2) =>> .r \"bad\")\nasm.chain = list.pure ((1 < 2 =< 2 <> 3) =>> .r \"H\")\nasm.chain_fail = list.pure ((1 < 3 < 2) =>> .r \"bad\")\nasm.chain_raw = 1 < (2 + 0) < 3\nasm.list = list.pure (([1,2] < [1,3]) =>> .r \"S\")\nasm.binary_list = list.pure ((\"AB\" == [65,66]) =>> .r \"B\")\nasm.string_list = list.pure (([\"A\",\"B\"] == [\"A\",\"B\"]) =>> .r \"V\")\nasm.string_order = list.pure (([\"A\",\"B\"] < [\"A\",\"C\"]) =>> .r \"W\")\nasm.nested_list = list.pure (([\"A\",\"B\"] <> \"AB\") =>> .r \"X\")\nasm.list_tuple = list.pure (([1,2] <> tuple_left) =>> .r \"Y\")\nasm.tuple = list.pure ((tuple_left < tuple_right) =>> .r \"U\")\nasm.dict = list.pure (({ a:1, b:{} } == { a:1 }) =>> .r \"D\")\nasm.and_result = list.pure ((3 > 2 and \"A\" == [65]) =>> .r \"A\")\nasm.or_result = list.pure ((3 < 2 or 3 == 3) =>> .r \"O\")\nasm.not_true = list.pure ((not (3 > 2)) =>> .r \"bad\")\nasm.not_false = list.pure ((not (3 < 2)) =>> .r \"F\")\nasm.could_true = list.pure ((could (.alt (.fail) (3 == 3))) =>> .r \"C\")\nasm.could_false = list.pure ((could (.fail)) =>> .r \"bad\")\n",

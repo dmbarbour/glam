@@ -252,7 +252,8 @@ impl GCompilerValues {
             Value::Dict(list)
         });
         rooted_checkpoint();
-        // Only constructors: a dict's keys are listed only by reflection.
+        // Constructors and path operations: a dict's keys are listed only
+        // by reflection.
         let dict = build_module(values, &constant_object_defs, |_| {
             Value::Dict(
                 Dict::new_sync()
@@ -263,6 +264,19 @@ impl GCompilerValues {
                     .insert(
                         name_as_key("from_pairs"),
                         Value::Builtin(Builtin::DictFromPairs),
+                    )
+                    .insert(name_as_key("lookup"), Value::Builtin(Builtin::DictLookup))
+                    .insert(name_as_key("defines"), Value::Builtin(Builtin::DictDefines))
+                    .insert(name_as_key("default"), Value::Builtin(Builtin::DictDefault))
+                    .insert(name_as_key("insert"), Value::Builtin(Builtin::DictInsert))
+                    .insert(name_as_key("remove"), Value::Builtin(Builtin::DictRemove))
+                    .insert(
+                        name_as_key("update"),
+                        Value::Builtin(Builtin::DictUpdateWith),
+                    )
+                    .insert(
+                        name_as_key("union"),
+                        Value::Builtin(Builtin::DictShallowUnion),
                     ),
             )
         });

@@ -195,6 +195,13 @@ pub(super) fn apply_builtin_in(
         | Builtin::DictPairs
         | Builtin::DictFromEntries
         | Builtin::DictFromPairs
+        | Builtin::DictLookup
+        | Builtin::DictDefines
+        | Builtin::DictDefault
+        | Builtin::DictInsert
+        | Builtin::DictRemove
+        | Builtin::DictUpdateWith
+        | Builtin::DictShallowUnion
         | Builtin::MergeDuplicate
         | Builtin::Default => deferred(arguments),
         Builtin::ObjectSpec
