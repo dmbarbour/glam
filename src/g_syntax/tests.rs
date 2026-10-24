@@ -3514,7 +3514,7 @@ fn parses_dictionary_literals() {
             target: static_definition_target("d"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            expr: Some(SyntaxExpr::DictUnion(vec![
+            expr: Some(SyntaxExpr::dict_literal(vec![
                 SyntaxExpr::PathDict(
                     vec![SyntaxKeyExpr::Atom("hello".to_owned())],
                     Box::new(SyntaxExpr::Text("Hello".to_owned())),
@@ -3539,7 +3539,7 @@ fn parses_dictionary_unions() {
             target: static_definition_target("d"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            expr: Some(SyntaxExpr::DictUnion(vec![
+            expr: Some(SyntaxExpr::dict_literal(vec![
                 SyntaxExpr::Name("left".to_owned()),
                 SyntaxExpr::Name("right".to_owned()),
                 SyntaxExpr::PathDict(
@@ -3566,17 +3566,17 @@ fn dictionary_puns_and_constructors_read_alike_everywhere() {
     assert!(matches!(
         &parsed.declarations[3].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            expr: Some(SyntaxExpr::DictUnion(items)),
+            expr: Some(SyntaxExpr::DictLiteral(members)),
             ..
         }) if matches!(
-            items.as_slice(),
+            members.as_slice(),
             [
-                SyntaxExpr::PathDict(left_path, left),
-                SyntaxExpr::PathDict(right_path, right),
+                DictMember::Path(left_path, left),
+                DictMember::Path(right_path, right),
             ] if left_path == &[SyntaxKeyExpr::Atom("left".to_owned())]
                 && right_path == &[SyntaxKeyExpr::Atom("right".to_owned())]
-                && matches!(left.as_ref(), SyntaxExpr::Name(name) if name == "left")
-                && matches!(right.as_ref(), SyntaxExpr::Name(name) if name == "right")
+                && matches!(left, SyntaxExpr::Name(name) if name == "left")
+                && matches!(right, SyntaxExpr::Name(name) if name == "right")
         )
     ));
 
@@ -3592,11 +3592,11 @@ fn dictionary_puns_and_constructors_read_alike_everywhere() {
     assert!(matches!(
         &applied.declarations[1].kind,
         DeclarationKind::Definition(DefinitionDecl {
-            expr: Some(SyntaxExpr::DictUnion(items)),
+            expr: Some(SyntaxExpr::DictLiteral(members)),
             ..
         }) if matches!(
-            items.as_slice(),
-            [SyntaxExpr::Apply(function, _)]
+            members.as_slice(),
+            [DictMember::Dict(SyntaxExpr::Apply(function, _))]
                 if matches!(function.as_ref(), SyntaxExpr::PathDict(..))
         )
     ));
@@ -3627,7 +3627,7 @@ fn parses_multiline_literals_with_leading_commas() {
             target: static_definition_target("d"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            expr: Some(SyntaxExpr::DictUnion(vec![
+            expr: Some(SyntaxExpr::dict_literal(vec![
                 SyntaxExpr::PathDict(
                     vec![SyntaxKeyExpr::Atom("hello".to_owned())],
                     Box::new(SyntaxExpr::Text("Hello".to_owned())),
@@ -3705,7 +3705,7 @@ fn parses_expression_indexed_names_and_keys() {
             target: static_definition_target("d"),
             parameters: vec![],
             kind: DefinitionKind::Introduce,
-            expr: Some(SyntaxExpr::DictUnion(vec![SyntaxExpr::PathDict(
+            expr: Some(SyntaxExpr::dict_literal(vec![SyntaxExpr::PathDict(
                 vec![SyntaxKeyExpr::Index(Box::new(SyntaxExpr::Number(n(42))))],
                 Box::new(SyntaxExpr::Text("World".to_owned())),
             )])),
@@ -5781,6 +5781,90 @@ fn effect_then_requires_unit_result_when_observed() {
         err.to_string(),
         "`=>>` discarded result: unit expected, received Binary"
     );
+}
+
+#[test]
+fn dict_literals_introduce_their_members_in_order() {
+    // `dict-path-fusion`: a literal introduces its members in written order,
+    // the inverse of a dict pattern's takes. Paths sharing a prefix fuse, a
+    // dict member is a shallow union at the root, a parenthesized tag is a
+    // dict member, and `path?:` introduces a list's one value or nothing.
+    let parsed = parse(concat!(
+        "language g0\nimport 'std\n",
+        "one n = n\n",
+        "d = { a:{ b:1 } }\n",
+        "fused = { a.b:(one 1), a.c:2, [1, 2]:3, [1, 4]:4 }\n",
+        "refined = { d, a.c:2 }\n",
+        "lazy = { a:(dict.insert ['b] 1 {}), a.c:2 }\n",
+        "optional = { x?:[], y?:[5] }\n",
+        "alone = z?:[6]\n",
+        "empty = { e:{} }\n",
+        "asm.fused = list.pure ((fused.a.b == 1 and fused.a.c == 2 and fused.[1, 4] == 4) =>> .r \"F\")\n",
+        "asm.refined = list.pure ((refined.a.b == 1 and refined.a.c == 2) =>> .r \"R\")\n",
+        "asm.lazy = list.pure ((lazy.a.b == 1 and lazy.a.c == 2) =>> .r \"L\")\n",
+        "asm.optional = list.pure ((not (dict.defines ['x] optional) and optional.y == 5) =>> .r \"O\")\n",
+        "asm.alone = list.pure ((alone.z == 6) =>> .r \"A\")\n",
+        "asm.empty = list.pure (dict.defines ['e] empty =>> .r \"E\")\n",
+        "shallow = dict.lookup ['nested] { { nested:{ x:(one 1) } }, { nested:{ y:2 } } }\n",
+        "grouped = dict.lookup ['a] { (a.b:(one 1)), (a.c:2) }\n",
+        "many = { m?:[1, 2] }\n",
+        "twice = dict.introduce ['a] 2 { a:(one 1) }\n",
+    ));
+    let context = CompileContext::default();
+    let lowered = lower_parsed_source(parsed, &context);
+    assert_eq!(lowered.diagnostics, []);
+
+    let value = evaluated_module_value(&context, &lowered);
+    for (path, expected) in [
+        ("fused", b"F".as_slice()),
+        ("refined", b"R"),
+        ("lazy", b"L"),
+        ("optional", b"O"),
+        ("alone", b"A"),
+        ("empty", b"E"),
+    ] {
+        assert_eq!(
+            output_binary_result_list(&fully_evaluated_value(resolved_value_at_path(
+                &value,
+                &["asm", path]
+            ))),
+            expected,
+            "{path}"
+        );
+    }
+    for (path, expected) in [
+        ("shallow", "both dicts define `nested`"),
+        ("grouped", "both dicts define `a`"),
+        ("many", "takes `[]` or `[Value]`"),
+        ("twice", "`a` is already defined"),
+    ] {
+        let binding = value_at_atom_path(&value, &[path]).expect("binding should exist");
+        let error = fully_evaluated_error(binding);
+        assert!(error.to_string().contains(expected), "{path}: {error}");
+    }
+
+    // What the compiler can see conflict, it reports: a path introduced
+    // twice, a path after a deeper one under it, and a pattern that takes
+    // a path before a deeper one it holds.
+    for (source, expected) in [
+        ("x = { a:(one 1), a:2 }\n", "introduces `a` twice"),
+        ("x = { a.c:2, a:(one 1) }\n", "write `a` first"),
+        (
+            "x = match { a:{ c:1 } } as\n  { a:a, a.c:c } => c\n  _ => 0\n",
+            "take `a.c` first",
+        ),
+    ] {
+        let parsed = parse(&format!("language g0\nimport 'std\none n = n\n{source}"));
+        let lowered = lower_parsed_source(parsed, &CompileContext::default());
+        assert!(
+            lowered
+                .diagnostics
+                .iter()
+                .any(|diagnostic| diagnostic.message.contains(expected)),
+            "{source}: {:?}",
+            lowered.diagnostics
+        );
+    }
 }
 
 #[test]

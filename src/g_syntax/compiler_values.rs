@@ -269,6 +269,10 @@ impl GCompilerValues {
                     .insert(name_as_key("defines"), Value::Builtin(Builtin::DictDefines))
                     .insert(name_as_key("default"), Value::Builtin(Builtin::DictDefault))
                     .insert(name_as_key("insert"), Value::Builtin(Builtin::DictInsert))
+                    .insert(
+                        name_as_key("introduce"),
+                        Value::Builtin(Builtin::DictIntroduce),
+                    )
                     .insert(name_as_key("remove"), Value::Builtin(Builtin::DictRemove))
                     .insert(
                         name_as_key("update"),

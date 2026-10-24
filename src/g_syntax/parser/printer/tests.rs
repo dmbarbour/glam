@@ -161,7 +161,7 @@ impl Generator {
                     .map(|_| self.expression(depth))
                     .collect(),
             ),
-            13 => SyntaxExpr::DictUnion(
+            13 => SyntaxExpr::dict_literal(
                 (0..self.below(3))
                     .map(|_| {
                         if self.chance(3) {

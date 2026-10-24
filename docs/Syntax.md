@@ -856,28 +856,42 @@ For access control and conflict avoidance, we can leverage the namespace as a st
 
 ## Dicts
 
-In expression contexts, `{}` is the empty dictionary, and a dictionary
-literal is the union of its items, each an ordinary expression:
-`{a:1, b: f x, :c, D}`. Braces have no member grammar of their own, so a tag,
-a pun and a constructor read in them as anywhere. Computed paths are
-expressed as list literals or parenthetical expressions of lists:
-`{ [0]:A, [1,2]:B, ([1] ++ [3,4]):C }`.
+In expression contexts, `{}` is the empty dictionary, a value like any other.
+A dictionary literal introduces its members in written order, the inverse of
+a dictionary pattern's takes (`dict-literals-introduce-in-order`):
 
-Within a dictionary, `{}` serves as the 'undefined' value. For example,
-`{foo:{}}` is equivalent to `{}`. Only a finite subset of dictionary elements
-may be defined. In general, we can compose dictionaries: `{ D1, D2, D3 }` is a
-hierarchical union of three dictionaries. For example:
-`{{foo:{bar:0}}, {foo:{baz:1}}}` evaluates as
-`{foo:{bar:0, baz:1}}`.
+- A tag member, `path:Value`, introduces `Value` at `path`, which must not yet
+  be defined. The dictionaries on the way are created where absent.
+- An optional member, `path?:List`, introduces `V` where `List` is `[V]`, and
+  nothing where it is `[]`, as a pattern's `path?:` matches `[V]` or `[]`.
+- Any other member, a parenthesized one included, is a dictionary whose keys
+  join the root, each new: `{ D1, D2 }` is the shallow union of two
+  dictionaries.
 
-Since items are ordinary expressions:
+So `{a.b:1, a.c:2}` is `{a:{b:1, c:2}}`, and `{a:{b:1}, a.c:2}` adds `c` to
+what `a` introduced. Computed paths, list literals or parenthetical
+expressions of lists, fuse alike: `{ [0]:A, [1,2]:B, ([1] ++ [3,4]):C }`.
+Order is the writer's. A literal writes shallower paths first, as a pattern
+takes deeper ones first; where the written order makes a conflict the
+compiler can see, it reports it and suggests the order. Even `{foo:1, foo:1}`
+is an error: there is no generalized unification. So is
+`{ {foo:{bar:0}}, {foo:{baz:1}} }`, since union is shallow; a deep merge is a
+function's to write. An error is reported where it is noticed, by the
+compiler where it sees it, never by forcing a value sooner to notice it.
+
+Braces have no member grammar of their own beyond this, so a tag, a pun and a
+constructor read in them as anywhere:
 
         {:value}             # {value:value}
-        {foo: f x, D}        # union of foo:(f x) and D
-        {(foo:) Value, D}    # union of foo:Value and D
+        {foo: f x, D}        # foo:(f x), then D's keys
+        {(foo:) Value, D}    # a dict member, foo:Value, then D's keys
         {:foo Value}         # applies the pun foo:foo to Value
+        {opt?:[x], none?:[]} # {opt:x}
 
-However, it is an error the dictionaries share any defined elements. Even `{foo:1, foo:1}` is an error: there is no generalized unification, and hierarchical union applies only to dictionaries. This error is lazy and only applies to the specific overlapping elements, thus in `D = {foo:1, {foo:1, bar:2}}`, we'd have an error when observing `D.foo` but not for `D.bar`. 
+Reading a missing key is an error rather than `{}`. `dict.defines Path D`
+asks whether a path is defined, `dict.default Path Fallback D` reads with a
+fallback, and `dict.remove Path D` removes, pruning the dictionaries the
+removal empties (the dict semantics plan, `plans/DictSemantics_2026-10-24.md`).
 
 Multi-line literal dictionaries accept a leading comma for convenient line-editing, consistent with lists:
 

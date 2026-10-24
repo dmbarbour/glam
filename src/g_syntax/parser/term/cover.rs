@@ -19,7 +19,7 @@
 use crate::core::Builtin;
 use crate::g_syntax::keywords::{canonical_keyword, reserved_keyword_message};
 use crate::g_syntax::{
-    PathSuffix, SyntaxDictPatternEntry, SyntaxExpr, SyntaxGuardClause, SyntaxKeyExpr,
+    DictMember, PathSuffix, SyntaxDictPatternEntry, SyntaxExpr, SyntaxGuardClause, SyntaxKeyExpr,
     SyntaxOperator, SyntaxPattern, SyntaxPatternKind, SyntaxPatternLiteral,
 };
 use crate::number::Number;
@@ -96,12 +96,16 @@ impl Term {
             Self::Group(term) | Self::Complete(term) => term.into_expr()?,
             Self::Tuple(items) => SyntaxExpr::Tuple(exprs(items)?),
             Self::List(items) => SyntaxExpr::List(exprs(items)?),
-            Self::Dict(members) => SyntaxExpr::DictUnion(exprs(members)?),
+            Self::Dict(members) => SyntaxExpr::DictLiteral(
+                members
+                    .into_iter()
+                    .map(Term::into_dict_member)
+                    .collect::<Result<_, _>>()?,
+            ),
             Self::Tag(path, payload) => SyntaxExpr::PathDict(path, Box::new(payload.into_expr()?)),
-            Self::OptionalTag(..) => {
-                return Err(
-                    "an optional entry `path?:` is valid only in a dictionary pattern".to_owned(),
-                );
+            // An optional tag alone is the dict of its one optional member.
+            Self::OptionalTag(path, payload) => {
+                SyntaxExpr::DictLiteral(vec![DictMember::Optional(path, payload.into_expr()?)])
             }
             Self::Pun(name) => {
                 let name = validate_expr_name(&name)?;
@@ -131,6 +135,31 @@ impl Term {
             Self::Guarded { .. } => {
                 return Err("a `when` guard is valid only in a pattern".to_owned());
             }
+        })
+    }
+
+    /// A dict literal's member: a tag or a pun is a path member, an
+    /// optional tag an optional member, and any other term, a parenthesized
+    /// tag included, a dict (`dict-path-fusion`).
+    fn into_dict_member(self) -> Result<DictMember, String> {
+        Ok(match self {
+            Self::Tag(path, payload) => DictMember::Path(path, payload.into_expr()?),
+            Self::OptionalTag(path, payload) => DictMember::Optional(path, payload.into_expr()?),
+            // An expression's tags: a path dict, or an optional tag's literal.
+            Self::Expr(SyntaxExpr::PathDict(path, payload)) => DictMember::Path(path, *payload),
+            Self::Expr(SyntaxExpr::DictLiteral(mut members))
+                if matches!(members.as_slice(), [DictMember::Optional(..)]) =>
+            {
+                members.pop().expect("one optional member")
+            }
+            Self::Pun(name) => {
+                let name = validate_expr_name(&name)?;
+                DictMember::Path(
+                    vec![SyntaxKeyExpr::Atom(name.clone())],
+                    SyntaxExpr::Name(name),
+                )
+            }
+            term => DictMember::Dict(term.into_expr()?),
         })
     }
 

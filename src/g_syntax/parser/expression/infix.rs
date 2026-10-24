@@ -339,6 +339,11 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::DictRemove) => "dict.remove",
         SyntaxOperator::Builtin(crate::core::Builtin::DictUpdateWith) => "dict.update",
         SyntaxOperator::Builtin(crate::core::Builtin::DictShallowUnion) => "dict.union",
+        SyntaxOperator::Builtin(crate::core::Builtin::DictIntroduce) => "dict.introduce",
+        SyntaxOperator::Builtin(crate::core::Builtin::DictIntroduceOptional) => {
+            "dict_introduce_optional"
+        }
+        SyntaxOperator::Builtin(crate::core::Builtin::DictBuild) => "dict_build",
         SyntaxOperator::Builtin(crate::core::Builtin::PatternIsList) => "pattern_is_list",
         SyntaxOperator::Builtin(crate::core::Builtin::PatternListTryUncons) => {
             "pattern_list_try_uncons"

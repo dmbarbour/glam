@@ -258,6 +258,18 @@ Slices keep the old semantics working until the last flips them.
    - `path?:L` reads alike outside braces: an optional singleton.
    - A literal keeps a `{}` member as a value, so this step changes what
      depended on literals dropping one.
+   Built 2026-10-24 (`dict-literals-introduce-in-order`): the parser
+   classifies members (a parenthesized item stays a dict member) and reads
+   `path?:` in expressions; a closed literal of static paths folds at
+   compile time with introduce semantics; any other lowers to
+   `DictBuild [members]`, each member a partial `dict.introduce`,
+   optional introduction or shallow union, applied in order and forced
+   step by step. The compiler reports a static path introduced twice or
+   after a deeper one, and a pattern taking a path before a deeper one it
+   holds. A tag alone introduces into `{}`, keeping a `{}` payload.
+   `Values::dict_union` and the turn's `dict_union` are shallow. The old
+   `DictUnion` and `MergeDuplicate` remain only for the compiler's records
+   of distinct names, until the flip.
 5. `dict-optional-patterns` — `path?:P` matches `[]` or `[V]`; a take
    prunes the dicts it empties, as `dict.remove` does, so an exact path
    pattern leaves no `{root:{}}` behind. Known gap: taking `a.b` from what

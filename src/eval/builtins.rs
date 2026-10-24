@@ -202,6 +202,9 @@ pub(super) fn apply_builtin_in(
         | Builtin::DictRemove
         | Builtin::DictUpdateWith
         | Builtin::DictShallowUnion
+        | Builtin::DictIntroduce
+        | Builtin::DictIntroduceOptional
+        | Builtin::DictBuild
         | Builtin::MergeDuplicate => deferred(arguments),
         Builtin::ObjectSpec
         | Builtin::ObjectLocalName

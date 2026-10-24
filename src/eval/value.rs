@@ -2043,7 +2043,7 @@ fn produce_test_lazy_source_in(
     }
 }
 
-pub(super) fn format_name_part(key: &Key) -> String {
+pub(crate) fn format_name_part(key: &Key) -> String {
     match key {
         Key::Binary(bytes) => String::from_utf8_lossy(bytes).into_owned(),
         Key::AbstractGlobalPath(parts) => parts.join("."),

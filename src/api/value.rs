@@ -670,13 +670,14 @@ impl Values {
         })
     }
 
-    /// Constructs ordinary hierarchical dictionary union without demanding
-    /// either dictionary.
+    /// Constructs the shallow union of two dictionaries, as a dict literal's
+    /// `{left, right}` is, without demanding either: a key both define is an
+    /// error where it is read (`dict-path-fusion`).
     pub fn dict_union(&self, left: Value, right: Value) -> Result<Value, Error> {
         self.with_access(|values| {
             Ok(values.wrap(CoreValue::builtin_call_in(
                 values.runtime_access(),
-                Builtin::DictUnion,
+                Builtin::DictShallowUnion,
                 vec![values.clone_core(&left)?, values.clone_core(&right)?],
             )))
         })

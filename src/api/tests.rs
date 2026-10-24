@@ -1002,13 +1002,19 @@ fn dictionary_composition_matches_source_literals_union_and_updates() {
         );
     };
 
-    for path in [
-        ["base"].as_slice(),
-        ["added"].as_slice(),
-        ["nested", "x"].as_slice(),
-        ["nested", "y"].as_slice(),
-    ] {
+    for path in [["base"].as_slice(), ["added"].as_slice()] {
         assert_field(&union, "source_union", path);
+    }
+    // The union is shallow: both define `nested` (`dict-path-fusion`).
+    let source_union = access_path(&assembler, module.value(), "source_union").unwrap();
+    for union in [&union, &source_union] {
+        assert!(
+            values
+                .access_names(union, ["nested"])
+                .and_then(|value| assembler.evaluate(&value))
+                .is_err(),
+            "a key both define is an error"
+        );
     }
     let conflict = values
         .dict_union(

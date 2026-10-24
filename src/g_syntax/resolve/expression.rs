@@ -56,8 +56,8 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
         SyntaxExpr::TaggedConstructor(path) => {
             lower_tagged_constructor_resolved(access, path, line, context, scope, locals)?
         }
-        SyntaxExpr::DictUnion(items) => {
-            lower_dict_union_resolved(access, items, line, context, scope, locals)?
+        SyntaxExpr::DictLiteral(members) => {
+            lower_dict_literal_resolved(access, members, line, context, scope, locals)?
         }
         SyntaxExpr::Name(name) => lower_name_expr_resolved(access, name, context, scope, locals),
         SyntaxExpr::PriorName(name) => {
@@ -223,11 +223,6 @@ pub(in crate::g_syntax) fn syntax_expr_to_resolved_in_semantic_scope(
     })
 }
 
-enum ResolvedDictPath {
-    Key(ResolvedExpr<Value>),
-    Path(ResolvedExpr<Value>),
-}
-
 fn lower_path_dict_resolved(
     access: &RuntimeValueAccess<'_>,
     path: &[SyntaxKeyExpr],
@@ -237,52 +232,27 @@ fn lower_path_dict_resolved(
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let path = resolve_dict_path(access, path, line, context, scope, locals)?;
+    let path = syntax_path_resolved(access, path, line, context, scope, locals)?;
     let value =
         syntax_expr_to_resolved_in_semantic_scope(access, value, line, context, scope, locals)?;
     Ok(build_path_dict_resolved(access, path, value))
 }
 
-fn resolve_dict_path(
-    access: &RuntimeValueAccess<'_>,
-    path: &[SyntaxKeyExpr],
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope<ResolvedRoot>,
-    locals: &mut ResolverContext,
-) -> Result<ResolvedDictPath, Diagnostic> {
-    if let [key] = path
-        && !matches!(key, SyntaxKeyExpr::PathIndex(_))
-    {
-        return Ok(ResolvedDictPath::Key(syntax_key_expr_to_resolved_value(
-            access, key, line, context, scope, locals,
-        )?));
-    }
-
-    Ok(ResolvedDictPath::Path(syntax_path_resolved(
-        access, path, line, context, scope, locals,
-    )?))
-}
-
+/// A tag: `value` introduced at `path` in `{}`, kept even where it is `{}`
+/// (`dict-path-fusion`).
 fn build_path_dict_resolved(
     _access: &RuntimeValueAccess<'_>,
-    path: ResolvedDictPath,
+    path: ResolvedExpr<Value>,
     value: ResolvedExpr<Value>,
 ) -> ResolvedExpr<Value> {
-    match path {
-        ResolvedDictPath::Key(key) => ResolvedExpr::apply(
-            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
-            [key, value],
-        ),
-        ResolvedDictPath::Path(path) => ResolvedExpr::apply(
-            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUpdate)),
-            [
-                path,
-                value,
-                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
-            ],
-        ),
-    }
+    ResolvedExpr::apply(
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::DictIntroduce)),
+        [
+            path,
+            value,
+            ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+        ],
+    )
 }
 
 fn lower_tagged_constructor_resolved(
@@ -295,7 +265,7 @@ fn lower_tagged_constructor_resolved(
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
     // Resolve the path in the surrounding scope before introducing the
     // constructor's inaccessible, hygienic argument binding.
-    let path = resolve_dict_path(access, path, line, context, scope, locals)?;
+    let path = syntax_path_resolved(access, path, line, context, scope, locals)?;
     let payload = locals.fresh_binding();
     let body = build_path_dict_resolved(access, path, ResolvedExpr::Local(payload));
     Ok(ResolvedExpr::lambda(vec![payload], body))
@@ -846,26 +816,6 @@ pub(in crate::g_syntax) fn lower_comparison_chain_values_resolved(
     ResolvedExpr::apply(ResolvedExpr::lambda(vec![right_binding], body), [right])
 }
 
-pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_value(
-    access: &RuntimeValueAccess<'_>,
-    key: &SyntaxKeyExpr,
-    line: usize,
-    context: &CompileContext,
-    scope: &NameScope<ResolvedRoot>,
-    locals: &mut ResolverContext,
-) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    match key {
-        SyntaxKeyExpr::Atom(name) => Ok(ResolvedExpr::Embedded(Value::Atom(atom_from_str(name)))),
-        SyntaxKeyExpr::Index(expr) => {
-            syntax_expr_to_resolved_in_semantic_scope(access, expr, line, context, scope, locals)
-        }
-        SyntaxKeyExpr::PathIndex(_) => Err(Diagnostic::error(
-            line,
-            "list-valued path expressions are not valid dictionary keys",
-        )),
-    }
-}
-
 pub(in crate::g_syntax) fn syntax_key_expr_to_resolved_path(
     access: &RuntimeValueAccess<'_>,
     key: &SyntaxKeyExpr,
@@ -931,72 +881,196 @@ pub(in crate::g_syntax) fn syntax_path_resolved(
     })
 }
 
-pub(in crate::g_syntax) fn lower_dict_union_resolved(
+/// A dict literal's member, resolved.
+enum ResolvedDictMember {
+    Path(ResolvedExpr<Value>, ResolvedExpr<Value>),
+    Optional(ResolvedExpr<Value>, ResolvedExpr<Value>),
+    Dict(ResolvedExpr<Value>),
+}
+
+/// A dict literal (`dict-path-fusion`): its members introduced in written
+/// order, the inverse of a dict pattern's takes. A literal of closed data at
+/// static paths folds here, where a conflict is an error the compiler
+/// reports; any other builds at run time, applying its members in order,
+/// each a function of the dict built so far.
+pub(in crate::g_syntax) fn lower_dict_literal_resolved(
     access: &RuntimeValueAccess<'_>,
-    items: &[SyntaxExpr],
+    members: &[DictMember],
     line: usize,
     context: &CompileContext,
     scope: &NameScope<ResolvedRoot>,
     locals: &mut ResolverContext,
 ) -> Result<ResolvedExpr<Value>, Diagnostic> {
-    let items = items
-        .iter()
-        .map(|item| {
-            syntax_expr_to_resolved_in_semantic_scope(access, item, line, context, scope, locals)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    if let Some(dict) = closed_dict(access, &items) {
+    check_static_member_order(members, line)?;
+    let mut resolved = Vec::with_capacity(members.len());
+    for member in members {
+        let mut value = |value| {
+            syntax_expr_to_resolved_in_semantic_scope(access, value, line, context, scope, locals)
+        };
+        resolved.push(match member {
+            DictMember::Path(path, member_value) => {
+                let member_value = value(member_value)?;
+                ResolvedDictMember::Path(
+                    syntax_path_resolved(access, path, line, context, scope, locals)?,
+                    member_value,
+                )
+            }
+            DictMember::Optional(path, member_value) => {
+                let member_value = value(member_value)?;
+                ResolvedDictMember::Optional(
+                    syntax_path_resolved(access, path, line, context, scope, locals)?,
+                    member_value,
+                )
+            }
+            DictMember::Dict(member_value) => ResolvedDictMember::Dict(value(member_value)?),
+        });
+    }
+    if let Some(dict) = closed_dict(access, &resolved, line)? {
         return Ok(ResolvedExpr::Embedded(Value::Dict(dict)));
     }
-    // Union is associative, so the members join in a shallow tree rather
-    // than a chain as deep as the literal is long.
-    Ok(
-        super::super::resolved::finger_join(items, &mut |left, right| {
-            ResolvedExpr::apply(
-                ResolvedExpr::Embedded(Value::Builtin(Builtin::DictUnion)),
-                [left, right],
-            )
+    let members = resolved
+        .into_iter()
+        .map(|member| {
+            let (builtin, arguments) = match member {
+                ResolvedDictMember::Path(path, value) => {
+                    (Builtin::DictIntroduce, vec![path, value])
+                }
+                ResolvedDictMember::Optional(path, list) => {
+                    (Builtin::DictIntroduceOptional, vec![path, list])
+                }
+                ResolvedDictMember::Dict(dict) => (Builtin::DictShallowUnion, vec![dict]),
+            };
+            ResolvedExpr::apply(ResolvedExpr::Embedded(Value::Builtin(builtin)), arguments)
         })
-        .unwrap_or_else(|| ResolvedExpr::Embedded(Value::Dict(Dict::new_sync()))),
-    )
+        .collect();
+    Ok(ResolvedExpr::apply(
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::DictBuild)),
+        [ResolvedExpr::List(members)],
+    ))
 }
 
-/// The dictionary a literal's members build, when every member is a
-/// single-key entry of closed data with an atom, number or text key, and no
-/// two entries share a key. An entry whose value is the undefined (empty)
-/// dictionary adds nothing, as its singleton would be empty. Other
-/// literals, including those whose duplicate keys must merge, build at run
-/// time.
-fn closed_dict(access: &RuntimeValueAccess<'_>, members: &[ResolvedExpr<Value>]) -> Option<Dict> {
+/// Reports what the compiler can see conflict in a literal's static paths
+/// (`dict-path-fusion`): a path introduced twice, or a path introduced after
+/// a deeper one under it, which the literal should write first.
+fn check_static_member_order(members: &[DictMember], line: usize) -> Result<(), Diagnostic> {
+    fn static_path(path: &[SyntaxKeyExpr]) -> Option<Vec<&str>> {
+        path.iter()
+            .map(|key| match key {
+                SyntaxKeyExpr::Atom(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+    let mut earlier: Vec<Vec<&str>> = Vec::new();
+    for member in members {
+        let DictMember::Path(path, _) = member else {
+            continue;
+        };
+        let Some(path) = static_path(path) else {
+            continue;
+        };
+        for prior in &earlier {
+            if *prior == path {
+                return Err(Diagnostic::error(
+                    line,
+                    format!("the dict literal introduces `{}` twice", path.join(".")),
+                ));
+            }
+            if prior.starts_with(&path) {
+                return Err(Diagnostic::error(
+                    line,
+                    format!(
+                        "the dict literal introduces `{}` after `{}`, which defines it: write `{}` first",
+                        path.join("."),
+                        prior.join("."),
+                        path.join(".")
+                    ),
+                ));
+            }
+        }
+        earlier.push(path);
+    }
+    Ok(())
+}
+
+/// The dict a literal builds, where every member is closed data at a
+/// static path of atom, number or text keys: introduced in order, as at run
+/// time, a conflict an error here. `None` where some member is not.
+fn closed_dict(
+    access: &RuntimeValueAccess<'_>,
+    members: &[ResolvedDictMember],
+    line: usize,
+) -> Result<Option<Dict>, Diagnostic> {
     let mut dict = Dict::new_sync();
     for member in members {
-        let ResolvedExpr::Apply {
-            function,
-            arguments,
-        } = member
+        let ResolvedDictMember::Path(ResolvedExpr::List(path), ResolvedExpr::Embedded(value)) =
+            member
         else {
-            return None;
+            return Ok(None);
         };
-        let (
-            ResolvedExpr::Embedded(Value::Builtin(Builtin::DictSingleton)),
-            [ResolvedExpr::Embedded(key), ResolvedExpr::Embedded(value)],
-        ) = (function.as_ref(), arguments.as_slice())
-        else {
-            return None;
-        };
-        if !matches!(key, Value::Atom(_) | Value::Number(_) | Value::Binary(_)) {
-            return None;
+        let mut keys = Vec::with_capacity(path.len());
+        for key in path {
+            let ResolvedExpr::Embedded(
+                key @ (Value::Atom(_) | Value::Number(_) | Value::Binary(_)),
+            ) = key
+            else {
+                return Ok(None);
+            };
+            let Some(key) = access.key_from_value(key) else {
+                return Ok(None);
+            };
+            keys.push(key);
         }
-        if matches!(value, Value::Dict(entries) if entries.is_empty()) {
-            continue;
+        if keys.is_empty() {
+            return Ok(None);
         }
-        let key = access.key_from_value(key)?;
-        if dict.contains_key(&key) {
-            return None;
+        match closed_introduce(access, &dict, &keys, value) {
+            Ok(Some(introduced)) => dict = introduced,
+            Ok(None) => return Ok(None),
+            Err(message) => return Err(Diagnostic::error(line, message)),
         }
-        dict = dict.insert(key, access.duplicate_value(value));
     }
-    Some(dict)
+    Ok(Some(dict))
+}
+
+/// `dict` with `value` introduced at `keys`, as `dict.introduce` would:
+/// `None` where a dict on the way is not closed data.
+fn closed_introduce(
+    access: &RuntimeValueAccess<'_>,
+    dict: &Dict,
+    keys: &[Key],
+    value: &Value,
+) -> Result<Option<Dict>, String> {
+    let name = || {
+        keys.iter()
+            .map(crate::eval::format_key_name)
+            .collect::<Vec<_>>()
+            .join(".")
+    };
+    let [head, rest @ ..] = keys else {
+        unreachable!("a closed path has a key")
+    };
+    if rest.is_empty() {
+        if dict.contains_key(head) {
+            return Err(format!("the dict literal introduces `{}` twice", name()));
+        }
+        return Ok(Some(
+            dict.insert(head.clone(), access.duplicate_value(value)),
+        ));
+    }
+    let nested = match dict.get(head) {
+        None => Dict::new_sync(),
+        Some(Value::Dict(nested)) => nested.clone(),
+        Some(Value::Lazy(_) | Value::Promised(_)) => return Ok(None),
+        Some(_) => {
+            return Err(format!(
+                "the dict literal's path `{}` traverses a non-dictionary value",
+                name()
+            ));
+        }
+    };
+    Ok(closed_introduce(access, &nested, rest, value)?
+        .map(|nested| dict.insert(head.clone(), Value::Dict(nested))))
 }
 
 pub(in crate::g_syntax) fn lower_lambda_expr_resolved(
@@ -1570,38 +1644,65 @@ mod tests {
         SyntaxExpr::PathDict(vec![SyntaxKeyExpr::Atom(key.into())], Box::new(value))
     }
 
-    fn depth(expr: &ResolvedExpr<Value>) -> usize {
-        match expr {
-            ResolvedExpr::Apply { arguments, .. } => {
-                1 + arguments.iter().map(depth).max().unwrap_or(0)
-            }
-            _ => 0,
-        }
+    fn entry_path(path: &[&str], value: SyntaxExpr) -> SyntaxExpr {
+        SyntaxExpr::PathDict(
+            path.iter()
+                .map(|key| SyntaxKeyExpr::Atom((*key).into()))
+                .collect(),
+            Box::new(value),
+        )
     }
 
-    /// A literal of single-key entries of closed data resolves to its
-    /// dictionary, leaving out entries whose value is undefined. Duplicate
-    /// keys, which must merge, and computed values build at run time, in a
-    /// tree of unions logarithmically deep.
+    fn resolve_error(expr: &SyntaxExpr) -> String {
+        let context = CompileContext::default();
+        let scope = NameScope::module(&context, Value::Dict(Dict::new_sync()));
+        syntax_expr_to_resolved_in_scope(expr, 1, &context, &scope, &mut ResolverContext::default())
+            .map(|_| ())
+            .expect_err("the literal should not resolve")
+            .message
+            .clone()
+    }
+
+    /// A literal of closed data at static paths resolves to its dictionary,
+    /// introducing its members in order, an empty dict kept as a value
+    /// (`dict-path-fusion`). The compiler reports a path introduced twice,
+    /// or after a deeper one under it. Computed values build at run time,
+    /// one build of all the members, not a chain as deep as the literal.
     #[test]
     fn closed_dict_literals_resolve_to_their_values() {
-        let closed = SyntaxExpr::DictUnion(vec![
+        let closed = SyntaxExpr::dict_literal(vec![
             entry("a", number(1)),
             entry("b", SyntaxExpr::Text("two".into())),
-            entry("gone", SyntaxExpr::DictUnion(Vec::new())),
+            entry("empty", SyntaxExpr::dict_literal(Vec::new())),
         ]);
         let ResolvedExpr::Embedded(Value::Dict(dict)) = resolve(&closed) else {
             panic!("a closed literal should resolve to its dictionary");
         };
-        assert_eq!(dict.size(), 2);
+        assert_eq!(dict.size(), 3, "an empty dict is a value");
 
-        let duplicate = SyntaxExpr::DictUnion(vec![entry("a", number(1)), entry("a", number(2))]);
-        assert!(
-            matches!(resolve(&duplicate), ResolvedExpr::Apply { .. }),
-            "duplicate keys should merge at run time"
-        );
+        let fused = SyntaxExpr::dict_literal(vec![
+            entry("a", SyntaxExpr::dict_literal(vec![entry("b", number(1))])),
+            entry_path(&["a", "c"], number(2)),
+            entry_path(&["d", "e"], number(3)),
+        ]);
+        let ResolvedExpr::Embedded(Value::Dict(dict)) = resolve(&fused) else {
+            panic!("static paths should fuse into a closed dictionary");
+        };
+        let Some(Value::Dict(a)) = dict.get(&Key::atom_from_text("a")) else {
+            panic!("`a` should hold a dictionary");
+        };
+        assert_eq!(a.size(), 2, "`a.c` joins what `a` introduced");
 
-        let computed = SyntaxExpr::DictUnion(
+        let duplicate =
+            SyntaxExpr::dict_literal(vec![entry("a", number(1)), entry("a", number(2))]);
+        assert!(resolve_error(&duplicate).contains("introduces `a` twice"));
+        let reversed = SyntaxExpr::dict_literal(vec![
+            entry_path(&["a", "c"], number(2)),
+            entry("a", number(1)),
+        ]);
+        assert!(resolve_error(&reversed).contains("write `a` first"));
+
+        let computed = SyntaxExpr::dict_literal(
             (0..64)
                 .map(|index| {
                     entry(
@@ -1611,13 +1712,13 @@ mod tests {
                 })
                 .collect(),
         );
-        // Each entry adds two applications of its own (its singleton and
-        // its sum); a chain of unions would add 63 more.
+        // One build applies every member; each member is one application
+        // of its own around its sum.
         let resolved = resolve(&computed);
         assert!(
-            depth(&resolved) <= 3 * 7 + 2,
-            "64 computed entries should join logarithmically deep, not {}",
-            depth(&resolved)
+            matches!(&resolved, ResolvedExpr::Apply { arguments, .. }
+                if matches!(arguments.as_slice(), [ResolvedExpr::List(members)] if members.len() == 64)),
+            "64 computed entries should build in one step"
         );
     }
 }

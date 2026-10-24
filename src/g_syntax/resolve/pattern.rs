@@ -328,6 +328,7 @@ fn append_dict_match(
         lowering,
     );
 
+    check_static_take_order(entries, line)?;
     let mut rest = ResolvedExpr::Local(subject);
     for entry in entries {
         let builtin = if entry.optional {
@@ -367,6 +368,45 @@ fn append_dict_match(
         );
         Ok(())
     }
+}
+
+/// Reports a dict pattern that takes a static path before a deeper one
+/// under it, which then always fails: the pattern should take the deeper
+/// path first, as a literal introduces the shallower first
+/// (`dict-path-fusion`).
+fn check_static_take_order(
+    entries: &[SyntaxDictPatternEntry],
+    line: usize,
+) -> Result<(), Diagnostic> {
+    fn static_path(path: &[SyntaxKeyExpr]) -> Option<Vec<&str>> {
+        path.iter()
+            .map(|key| match key {
+                SyntaxKeyExpr::Atom(name) => Some(name.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+    let paths = entries
+        .iter()
+        .map(|entry| static_path(&entry.path))
+        .collect::<Vec<_>>();
+    for (at, path) in paths.iter().enumerate() {
+        let Some(path) = path else { continue };
+        for later in paths[at + 1..].iter().flatten() {
+            if later.len() > path.len() && later.starts_with(path) {
+                return Err(Diagnostic::error(
+                    line,
+                    format!(
+                        "the pattern takes `{}` before `{}`, which it holds: take `{}` first",
+                        path.join("."),
+                        later.join("."),
+                        later.join(".")
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(())
 }
 
 fn append_bind(

@@ -83,6 +83,7 @@ pub(crate) use sequence::list_output_bytes;
 #[cfg(test)]
 pub(crate) use sequence::list_to_value_items;
 pub(crate) use token_machine::{token_api_in, token_state_in};
+pub(crate) use value::format_name_part as format_key_name;
 pub(crate) use value::lazy_root_wait;
 pub(crate) use value::poll_lazy_route;
 #[cfg(test)]

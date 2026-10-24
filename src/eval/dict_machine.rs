@@ -44,9 +44,33 @@ enum RegionalDictBuiltinState {
     ShallowUnion(RegionalSequentialDemands),
     /// `DictUpdateWith`'s composition, built at once.
     Composed(Value),
+    IntroduceOptional(Box<RegionalIntroduceOptional>),
+    Build(Box<RegionalDictBuild>),
     MergeDuplicate(RegionalSequentialDemands),
     Pairs(RegionalWhnfWork),
     FromEntries(Box<RegionalDictFromEntries>),
+}
+
+/// `DictIntroduceOptional path list dict`: the list forced until it shows
+/// `[]` or `[V]`, never `V` (`dict-path-fusion`).
+struct RegionalIntroduceOptional {
+    path: Value,
+    list: Option<RegionalWhnfWork>,
+    front: Option<RegionalListFront>,
+    item: Option<Value>,
+    dict: Value,
+    source_owner: LazyId,
+}
+
+/// `DictBuild members`: each member, a function of the dict built so far,
+/// applied in order from `{}`, each step forced to its dict, so a literal
+/// of any length builds without a chain as deep as it is long.
+struct RegionalDictBuild {
+    members: Option<RegionalWhnfWork>,
+    front: Option<RegionalListFront>,
+    built: Value,
+    step: Option<RegionalWhnfWork>,
+    source_owner: LazyId,
 }
 
 /// A walk down a path, forcing each dict on the way and nothing else:
@@ -191,7 +215,41 @@ impl RegionalDictBuiltinMachine {
                     ],
                 ))
             }
-            Builtin::DictUpdate | Builtin::DictInsert => {
+            Builtin::DictIntroduceOptional => {
+                let [path, list, dict] = arguments else {
+                    unreachable!("an optional introduction retains three operands")
+                };
+                RegionalDictBuiltinState::IntroduceOptional(Box::new(RegionalIntroduceOptional {
+                    path: access.values().duplicate_value(path),
+                    list: Some(
+                        RegionalWhnfWork::from_focus(access, access.values().duplicate_value(list))
+                            .with_source_owner(source_owner),
+                    ),
+                    front: None,
+                    item: None,
+                    dict: access.values().duplicate_value(dict),
+                    source_owner,
+                }))
+            }
+            Builtin::DictBuild => {
+                let [members] = arguments else {
+                    unreachable!("a dict build retains its members")
+                };
+                RegionalDictBuiltinState::Build(Box::new(RegionalDictBuild {
+                    members: Some(
+                        RegionalWhnfWork::from_focus(
+                            access,
+                            access.values().duplicate_value(members),
+                        )
+                        .with_source_owner(source_owner),
+                    ),
+                    front: None,
+                    built: Value::Dict(Dict::new_sync()),
+                    step: None,
+                    source_owner,
+                }))
+            }
+            Builtin::DictUpdate | Builtin::DictInsert | Builtin::DictIntroduce => {
                 let [path, new_value, dict] = arguments else {
                     unreachable!("dictionary update retains three operands")
                 };
@@ -382,6 +440,10 @@ impl RegionalDictBuiltinMachine {
             RegionalDictBuiltinState::Composed(value) => {
                 RegionalBuiltinPoll::Ready(access.values().duplicate_value(value))
             }
+            RegionalDictBuiltinState::IntroduceOptional(optional) => {
+                optional.poll_in(access, step_budget)
+            }
+            RegionalDictBuiltinState::Build(build) => build.poll_in(access, step_budget),
             RegionalDictBuiltinState::Update {
                 builtin,
                 path,
@@ -413,10 +475,10 @@ impl RegionalDictBuiltinMachine {
                     .expect("dictionary update path conversion must finish once");
                 if path.is_empty() {
                     return RegionalBuiltinPoll::Failed(Arc::new(EvaluationFailure::message(
-                        if *builtin == Builtin::DictInsert {
-                            "dict.insert requires a non-empty path"
-                        } else {
-                            "dict update builtin requires a non-empty path"
+                        match builtin {
+                            Builtin::DictInsert => "dict.insert requires a non-empty path",
+                            Builtin::DictIntroduce => "dict.introduce requires a non-empty path",
+                            _ => "dict update builtin requires a non-empty path",
                         },
                     )));
                 }
@@ -438,10 +500,11 @@ impl RegionalDictBuiltinMachine {
                             return RegionalBuiltinPoll::Failed(failure);
                         }
                     };
-                if *builtin == Builtin::DictInsert {
-                    finish_insert_in(access, path, new_value, &dict)
-                } else {
-                    finish_update_in(access, path, new_value, &dict)
+                match builtin {
+                    Builtin::DictInsert | Builtin::DictIntroduce => {
+                        finish_insert_in(access, *builtin, path, new_value, &dict)
+                    }
+                    _ => finish_update_in(access, path, new_value, &dict),
                 }
             }
             RegionalDictBuiltinState::MergeDuplicate(demands) => {
@@ -485,6 +548,10 @@ impl RegionalDictBuiltinMachine {
             RegionalDictBuiltinState::Composed(value) => {
                 trace_compatibility_value_managed_edges(value, visitor);
             }
+            RegionalDictBuiltinState::IntroduceOptional(optional) => {
+                optional.trace_managed_edges(visitor);
+            }
+            RegionalDictBuiltinState::Build(build) => build.trace_managed_edges(visitor),
             RegionalDictBuiltinState::Update {
                 path,
                 new_value,
@@ -497,6 +564,160 @@ impl RegionalDictBuiltinMachine {
                 trace_compatibility_value_managed_edges(new_value, visitor);
                 dict.trace_managed_edges(visitor);
             }
+        }
+    }
+}
+
+impl RegionalIntroduceOptional {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        const SHAPE: &str = "an optional dict member takes `[]` or `[Value]`";
+        if let Some(list) = &mut self.list {
+            let list = match demand_list_in(access, list, step_budget, SHAPE) {
+                Ok(list) => list,
+                Err(poll) => return poll,
+            };
+            self.list = None;
+            self.front = Some(RegionalListFront::new_in(
+                access,
+                list,
+                Some(self.source_owner),
+            ));
+            return RegionalBuiltinPoll::Continue;
+        }
+        let front = self
+            .front
+            .as_mut()
+            .expect("an optional introduction walks its list");
+        let next = match front.poll_in(access, step_budget) {
+            RegionalListFrontPoll::Ready(next) => next,
+            RegionalListFrontPoll::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
+            }
+            RegionalListFrontPoll::Continue => return RegionalBuiltinPoll::Continue,
+            RegionalListFrontPoll::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
+            RegionalListFrontPoll::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
+        };
+        match (self.item.take(), next) {
+            // `[]`: nothing is introduced.
+            (None, None) => RegionalBuiltinPoll::Ready(access.values().duplicate_value(&self.dict)),
+            (None, Some((item, tail))) => {
+                self.item = Some(item);
+                *front = RegionalListFront::new_in(access, tail, Some(self.source_owner));
+                RegionalBuiltinPoll::Continue
+            }
+            // `[V]`: `V` is introduced.
+            (Some(item), None) => RegionalBuiltinPoll::Ready(Value::builtin_call_in(
+                access.values(),
+                Builtin::DictIntroduce,
+                vec![
+                    access.values().duplicate_value(&self.path),
+                    item,
+                    access.values().duplicate_value(&self.dict),
+                ],
+            )),
+            (Some(_), Some(_)) => failure(SHAPE),
+        }
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        trace_compatibility_value_managed_edges(&self.path, visitor);
+        if let Some(list) = &self.list {
+            list.trace_managed_edges(visitor);
+        }
+        if let Some(front) = &self.front {
+            front.trace_managed_edges(visitor);
+        }
+        if let Some(item) = &self.item {
+            trace_compatibility_value_managed_edges(item, visitor);
+        }
+        trace_compatibility_value_managed_edges(&self.dict, visitor);
+    }
+}
+
+impl RegionalDictBuild {
+    fn poll_in(
+        &mut self,
+        access: &EvaluationValueAccess<'_>,
+        step_budget: &mut EvaluationStepBudget,
+    ) -> RegionalBuiltinPoll {
+        if let Some(members) = &mut self.members {
+            let members =
+                match demand_list_in(access, members, step_budget, "a dict literal's members") {
+                    Ok(members) => members,
+                    Err(poll) => return poll,
+                };
+            self.members = None;
+            self.front = Some(RegionalListFront::new_in(
+                access,
+                members,
+                Some(self.source_owner),
+            ));
+            return RegionalBuiltinPoll::Continue;
+        }
+        if let Some(step) = &mut self.step {
+            let built =
+                match drive_regional_in_place(access, step, step_budget, reduce_semantic_shell) {
+                    RegionalWhnfStatus::Ready(value) => {
+                        EvaluatedValue::from_whnf_in(access.values(), value)
+                            .expect("a dict literal's step must reach WHNF")
+                            .into_value_in(access.values())
+                    }
+                    RegionalWhnfStatus::Boundary(request) => {
+                        return RegionalBuiltinPoll::Boundary(request);
+                    }
+                    RegionalWhnfStatus::BudgetExhausted => {
+                        return RegionalBuiltinPoll::BudgetExhausted;
+                    }
+                    RegionalWhnfStatus::Failed(failure) => {
+                        return RegionalBuiltinPoll::Failed(failure);
+                    }
+                };
+            if !matches!(built, Value::Dict(_)) {
+                return failure("a dict literal's member must be a dict");
+            }
+            self.built = built;
+            self.step = None;
+            return RegionalBuiltinPoll::Continue;
+        }
+        let front = self.front.as_mut().expect("a dict build walks its members");
+        let next = match front.poll_in(access, step_budget) {
+            RegionalListFrontPoll::Ready(next) => next,
+            RegionalListFrontPoll::Boundary(request) => {
+                return RegionalBuiltinPoll::Boundary(request);
+            }
+            RegionalListFrontPoll::Continue => return RegionalBuiltinPoll::Continue,
+            RegionalListFrontPoll::BudgetExhausted => return RegionalBuiltinPoll::BudgetExhausted,
+            RegionalListFrontPoll::Failed(failure) => return RegionalBuiltinPoll::Failed(failure),
+        };
+        let Some((member, tail)) = next else {
+            return RegionalBuiltinPoll::Ready(access.values().duplicate_value(&self.built));
+        };
+        *front = RegionalListFront::new_in(access, tail, Some(self.source_owner));
+        let applied = Value::Lazy(LazyValue::from_application_in(
+            access.values(),
+            member,
+            Arc::from([access.values().duplicate_value(&self.built)]),
+        ));
+        self.step = Some(
+            RegionalWhnfWork::from_focus(access, applied).with_source_owner(self.source_owner),
+        );
+        RegionalBuiltinPoll::Continue
+    }
+
+    fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
+        if let Some(members) = &self.members {
+            members.trace_managed_edges(visitor);
+        }
+        if let Some(front) = &self.front {
+            front.trace_managed_edges(visitor);
+        }
+        trace_compatibility_value_managed_edges(&self.built, visitor);
+        if let Some(step) = &self.step {
+            step.trace_managed_edges(visitor);
         }
     }
 }
@@ -1078,30 +1299,50 @@ fn finish_update_in(
 
 fn finish_insert_in(
     access: &EvaluationValueAccess<'_>,
+    builtin: Builtin,
     path: &[Key],
     new_value: &Value,
     dict: &Value,
 ) -> RegionalBuiltinPoll {
-    let Value::Dict(dict) = dict else {
-        return failure("dict.insert requires a dictionary");
+    let name = if builtin == Builtin::DictIntroduce {
+        "dict.introduce"
+    } else {
+        "dict.insert"
     };
-    RegionalBuiltinPoll::Ready(Value::Dict(insert_dict_path_in(
+    let Value::Dict(dict) = dict else {
+        return failure(&format!("{name} requires a dictionary"));
+    };
+    match insert_dict_path_in(
         access.values(),
+        builtin,
         dict,
         path,
         access.values().duplicate_value(new_value),
-    )))
+    ) {
+        Ok(dict) => RegionalBuiltinPoll::Ready(Value::Dict(dict)),
+        Err(message) => failure(&message),
+    }
 }
 
 /// `dict` with `new_value` at `path`, adding the dicts on the way where
-/// absent. A lazy dict on the way takes the rest of the insert lazily, as
+/// absent. A lazy dict on the way takes the rest lazily, as
 /// `update_dict_path_in` does, so nothing is forced that would not be.
+/// `DictInsert` replaces what is at `path`; `DictIntroduce` fails where
+/// `path` is defined, or a dict on the way is no dict, as soon as it sees
+/// it (`dict-path-fusion`).
 fn insert_dict_path_in(
     access: &crate::core::RuntimeValueAccess<'_>,
+    builtin: Builtin,
     dict: &Dict,
     path: &[Key],
     new_value: Value,
-) -> Dict {
+) -> Result<Dict, String> {
+    let introduce = builtin == Builtin::DictIntroduce;
+    let name = if introduce {
+        "dict.introduce"
+    } else {
+        "dict.insert"
+    };
     let mut parents = Vec::with_capacity(path.len().saturating_sub(1));
     let mut current = dict.clone();
     let mut index = 0;
@@ -1109,6 +1350,12 @@ fn insert_dict_path_in(
         let head = &path[index];
         let rest = &path[index + 1..];
         if rest.is_empty() {
+            if introduce && current.contains_key(head) {
+                return Err(format!(
+                    "dict.introduce path `{}` is already defined",
+                    render_path(path)
+                ));
+            }
             break new_value;
         }
         match current.get(head).map(|value| access.duplicate_value(value)) {
@@ -1125,20 +1372,21 @@ fn insert_dict_path_in(
             Some(prior @ (Value::Lazy(_) | Value::Promised(_))) => {
                 break builtin_apply3_value_in(
                     access,
-                    Builtin::DictInsert,
+                    builtin,
                     &key_path_value(access, rest),
                     &new_value,
                     &prior,
                 );
             }
             Some(_) => {
-                break Value::Lazy(LazyValue::error_in(
-                    access,
-                    format!(
-                        "dict.insert path `{}` traverses a non-dictionary value",
-                        format_name_part(head)
-                    ),
-                ));
+                let message = format!(
+                    "{name} path `{}` traverses a non-dictionary value",
+                    render_path(&path[..=index])
+                );
+                if introduce {
+                    return Err(message);
+                }
+                break Value::Lazy(LazyValue::error_in(access, message));
             }
         }
     };
@@ -1146,7 +1394,7 @@ fn insert_dict_path_in(
     while let Some((parent, head)) = parents.pop() {
         result = parent.insert(head, Value::Dict(result));
     }
-    result
+    Ok(result)
 }
 
 fn finish_merge_duplicate_in(

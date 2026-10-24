@@ -1120,8 +1120,45 @@ maps the short names used here to file names.
 - **Recorded in:** structural overheads plan, `perf-list-map-growth` and
   `perf-list-literal-composition`.
 
+### Dict literals introduce their members in order
+`dict-literals-introduce-in-order` · 2026-10-24 · maintainer · accepted
+- **Context:** a dict literal was the hierarchical union of its items: at a
+  shared key two dicts merged, recursively, which forced both, and `{}`
+  gave way as undefined. Equality, union and definedness all had to force
+  values, and an empty dict could not be a value (`DictSemantics_2026-10-24.md`).
+- **Decision:**
+  - A literal introduces its members in written order, the inverse of a
+    dict pattern's takes. A tag member `path:V` introduces `V` at `path`,
+    an error where `path` is defined, creating the dicts on the way where
+    absent and deferring through a lazy one. An optional member `path?:L`
+    introduces `V` where `L` is `[V]`, nothing where `[]`. Any other
+    member, a parenthesized one included, is opaque to the syntax: a dict
+    whose keys join the root, each new, so `{D1, D2}` is a shallow union.
+  - Order is the writer's, never sorted: shallower first in a literal,
+    deeper first in a pattern. The compiler reports what it sees conflict,
+    a path introduced twice or after a deeper one under it, and a pattern
+    taking a path before a deeper one it holds, and suggests the order.
+  - Errors are reported where noticed, the compiler's included; nothing is
+    forced only to notice one sooner.
+  - `dict.introduce Path Value Dict` is the insertion; a closed literal of
+    static paths folds at compile time, and any other builds at run time,
+    one step per member, with no chain as deep as the literal.
+  - `path?:L` reads alike outside braces, an optional singleton.
+- **Reasons:**
+  - Symmetry with patterns: what a literal introduces, the same pattern
+    written deepest first takes back.
+  - Deep merges forced values and hid conflicts until read; insertion
+    knows a conflict from keys, never values.
+  - Order stays the writer's, as in patterns, whose takes may depend on
+    earlier bindings and cannot be sorted; sorting construction alone would
+    break the symmetry.
+- **Consequences:** a `{}` member is a value; `Values::dict_union` and the
+  turn's `dict_union` are shallow. Revises `dict-literals-compose`.
+- **Recorded in:** [Dict Semantics](plans/DictSemantics_2026-10-24.md),
+  `dict-path-fusion`.
+
 ### Dict literals fold when closed and otherwise join as a finger tree
-`dict-literals-compose` · 2026-10-10 · maintainer · accepted
+`dict-literals-compose` · 2026-10-10 · maintainer · revised by `dict-literals-introduce-in-order`
 - **Context:** a dict literal resolved to a left-nested chain of binary
   unions, one per member, as deep as the literal was long. Lowering
   walked it quadratically, and at 5,000 computed entries lowering and

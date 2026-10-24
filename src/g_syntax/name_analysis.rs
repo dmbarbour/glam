@@ -423,7 +423,20 @@ impl FileNameAnalysis {
                     self.visit_key_expr(key, line, scope, locals);
                 }
             }
-            SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
+            SyntaxExpr::DictLiteral(members) => {
+                for member in members {
+                    match member {
+                        DictMember::Path(path, value) | DictMember::Optional(path, value) => {
+                            for key in path {
+                                self.visit_key_expr(key, line, scope, locals);
+                            }
+                            self.visit_expr(value, line, scope, locals);
+                        }
+                        DictMember::Dict(value) => self.visit_expr(value, line, scope, locals),
+                    }
+                }
+            }
+            SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
                 for item in items {
                     self.visit_expr(item, line, scope, locals);
                 }

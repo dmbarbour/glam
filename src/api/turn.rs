@@ -1593,16 +1593,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// `a b -- a ∪ b`, lazily: a dict with both's entries. Where both hold a
-    /// key, their values merge as glam's dict literals' do: dicts merge
-    /// again, and other values fail when that entry is forced.
+    /// `a b -- a ∪ b`, lazily: the shallow union, a dict with both's
+    /// entries, as glam's `{a, b}` is. A key both hold is an error when that
+    /// entry is forced (`dict-path-fusion`).
     pub fn dict_union(&mut self) -> Result<(), Error> {
         self.rewrite_top(2, |access, items| {
             let [left, right] = <[CoreValue; 2]>::try_from(items)
                 .unwrap_or_else(|_| unreachable!("the top two values"));
             Ok(vec![builtin_call_in(
                 access,
-                Builtin::DictUnion,
+                Builtin::DictShallowUnion,
                 [left, right],
             )])
         })

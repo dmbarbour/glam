@@ -476,7 +476,18 @@ impl<'a> Walk<'a> {
                 self.expr(value, line);
             }
             SyntaxExpr::TaggedConstructor(path) => self.keys(path, line),
-            SyntaxExpr::DictUnion(items) | SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
+            SyntaxExpr::DictLiteral(members) => {
+                for member in members {
+                    match member {
+                        DictMember::Path(path, value) | DictMember::Optional(path, value) => {
+                            self.keys(path, line);
+                            self.expr(value, line);
+                        }
+                        DictMember::Dict(value) => self.expr(value, line),
+                    }
+                }
+            }
+            SyntaxExpr::List(items) | SyntaxExpr::Tuple(items) => {
                 for item in items {
                     self.expr(item, line);
                 }

@@ -11,7 +11,7 @@
 //! begins its chain.
 
 use crate::g_syntax::{
-    ConditionalMode, ConditionalResultMode, DefinitionKind, DoExpr, DoStepKind, IfExpr,
+    ConditionalMode, ConditionalResultMode, DefinitionKind, DictMember, DoExpr, DoStepKind, IfExpr,
     MatchCommitment, MatchExpr, MatchOutcome, ObjectBodyDefinition, ObjectBodyDefinitionKind,
     SyntaxExpr, SyntaxGuardClause, SyntaxKeyExpr, SyntaxOperator, SyntaxPattern, SyntaxPatternKind,
 };
@@ -61,10 +61,15 @@ fn is_spaced_tag(expression: &SyntaxExpr) -> bool {
     let SyntaxExpr::PathDict(_, payload) = expression else {
         return false;
     };
+    is_spaced_payload(payload)
+}
+
+/// Whether a tag's payload prints after a space, running to its item's end.
+fn is_spaced_payload(payload: &SyntaxExpr) -> bool {
     is_tail_form(payload)
         || ends_with_block(payload)
         || top_operator(payload).is_some()
-        || matches!(payload.as_ref(), SyntaxExpr::Apply(..))
+        || matches!(payload, SyntaxExpr::Apply(..))
 }
 
 /// Whether an expression prints beginning with a joint tag, which a dict
@@ -269,35 +274,35 @@ impl Printer {
             }
             // A spaced tag's payload is the rest of its item; a joint one's
             // is an atom.
-            SyntaxExpr::PathDict(keys, payload) if is_spaced_tag(expression) => {
-                self.path(keys);
-                self.text(": ");
-                self.expression(payload, true);
-            }
-            SyntaxExpr::PathDict(keys, payload) => {
-                self.path(keys);
-                self.text(":");
-                match payload.as_ref() {
-                    SyntaxExpr::Effect(_) => self.group(payload),
-                    _ => self.atom(payload),
-                }
-            }
+            SyntaxExpr::PathDict(keys, payload) => self.tag(keys, payload, false),
             SyntaxExpr::TaggedConstructor(keys) => {
                 self.text("(");
                 self.path(keys);
                 self.text(":)");
             }
-            SyntaxExpr::DictUnion(items) => {
+            // An optional tag alone.
+            SyntaxExpr::DictLiteral(members)
+                if matches!(members.as_slice(), [DictMember::Optional(..)]) =>
+            {
+                let [DictMember::Optional(keys, payload)] = members.as_slice() else {
+                    unreachable!("matched one optional member")
+                };
+                self.tag(keys, payload, true);
+            }
+            SyntaxExpr::DictLiteral(members) => {
                 self.text("{");
-                for (at, item) in items.iter().enumerate() {
+                for (at, member) in members.iter().enumerate() {
                     if at > 0 {
                         self.text(", ");
                     }
-                    match item {
-                        // An item is an expression to its comma.
-                        SyntaxExpr::PathDict(..) => self.expression(item, true),
-                        _ if begins_with_joint_tag(item) => self.group(item),
-                        _ => self.expression(item, true),
+                    match member {
+                        // A member is an expression to its comma.
+                        DictMember::Path(keys, payload) => self.tag(keys, payload, false),
+                        DictMember::Optional(keys, payload) => self.tag(keys, payload, true),
+                        // A tag that is a dict member keeps its parentheses.
+                        DictMember::Dict(item @ SyntaxExpr::PathDict(..)) => self.group(item),
+                        DictMember::Dict(item) if begins_with_joint_tag(item) => self.group(item),
+                        DictMember::Dict(item) => self.expression(item, true),
                     }
                 }
                 self.text("}");
@@ -385,6 +390,22 @@ impl Printer {
                 self.text(", ");
             }
             self.expression(item, true);
+        }
+    }
+
+    /// A tag, `path:payload` or `path: payload`, or with `optional`,
+    /// `path?:payload`.
+    fn tag(&mut self, keys: &[SyntaxKeyExpr], payload: &SyntaxExpr, optional: bool) {
+        self.path(keys);
+        self.text(if optional { "?:" } else { ":" });
+        if is_spaced_payload(payload) {
+            self.text(" ");
+            self.expression(payload, true);
+            return;
+        }
+        match payload {
+            SyntaxExpr::Effect(_) => self.group(payload),
+            _ => self.atom(payload),
         }
     }
 

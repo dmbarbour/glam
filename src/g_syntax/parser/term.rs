@@ -59,7 +59,9 @@
 use std::cell::RefCell;
 
 use crate::g_syntax::keywords::{canonical_keyword, g0_keyword, reserved_keyword_message};
-use crate::g_syntax::{PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, SyntaxPattern};
+use crate::g_syntax::{
+    DictMember, PathSuffix, SyntaxExpr, SyntaxKeyExpr, SyntaxOperator, SyntaxPattern,
+};
 
 use super::expression::{
     InfixChain, access_if_path, quoted_path, syntax_operator, validate_expr_name,
@@ -887,11 +889,22 @@ fn dict_item(scope: Scope<'_, '_, '_>, item: &[Piece]) -> Parse<Term> {
     let joint = Items::new(scope, item)
         .tag_prefix_at(0)
         .is_some_and(|prefix| prefix.payload == TagPayload::Joint);
+    // A parenthesized item is opaque to the literal: a dict member even
+    // where it holds a tag (`dict-path-fusion`). An expression's groups
+    // resolve away, so the literal keeps this one.
+    let grouped = matches!(item, [Piece::Group { cover, .. }]
+        if matches!(scope.covers.shape(scope, *cover), Shape::Grouped));
     let term = resolved_term(scope, item)?;
+    let term = if grouped && !matches!(term, Term::Group(_)) {
+        Term::Group(Box::new(term))
+    } else {
+        term
+    };
     let tag = matches!(
         term,
         Term::Tag(..) | Term::OptionalTag(..) | Term::Expr(SyntaxExpr::PathDict(..))
-    );
+    ) || matches!(&term, Term::Expr(SyntaxExpr::DictLiteral(members))
+        if matches!(members.as_slice(), [DictMember::Optional(..)]));
     if joint && !tag {
         return Err(Fail::error(JOINT_ITEM).or_at(item.first().map(piece_token)));
     }
@@ -922,8 +935,19 @@ struct Level {
 enum LevelKind {
     Item,
     Lambda(Vec<String>),
-    /// A spaced tag prefix, `path: payload`.
-    Tag(Vec<SyntaxKeyExpr>),
+    /// A spaced tag prefix, `path: payload`, or optional, `path?: payload`.
+    Tag(Vec<SyntaxKeyExpr>, bool),
+}
+
+/// A tag in an expression: `path:payload`, a path dict, or optional,
+/// `path?:payload`, a literal of its one optional member
+/// (`dict-path-fusion`).
+fn tag_expr(path: Vec<SyntaxKeyExpr>, optional: bool, payload: SyntaxExpr) -> SyntaxExpr {
+    if optional {
+        SyntaxExpr::DictLiteral(vec![DictMember::Optional(path, payload)])
+    } else {
+        SyntaxExpr::PathDict(path, Box::new(payload))
+    }
 }
 
 /// What follows a tag prefix's `:`.
@@ -1540,7 +1564,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
                 LevelKind::Lambda(params) => {
                     SyntaxExpr::Lambda(params, Box::new(body(level.chain)?))
                 }
-                LevelKind::Tag(path) => SyntaxExpr::PathDict(path, Box::new(body(level.chain)?)),
+                LevelKind::Tag(path, optional) => tag_expr(path, optional, body(level.chain)?),
             };
             levels
                 .last_mut()
@@ -1708,12 +1732,6 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         let at = self.here();
         let path = self.data_path()?;
         self.position += 1 + usize::from(prefix.optional);
-        if prefix.optional && self.scope.mode == Mode::Expression {
-            return Err(Fail::error(
-                "an optional entry `path?:` is valid only in a dictionary pattern",
-            )
-            .or_at(at));
-        }
         if prefix.payload == TagPayload::Bare {
             return Err(Fail::error(missing_payload(prefix.optional)).or_at(at));
         }
@@ -1731,7 +1749,7 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
             Mode::Expression => {
                 levels.push(Level {
                     chain: Chain::default(),
-                    kind: LevelKind::Tag(path),
+                    kind: LevelKind::Tag(path, prefix.optional),
                 });
                 Ok(None)
             }
@@ -1892,11 +1910,6 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         let base = loop {
             if let Some(prefix) = self.tag_prefix_at(0) {
                 let at = self.here();
-                if prefix.optional && self.scope.mode == Mode::Expression {
-                    return self.error_here(
-                        "an optional entry `path?:` is valid only in a dictionary pattern",
-                    );
-                }
                 match prefix.payload {
                     TagPayload::Joint => {
                         let path = self.data_path()?;
@@ -1957,9 +1970,10 @@ impl<'p, 'lex, 'source> Items<'p, 'lex, 'source> {
         tags.into_iter()
             .rev()
             .try_fold(base, |payload, (path, optional)| match self.scope.mode {
-                Mode::Expression => Ok(Term::Expr(SyntaxExpr::PathDict(
+                Mode::Expression => Ok(Term::Expr(tag_expr(
                     path,
-                    Box::new(payload.into_expr().map_err(Fail::error)?),
+                    optional,
+                    payload.into_expr().map_err(Fail::error)?,
                 ))),
                 Mode::Cover if optional => Ok(Term::OptionalTag(path, Box::new(payload))),
                 Mode::Cover => Ok(Term::Tag(path, Box::new(payload))),

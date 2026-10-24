@@ -322,11 +322,11 @@ fn tag_prefixes_read_alike_in_braces_and_out() {
         ("a: f x", tag("a", apply(name("f"), name("x")))),
         (
             "{a: f x}",
-            SyntaxExpr::DictUnion(vec![tag("a", apply(name("f"), name("x")))]),
+            SyntaxExpr::dict_literal(vec![tag("a", apply(name("f"), name("x")))]),
         ),
         (
             "{(a:f) x}",
-            SyntaxExpr::DictUnion(vec![apply(tag("a", name("f")), name("x"))]),
+            SyntaxExpr::dict_literal(vec![apply(tag("a", name("f")), name("x"))]),
         ),
         (
             "g (a: f x)",
@@ -334,7 +334,7 @@ fn tag_prefixes_read_alike_in_braces_and_out() {
         ),
         (
             "{f :a}",
-            SyntaxExpr::DictUnion(vec![apply(name("f"), tag("a", name("a")))]),
+            SyntaxExpr::dict_literal(vec![apply(name("f"), tag("a", name("a")))]),
         ),
         (":a", tag("a", name("a"))),
         (
@@ -343,7 +343,7 @@ fn tag_prefixes_read_alike_in_braces_and_out() {
         ),
         (
             "{(a:)}",
-            SyntaxExpr::DictUnion(vec![SyntaxExpr::TaggedConstructor(vec![
+            SyntaxExpr::dict_literal(vec![SyntaxExpr::TaggedConstructor(vec![
                 SyntaxKeyExpr::Atom("a".to_owned()),
             ])]),
         ),

@@ -2385,6 +2385,17 @@ pub enum Builtin {
     /// `dict.union Left Right`: the shallow union of two dicts. A key both
     /// define is an error, found where it is read.
     DictShallowUnion,
+    /// `dict.introduce Path Value Dict`: `Dict` with `Value` at `Path`, an
+    /// error where `Path` is already defined. It adds the dicts on the way
+    /// where absent and defers through a lazy one (`dict-path-fusion`).
+    DictIntroduce,
+    /// Compiler-private: `DictIntroduceOptional Path List Dict` introduces
+    /// `V` at `Path` where `List` is `[V]`, and is `Dict` where it is `[]`:
+    /// a literal's `path?:` member.
+    DictIntroduceOptional,
+    /// Compiler-private: `DictBuild Members` applies each member, a function
+    /// of the dict built so far, in order, from `{}`: a dict literal.
+    DictBuild,
     ObjectSpec,
     ObjectFromDict,
     ObjectLocalName,
@@ -2534,6 +2545,9 @@ impl Builtin {
             Self::DictRemove => 2,
             Self::DictUpdateWith => 3,
             Self::DictShallowUnion => 2,
+            Self::DictIntroduce => 3,
+            Self::DictIntroduceOptional => 3,
+            Self::DictBuild => 1,
             Self::ObjectSpec => 1,
             Self::ObjectFromDict => 1,
             Self::ObjectLocalName => 2,

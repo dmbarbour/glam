@@ -94,15 +94,17 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 # A joint colon always tags, even after an operator name: (and:x) is a
 # tag; (and x), (x and) and (and) are sections.
 
-{}                  # empty dict; ALSO the 'undefined' value
-{foo:1, bar.baz:2}  # literal: the union of its items; {foo:{}} ≡ {}
+{}                  # the empty dict, a value like any other
+{foo:1, bar.baz:2}  # literal: members introduced in order; a path defined twice is an error
 {foo: f x}          # a spaced tag runs to its item's comma: foo:(f x)
 {foo:f x}           # joint, then more: reported while code migrates
 {foo: 1, bar:       # a space or line break may follow a tag's `:` ...
     f x}            # ... but never precede it: {foo :x} applies foo to x:x
 {:foo, :bar}        # puns: {foo:foo, bar:bar}
-{ [0]:'a, [1,2]:'b, ([1] ++ [3,4]):'c } # computed paths
-{ D1, D2 }          # union; ERROR if defined keys overlap
+{ [0]:'a, [1,2]:'b, ([1] ++ [3,4]):'c } # computed paths, fused by prefix
+{ D1, D2 }          # shallow union; ERROR on a shared key
+{opt?:[x], none?:[]} # optional members: {opt:x}
+{a:{b:1}, a.c:2}    # shallower first: {a:{b:1, c:2}}; (a.b:1) in a literal is a dict member
 {(tag:) Value, D}   # a constructor applied, as anywhere
 {:tag Value}        # applies the pun tag:tag to Value, as anywhere
 {                   # multi-line: leading commas

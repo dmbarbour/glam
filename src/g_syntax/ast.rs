@@ -630,7 +630,9 @@ pub enum SyntaxExpr {
     PathDict(Vec<SyntaxKeyExpr>, Box<SyntaxExpr>),
     /// A function that places its argument at one defined dictionary path.
     TaggedConstructor(Vec<SyntaxKeyExpr>),
-    DictUnion(Vec<SyntaxExpr>),
+    /// A dict literal, which introduces its members in written order, the
+    /// inverse of a dict pattern's takes (`dict-path-fusion`).
+    DictLiteral(Vec<DictMember>),
     List(Vec<SyntaxExpr>),
     Tuple(Vec<SyntaxExpr>),
     Lambda(Vec<String>, Box<SyntaxExpr>),
@@ -678,6 +680,40 @@ pub enum SyntaxOperator {
     EffectBind,
     KleisliCompose,
     EffectThen,
+}
+
+/// A dict literal's member.
+#[derive(Debug, PartialEq, Eq)]
+pub enum DictMember {
+    /// `path: value`: `value` introduced at `path`, which must be undefined.
+    Path(Vec<SyntaxKeyExpr>, SyntaxExpr),
+    /// `path?: list`: the list's value introduced at `path` where it is
+    /// `[value]`, and nothing where it is `[]`.
+    Optional(Vec<SyntaxKeyExpr>, SyntaxExpr),
+    /// Any other member, a parenthesized one included: a dict inserted at
+    /// the root, each of its keys new.
+    Dict(SyntaxExpr),
+}
+
+impl SyntaxExpr {
+    /// A dict literal of `items`, each a member as
+    /// [`DictMember::from_expr`] reads it.
+    #[cfg(test)]
+    pub fn dict_literal(items: Vec<SyntaxExpr>) -> Self {
+        Self::DictLiteral(items.into_iter().map(DictMember::from_expr).collect())
+    }
+}
+
+impl DictMember {
+    /// The member an expression is: a path member where it is a path dict,
+    /// as a literal's unparenthesized tag is, and otherwise a dict.
+    #[cfg(test)]
+    pub fn from_expr(expr: SyntaxExpr) -> Self {
+        match expr {
+            SyntaxExpr::PathDict(path, value) => Self::Path(path, *value),
+            expr => Self::Dict(expr),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
