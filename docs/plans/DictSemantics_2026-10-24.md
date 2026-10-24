@@ -359,5 +359,7 @@ Then `api-comparables` resumes, its definedness checks already moved.
    `local_get`, `local_take` and `dict_unpack` return the error. Within a
    reflection task's cut whose read was observed, the error waits for a
    change, as reflection retries any error after an observed read; a
-   turn's cut ends on an error, waiting only after `fail` or `retry`, a
-   difference left as it was.
+   turn's cut ends on an error, waiting only after `fail` or `retry`.
+   That difference is right (maintainer, 2026-10-24): a turn's Rust code
+   handles each fallible call's error, as a reflection task would wrap
+   each fallible operation in `.try`.

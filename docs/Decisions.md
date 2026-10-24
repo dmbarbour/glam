@@ -1179,7 +1179,11 @@ maps the short names used here to file names.
     `local_take` and `dict_unpack` return the error where something is
     undefined, `heap_try_get` and `volume_try_get` fail, `dict_defines`,
     `dict_defines_path` and `local_defines` ask, and `Values::dict_insert`
-    and `dict_remove` build.
+    and `dict_remove` build. A turn's cut that ends on such an error ends
+    for good, waiting only after `fail` or `retry`, where a reflection cut
+    waits after an observed read: a turn's Rust code handles each fallible
+    call's error, as a reflection task wraps each fallible operation in
+    `.try` (maintainer).
   - A spec's `name`, `deps` and `defs` keep their defaults where absent;
     an anonymous object's spec names it `{}`.
 - **Rule lives in:** `src/eval/dict_machine.rs` (path walks, insertion,
