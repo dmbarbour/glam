@@ -363,3 +363,22 @@ Then `api-comparables` resumes, its definedness checks already moved.
    That difference is right (maintainer, 2026-10-24): a turn's Rust code
    handles each fallible call's error, as a reflection task would wrap
    each fallible operation in `.try`.
+
+Follow-ups, recorded 2026-10-24 to fix later:
+
+9. `dict-handler-presence-ops` — `.try_get` and `.del` for the pure
+   handler and the net builder, which serve `.get` and `.set` but neither,
+   so effects run under them reach `.get [] >>= dict.…` instead. The other
+   handlers of `.get`/`.set` with them. Pending.
+10. `dict-optional-field-reads` — the CLI renderer reads a diagnostic's
+    optional fields (`msg.severity`, `msg.location.line`, context fields)
+    as absent wherever they fail, so a defined field whose evaluation
+    errs is silently dropped. Asking definedness first (`dict.default`)
+    would report it. Pending.
+11. `dict-state-decoding` — the handlers and parsers decode their own
+    state with `{}` for an absent member: the token parser's `user` and
+    `handler`, the macro runner's `handler`, the pure handler's reset
+    frames' `user`. Where the protocol requires the member, an absent one
+    should be an error naming it, not `{}`. Pending.
+
+A performance follow-up is on the roadmap: `perf-read-walks-once`.

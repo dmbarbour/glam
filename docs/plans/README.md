@@ -103,8 +103,11 @@ flags a step for discussion when work reaches it, not a decision.
   shallow union, paths fused by prefix, reads of what is undefined
   errors, and operations to query definedness, `.try_get` and `.del`.
   Drafted 2026-10-24 at the maintainer's request, with a survey of what
-  depends on the old semantics; built 2026-10-24, through `dict-docs`
-  (`dict-empty-is-a-value`, `dict-literals-introduce-in-order`).
+  depends on the old semantics; built 2026-10-24, through `dict-docs` and
+  `dict-get-errors` (`dict-empty-is-a-value`,
+  `dict-literals-introduce-in-order`). Pending follow-ups:
+  `dict-handler-presence-ops`, `dict-optional-field-reads`,
+  `dict-state-decoding`.
 - [`PollBudget_2026-10-22.md`](PollBudget_2026-10-22.md): `budget-` steps
   from an audit of how polls spend and report their budget: coarse-grained
   steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`

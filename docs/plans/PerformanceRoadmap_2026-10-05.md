@@ -378,6 +378,13 @@ Their sections hold their earlier evidence.
   A worker's change in the middle of the foreground's route makes
   validation fall back to a complete search, where the route could shrink
   to its proven frames. Workers are opt-in, so this comes last.
+- **One walk per read** (`perf-read-walks-once`), not measured (found
+  2026-10-24, in `dict-get-errors`). `.get`, `.heap.get`, `.vol.get`,
+  `.try_get` and the pure handler's `get` walk their path twice: a
+  presence check (`DictRequire` or `DictDefines`) forces the dicts on the
+  way, then the held read walks again when the value is forced. One walk
+  answering the member unforced, with the presence check, would halve
+  it. Measure once deep state paths are common.
 - **Coalesced wake-ups** (`perf-coalesced-wakeups`), an open experiment
   (maintainer's suggestion). Coordinator mutations set a notify flag
   flushed once per quantum, trading up to a quantum of latency for fewer
