@@ -2257,9 +2257,6 @@ pub enum Builtin {
     /// override the inner's.
     MixinCompose,
     MergeDuplicate,
-    /// `default fallback value`: `fallback` when `value` is logically `{}`,
-    /// the undefined value, and otherwise `value`.
-    Default,
     Floor,
     Mod,
     Slice,
@@ -2465,7 +2462,6 @@ impl Builtin {
             Self::CompileSource => 5,
             Self::MixinCompose => 4,
             Self::MergeDuplicate => 3,
-            Self::Default => 2,
             Self::Floor => 1,
             Self::Mod => 2,
             Self::Slice => 3,

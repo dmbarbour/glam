@@ -66,16 +66,21 @@ fn binary_value(assembler: &Assembler, value: HandleValue) -> Result<Bytes, glam
     })
 }
 
+/// `path`, dotted, as a path value.
+fn key_path(assembler: &Assembler, path: &str) -> Result<HandleValue, glam::Error> {
+    let values = assembler.values();
+    values.list(path.split('.').map(|part| values.atom_from_text(part)))
+}
+
 fn required_access(
     assembler: &Assembler,
     root: &HandleValue,
     path: &str,
 ) -> Result<HandleValue, glam::Error> {
     let values = assembler.values();
-    let candidate = access_path(assembler, root, path)?;
     let required = values.apply(
         &values.require_defined_function(),
-        [values.text(path), candidate],
+        [values.text(path), key_path(assembler, path)?, root.clone()],
     )?;
     evaluated_value(assembler, &required)
 }
@@ -96,11 +101,21 @@ fn same_representation(assembler: &Assembler, left: &HandleValue, right: &Handle
         .expect("compared values should belong to the assembler runtime")
 }
 
-fn is_logically_undefined(assembler: &Assembler, value: HandleValue) -> Result<bool, glam::Error> {
+/// Whether `value`, evaluated, is the empty dict.
+fn is_empty_dict(assembler: &Assembler, value: HandleValue) -> Result<bool, glam::Error> {
+    evaluate(assembler, &value)?.same_representation(&assembler.values().empty_dict())
+}
+
+/// Whether `root` defines `path`, never evaluating what is there
+/// (`dict-presence-ops`).
+fn defines(assembler: &Assembler, root: &HandleValue, path: &str) -> Result<bool, glam::Error> {
     let values = assembler.values();
     let marker = values.atom_from_text("public_api.undefined_marker");
-    let selected = values.apply(&values.defined_or_function(), [marker.clone(), value])?;
-    evaluate(assembler, &selected)?.same_representation(&marker)
+    let selected = values.apply(
+        &values.default_function(),
+        [key_path(assembler, path)?, marker.clone(), root.clone()],
+    )?;
+    Ok(!evaluate(assembler, &selected)?.same_representation(&marker)?)
 }
 
 #[derive(Clone)]
@@ -1112,7 +1127,7 @@ fn public_reflection_recognizes_sealed_metadata_without_forcing_it() {
         .associated_metadata(&carrier)
         .expect("metadata recognition should evaluate the carrier shell")
         .expect("the carrier should expose metadata to reflection");
-    assert!(is_logically_undefined(&assembler, initial).unwrap());
+    assert!(is_empty_dict(&assembler, initial).unwrap());
 
     let failed = access_path(&assembler, module.value(), "failed")
         .expect("fixture should define its derived carrier");
@@ -1129,7 +1144,7 @@ fn public_reflection_recognizes_sealed_metadata_without_forcing_it() {
         reflection
             .associated_metadata(&carrier)
             .expect("the original carrier should remain inspectable")
-            .and_then(|metadata| is_logically_undefined(&assembler, metadata).ok())
+            .and_then(|metadata| is_empty_dict(&assembler, metadata).ok())
             .unwrap_or(false),
         "deriving another carrier must not alter the original snapshot"
     );
@@ -1161,13 +1176,10 @@ fn semantic_path_lookup_leaves_required_and_fallback_policy_to_glam_helpers() {
         .unwrap(),
         Some(1)
     );
+    assert!(defines(&assembler, &value, "present").unwrap());
     assert!(
-        is_logically_undefined(
-            &assembler,
-            access_path(&assembler, &value, "missing")
-                .expect("missing path access should construct"),
-        )
-        .expect("missing path should evaluate to logical undefined")
+        !defines(&assembler, &value, "missing").expect("a missing path is undefined"),
+        "a default answers for the missing path"
     );
     assert!(required_access(&assembler, &value, "missing").is_err());
 }

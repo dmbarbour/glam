@@ -6654,11 +6654,18 @@ fn anno_builtin_continues_demand_after_assertions_pass() {
                 )),
                 TestExpr::Value(Value::binary_from_text("missing")),
             ),
+            // Whether the root defines the target (`dict-presence-ops`).
             singleton_expr(
                 Value::Atom(crate::core::Atom::from_key(
-                    &crate::core::Key::binary_from_text("value"),
+                    &crate::core::Key::binary_from_text("defined"),
                 )),
-                global_access(vec![TestKey::Key(Key::atom_from_text("missing"))]),
+                builtin2_expr(
+                    Builtin::DictDefines,
+                    TestExpr::Value(Value::List(List::from_values(vec![key_value(
+                        &Key::atom_from_text("missing"),
+                    )]))),
+                    TestExpr::Local(0),
+                ),
             ),
         ),
     );
@@ -6696,11 +6703,18 @@ fn anno_builtin_reports_failed_assertions_during_demand() {
                 )),
                 TestExpr::Value(Value::binary_from_text("foo")),
             ),
+            // Whether the root defines the target (`dict-presence-ops`).
             singleton_expr(
                 Value::Atom(crate::core::Atom::from_key(
-                    &crate::core::Key::binary_from_text("value"),
+                    &crate::core::Key::binary_from_text("defined"),
                 )),
-                global_access(vec![TestKey::Key(Key::atom_from_text("foo"))]),
+                builtin2_expr(
+                    Builtin::DictDefines,
+                    TestExpr::Value(Value::List(List::from_values(vec![key_value(
+                        &Key::atom_from_text("foo"),
+                    )]))),
+                    TestExpr::Local(0),
+                ),
             ),
         ),
     );
@@ -9624,16 +9638,20 @@ fn journal_conflicts_replay_a_journal_in_order() {
     );
 }
 
-/// `default fallback value` is `fallback` exactly when `value` is `{}`, and
-/// forces only `value`.
+/// `dict.default path fallback dict` is `fallback` exactly where `path` is
+/// undefined, and otherwise the value there, never forcing the fallback
+/// (`dict-presence-ops`).
 #[test]
-fn default_selects_its_fallback_only_for_undefined_values() {
+fn dict_default_selects_its_fallback_only_for_an_undefined_path() {
     let context = isolated_test_context();
-    let default = |fallback: Value, value: Value| {
+    let default = |fallback: Value, dict: Value| {
+        let path = Value::List(List::from_values(vec![key_value(&Key::atom_from_text(
+            "x",
+        ))]));
         let application = apply_values(
             &context,
-            Value::Builtin(Builtin::Default),
-            vec![fallback, value],
+            Value::Builtin(Builtin::DictDefault),
+            vec![path, fallback, dict],
         )
         .expect("default should build");
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &application)
@@ -9641,12 +9659,13 @@ fn default_selects_its_fallback_only_for_undefined_values() {
     };
     let empty = || Value::List(List::empty());
     let Value::List(selected) = default(empty(), Value::Dict(Dict::new_sync())) else {
-        panic!("an undefined value should select the fallback");
+        panic!("an undefined path should select the fallback");
     };
     assert_eq!(selected.len(), 0);
     let failing = Value::error(context.values(), "the fallback should stay unforced");
     let lazy_value = Value::semantic_thunk(context.values(), |_| Ok(n(3)));
+    let dict = Value::Dict(Dict::new_sync().insert(Key::atom_from_text("x"), lazy_value));
     context
         .values()
-        .assert_same_representation_for_test(&default(failing, lazy_value), &n(3));
+        .assert_same_representation_for_test(&default(failing, dict), &n(3));
 }

@@ -17,10 +17,13 @@ fn dispatch(arguments: &[&str]) -> Result<TopLevelCommand, String> {
 
 trait TestValueFacade {
     fn get<'a>(&'a self, root: &HandleValue, path: &str) -> Result<TestEvaluated<'a>, Error>;
+    /// Whether `root` defines `path`, never evaluating what is there
+    /// (`dict-presence-ops`).
+    fn defines(&self, root: &HandleValue, path: &[&str]) -> bool;
 }
 
 struct TestEvaluated<'a> {
-    assembler: &'a Assembler,
+    _assembler: std::marker::PhantomData<&'a Assembler>,
     value: EvaluatedValue,
 }
 
@@ -28,9 +31,24 @@ impl TestValueFacade for Assembler {
     fn get<'a>(&'a self, root: &HandleValue, path: &str) -> Result<TestEvaluated<'a>, Error> {
         let value = self.values().access_names(root, path.split('.'))?;
         Ok(TestEvaluated {
-            assembler: self,
+            _assembler: std::marker::PhantomData,
             value: self.evaluator().eval(&value)?,
         })
+    }
+
+    fn defines(&self, root: &HandleValue, path: &[&str]) -> bool {
+        let values = self.values();
+        let marker = values.atom_from_text("cli_test.undefined_marker");
+        values
+            .list(path.iter().map(|part| values.atom_from_text(part)))
+            .and_then(|path| {
+                values.apply(
+                    &values.default_function(),
+                    [path, marker.clone(), root.clone()],
+                )
+            })
+            .and_then(|value| self.evaluator().eval(&value))
+            .is_ok_and(|value| value.same_representation(&marker).is_ok_and(|same| !same))
     }
 }
 
@@ -43,17 +61,6 @@ impl TestEvaluated<'_> {
 
     fn into_value(self) -> HandleValue {
         self.value.into_value()
-    }
-
-    fn is_undefined(&self) -> bool {
-        let values = self.assembler.values();
-        values
-            .apply(
-                &values.defined_or_function(),
-                [values.integer(1), self.value.as_value().clone()],
-            )
-            .and_then(|value| self.assembler.evaluator().eval(&value))
-            .is_ok_and(|value| value.as_i64().is_ok_and(|value| value == Some(1)))
     }
 }
 
@@ -562,13 +569,11 @@ fn explained_cli_cases_render_furthest_parse_context() {
         Some(b"build FILE".as_slice())
     );
     assert!(
-        !assembler
-            .get(
-                error.diagnostic(&assembler.values()).unwrap().emission(),
-                "cli.cases",
-            )
-            .expect("rich CLI diagnostic should retain case values")
-            .is_undefined()
+        assembler.defines(
+            error.diagnostic(&assembler.values()).unwrap().emission(),
+            &["cli", "cases"]
+        ),
+        "rich CLI diagnostic should retain case values"
     );
 }
 

@@ -16,10 +16,11 @@ configuration_definitions = {env:empty_env}
 # reflection reads with `.env`: the `process` the CLI runs as.
 process_share process = std.object_from_dict {process:process}
 
-# A configuration entry: the value at `path`, or `fallback` where it is
-# undefined. A failure names the entry and the path looked up.
-entry name path fallback value =
-    std.anno context:{conf:{entry:name}} (std.default fallback (std.anno context:{eval:{op:'path_lookup, args:{path:path}}} value))
+# A configuration entry: the value at `keys` in `configuration`, or
+# `fallback` where that path is undefined. A failure names the entry and the
+# path looked up, `path` as text.
+entry name path keys fallback configuration =
+    std.anno context:{conf:{entry:name}} (std.anno context:{eval:{op:'path_lookup, args:{path:path}}} (std.dict.default keys fallback configuration))
 
 # What compiling the assembly starts from, with journal records of what the
 # assembler introduces and declares before the first input.

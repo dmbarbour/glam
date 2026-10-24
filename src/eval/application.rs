@@ -63,6 +63,37 @@ pub(super) fn effect_value(_access: &RuntimeValueAccess<'_>, function: Value) ->
     Value::Dict(crate::core::Dict::new_sync().insert((*keys::EFF).clone(), function))
 }
 
+/// Whether `value`, a predicate's answer as [`predicate_effect`] builds it,
+/// holds; `None` for any other value.
+pub(super) fn predicate_effect_holds(
+    _access: &RuntimeValueAccess<'_>,
+    value: &Value,
+) -> Option<bool> {
+    let Value::Dict(effect) = value else {
+        return None;
+    };
+    if effect.size() != 1 {
+        return None;
+    }
+    let Value::PartialBuiltin(call) = effect.get(&keys::EFF)? else {
+        return None;
+    };
+    if call.builtin != Builtin::EffectCall {
+        return None;
+    }
+    let [Value::Atom(request), _] = call.arguments.as_ref() else {
+        return None;
+    };
+    let request = request.key();
+    if *request == Key::binary_from_text("r") {
+        Some(true)
+    } else if *request == Key::binary_from_text("fail") {
+        Some(false)
+    } else {
+        None
+    }
+}
+
 /// The effect a predicate answers, as comparisons do: `.r ()` where it
 /// holds, and `.fail` where it does not.
 pub(super) fn predicate_effect(access: &RuntimeValueAccess<'_>, holds: bool) -> Value {

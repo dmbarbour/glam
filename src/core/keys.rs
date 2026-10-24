@@ -44,6 +44,7 @@ protocol_key!(LANG, "lang");
 protocol_key!(EXTENDS, "extends");
 
 protocol_key!(VALUE, "value");
+protocol_key!(DEFINED, "defined");
 protocol_key!(CONTEXT, "context");
 protocol_key!(DIAGNOSTIC, "diagnostic");
 protocol_key!(FROM, "from");

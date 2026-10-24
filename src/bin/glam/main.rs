@@ -212,12 +212,10 @@ fn run_completion_script(
     runtime: &mut Runtime,
     name: &str,
 ) -> Result<Result<Vec<u8>, String>, Error> {
-    let path = format!("conf.completion_script.{name}");
     runtime.run(CLI, |m| {
         m.list_pack(0)?;
         m.local_get("configuration");
-        m.dict_get_path(["conf", "completion_script", name])?;
-        select_entry(m, "completion_script", &path)?;
+        select_entry(m, "completion_script", &["conf", "completion_script", name])?;
         // An undefined binding falls back to the built-in script. A
         // configured binding that fails to evaluate is reported, never
         // silently replaced.

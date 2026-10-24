@@ -19,14 +19,7 @@ pub(crate) fn expand_configured(
     arguments: CliArguments,
 ) -> Result<CliExpansion, CliError> {
     let values = assembler.values();
-    let candidate = values
-        .access_names(configuration, ["conf", "cli"])
-        .and_then(|candidate| with_path_lookup_context(&values, candidate, "conf.cli"))
-        .map_err(CliError::from_error)?;
-    let fail = values.fail_effect();
-    let effect = values
-        .apply(&values.defined_or_function(), [fail, candidate])
-        .map_err(CliError::from_error)?;
+    let effect = configured_cli(&values, configuration).map_err(CliError::from_error)?;
     let result = run_cli_search(assembler, &effect, arguments)?;
     Ok(CliExpansion::new(result.plan, result.diagnostics))
 }
@@ -39,15 +32,19 @@ pub(crate) fn complete_configured(
     request: CompletionRequest,
 ) -> Result<CliCompletion, CliError> {
     let values = assembler.values();
-    let candidate = values
-        .access_names(configuration, ["conf", "cli"])
-        .and_then(|candidate| with_path_lookup_context(&values, candidate, "conf.cli"))
-        .map_err(CliError::from_error)?;
-    let fail = values.fail_effect();
-    let effect = values
-        .apply(&values.defined_or_function(), [fail, candidate])
-        .map_err(CliError::from_error)?;
+    let effect = configured_cli(&values, configuration).map_err(CliError::from_error)?;
     run_cli_completion(assembler, &effect, request)
+}
+
+/// The configuration's `conf.cli`, or `.fail` where it is undefined
+/// (`dict-presence-ops`), a failure in it naming the path looked up.
+fn configured_cli(values: &Values, configuration: &HandleValue) -> Result<HandleValue, Error> {
+    let path = values.list([values.atom_from_text("conf"), values.atom_from_text("cli")])?;
+    let selected = values.apply(
+        &values.default_function(),
+        [path, values.fail_effect(), configuration.clone()],
+    )?;
+    with_path_lookup_context(values, selected, "conf.cli")
 }
 
 fn with_path_lookup_context(

@@ -123,17 +123,25 @@ impl<'a> DefinitionTargetContext<'a> {
                         target,
                     ))),
                 ),
+                // Whether the prior definitions define the target, never
+                // its value (`dict-presence-ops`).
                 singleton(
-                    "value",
-                    definition_target_access_resolved(
+                    "defined",
+                    apply_builtin_resolved(
                         self.access,
-                        target,
-                        self.definitions,
-                        self.line,
-                        self.compiler,
-                        self.scope,
-                        locals,
-                    )?,
+                        Builtin::DictDefines,
+                        [
+                            definition_target_path_resolved(
+                                self.access,
+                                target,
+                                self.line,
+                                self.compiler,
+                                self.scope,
+                                locals,
+                            )?,
+                            self.definitions.expr(self.access),
+                        ],
+                    ),
                 ),
             ],
         );
@@ -410,6 +418,19 @@ pub(in crate::g_syntax) fn static_path_resolved(
             .map(|part| ResolvedExpr::Embedded(Value::Atom(atom_from_str(part))))
             .collect::<Vec<_>>(),
     )
+}
+
+/// `target`, a dotted static path, as a path value of atoms.
+pub(in crate::g_syntax) fn static_path_value(
+    _access: &RuntimeValueAccess<'_>,
+    target: &str,
+) -> Value {
+    Value::List(crate::core::List::from_values(
+        target
+            .split('.')
+            .map(|part| Value::Atom(atom_from_str(part)))
+            .collect(),
+    ))
 }
 
 pub(in crate::g_syntax) fn path_resolved_in_definitions(

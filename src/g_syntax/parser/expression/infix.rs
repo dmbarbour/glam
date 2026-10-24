@@ -317,7 +317,6 @@ fn infix_operator_symbol(operator: SyntaxOperator) -> &'static str {
         SyntaxOperator::Builtin(crate::core::Builtin::CompileSource) => "compile_source",
         SyntaxOperator::Builtin(crate::core::Builtin::MixinCompose) => "mixin_compose",
         SyntaxOperator::Builtin(crate::core::Builtin::MergeDuplicate) => "merge_duplicate",
-        SyntaxOperator::Builtin(crate::core::Builtin::Default) => "default",
         SyntaxOperator::Builtin(crate::core::Builtin::Floor) => "floor",
         SyntaxOperator::Builtin(crate::core::Builtin::Mod) => "mod",
         SyntaxOperator::Builtin(crate::core::Builtin::Slice) => "slice",

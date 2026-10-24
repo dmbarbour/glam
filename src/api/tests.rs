@@ -1060,51 +1060,56 @@ fn dictionary_composition_matches_source_literals_union_and_updates() {
 }
 
 #[test]
-fn cached_defined_selection_helpers_match_glam_undefined_semantics() {
+fn cached_default_helpers_answer_by_path() {
+    // `dict-presence-ops`: the default and the requirement ask whether a
+    // path is defined, never what is there, so an empty dict is a value.
     let assembler = Assembler::new();
     let values = assembler.values();
     let core_values = assembler.core_values();
-    let defined_or = Value::from_runtime_root(crate::g_syntax::defined_or_root(&core_values));
+    let default = Value::from_runtime_root(crate::g_syntax::path_default_root(&core_values));
     let require_defined =
         Value::from_runtime_root(crate::g_syntax::require_defined_root(&core_values));
-    let fallback = values.integer(7);
-
-    for undefined in [
-        values.empty_dict(),
-        values
-            .record([("nested", values.empty_dict())])
-            .expect("logical undefined fixture should construct"),
-    ] {
-        let selected = values
-            .apply(&defined_or, [fallback.clone(), undefined])
-            .and_then(|value| assembler.evaluate(&value))
-            .expect("defined-or should select its fallback");
-        assert_eq!(value_i64(&assembler, &selected), Some(7));
-    }
+    let dict = values
+        .record([
+            ("present", values.integer(9)),
+            ("empty", values.empty_dict()),
+        ])
+        .expect("the fixture should construct");
+    let path = |name: &str| values.list([values.atom_from_text(name)]).unwrap();
 
     let selected = values
-        .apply(&defined_or, [fallback, values.integer(9)])
+        .apply(&default, [path("missing"), values.integer(7), dict.clone()])
         .and_then(|value| assembler.evaluate(&value))
-        .expect("defined-or should preserve a defined candidate");
+        .expect("the default selects its fallback");
+    assert_eq!(value_i64(&assembler, &selected), Some(7));
+    let selected = values
+        .apply(&default, [path("present"), values.integer(7), dict.clone()])
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("the default keeps what is defined");
     assert_eq!(value_i64(&assembler, &selected), Some(9));
+    let selected = values
+        .apply(&default, [path("empty"), values.integer(7), dict.clone()])
+        .and_then(|value| assembler.evaluate(&value))
+        .expect("the default keeps an empty dict, a value");
+    assert_eq!(value_i64(&assembler, &selected), None);
 
     let required = values
         .apply(
             &require_defined,
-            [values.text("required.value"), values.integer(11)],
+            [values.text("present"), path("present"), dict.clone()],
         )
         .and_then(|value| assembler.evaluate(&value))
-        .expect("required helper should preserve a defined value");
-    assert_eq!(value_i64(&assembler, &required), Some(11));
+        .expect("the requirement keeps what is defined");
+    assert_eq!(value_i64(&assembler, &required), Some(9));
     assert!(
         values
             .apply(
                 &require_defined,
-                [values.text("required.value"), values.empty_dict()],
+                [values.text("missing"), path("missing"), dict],
             )
             .and_then(|value| assembler.evaluate(&value))
             .is_err(),
-        "required helper should reject a logically undefined value"
+        "the requirement rejects an undefined path"
     );
 }
 

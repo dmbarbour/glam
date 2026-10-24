@@ -8,7 +8,7 @@
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use crate::core::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
+use crate::core::{List, RuntimeCacheFamily, RuntimeCacheFamilyRecord};
 use crate::runtime::RuntimeValueRoot;
 
 use super::*;
@@ -41,7 +41,7 @@ struct GCompilerValues {
     constant_object_defs: RuntimeValueRoot,
     reflection_scanner: RuntimeValueRoot,
     reflection_annotator: RuntimeValueRoot,
-    defined_or: RuntimeValueRoot,
+    path_default: RuntimeValueRoot,
     require_defined: RuntimeValueRoot,
     macro_environment: RuntimeValueRoot,
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
@@ -66,7 +66,7 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
             constant_object_defs,
             reflection_scanner,
             reflection_annotator,
-            defined_or,
+            path_default,
             require_defined,
             macro_environment,
             effects,
@@ -80,7 +80,7 @@ unsafe impl RuntimeCacheFamily for GCompilerValues {
             constant_object_defs,
             reflection_scanner,
             reflection_annotator,
-            defined_or,
+            path_default,
             require_defined,
             macro_environment,
         ] {
@@ -136,8 +136,8 @@ pub(in crate::g_syntax) fn prepare(values: &CoreValueFactory) {
     drop(cache(values));
 }
 
-pub(in crate::g_syntax) fn defined_or_root(values: &CoreValueFactory) -> RuntimeValueRoot {
-    cache(values).defined_or.clone()
+pub(in crate::g_syntax) fn path_default_root(values: &CoreValueFactory) -> RuntimeValueRoot {
+    cache(values).path_default.clone()
 }
 
 pub(in crate::g_syntax) fn empty_object_defs_root(values: &CoreValueFactory) -> RuntimeValueRoot {
@@ -219,7 +219,7 @@ impl GCompilerValues {
         let constant_object_defs = build_constant_object_defs(values);
         rooted_checkpoint();
 
-        let defined_or = build_defined_or(values);
+        let path_default = build_path_default(values);
         rooted_checkpoint();
         let math = build_module(values, &constant_object_defs, |_| {
             Value::Dict(
@@ -286,7 +286,7 @@ impl GCompilerValues {
                 Dict::new_sync()
                     .insert(name_as_key("anno"), Value::Builtin(Builtin::Anno))
                     .insert(name_as_key("seq"), Value::Builtin(Builtin::Seq))
-                    .insert(name_as_key("default"), Value::Builtin(Builtin::Default))
+                    .insert(name_as_key("default"), Value::Builtin(Builtin::DictDefault))
                     .insert(name_as_key("spark"), Value::Builtin(Builtin::Spark))
                     .insert(
                         name_as_key("interaction_net"),
@@ -318,7 +318,7 @@ impl GCompilerValues {
         rooted_checkpoint();
         let reflection_annotator = build_reflection_annotator(values, &build_cache);
         rooted_checkpoint();
-        let require_defined = build_require_defined(values, &defined_or);
+        let require_defined = build_require_defined(values, &path_default);
         rooted_checkpoint();
         let macro_environment = build_macro_environment(values);
         rooted_checkpoint();
@@ -333,7 +333,7 @@ impl GCompilerValues {
             reflection_scanner,
             reflection_annotator,
             require_defined,
-            defined_or,
+            path_default,
             macro_environment,
             effects,
         }
@@ -427,21 +427,19 @@ pub(in crate::g_syntax) fn namespace_reflection_operation_resolved(
     let cache = cache(access.values());
     apply_builtin(
         access,
-        Builtin::Default,
+        Builtin::DictDefault,
         [
+            ResolvedExpr::Embedded(Value::List(List::from_values(vec![
+                Value::Atom(atom_from_str("meta")),
+                Value::Atom(atom_from_str("refl")),
+            ]))),
             effect_call(
                 access,
                 cache.as_ref(),
                 "r",
                 [ResolvedExpr::Embedded(access.unit())],
             ),
-            ResolvedExpr::Access {
-                base: Box::new(final_defs),
-                path: vec![
-                    ResolvedPathPart::Key(name_as_key("meta")),
-                    ResolvedPathPart::Key(name_as_key("refl")),
-                ],
-            },
+            final_defs,
         ],
     )
 }
@@ -772,20 +770,21 @@ fn build_could(values: &CoreValueFactory, not: &RuntimeValueRoot) -> RuntimeValu
     })
 }
 
-fn build_defined_or(values: &CoreValueFactory) -> RuntimeValueRoot {
+fn build_path_default(values: &CoreValueFactory) -> RuntimeValueRoot {
     evaluate_closed(values, |_| {
-        ResolvedExpr::Embedded(Value::Builtin(Builtin::Default))
+        ResolvedExpr::Embedded(Value::Builtin(Builtin::DictDefault))
     })
 }
 
 fn build_require_defined(
     values: &CoreValueFactory,
-    defined_or: &RuntimeValueRoot,
+    path_default: &RuntimeValueRoot,
 ) -> RuntimeValueRoot {
     evaluate_closed(values, |access| {
         let mut locals = ResolverContext::default();
         let name = locals.push_internal_binding("<required-name>");
-        let candidate = locals.push_internal_binding("<required-candidate>");
+        let path = locals.push_internal_binding("<required-path>");
+        let dict = locals.push_internal_binding("<required-dict>");
         let singleton = |key: &str, value| {
             apply_builtin(
                 access,
@@ -817,10 +816,14 @@ fn build_require_defined(
             ],
         );
         let required = ResolvedExpr::apply(
-            ResolvedExpr::Embedded(project_value(access, defined_or)),
-            [failure, ResolvedExpr::Local(candidate)],
+            ResolvedExpr::Embedded(project_value(access, path_default)),
+            [
+                ResolvedExpr::Local(path),
+                failure,
+                ResolvedExpr::Local(dict),
+            ],
         );
-        ResolvedExpr::lambda(vec![name, candidate], required)
+        ResolvedExpr::lambda(vec![name, path, dict], required)
     })
 }
 
@@ -842,10 +845,16 @@ fn build_macro_environment(values: &CoreValueFactory) -> RuntimeValueRoot {
                 ],
             )
         };
-        let prior_language = ResolvedExpr::Access {
-            base: Box::new(ResolvedExpr::Local(prior)),
-            path: vec![ResolvedPathPart::Key(name_as_key("language"))],
-        };
+        let prior_defines_language = apply_builtin(
+            access,
+            Builtin::DictDefines,
+            [
+                ResolvedExpr::Embedded(Value::List(List::from_values(vec![Value::Atom(
+                    atom_from_str("language"),
+                )]))),
+                ResolvedExpr::Local(prior),
+            ],
+        );
         let assertion_payload = apply_builtin(
             access,
             Builtin::DictUnion,
@@ -854,7 +863,7 @@ fn build_macro_environment(values: &CoreValueFactory) -> RuntimeValueRoot {
                     "name",
                     ResolvedExpr::Embedded(Value::binary_from_text("language")),
                 ),
-                singleton("value", prior_language),
+                singleton("defined", prior_defines_language),
             ],
         );
         let assertion = singleton("assert_undefined", assertion_payload);
@@ -936,10 +945,24 @@ fn build_reflection_scanner(
                 ResolvedExpr::Embedded(Value::Atom(atom_from_str(field))),
             ])
         };
-        let final_refl = ResolvedExpr::Access {
-            base: Box::new(ResolvedExpr::Local(final_defs)),
-            path: vec![ResolvedPathPart::Key(name_as_key("refl"))],
+        let static_path = |parts: &[&str]| {
+            ResolvedExpr::Embedded(Value::List(List::from_values(
+                parts
+                    .iter()
+                    .map(|part| Value::Atom(atom_from_str(part)))
+                    .collect(),
+            )))
         };
+        // A namespace without `refl` launches nothing (`dict-presence-ops`).
+        let final_refl = apply_builtin(
+            access,
+            Builtin::DictDefault,
+            [
+                static_path(&["refl"]),
+                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+                ResolvedExpr::Local(final_defs),
+            ],
+        );
 
         let item = locals.push_internal_binding("<reflection-item>");
         let item_field = |name| ResolvedExpr::Access {
@@ -1023,13 +1046,15 @@ fn build_reflection_scanner(
 
         // Replays the namespace's final journal first, logging each conflict
         // as an error (`perf-definition-assertions`).
-        let final_journal = ResolvedExpr::Access {
-            base: Box::new(ResolvedExpr::Local(final_defs)),
-            path: vec![
-                ResolvedPathPart::Key(name_as_key("meta")),
-                ResolvedPathPart::Key(name_as_key("journal")),
+        let final_journal = apply_builtin(
+            access,
+            Builtin::DictDefault,
+            [
+                static_path(&["meta", "journal"]),
+                ResolvedExpr::Embedded(Value::List(List::empty())),
+                ResolvedExpr::Local(final_defs),
             ],
-        };
+        );
         let conflict = locals.push_internal_binding("<reflection-journal-conflict>");
         let report = ResolvedExpr::lambda(
             vec![conflict],
@@ -1063,16 +1088,9 @@ fn build_reflection_scanner(
 
         // The scanner takes ownership of its namespace's reflection state:
         // a second run, as user-defined syntax might spawn, logs an error
-        // and halts.
+        // and halts. Whether the mark is defined decides, never its value
+        // (`dict-presence-ops`).
         let scanned = locals.push_internal_binding("<reflection-scanned>");
-        let first_run = apply_builtin(
-            access,
-            Builtin::Equal,
-            [
-                ResolvedExpr::Local(scanned),
-                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
-            ],
-        );
         let mark_and_scan = effect_then(
             access,
             cache,
@@ -1084,14 +1102,6 @@ fn build_reflection_scanner(
             ),
             scanner,
             "reflection scanner mark",
-            &mut locals,
-        );
-        let scan_once = effect_then(
-            access,
-            cache,
-            first_run,
-            mark_and_scan,
-            "reflection scanner first-run test",
             &mut locals,
         );
         let message = Value::Dict(Dict::new_sync().insert(
@@ -1110,6 +1120,15 @@ fn build_reflection_scanner(
                 ResolvedExpr::Embedded(message),
             ],
         );
+        let already_scanned = effect_call(
+            access,
+            cache,
+            "seq",
+            [
+                effect_path_call(access, cache, &["heap", "try_get"], [state_path("scanned")]),
+                ResolvedExpr::lambda(vec![scanned], report_again),
+            ],
+        );
         let once = effect_call(
             access,
             cache,
@@ -1117,14 +1136,8 @@ fn build_reflection_scanner(
             [effect_call(
                 access,
                 cache,
-                "seq",
-                [
-                    effect_path_call(access, cache, &["heap", "get"], [state_path("scanned")]),
-                    ResolvedExpr::lambda(
-                        vec![scanned],
-                        effect_call(access, cache, "alt", [scan_once, report_again]),
-                    ),
-                ],
+                "alt",
+                [already_scanned, mark_and_scan],
             )],
         );
         ResolvedExpr::lambda(vec![guard, final_defs], once)
@@ -1174,39 +1187,23 @@ fn build_reflection_annotator(
                 ),
             ],
         );
+        // A claim already defined means a task started; its value, a task
+        // handle, is never compared (`dict-presence-ops`).
         let existing = locals.push_internal_binding("<reflection-claim>");
-        let guard_is_empty = ResolvedExpr::apply(
-            ResolvedExpr::Embedded(Value::Builtin(Builtin::Equal)),
+        let already_started = effect_call(
+            access,
+            cache,
+            "seq",
             [
-                ResolvedExpr::Local(existing),
-                ResolvedExpr::Embedded(Value::Dict(Dict::new_sync())),
+                effect_path_call(access, cache, &["heap", "try_get"], [state_path("claim")]),
+                ResolvedExpr::lambda(
+                    vec![existing],
+                    effect_call(access, cache, "r", [ResolvedExpr::Embedded(access.unit())]),
+                ),
             ],
         );
-        let start_if_missing = effect_then(
-            access,
-            cache,
-            guard_is_empty,
-            launch_and_remember,
-            "automatic reflection boundary claim test",
-            &mut locals,
-        );
-        let already_started =
-            effect_call(access, cache, "r", [ResolvedExpr::Embedded(access.unit())]);
-        let choose = effect_call(access, cache, "alt", [start_if_missing, already_started]);
-        let ensure_tasks = effect_call(
-            access,
-            cache,
-            "cut",
-            [effect_call(
-                access,
-                cache,
-                "seq",
-                [
-                    effect_path_call(access, cache, &["heap", "get"], [state_path("claim")]),
-                    ResolvedExpr::lambda(vec![existing], choose),
-                ],
-            )],
-        );
+        let choose = effect_call(access, cache, "alt", [already_started, launch_and_remember]);
+        let ensure_tasks = effect_call(access, cache, "cut", [choose]);
         let annotation = apply_builtin(
             access,
             Builtin::DictSingleton,
@@ -1368,7 +1365,7 @@ mod tests {
             &compiler.constant_object_defs,
             &compiler.reflection_scanner,
             &compiler.reflection_annotator,
-            &compiler.defined_or,
+            &compiler.path_default,
             &compiler.require_defined,
             &compiler.macro_environment,
         ];

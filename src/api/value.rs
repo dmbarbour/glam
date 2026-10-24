@@ -703,10 +703,11 @@ impl Values {
         })
     }
 
-    /// Returns the `default` builtin, `\fallback value -> ...`, which selects
-    /// `fallback` exactly when `value` is logically equal to `{}`.
-    pub fn defined_or_function(&self) -> Value {
-        Value::from_runtime_root(crate::g_syntax::defined_or_root(self.core()))
+    /// Returns the `default` builtin, `\path fallback dict -> ...`: the value
+    /// at `path` in `dict`, or `fallback` where `path` is undefined
+    /// (`dict-presence-ops`).
+    pub fn default_function(&self) -> Value {
+        Value::from_runtime_root(crate::g_syntax::path_default_root(self.core()))
     }
 
     /// Constructs the standard failing effect without evaluating anything.
@@ -714,9 +715,9 @@ impl Values {
         Value::from_runtime_root(crate::g_syntax::fail_effect_root(self.core()))
     }
 
-    /// Returns the cached closed Glam helper which asserts that its second
-    /// argument is logically defined, using its first argument as the name in
-    /// a structured failure.
+    /// Returns the cached closed Glam helper `\name path dict -> ...`: the
+    /// value at `path` in `dict`, or, where `path` is undefined, a
+    /// structured failure using `name`.
     pub fn require_defined_function(&self) -> Value {
         Value::from_runtime_root(crate::g_syntax::require_defined_root(self.core()))
     }

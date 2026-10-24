@@ -18,6 +18,7 @@ use crate::core::{
 use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::number::Number;
 
+use super::application::predicate_effect_holds;
 use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll};
 use super::value::evaluation_context_frame_in;
@@ -218,9 +219,11 @@ impl RegionalAnnotationMachine {
                             format!("invalid `{}` annotation payload", assertion_name(kind)),
                         );
                     };
+                    // `defined` is the prior definitions' answer to whether
+                    // they define the target (`dict-presence-ops`).
                     let parsed = payload
                         .get(&*keys::NAME)
-                        .zip(payload.get(&*keys::VALUE))
+                        .zip(payload.get(&*keys::DEFINED))
                         .map(|(name, value)| {
                             (
                                 access.values().duplicate_value(name),
@@ -306,7 +309,12 @@ impl RegionalAnnotationMachine {
                             return poll;
                         }
                     };
-                    let defined = !matches!(value, Value::Dict(dict) if dict.is_empty());
+                    let Some(defined) = predicate_effect_holds(access.values(), &value) else {
+                        return annotation_error_in(
+                            access,
+                            format!("invalid `{}` annotation payload", assertion_name(kind)),
+                        );
+                    };
                     let passes = match kind {
                         AssertionKind::Defined => defined,
                         AssertionKind::Undefined => !defined,

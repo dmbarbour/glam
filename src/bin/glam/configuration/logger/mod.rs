@@ -259,8 +259,7 @@ pub(crate) fn render_unread(
 fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<HandleValue>, Error> {
     m.list_pack(0)?;
     m.local_get("configuration");
-    m.dict_get_path(["conf", "log"])?;
-    select_entry(m, "log", "conf.log")?;
+    select_entry(m, "log", &["conf", "log"])?;
     m.eval()?;
     if selects_nothing(m)? {
         m.discard(1)?;

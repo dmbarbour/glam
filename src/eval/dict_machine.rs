@@ -15,7 +15,6 @@ use super::access_machine::{RegionalConversionPoll, RegionalKeyConversion, Regio
 use super::application::predicate_effect;
 use super::builtin_machine::RegionalBuiltinPoll;
 use super::list_machine::{RegionalListFront, RegionalListFrontPoll, item_value_in};
-use super::tagged_machine::{RegionalSemanticUndefined, RegionalSemanticUndefinedPoll};
 use super::value::{
     format_name_part, is_deferred_value, is_error_lazy_value, is_undefined_dict_value,
 };
@@ -46,11 +45,6 @@ enum RegionalDictBuiltinState {
     /// `DictUpdateWith`'s composition, built at once.
     Composed(Value),
     MergeDuplicate(RegionalSequentialDemands),
-    Default {
-        fallback: Value,
-        value: Value,
-        undefined: RegionalSemanticUndefined,
-    },
     Pairs(RegionalWhnfWork),
     FromEntries(Box<RegionalDictFromEntries>),
 }
@@ -220,20 +214,6 @@ impl RegionalDictBuiltinMachine {
             Builtin::MergeDuplicate => RegionalDictBuiltinState::MergeDuplicate(
                 RegionalSequentialDemands::new_in(access, source_owner, arguments),
             ),
-            Builtin::Default => {
-                let [fallback, value] = arguments else {
-                    unreachable!("default retains two operands")
-                };
-                RegionalDictBuiltinState::Default {
-                    fallback: access.values().duplicate_value(fallback),
-                    value: access.values().duplicate_value(value),
-                    undefined: RegionalSemanticUndefined::new_in(
-                        access,
-                        access.values().duplicate_value(value),
-                        source_owner,
-                    ),
-                }
-            }
             Builtin::DictPairs => {
                 let [dict] = arguments else {
                     unreachable!("dictionary pairs retain one operand")
@@ -485,29 +465,6 @@ impl RegionalDictBuiltinMachine {
                 };
                 finish_merge_duplicate_in(access, name, left, right)
             }
-            RegionalDictBuiltinState::Default {
-                fallback,
-                value,
-                undefined,
-            } => match undefined.poll_in(access, step_budget) {
-                RegionalSemanticUndefinedPoll::Ready(undefined) => {
-                    RegionalBuiltinPoll::Ready(access.values().duplicate_value(if undefined {
-                        fallback
-                    } else {
-                        value
-                    }))
-                }
-                RegionalSemanticUndefinedPoll::Boundary(request) => {
-                    RegionalBuiltinPoll::Boundary(request)
-                }
-                RegionalSemanticUndefinedPoll::Continue => RegionalBuiltinPoll::Continue,
-                RegionalSemanticUndefinedPoll::BudgetExhausted => {
-                    RegionalBuiltinPoll::BudgetExhausted
-                }
-                RegionalSemanticUndefinedPoll::Failed(failure) => {
-                    RegionalBuiltinPoll::Failed(failure)
-                }
-            },
         }
     }
 
@@ -539,15 +496,6 @@ impl RegionalDictBuiltinMachine {
                 }
                 trace_compatibility_value_managed_edges(new_value, visitor);
                 dict.trace_managed_edges(visitor);
-            }
-            RegionalDictBuiltinState::Default {
-                fallback,
-                value,
-                undefined,
-            } => {
-                trace_compatibility_value_managed_edges(fallback, visitor);
-                trace_compatibility_value_managed_edges(value, visitor);
-                undefined.trace_managed_edges(visitor);
             }
         }
     }

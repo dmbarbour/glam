@@ -202,22 +202,25 @@ pub(in crate::g_syntax) fn journal_bundle_in(
 }
 
 /// The journal at `journal` in `definitions` with `bundle` appended:
-/// `(default [] prior) ++ bundle`.
+/// `(dict.default journal [] definitions) ++ bundle`.
 pub(in crate::g_syntax) fn appended_journal_resolved(
     access: &RuntimeValueAccess<'_>,
     journal: &str,
     definitions: ResolvedExpr<Value>,
     bundle: Value,
 ) -> ResolvedExpr<Value> {
-    let prior = path_resolved_in_definitions(access, journal, definitions);
     apply_builtin_resolved(
         access,
         Builtin::Append,
         [
             apply_builtin_resolved(
                 access,
-                Builtin::Default,
-                [ResolvedExpr::Provided(Value::List(List::empty())), prior],
+                Builtin::DictDefault,
+                [
+                    ResolvedExpr::Provided(static_path_value(access, journal)),
+                    ResolvedExpr::Provided(Value::List(List::empty())),
+                    definitions,
+                ],
             ),
             ResolvedExpr::Provided(bundle),
         ],

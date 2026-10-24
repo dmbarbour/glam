@@ -201,24 +201,31 @@ fn load(
         m.local_get("prelude");
         m.dict_get("empty_env")?;
         m.local_get("configuration");
-        m.dict_get_path(["conf", "env"])?;
-        select_entry(m, "env", "conf.env")?;
+        select_entry(m, "env", &["conf", "env"])?;
         m.eval()?;
         m.local_set("environment")
     })
 }
 
-/// Replaces a fallback and a candidate, the configuration's value at
-/// `path`, with the entry the prelude selects: the candidate, or the
-/// fallback where it is undefined.
-pub(super) fn select_entry(m: &mut Machine<'_, '_>, entry: &str, path: &str) -> Result<(), Error> {
+/// Replaces a fallback and the configuration with the entry the prelude
+/// selects: the configuration's value at `keys`, or the fallback where that
+/// path is undefined (`dict-presence-ops`).
+pub(super) fn select_entry(
+    m: &mut Machine<'_, '_>,
+    entry: &str,
+    keys: &[&str],
+) -> Result<(), Error> {
     m.stash(2)?;
     m.local_get("prelude");
     m.dict_get("entry")?;
     m.text_push(entry);
-    m.text_push(path);
+    m.text_push(keys.join("."));
+    for key in keys {
+        m.atom_push(key);
+    }
+    m.list_pack(keys.len())?;
     m.stash_pop(2)?;
-    m.apply(4)
+    m.apply(5)
 }
 
 /// Whether the top value, evaluated, is the empty list by which a

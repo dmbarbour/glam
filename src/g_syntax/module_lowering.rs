@@ -364,14 +364,11 @@ impl<'context> ModuleLowerer<'context> {
             );
             let installed = apply_builtin_resolved(
                 &access,
-                Builtin::Default,
+                Builtin::DictDefault,
                 [
+                    ResolvedExpr::Embedded(definitions::static_path_value(&access, "meta.refl")),
                     scanner,
-                    path_resolved_in_definitions(
-                        &access,
-                        "meta.refl",
-                        ResolvedExpr::Provided(access.duplicate_value(&definitions)),
-                    ),
+                    ResolvedExpr::Provided(access.duplicate_value(&definitions)),
                 ],
             );
             let definitions = update_module_resolved(

@@ -146,9 +146,15 @@ impl DefaultLogger {
     ) -> Vec<String> {
         let values = self.evaluator.values();
         let frames = match values
-            .access_names(message, ["msg", "context"])
-            .and_then(|candidate| {
-                values.apply(&values.defined_or_function(), [values.list([])?, candidate])
+            .list([
+                values.atom_from_text("msg"),
+                values.atom_from_text("context"),
+            ])
+            .and_then(|path| {
+                values.apply(
+                    &values.default_function(),
+                    [path, values.list([])?, message.clone()],
+                )
             })
             .and_then(|contexts| values.anno_array(contexts))
             .and_then(|array| self.evaluator.evaluator().eval(&array))

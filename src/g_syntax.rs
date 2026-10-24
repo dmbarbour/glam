@@ -83,8 +83,8 @@ pub(crate) fn default_diagnostic_formatter_root(values: &CoreValueFactory) -> Ru
     diagnostic_formatter::root(values)
 }
 
-pub(crate) fn defined_or_root(values: &CoreValueFactory) -> RuntimeValueRoot {
-    compiler_values::defined_or_root(values)
+pub(crate) fn path_default_root(values: &CoreValueFactory) -> RuntimeValueRoot {
+    compiler_values::path_default_root(values)
 }
 
 /// A machine's environment, composed from the mixins that it and its

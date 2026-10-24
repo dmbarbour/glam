@@ -242,7 +242,11 @@ impl<'source> StagedSourceParser<'source> {
             ],
             false,
         ) {
-            Ok(environment) => environment,
+            Ok(Some(environment)) => environment,
+            // A module without `meta.macro.env` has none to extend.
+            Ok(None) => context
+                .values()
+                .construct_runtime_value_root(|_| Value::Dict(Dict::new_sync())),
             Err(error) => {
                 context.note_wait(error.wait.clone());
                 let message = error.headline("macro environment could not be selected");
@@ -293,18 +297,8 @@ impl<'source> StagedSourceParser<'source> {
                 None => macro_lookup(execution, prior_definitions, &keys, true),
             };
             let effect = match selected {
-                Ok(effect)
-                    if !context.values().with_boundary_access(|access| {
-                        effect
-                            .with_core(&access, |value| {
-                                access.same_representation(value, &Value::Dict(Dict::new_sync()))
-                            })
-                            .expect("selected macro belongs to the compilation runtime")
-                    }) =>
-                {
-                    effect
-                }
-                Ok(_) => {
+                Ok(Some(effect)) => effect,
+                Ok(None) => {
                     self.diagnostics.push(macro_compiler_diagnostic(
                         context.values(),
                         &original,
@@ -713,11 +707,11 @@ fn macro_lookup(
     root: &RuntimeValueRoot,
     path: &[Key],
     force_result: bool,
-) -> Result<RuntimeValueRoot, MacroLookupFailure> {
+) -> Result<Option<RuntimeValueRoot>, MacroLookupFailure> {
     let mut current = root.clone();
     for key in path {
         let evaluated = force_macro_lookup_value(execution, current)?;
-        current = execution
+        let member = execution
             .lookup_context()
             .values()
             .with_boundary_access(|access| {
@@ -726,19 +720,22 @@ fn macro_lookup(
                         let Value::Dict(dict) = value else {
                             return Err("macro path traverses a non-dictionary value".to_owned());
                         };
-                        Ok(access.root_runtime_value(
-                            dict.get(key)
-                                .map(|value| access.duplicate_value(value))
-                                .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
-                        ))
+                        Ok(dict
+                            .get(key)
+                            .map(|value| access.root_runtime_value(access.duplicate_value(value))))
                     })
                     .expect("macro lookup root belongs to the lookup runtime")
             })?;
+        // An undefined path selects nothing (`dict-presence-ops`).
+        let Some(member) = member else {
+            return Ok(None);
+        };
+        current = member;
     }
     if force_result {
-        force_macro_lookup_value(execution, current)
+        force_macro_lookup_value(execution, current).map(Some)
     } else {
-        Ok(current)
+        Ok(Some(current))
     }
 }
 

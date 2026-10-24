@@ -208,6 +208,20 @@ Slices keep the old semantics working until the last flips them.
    compiler's guards, override checks and defaults, `std.default` and the
    CLI's configuration, the wait idiom, `.try` outcome checks, tests,
    samples, `direct_assembly.g`.
+   Built so far (2026-10-24):
+   - The compiler: the reflection scanner's and annotator's guards test
+     their heap marks with `.heap.try_get` inside an `.alt`, never
+     comparing a task handle with `{}`; `refl`, `meta.journal` and
+     `meta.refl` default by path (`dict.default`); `=`/`:=` checks carry
+     `defined: dict.defines Path Defs`, which the annotation machine reads
+     as the predicate's answer; macro lookup reports an undefined path, and
+     an absent `meta.macro.env` defaults to `{}` explicitly.
+   - `std.default` is now `default Path DefaultVal Dict`, and the
+     value-based `Builtin::Default` is gone.
+   - The public API: `Values::default_function()` (`\path fallback dict`)
+     replaces `defined_or_function()`, and `require_defined_function()`
+     takes `name path dict`. The CLI's `conf.env`, `conf.log`,
+     `conf.completion_script.*` and `conf.cli` select by path.
 4. `dict-path-fusion` — the front end groups static paths; a run-time
    builtin fuses computed paths by shared prefix, rejecting a prefix or a
    repeat; literals stop relying on deep union.
