@@ -546,8 +546,9 @@ P1 as P2            # both views
 {d}                 # any dict
 {x:P, y:Q, rem}     # partial match, 'rem' captures rest (default {} = exact)
 {x:P, {y:Q}}        # run a refutable pattern against the residual dictionary
-{x?:P, rem}         # absent/undefined x feeds {} to P; remainder unchanged
-{x?:{}}             # explicitly accept a missing x (`{x:{}}` remains required)
+{x?:P, rem}         # P matches [] where x is absent, [V] where present; never fails on absence
+{x?:[]}             # explicitly accept a missing x; {x?:[v]} binds a present one
+{a.c:C, a:A}        # deeper paths first: a take removes, pruning what it empties
 {:x, :y}            # ≡ {x:x, y:y}; :x alone ≡ {x:x} too
 {a.b.c:P, _}        # deep path
 {selector:key, [key]:P, rem}       # prior capture selects a computed key

@@ -502,8 +502,13 @@ layout and braced forms. Patterns currently include names, `_`, general
 most one potentially refutable variable-length segment, computed-path
 dictionaries and quoted paths, static and computed tags, tuples, views,
 predicates, and local guards. Dictionary entries are required by default;
-`path?:Pattern` explicitly passes `{}` to the payload pattern when the path is
-absent or undefined. Computed paths and effectful pattern expressions are
+`path?:Pattern` matches the payload pattern against `[]` where the path is
+absent and `[V]` where it holds `V`, so it never fails on absence. A path is
+present where its key is, whatever its value, which a take never forces; the
+dictionaries on the way are forced, and a take prunes those it empties, so an
+exact pattern such as `{selector:key, root.[key]:value}` leaves no
+`{root:{}}` behind. Entries take in written order, deeper paths before
+shallower ones under them. Computed paths and effectful pattern expressions are
 evaluated once in source order and may use captures from earlier subpatterns.
 A layout block is newline-delimited:
 
@@ -1863,8 +1868,9 @@ Patterns offer a concise way of extracting data from similar structure. I'm borr
         {d}                         # any dict
         {x:Pattern, y:Pattern, rem} # dict of at least x,y with matching data
         {x:Pattern, {y:Pattern}}    # match residual dict with another pattern
-        {x?:Pattern, rem}           # absent/undefined x feeds {} to Pattern
-        {x?:{}}                     # explicitly accept a missing x
+        {x?:Pattern, rem}           # Pattern matches [] where x is absent, [V] where present
+        {x?:[]}                     # explicitly accept a missing x
+        {x?:[v]}                    # x present, its value v
         {:x,:y,:z}                  # same as {x:x, y:y, z:z}
         {foo.bar.baz:Pattern, _}    # deep refs
         {selector:key, [key]:Pattern}

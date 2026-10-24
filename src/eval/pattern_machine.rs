@@ -64,7 +64,6 @@ pub(in crate::eval) struct RegionalPatternDictTakeMachine {
     selected: Option<RegionalWhnfWork>,
     selected_value: Option<Value>,
     frames: Vec<RegionalPatternDictTakeFrame>,
-    undefined: Option<super::tagged_machine::RegionalSemanticUndefined>,
     source_owner: LazyId,
 }
 
@@ -102,7 +101,11 @@ enum RegionalPatternDictPredicateState {
         source: Option<Value>,
         demand: Option<RegionalWhnfWork>,
     },
-    IsEmpty(super::tagged_machine::RegionalSemanticUndefined),
+    /// Whether the remainder is the empty dict (`dict-optional-patterns`).
+    IsEmpty {
+        source: Option<Value>,
+        demand: Option<RegionalWhnfWork>,
+    },
 }
 
 impl RegionalPatternDictPredicateMachine {
@@ -120,13 +123,10 @@ impl RegionalPatternDictPredicateMachine {
                 source: Some(access.values().duplicate_value(source)),
                 demand: None,
             },
-            Builtin::PatternDictIsEmpty => RegionalPatternDictPredicateState::IsEmpty(
-                super::tagged_machine::RegionalSemanticUndefined::new_in(
-                    access,
-                    access.values().duplicate_value(source),
-                    source_owner,
-                ),
-            ),
+            Builtin::PatternDictIsEmpty => RegionalPatternDictPredicateState::IsEmpty {
+                source: Some(access.values().duplicate_value(source)),
+                demand: None,
+            },
             _ => unreachable!("dictionary predicate machine received another builtin"),
         };
         Self {
@@ -141,7 +141,8 @@ impl RegionalPatternDictPredicateMachine {
         step_budget: &mut EvaluationStepBudget,
     ) -> RegionalBuiltinPoll {
         match &mut self.state {
-            RegionalPatternDictPredicateState::IsDict { source, demand } => {
+            RegionalPatternDictPredicateState::IsDict { source, demand }
+            | RegionalPatternDictPredicateState::IsEmpty { source, demand } => {
                 if demand.is_none() {
                     let source = source
                         .take()
@@ -170,42 +171,29 @@ impl RegionalPatternDictPredicateMachine {
                         return RegionalBuiltinPoll::Failed(failure);
                     }
                 };
-                pattern_predicate_in(access, matches!(source, Value::Dict(_)))
-            }
-            RegionalPatternDictPredicateState::IsEmpty(undefined) => {
-                match undefined.poll_in(access, step_budget) {
-                    super::tagged_machine::RegionalSemanticUndefinedPoll::Ready(empty) => {
-                        pattern_predicate_in(access, empty)
+                let passes = match &self.state {
+                    RegionalPatternDictPredicateState::IsDict { .. } => {
+                        matches!(source, Value::Dict(_))
                     }
-                    super::tagged_machine::RegionalSemanticUndefinedPoll::Boundary(request) => {
-                        RegionalBuiltinPoll::Boundary(request)
+                    RegionalPatternDictPredicateState::IsEmpty { .. } => {
+                        matches!(&source, Value::Dict(dict) if dict.is_empty())
                     }
-                    super::tagged_machine::RegionalSemanticUndefinedPoll::Continue => {
-                        RegionalBuiltinPoll::Continue
-                    }
-                    super::tagged_machine::RegionalSemanticUndefinedPoll::BudgetExhausted => {
-                        RegionalBuiltinPoll::BudgetExhausted
-                    }
-                    super::tagged_machine::RegionalSemanticUndefinedPoll::Failed(failure) => {
-                        RegionalBuiltinPoll::Failed(failure)
-                    }
-                }
+                };
+                pattern_predicate_in(access, passes)
             }
         }
     }
 
     pub(in crate::eval) fn trace_managed_edges(&self, visitor: &mut Visitor<'_>) {
         match &self.state {
-            RegionalPatternDictPredicateState::IsDict { source, demand } => {
+            RegionalPatternDictPredicateState::IsDict { source, demand }
+            | RegionalPatternDictPredicateState::IsEmpty { source, demand } => {
                 if let Some(source) = source {
                     trace_compatibility_value_managed_edges(source, visitor);
                 }
                 if let Some(demand) = demand {
                     demand.trace_managed_edges(visitor);
                 }
-            }
-            RegionalPatternDictPredicateState::IsEmpty(undefined) => {
-                undefined.trace_managed_edges(visitor);
             }
         }
     }
@@ -237,7 +225,6 @@ impl RegionalPatternDictTakeMachine {
             selected: None,
             selected_value: None,
             frames: Vec::new(),
-            undefined: None,
             source_owner,
         }
     }
@@ -265,29 +252,6 @@ impl RegionalPatternDictTakeMachine {
             };
         }
 
-        if let Some(undefined) = &mut self.undefined {
-            return match undefined.poll_in(access, step_budget) {
-                super::tagged_machine::RegionalSemanticUndefinedPoll::Ready(true) => {
-                    self.finish_absent(access)
-                }
-                super::tagged_machine::RegionalSemanticUndefinedPoll::Ready(false) => {
-                    self.finish_found(access)
-                }
-                super::tagged_machine::RegionalSemanticUndefinedPoll::Boundary(request) => {
-                    RegionalBuiltinPoll::Boundary(request)
-                }
-                super::tagged_machine::RegionalSemanticUndefinedPoll::Continue => {
-                    RegionalBuiltinPoll::Continue
-                }
-                super::tagged_machine::RegionalSemanticUndefinedPoll::BudgetExhausted => {
-                    RegionalBuiltinPoll::BudgetExhausted
-                }
-                super::tagged_machine::RegionalSemanticUndefinedPoll::Failed(failure) => {
-                    RegionalBuiltinPoll::Failed(failure)
-                }
-            };
-        }
-
         if let Some(selected) = &mut self.selected {
             let value =
                 match drive_regional_in_place(access, selected, step_budget, reduce_semantic_shell)
@@ -304,15 +268,6 @@ impl RegionalPatternDictTakeMachine {
                     }
                 };
             self.selected = None;
-            if self.next_key == self.keys().len() {
-                self.undefined = Some(super::tagged_machine::RegionalSemanticUndefined::new_in(
-                    access,
-                    access.values().duplicate_value(&value),
-                    self.source_owner,
-                ));
-                self.selected_value = Some(value);
-                return RegionalBuiltinPoll::Continue;
-            }
             if !matches!(value, Value::Dict(_)) {
                 return pattern_failure_in(access);
             }
@@ -379,8 +334,16 @@ impl RegionalPatternDictTakeMachine {
             .map_or(PatternDictSelection::Missing, |value| {
                 PatternDictSelection::Present(access.values().duplicate_value(value))
             });
+        // Whether the path is defined is the key's presence, never its
+        // value's (`dict-optional-patterns`): the leaf stays unforced, and
+        // only the dicts on the way are forced.
         match selection {
             PatternDictSelection::Missing => self.finish_absent(access),
+            PatternDictSelection::Present(value) if self.next_key + 1 == self.keys().len() => {
+                self.next_key += 1;
+                self.selected_value = Some(value);
+                self.finish_found(access)
+            }
             PatternDictSelection::Present(value) => {
                 self.next_key += 1;
                 self.selected = Some(
@@ -398,6 +361,8 @@ impl RegionalPatternDictTakeMachine {
             .expect("dictionary extraction path must be ready")
     }
 
+    /// An absent path: a failure, or for an optional entry, `[]` and the
+    /// whole dict.
     fn finish_absent(&self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
         if !self.optional {
             return pattern_failure_in(access);
@@ -406,7 +371,7 @@ impl RegionalPatternDictTakeMachine {
             access.values(),
             Value::Dict(
                 Dict::new_sync()
-                    .insert((*keys::VALUE).clone(), Value::Dict(Dict::new_sync()))
+                    .insert((*keys::VALUE).clone(), Value::List(List::empty()))
                     .insert(
                         (*keys::REST).clone(),
                         self.original
@@ -437,17 +402,22 @@ impl RegionalPatternDictTakeMachine {
                 parent.insert(frame.key.clone(), Value::Dict(rest))
             };
         }
+        let value = self
+            .selected_value
+            .as_ref()
+            .map(|value| access.values().duplicate_value(value))
+            .expect("successful extraction must retain its selected value");
+        // An optional entry's pattern matches `[V]` (`dict-optional-patterns`).
+        let value = if self.optional {
+            Value::List(List::from_values(vec![value]))
+        } else {
+            value
+        };
         RegionalBuiltinPoll::Ready(pattern_success_value_in(
             access.values(),
             Value::Dict(
                 Dict::new_sync()
-                    .insert(
-                        (*keys::VALUE).clone(),
-                        self.selected_value
-                            .as_ref()
-                            .map(|value| access.values().duplicate_value(value))
-                            .expect("successful extraction must retain its selected value"),
-                    )
+                    .insert((*keys::VALUE).clone(), value)
                     .insert((*keys::REST).clone(), Value::Dict(rest)),
             ),
         ))
@@ -474,9 +444,6 @@ impl RegionalPatternDictTakeMachine {
         }
         for frame in &self.frames {
             trace_compatibility_value_managed_edges(&frame.parent, visitor);
-        }
-        if let Some(undefined) = &self.undefined {
-            undefined.trace_managed_edges(visitor);
         }
     }
 }

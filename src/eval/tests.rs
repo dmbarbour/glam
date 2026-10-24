@@ -4885,27 +4885,30 @@ fn compiler_pattern_dictionary_operations_preserve_remainders() {
 
 #[test]
 fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix() {
+    // The dicts on the way are forced, never the leaf (`dict-optional-patterns`):
+    // here the promised dict is `foo.bar`, on the way to `baz`.
     let (owner, observer, _executor) = same_runtime_contexts();
-    let (leaf, _owner_task, _owner) = owner
+    let (middle, _owner_task, _owner) = owner
         .task_owned_promise()
-        .expect("the owner should allocate a promised dictionary leaf");
+        .expect("the owner should allocate a promised dictionary on the path");
     let prefix_demands = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&prefix_demands);
     let foo = Key::atom_from_text("foo");
     let bar = Key::atom_from_text("bar");
     let values = observer.values().clone();
-    let promised_leaf = leaf.duplicate_for_test(&values);
-    let captured_leaf = promised_leaf.duplicate_for_test(&values);
+    let promised_middle = middle.duplicate_for_test(&values);
+    let captured_middle = promised_middle.duplicate_for_test(&values);
     let child = Value::semantic_thunk(observer.values(), move |context| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Dict(Dict::new_sync().insert(
             bar.clone(),
-            Value::Promised(captured_leaf.duplicate_for_test(context)),
+            Value::Promised(captured_middle.duplicate_for_test(context)),
         )))
     });
     let path = Value::List(List::from_values(vec![
         key_value(&foo),
         key_value(&Key::atom_from_text("bar")),
+        key_value(&Key::atom_from_text("baz")),
     ]));
     let application = apply_values(
         &observer,
@@ -4920,7 +4923,7 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err_without_debug("the unresolved leaf should suspend dictionary extraction");
+            .expect_err_without_debug("the unresolved dict on the path should suspend extraction");
     assert!(blocked.blocked_on().is_some());
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
     observer
@@ -4928,10 +4931,14 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
         .collect_managed_for_test()
         .expect("dictionary extraction must trace its completed path prefix and frames");
     crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err_without_debug("a later route must resume the exact promised dictionary leaf");
+        .expect_err_without_debug("a later route must resume the exact promised dictionary");
     assert_eq!(prefix_demands.load(Ordering::SeqCst), 1);
-    set_promise(&owner, &promised_leaf, n(7))
-        .expect_without_debug("the owner should resolve the leaf");
+    set_promise(
+        &owner,
+        &promised_middle,
+        Value::Dict(Dict::new_sync().insert(Key::atom_from_text("baz"), n(7))),
+    )
+    .expect_without_debug("the owner should resolve the dictionary");
     observer
         .values()
         .collect_managed_for_test()
@@ -4939,7 +4946,7 @@ fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix
 
     let effect =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect("dictionary extraction should resume from the leaf");
+            .expect("dictionary extraction should resume from the promised dictionary");
     let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
         .and_then(|value| {
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
@@ -4967,19 +4974,35 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
     let values = crate::core::test_value_factory();
     let key = Key::atom_from_text("key");
     let path = Value::List(List::from_values(vec![key_value(&key)]));
-    for value in [
-        Value::Dict(Dict::new_sync()),
-        Value::Dict(Dict::new_sync().insert(key.clone(), Value::Dict(Dict::new_sync()))),
-        n(1),
-    ] {
+    for value in [Value::Dict(Dict::new_sync()), n(1)] {
         assert!(
             run_pattern_builtin2(
                 Builtin::PatternDictTryTake,
                 path.duplicate_for_test(&values),
                 value,
             )
-            .expect("missing, undefined, and wrong-kind paths should mismatch")
+            .expect("missing and wrong-kind paths should mismatch")
             .is_empty()
+        );
+    }
+    // A key holding `{}` is present, and a leaf is never forced
+    // (`dict-optional-patterns`).
+    for value in [
+        Value::Dict(Dict::new_sync()),
+        Value::error(
+            &crate::core::test_value_factory(),
+            "the leaf stays unforced",
+        ),
+    ] {
+        assert_eq!(
+            run_pattern_builtin2(
+                Builtin::PatternDictTryTake,
+                path.duplicate_for_test(&values),
+                Value::Dict(Dict::new_sync().insert(key.clone(), value)),
+            )
+            .expect("a present key should be taken without forcing its value")
+            .len(),
+            1
         );
     }
 
@@ -4994,64 +5017,54 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
             .is_empty()
     );
 
-    let logically_empty = Dict::new_sync().insert(
-        key,
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &run_pattern_builtin(Builtin::PatternDictIsEmpty, Value::Dict(Dict::new_sync()))
+            .expect("the empty dict should pass"),
+        &[unit_value()],
+    );
+    // A member is present whatever it holds, and is never forced.
+    for member in [
         Value::Lazy(LazyValue::semantic_thunk(
             &crate::core::test_value_factory(),
             |_| Ok(Value::Dict(Dict::new_sync())),
         )),
-    );
-    crate::core::test_value_factory().assert_same_representation_for_test(
-        &run_pattern_builtin(Builtin::PatternDictIsEmpty, Value::Dict(logically_empty))
-            .expect("nested and deferred undefined values should be logically empty"),
-        &[unit_value()],
-    );
-    assert!(
-        run_pattern_builtin(
-            Builtin::PatternDictIsEmpty,
-            Value::Dict(Dict::new_sync().insert(Key::atom_from_text("present"), n(1))),
-        )
-        .expect("a present dictionary value should mismatch empty")
-        .is_empty()
-    );
-    assert_eq!(
-        run_pattern_builtin(
-            Builtin::PatternDictIsEmpty,
-            Value::Dict(Dict::new_sync().insert(
-                Key::atom_from_text("broken"),
-                Value::error(&crate::core::test_value_factory(), "dict value failed")
-            ),),
-        )
-        .expect_err_without_debug("forcing failures while establishing emptiness must propagate")
-        .to_string(),
-        "dict value failed"
-    );
+        Value::error(
+            &crate::core::test_value_factory(),
+            "the member stays unforced",
+        ),
+    ] {
+        assert!(
+            run_pattern_builtin(
+                Builtin::PatternDictIsEmpty,
+                Value::Dict(Dict::new_sync().insert(key.clone(), member)),
+            )
+            .expect("a dict with a member should mismatch empty, unforced")
+            .is_empty()
+        );
+    }
 }
 
+/// Emptiness forces the dict, never a member (`dict-optional-patterns`):
+/// an unresolved dict suspends it, and a member, present whatever it holds,
+/// makes it mismatch unforced.
 #[test]
-fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members() {
+fn compiler_pattern_dictionary_emptiness_forces_the_dict_and_no_member() {
     let (owner, observer, _executor) = same_runtime_contexts();
-    let (second, _owner_task, _owner) = owner
+    let (source, _owner_task, _owner) = owner
         .task_owned_promise()
-        .expect("the owner should allocate a promised dictionary member");
-    let first_demands = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&first_demands);
-    let first = Value::semantic_thunk(observer.values(), move |_| {
+        .expect("the owner should allocate a promised dictionary");
+    let member_demands = Arc::new(AtomicUsize::new(0));
+    let observed = Arc::clone(&member_demands);
+    let member = Value::semantic_thunk(observer.values(), move |_| {
         observed.fetch_add(1, Ordering::SeqCst);
         Ok(Value::Dict(Dict::new_sync()))
     });
-    let source = Value::Dict(
-        Dict::new_sync()
-            .insert(Key::Number(0.into()), first)
-            .insert(
-                Key::Number(1.into()),
-                Value::Promised(second.duplicate_for_test(observer.values())),
-            ),
-    );
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::PatternDictIsEmpty),
-        vec![source],
+        vec![Value::Promised(
+            source.duplicate_for_test(observer.values()),
+        )],
     )
     .expect("dictionary emptiness application should build");
     let Value::Lazy(application_lazy) = &application else {
@@ -5061,28 +5074,22 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
 
     let blocked =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err_without_debug(
-                "the unresolved second member should suspend emptiness traversal",
-            );
+            .expect_err_without_debug("the unresolved dictionary should suspend emptiness");
     assert!(blocked.blocked_on().is_some());
-    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
     observer
         .values()
         .collect_managed_for_test()
-        .expect("the dictionary-emptiness checkpoint must trace completed members");
-    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err_without_debug("a later route must resume the exact promised member");
-    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
-    set_promise(&owner, &second, Value::Dict(Dict::new_sync()))
-        .expect_without_debug("the owner should resolve the second dictionary member");
-    observer
-        .values()
-        .collect_managed_for_test()
-        .expect("the assigned dictionary-emptiness checkpoint must remain live");
+        .expect("the dictionary-emptiness checkpoint must remain traceable");
+    set_promise(
+        &owner,
+        &source,
+        Value::Dict(Dict::new_sync().insert(Key::Number(0.into()), member)),
+    )
+    .expect_without_debug("the owner should resolve the dictionary");
 
     let effect =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect("dictionary emptiness should resume from the second member");
+            .expect("dictionary emptiness should resume");
     let handled = apply_values(&observer, Value::Builtin(Builtin::ListEffect), vec![effect])
         .and_then(|value| {
             crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &value)
@@ -5091,11 +5098,17 @@ fn compiler_pattern_dictionary_emptiness_resumes_without_replaying_prior_members
     let Value::List(results) = handled else {
         panic!("the list effect handler should return a list")
     };
-    observer.values().assert_same_representation_for_test(
-        &list_to_value_items(&observer, &results).expect("the pattern result should be readable"),
-        &[unit_value()],
+    assert!(
+        list_to_value_items(&observer, &results)
+            .expect("the pattern result should be readable")
+            .is_empty(),
+        "a dict with a member is not empty"
     );
-    assert_eq!(first_demands.load(Ordering::SeqCst), 1);
+    assert_eq!(
+        member_demands.load(Ordering::SeqCst),
+        0,
+        "no member is forced"
+    );
     drop(application_root);
 }
 
@@ -5122,9 +5135,10 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     let Value::Dict(parts) = parts else {
         panic!("optional dictionary extraction should return a parts dictionary");
     };
+    // Absent: the entry's pattern matches `[]` (`dict-optional-patterns`).
     crate::core::test_value_factory().assert_same_representation_for_test(
         &parts.get(&*keys::VALUE),
-        &Some(&Value::Dict(Dict::new_sync())),
+        &Some(&Value::List(List::empty())),
     );
     crate::core::test_value_factory()
         .assert_same_representation_for_test(&parts.get(&*keys::REST), &Some(&Value::Dict(absent)));
@@ -5148,8 +5162,11 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     let Value::Dict(parts) = parts else {
         panic!("optional dictionary extraction should return a parts dictionary");
     };
-    crate::core::test_value_factory()
-        .assert_same_representation_for_test(&parts.get(&*keys::VALUE), &Some(&n(7)));
+    // Present: it matches `[V]`.
+    crate::core::test_value_factory().assert_same_representation_for_test(
+        &parts.get(&*keys::VALUE),
+        &Some(&Value::List(List::from_values(vec![n(7)]))),
+    );
 
     let wrong_intermediate = Value::Dict(Dict::new_sync().insert(foo.clone(), n(1)));
     assert!(

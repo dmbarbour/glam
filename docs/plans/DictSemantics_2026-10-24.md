@@ -275,6 +275,10 @@ Slices keep the old semantics working until the last flips them.
    pattern leaves no `{root:{}}` behind. Known gap: taking `a.b` from what
    `{a:{}, a.b:1}` built prunes `a`, which the literal wrote; a finer take
    can come if it matters.
+   Built 2026-10-24: a take decides presence by the key, never forcing the
+   value; only the dicts on the way are forced. An optional entry's
+   pattern matches `[]` or `[V]`, and the exact-match check asks whether
+   the remainder is the empty dict, forcing no member.
 6. `dict-empty-is-a-value` — the flip: `{}` is the empty dict, reads of
    what is undefined diverge, union is shallow, with eager and lazy forms
    by annotation, normalization and elision of `{}` go, dict equality is
