@@ -672,7 +672,7 @@ impl Values {
 
     /// Constructs the shallow union of two dictionaries, as a dict literal's
     /// `{left, right}` is, without demanding either: a key both define is an
-    /// error where it is read (`dict-path-fusion`).
+    /// error where it is read (`dict-literals-introduce-in-order`).
     pub fn dict_union(&self, left: Value, right: Value) -> Result<Value, Error> {
         self.with_access(|values| {
             Ok(values.wrap(CoreValue::builtin_call_in(
@@ -720,7 +720,7 @@ impl Values {
 
     /// Returns the `default` builtin, `\path fallback dict -> ...`: the value
     /// at `path` in `dict`, or `fallback` where `path` is undefined
-    /// (`dict-presence-ops`).
+    /// (`dict-empty-is-a-value`).
     pub fn default_function(&self) -> Value {
         Value::from_runtime_root(crate::g_syntax::path_default_root(self.core()))
     }

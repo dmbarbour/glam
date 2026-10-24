@@ -48,7 +48,7 @@ enum RegionalDictBuiltinState {
 }
 
 /// `DictIntroduceOptional path list dict`: the list forced until it shows
-/// `[]` or `[V]`, never `V` (`dict-path-fusion`).
+/// `[]` or `[V]`, never `V` (`dict-literals-introduce-in-order`).
 struct RegionalIntroduceOptional {
     path: Value,
     list: Option<RegionalWhnfWork>,
@@ -71,7 +71,7 @@ struct RegionalDictBuild {
 
 /// A walk down a path, forcing each dict on the way and nothing else:
 /// `DictLookup`, `DictDefines`, `DictDefault` and `DictRemove`
-/// (`dict-presence-ops`).
+/// (`dict-empty-is-a-value`).
 struct RegionalDictPathWalk {
     builtin: Builtin,
     /// The path, until it is converted to `keys`.
@@ -1178,7 +1178,7 @@ fn finish_union_in(
 }
 
 /// The shallow union: a key both dicts define is an error where it is read,
-/// whatever its values (`dict-presence-ops`).
+/// whatever its values (`dict-empty-is-a-value`).
 pub(in crate::eval) fn union_dicts_in(
     access: &crate::core::RuntimeValueAccess<'_>,
     left: &Dict,
@@ -1239,7 +1239,7 @@ fn finish_insert_in(
 /// forced that would not be.
 /// `DictInsert` replaces what is at `path`; `DictIntroduce` fails where
 /// `path` is defined, or a dict on the way is no dict, as soon as it sees
-/// it (`dict-path-fusion`).
+/// it (`dict-literals-introduce-in-order`).
 fn insert_dict_path_in(
     access: &crate::core::RuntimeValueAccess<'_>,
     builtin: Builtin,

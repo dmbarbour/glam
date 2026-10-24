@@ -332,5 +332,14 @@ Slices keep the old semantics working until the last flips them.
      undefined error value.
 7. `dict-docs` — the syntax and design docs, the agent context, and an
    ADR revising `dict-literals-compose`.
+   Built 2026-10-24: the ADR `dict-empty-is-a-value` records the flip,
+   with its reasons, and the code cites it, or
+   `dict-literals-introduce-in-order`, where it cited this plan's steps.
+   Syntax.md (override checks, `_self` in `using`, anonymous and abstract
+   object names, parents, `object_from_dict`, the dict operations), the
+   cheat sheet, Design.md's state effects and Macros.md's `.env` follow;
+   DistilledDesign.md and the dict section of Syntax.md already did. The
+   agent context held no note on the old semantics. The ADR template
+   gains a **Reasons** line.
 
 Then `api-comparables` resumes, its definedness checks already moved.

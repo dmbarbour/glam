@@ -294,7 +294,7 @@ enum StoreEdit {
         updater: Option<PublicValue>,
     },
     /// Removes what is at the address, pruning the dicts the removal
-    /// empties (`dict-presence-ops`). For conflict analysis it is a set: it
+    /// empties (`dict-empty-is-a-value`). For conflict analysis it is a set: it
     /// decides everything below its address.
     Remove { address: ConflictAddress },
     /// Allocates a volume whose ID the transaction reserved, with its
@@ -1018,7 +1018,7 @@ impl StoreJournal {
     }
 
     /// Removes what is at `path` in the shared heap, pruning the dicts the
-    /// removal empties (`dict-presence-ops`). The path is not empty.
+    /// removal empties (`dict-empty-is-a-value`). The path is not empty.
     pub(crate) fn remove(&mut self, path: Vec<Key>) {
         self.remove_by_id(self.snapshot.heap_volume, path);
     }

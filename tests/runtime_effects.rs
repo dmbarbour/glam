@@ -438,7 +438,7 @@ impl EffectProvider for Both {
 }
 
 /// The evaluated kind of the shared heap's value at `key`.
-/// Whether the shared heap defines `key` (`dict-presence-ops`).
+/// Whether the shared heap defines `key` (`dict-empty-is-a-value`).
 fn heap_defined(m: &mut Machine<'_, '_>, key: &str) -> Result<bool, Error> {
     match m.heap_try_get([key]) {
         Ok(()) => m.discard(1).map(|()| true),

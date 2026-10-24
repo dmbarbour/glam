@@ -33,6 +33,7 @@ maps the short names used here to file names.
 `<slug>` · YYYY-MM-DD · maintainer|agent · accepted|superseded
 - **Context:** …
 - **Decision:** …
+- **Reasons:** …   (where feasible)
 - **Consequences:** …
 - **Rule lives in:** <standing doc and section name>   (omit if none)
 - **Recorded in:** <history doc short name + finding or section ID>
@@ -1119,6 +1120,65 @@ maps the short names used here to file names.
   `src/g_syntax/resolve/expression.rs`.
 - **Recorded in:** structural overheads plan, `perf-list-map-growth` and
   `perf-list-literal-composition`.
+
+### The empty dict is a value; reading what is undefined is an error
+`dict-empty-is-a-value` · 2026-10-24 · maintainer · accepted
+- **Context:** `{}` was both the empty dict and "undefined": `{foo:{}}` was
+  `{}`, a missing key read `{}`, writing `{}` erased, and union merged
+  dicts at every shared key. Whether a key was defined depended on its
+  value, so equality, union and every definedness check forced values, and
+  definedness was spelled as a comparison with `{}`, which comparing only
+  comparables rejects (`DictSemantics_2026-10-24.md`).
+- **Decision:**
+  - `{}` is the empty dict, a value like any other: `{foo:{}}` defines
+    `foo`, and no construction, key or write drops it.
+  - Reading what is undefined is an error, "`a.b` is undefined". `.get`
+    and `.env` answer it with an error value, so the effect goes on and
+    only a reader of the value fails; `.try_get` gives the value where
+    defined and fails where not.
+  - Definedness is asked, never read: `dict.defines Path Dict` answers as
+    a comparison does, `.r ()` or `.fail`, forcing only the dicts on the
+    way; `dict.default Path Fallback Dict` reads with a fallback, and
+    `dict.lookup` fails where undefined. Override checks ask the prior
+    namespace the same way.
+  - Removing is an operation of its own: `dict.remove`, `.del`,
+    `.heap.del` and `.vol.del` prune the dicts they empty, as insertion
+    adds them. `dict.insert` replaces; `dict.update` applies a function.
+  - Union is shallow: a key both operands define is an error where it is
+    read, whatever the values. `dict.union` is the one union.
+  - A dict pattern's `path?:P` matches `P` against `[]` where `path` is
+    absent and `[V]` where defined, and a take decides presence by the key,
+    never forcing the value, pruning the dicts it empties.
+  - Dict equality is structural, the same keys and then equal values; an
+    atom equals the dict it stands for, `'tag` and `{tag:()}`, and unit
+    stands for no dict.
+  - Applying a dict decides by its keys: exactly `{eff:P}` is an effect,
+    a dict with `apply` applies it, and a handler recognizes any dict with
+    `eff` as an effect.
+- **Reasons:**
+  - A key's presence known from keys alone needs no value forced: equality,
+    union, patterns and definedness checks stay lazy.
+  - One meaning per value: an empty dict that is also "absent" made
+    `{foo:{}}`, `{}` and a missing key indistinguishable and surprising.
+  - An error read where it is noticed reports a mistake that `{}` hid,
+    and `.try_get` or `dict.default` say when absence is expected.
+  - Shallow union finds conflicts from keys, without a recursive merge; a
+    deep merge is a function's to write.
+- **Consequences:**
+  - The wait idiom reads with `.try_get` inside a cut, whose failure parks
+    on the observed read.
+  - Rust APIs mirror it: the turn's `local_get`, `local_take` and
+    `dict_unpack` push an error value where absent, `dict_defines`,
+    `dict_defines_path` and `local_defines` ask, and `Values::dict_insert`
+    and `dict_remove` build.
+  - A spec's `name`, `deps` and `defs` keep their defaults where absent;
+    an anonymous object's spec names it `{}`.
+- **Rule lives in:** `src/eval/dict_machine.rs` (path walks, insertion,
+  union), `src/eval/whnf.rs` and `src/eval/access_machine.rs` (access),
+  `src/eval/comparison_machine.rs` (equality), `src/eval/pattern_machine.rs`
+  (takes), and `src/reflection/machine.rs` (`.get`, `.try_get`, `.del`).
+- **Recorded in:** [Dict Semantics](plans/DictSemantics_2026-10-24.md),
+  `dict-presence-ops`, `dict-optional-patterns`, `dict-empty-is-a-value`.
 
 ### Dict literals introduce their members in order
 `dict-literals-introduce-in-order` · 2026-10-24 · maintainer · accepted

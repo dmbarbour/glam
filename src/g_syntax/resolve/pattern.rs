@@ -373,7 +373,7 @@ fn append_dict_match(
 /// Reports a dict pattern that takes a static path before a deeper one
 /// under it, which then always fails: the pattern should take the deeper
 /// path first, as a literal introduces the shallower first
-/// (`dict-path-fusion`).
+/// (`dict-literals-introduce-in-order`).
 fn check_static_take_order(
     entries: &[SyntaxDictPatternEntry],
     line: usize,

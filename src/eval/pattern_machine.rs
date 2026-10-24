@@ -101,7 +101,7 @@ enum RegionalPatternDictPredicateState {
         source: Option<Value>,
         demand: Option<RegionalWhnfWork>,
     },
-    /// Whether the remainder is the empty dict (`dict-optional-patterns`).
+    /// Whether the remainder is the empty dict (`dict-empty-is-a-value`).
     IsEmpty {
         source: Option<Value>,
         demand: Option<RegionalWhnfWork>,
@@ -335,7 +335,7 @@ impl RegionalPatternDictTakeMachine {
                 PatternDictSelection::Present(access.values().duplicate_value(value))
             });
         // Whether the path is defined is the key's presence, never its
-        // value's (`dict-optional-patterns`): the leaf stays unforced, and
+        // value's (`dict-empty-is-a-value`): the leaf stays unforced, and
         // only the dicts on the way are forced.
         match selection {
             PatternDictSelection::Missing => self.finish_absent(access),
@@ -407,7 +407,7 @@ impl RegionalPatternDictTakeMachine {
             .as_ref()
             .map(|value| access.values().duplicate_value(value))
             .expect("successful extraction must retain its selected value");
-        // An optional entry's pattern matches `[V]` (`dict-optional-patterns`).
+        // An optional entry's pattern matches `[V]` (`dict-empty-is-a-value`).
         let value = if self.optional {
             Value::List(List::from_values(vec![value]))
         } else {

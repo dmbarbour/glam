@@ -18,7 +18,7 @@ fn dispatch(arguments: &[&str]) -> Result<TopLevelCommand, String> {
 trait TestValueFacade {
     fn get<'a>(&'a self, root: &HandleValue, path: &str) -> Result<TestEvaluated<'a>, Error>;
     /// Whether `root` defines `path`, never evaluating what is there
-    /// (`dict-presence-ops`).
+    /// (`dict-empty-is-a-value`).
     fn defines(&self, root: &HandleValue, path: &[&str]) -> bool;
 }
 

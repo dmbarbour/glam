@@ -21,7 +21,7 @@ fn heap_int(rt: &mut Runtime, path: &[&str]) -> i64 {
 }
 
 /// Whether the shared heap leaves `path` undefined, read outside any cut
-/// (`dict-presence-ops`).
+/// (`dict-empty-is-a-value`).
 fn heap_undefined(rt: &mut Runtime, path: &[&str]) -> bool {
     rt.run("reader", |m| match m.heap_try_get(path.iter().copied()) {
         Ok(()) => m.discard(1).map(|()| false),
@@ -80,7 +80,7 @@ fn heap_actions_outside_a_cut_commit_at_once() {
 
 #[test]
 fn a_heap_removal_prunes_what_it_empties_and_undoes_with_its_cut() {
-    // `dict-presence-ops`: removing `a.b` prunes `a`, left empty, and keeps
+    // `dict-empty-is-a-value`: removing `a.b` prunes `a`, left empty, and keeps
     // `c`; within a failed cut, the removal is undone.
     let mut rt = runtime();
     rt.run("writer", |m| {

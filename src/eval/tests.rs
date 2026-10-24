@@ -4846,7 +4846,7 @@ fn compiler_pattern_dictionary_operations_preserve_remainders() {
 
 #[test]
 fn compiler_pattern_dictionary_take_resumes_without_replaying_a_completed_prefix() {
-    // The dicts on the way are forced, never the leaf (`dict-optional-patterns`):
+    // The dicts on the way are forced, never the leaf (`dict-empty-is-a-value`):
     // here the promised dict is `foo.bar`, on the way to `baz`.
     let (owner, observer, _executor) = same_runtime_contexts();
     let (middle, _owner_task, _owner) = owner
@@ -4947,7 +4947,7 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
         );
     }
     // A key holding `{}` is present, and a leaf is never forced
-    // (`dict-optional-patterns`).
+    // (`dict-empty-is-a-value`).
     for value in [
         Value::Dict(Dict::new_sync()),
         Value::error(
@@ -5005,7 +5005,7 @@ fn compiler_pattern_dictionary_mismatches_are_pass_fail() {
     }
 }
 
-/// Emptiness forces the dict, never a member (`dict-optional-patterns`):
+/// Emptiness forces the dict, never a member (`dict-empty-is-a-value`):
 /// an unresolved dict suspends it, and a member, present whatever it holds,
 /// makes it mismatch unforced.
 #[test]
@@ -5096,7 +5096,7 @@ fn compiler_pattern_optional_dictionary_operations_preserve_absence_and_errors()
     let Value::Dict(parts) = parts else {
         panic!("optional dictionary extraction should return a parts dictionary");
     };
-    // Absent: the entry's pattern matches `[]` (`dict-optional-patterns`).
+    // Absent: the entry's pattern matches `[]` (`dict-empty-is-a-value`).
     crate::core::test_value_factory().assert_same_representation_for_test(
         &parts.get(&*keys::VALUE),
         &Some(&Value::List(List::empty())),
@@ -6097,7 +6097,7 @@ fn singleton_dict_keeps_an_empty_dictionary_value() {
 #[test]
 fn dictionary_unions_are_shallow() {
     // A key both define is an error where it is read, whether both values
-    // are dicts or one is `{}` (`dict-path-fusion`).
+    // are dicts or one is `{}` (`dict-literals-introduce-in-order`).
     let key = Key::atom_from_text("greeting");
     let nested = |inner: &str, text: &str| {
         TestExpr::Value(Value::Dict(
@@ -6553,7 +6553,7 @@ fn anno_builtin_continues_demand_after_assertions_pass() {
                 )),
                 TestExpr::Value(Value::binary_from_text("missing")),
             ),
-            // Whether the root defines the target (`dict-presence-ops`).
+            // Whether the root defines the target (`dict-empty-is-a-value`).
             singleton_expr(
                 Value::Atom(crate::core::Atom::from_key(
                     &crate::core::Key::binary_from_text("defined"),
@@ -6602,7 +6602,7 @@ fn anno_builtin_reports_failed_assertions_during_demand() {
                 )),
                 TestExpr::Value(Value::binary_from_text("foo")),
             ),
-            // Whether the root defines the target (`dict-presence-ops`).
+            // Whether the root defines the target (`dict-empty-is-a-value`).
             singleton_expr(
                 Value::Atom(crate::core::Atom::from_key(
                     &crate::core::Key::binary_from_text("defined"),
@@ -9553,7 +9553,7 @@ fn journal_conflicts_replay_a_journal_in_order() {
 
 /// `dict.default path fallback dict` is `fallback` exactly where `path` is
 /// undefined, and otherwise the value there, never forcing the fallback
-/// (`dict-presence-ops`).
+/// (`dict-empty-is-a-value`).
 #[test]
 fn dict_default_selects_its_fallback_only_for_an_undefined_path() {
     let context = isolated_test_context();

@@ -101,9 +101,10 @@ flags a step for discussion when work reaches it, not a decision.
 - [`DictSemantics_2026-10-24.md`](DictSemantics_2026-10-24.md): `dict-`
   steps revising dicts: `{}` as the empty dict rather than undefined,
   shallow union, paths fused by prefix, reads of what is undefined
-  diverging, and operations to query definedness, `.try_get` and `.del`.
+  errors, and operations to query definedness, `.try_get` and `.del`.
   Drafted 2026-10-24 at the maintainer's request, with a survey of what
-  depends on the old semantics.
+  depends on the old semantics; built 2026-10-24, through `dict-docs`
+  (`dict-empty-is-a-value`, `dict-literals-introduce-in-order`).
 - [`PollBudget_2026-10-22.md`](PollBudget_2026-10-22.md): `budget-` steps
   from an audit of how polls spend and report their budget: coarse-grained
   steps bounded only by the budget, `Yielded` renamed `BudgetExhausted`

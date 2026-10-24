@@ -890,7 +890,7 @@ fn dict_item(scope: Scope<'_, '_, '_>, item: &[Piece]) -> Parse<Term> {
         .tag_prefix_at(0)
         .is_some_and(|prefix| prefix.payload == TagPayload::Joint);
     // A parenthesized item is opaque to the literal: a dict member even
-    // where it holds a tag (`dict-path-fusion`). An expression's groups
+    // where it holds a tag (`dict-literals-introduce-in-order`). An expression's groups
     // resolve away, so the literal keeps this one.
     let grouped = matches!(item, [Piece::Group { cover, .. }]
         if matches!(scope.covers.shape(scope, *cover), Shape::Grouped));
@@ -941,7 +941,7 @@ enum LevelKind {
 
 /// A tag in an expression: `path:payload`, a path dict, or optional,
 /// `path?:payload`, a literal of its one optional member
-/// (`dict-path-fusion`).
+/// (`dict-literals-introduce-in-order`).
 fn tag_expr(path: Vec<SyntaxKeyExpr>, optional: bool, payload: SyntaxExpr) -> SyntaxExpr {
     if optional {
         SyntaxExpr::DictLiteral(vec![DictMember::Optional(path, payload)])

@@ -85,7 +85,7 @@ _module.meta.macro.env with
   .['language] = DeclaredLanguage
 ```
 
-An undefined `meta.macro.env` behaves as `{}`. `DeclaredLanguage` reflects the
+An undefined `meta.macro.env` defaults to `{}`. `DeclaredLanguage` reflects the
 file's required declaration, including extension order. For example,
 `language g0 with utf8, demo` supplies a value equivalent to:
 
@@ -100,7 +100,8 @@ Macros select values with `.env Path`:
 .env '.language.base
 ```
 
-A missing path produces `{}` under ordinary dictionary access semantics.
+A missing path reads as an error value under ordinary dictionary access
+semantics: the macro goes on, and only a reader of the value fails.
 Every original macro invocation in one declaration sees the same environment
 snapshot. `meta.macro.env` may be an adapting object; the ordinary `with`
 operation re-instantiates it after adding `language`.

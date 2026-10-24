@@ -220,7 +220,7 @@ impl RegionalAnnotationMachine {
                         );
                     };
                     // `defined` is the prior definitions' answer to whether
-                    // they define the target (`dict-presence-ops`).
+                    // they define the target (`dict-empty-is-a-value`).
                     let parsed = payload
                         .get(&*keys::NAME)
                         .zip(payload.get(&*keys::DEFINED))

@@ -2359,7 +2359,7 @@ pub enum Builtin {
     /// `DictFromEntries`.
     DictFromPairs,
     /// `dict.lookup Path Dict`: the value at `Path`, which fails where
-    /// `Path` is undefined (`dict-presence-ops`).
+    /// `Path` is undefined (`dict-empty-is-a-value`).
     DictLookup,
     /// `dict.defines Path Dict`: an effect, as comparisons answer: `.r ()`
     /// where `Path` is defined and `.fail` where it is not.
@@ -2384,7 +2384,7 @@ pub enum Builtin {
     DictUnion,
     /// `dict.introduce Path Value Dict`: `Dict` with `Value` at `Path`, an
     /// error where `Path` is already defined. It adds the dicts on the way
-    /// where absent and defers through a lazy one (`dict-path-fusion`).
+    /// where absent and defers through a lazy one (`dict-literals-introduce-in-order`).
     DictIntroduce,
     /// Compiler-private: `DictIntroduceOptional Path List Dict` introduces
     /// `V` at `Path` where `List` is `[V]`, and is `Dict` where it is `[]`:

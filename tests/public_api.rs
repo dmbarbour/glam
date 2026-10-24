@@ -107,7 +107,7 @@ fn is_empty_dict(assembler: &Assembler, value: HandleValue) -> Result<bool, glam
 }
 
 /// Whether `root` defines `path`, never evaluating what is there
-/// (`dict-presence-ops`).
+/// (`dict-empty-is-a-value`).
 fn defines(assembler: &Assembler, root: &HandleValue, path: &str) -> Result<bool, glam::Error> {
     let values = assembler.values();
     let marker = values.atom_from_text("public_api.undefined_marker");

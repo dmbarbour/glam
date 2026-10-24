@@ -37,7 +37,7 @@ pub(crate) fn complete_configured(
 }
 
 /// The configuration's `conf.cli`, or `.fail` where it is undefined
-/// (`dict-presence-ops`), a failure in it naming the path looked up.
+/// (`dict-empty-is-a-value`), a failure in it naming the path looked up.
 fn configured_cli(values: &Values, configuration: &HandleValue) -> Result<HandleValue, Error> {
     let path = values.list([values.atom_from_text("conf"), values.atom_from_text("cli")])?;
     let selected = values.apply(

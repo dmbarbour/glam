@@ -26,7 +26,7 @@ fn a_volume_is_allocated_written_and_read_through_its_handle() {
 
 #[test]
 fn a_volume_removal_prunes_what_it_empties() {
-    // `dict-presence-ops`: removing `a.b` prunes `a`, which the removal
+    // `dict-empty-is-a-value`: removing `a.b` prunes `a`, which the removal
     // left empty, and keeps `c`.
     let mut rt = runtime();
     let (pruned, kept) = rt

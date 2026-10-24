@@ -726,7 +726,7 @@ fn macro_lookup(
                     })
                     .expect("macro lookup root belongs to the lookup runtime")
             })?;
-        // An undefined path selects nothing (`dict-presence-ops`).
+        // An undefined path selects nothing (`dict-empty-is-a-value`).
         let Some(member) = member else {
             return Ok(None);
         };

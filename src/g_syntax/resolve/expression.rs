@@ -239,7 +239,7 @@ fn lower_path_dict_resolved(
 }
 
 /// A tag: `value` introduced at `path` in `{}`, kept even where it is `{}`
-/// (`dict-path-fusion`).
+/// (`dict-literals-introduce-in-order`).
 fn build_path_dict_resolved(
     _access: &RuntimeValueAccess<'_>,
     path: ResolvedExpr<Value>,
@@ -888,7 +888,7 @@ enum ResolvedDictMember {
     Dict(ResolvedExpr<Value>),
 }
 
-/// A dict literal (`dict-path-fusion`): its members introduced in written
+/// A dict literal (`dict-literals-introduce-in-order`): its members introduced in written
 /// order, the inverse of a dict pattern's takes. A literal of closed data at
 /// static paths folds here, where a conflict is an error the compiler
 /// reports; any other builds at run time, applying its members in order,
@@ -950,7 +950,7 @@ pub(in crate::g_syntax) fn lower_dict_literal_resolved(
 }
 
 /// Reports what the compiler can see conflict in a literal's static paths
-/// (`dict-path-fusion`): a path introduced twice, or a path introduced after
+/// (`dict-literals-introduce-in-order`): a path introduced twice, or a path introduced after
 /// a deeper one under it, which the literal should write first.
 fn check_static_member_order(members: &[DictMember], line: usize) -> Result<(), Diagnostic> {
     fn static_path(path: &[SyntaxKeyExpr]) -> Option<Vec<&str>> {
@@ -1665,7 +1665,7 @@ mod tests {
 
     /// A literal of closed data at static paths resolves to its dictionary,
     /// introducing its members in order, an empty dict kept as a value
-    /// (`dict-path-fusion`). The compiler reports a path introduced twice,
+    /// (`dict-literals-introduce-in-order`). The compiler reports a path introduced twice,
     /// or after a deeper one under it. Computed values build at run time,
     /// one build of all the members, not a chain as deep as the literal.
     #[test]

@@ -124,7 +124,7 @@ impl<'a> DefinitionTargetContext<'a> {
                     ))),
                 ),
                 // Whether the prior definitions define the target, never
-                // its value (`dict-presence-ops`).
+                // its value (`dict-empty-is-a-value`).
                 singleton(
                     "defined",
                     apply_builtin_resolved(

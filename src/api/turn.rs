@@ -1596,7 +1596,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// `a b -- a ∪ b`, lazily: the shallow union, a dict with both's
     /// entries, as glam's `{a, b}` is. A key both hold is an error when that
-    /// entry is forced (`dict-path-fusion`).
+    /// entry is forced (`dict-literals-introduce-in-order`).
     pub fn dict_union(&mut self) -> Result<(), Error> {
         self.rewrite_top(2, |access, items| {
             let [left, right] = <[CoreValue; 2]>::try_from(items)
@@ -2488,7 +2488,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Pushes the value at `path` in the shared heap, without evaluating
     /// it, where `path` is defined, and fails where it is not, a
-    /// [`Self::fail`] error (`dict-presence-ops`). It forces the dicts on
+    /// [`Self::fail`] error (`dict-empty-is-a-value`). It forces the dicts on
     /// the way, never the value. Within a cut, the read joins the cut's
     /// transaction, as [`Self::heap_get`]'s does, so a cut that fails on it
     /// waits for the path's definition.
@@ -2515,7 +2515,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Whether `root` defines `path`, forcing the dicts on the way and
-    /// nothing else (`dict-presence-ops`).
+    /// nothing else (`dict-empty-is-a-value`).
     fn defines(&mut self, root: &HandleValue, path: &[Key]) -> Result<bool, Error> {
         let values = self.runtime.assembler.values().clone();
         let defines = values.with_access(|scoped| {
@@ -2540,7 +2540,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Removes what is at `path` in the shared heap, pruning the dicts the
-    /// removal empties (`dict-presence-ops`). Outside a cut, the removal
+    /// removal empties (`dict-empty-is-a-value`). Outside a cut, the removal
     /// commits at once; within one, with the outermost cut. The path is not
     /// empty.
     pub fn heap_del<K: Into<Key>>(

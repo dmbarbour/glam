@@ -631,7 +631,7 @@ pub enum SyntaxExpr {
     /// A function that places its argument at one defined dictionary path.
     TaggedConstructor(Vec<SyntaxKeyExpr>),
     /// A dict literal, which introduces its members in written order, the
-    /// inverse of a dict pattern's takes (`dict-path-fusion`).
+    /// inverse of a dict pattern's takes (`dict-literals-introduce-in-order`).
     DictLiteral(Vec<DictMember>),
     List(Vec<SyntaxExpr>),
     Tuple(Vec<SyntaxExpr>),

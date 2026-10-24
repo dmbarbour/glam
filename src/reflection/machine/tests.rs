@@ -9502,7 +9502,7 @@ fn a_cut_s_resolution_commits_with_it() {
 
 #[test]
 fn try_get_answers_a_defined_path_and_fails_an_undefined_one() {
-    // `dict-presence-ops`: `.try_get` gives the value where the path is
+    // `dict-empty-is-a-value`: `.try_get` gives the value where the path is
     // defined and fails where not; `.del` removes, pruning what it empties.
     for (source, expected) in [
         (

@@ -266,7 +266,7 @@ When defining names, we'll distinguish introductions versus overrides. An introd
 
 Users refer to prior versions of names via `_name`, i.e. `_` prefix. This applies consistently across modules and objects. A local has no prior version, so `_name` is an error where a local `name` is in scope; one name has one meaning in a file, and `_name` cannot reach past the local to a definition.
 
-The compiler enforces explicit overrides by implicit assertions analogous to: `name = assert (_name == {}) Expr` or `name := assert(_name <> {}) Expr` (where `{}` is the 'undefined' value). As an escape hatch, I propose a non-observing `name ::= \ prior -> Expr`. This also serves as an in-place update, i.e. `name ::= Update`. Users have more freedom with `::=`. 
+The compiler enforces explicit overrides by implicit assertions on the prior namespace: `name = Expr` asserts that it does not define `name`, and `name := Expr` that it does. They ask only whether the path is defined, as `dict.defines` does, never reading its value, and an empty dict `{}` is a definition like any other (`dict-empty-is-a-value`). As an escape hatch, I propose a non-observing `name ::= \ prior -> Expr`. This also serves as an in-place update, i.e. `name ::= Update`. Users have more freedom with `::=`. 
 
 ### File-Private Bindings
 
@@ -344,7 +344,8 @@ is `d.tmp` while `^tmp` is the local. A using scope is thus a controlled,
 coarse-grained form of shadowing in a language that otherwise blocks it: easy
 to reason about where needed, and easily abstracted via its namespace
 argument. Within the scope, `self` is equivalent to `Dict` and `_self` is
-equivalent to `{}`.
+equivalent to `{}`, which defines nothing, so reading `_name` there is an
+error.
 Users escape to the surrounding scope just as they do for objects, via
 `^name` or `^(Expr)`, as in `write message = using api do ... ^message ...`. `Dict` needs only to provide the dictionary members that
 are actually observed; it does not need to be a valid object and gains no
@@ -893,10 +894,15 @@ constructor read in them as anywhere:
         {:foo Value}         # applies the pun foo:foo to Value
         {opt?:[x], none?:[]} # {opt:x}
 
-Reading a missing key is an error rather than `{}`. `dict.defines Path D`
-asks whether a path is defined, `dict.default Path Fallback D` reads with a
-fallback, and `dict.remove Path D` removes, pruning the dictionaries the
-removal empties (the dict semantics plan, `plans/DictSemantics_2026-10-24.md`).
+Reading a missing key is an error rather than `{}` (`dict-empty-is-a-value`).
+`dict.defines Path D` asks whether a path is defined, never reading its value,
+and answers as a comparison does, `.r ()` or `.fail`. `dict.default Path
+Fallback D` reads with a fallback, `dict.lookup Path D` reads, failing where
+undefined, `dict.insert Path Value D` writes, replacing what is there, and
+`dict.remove Path D` removes, pruning the dictionaries the removal empties, as
+insertion adds them. Dictionary equality is structural, the same keys and then
+equal values, and an atom equals the dictionary it stands for, `'tag` and
+`{tag:()}`.
 
 Multi-line literal dictionaries accept a leading comma for convenient line-editing, consistent with lists:
 
@@ -1546,7 +1552,7 @@ error rather than a prior definition.
 
 ### Anonymous Objects
 
-An anonymous object has no name, i.e. `spec.name` is explicitly left blank. Users express anonymous objects via `_` in name position, e.g. `object _ extends foo, bar with ...`. To ensure anonymous objects are intentional, we raise an error if `NameExpr` evaluates as `{}`.
+An anonymous object has no name: its `spec.name` is `{}`, the empty dict, which names nothing. Users express anonymous objects via `_` in name position, e.g. `object _ extends foo, bar with ...`. To ensure anonymous objects are intentional, we raise an error if `NameExpr` evaluates as `{}`.
 
 Anonymous objects do not fully participate in multiple inheritance: they are not deduplicated and have a simplistic merge order. They do support mixin inheritance,  always applying before named objects. To resist surprises, it's a linearization error for named objects to appear before anonymous objects in `spec.deps`. For example, in `object _ extends foo, bar`, `bar` may be anonymous only if `foo` is anonymous.
 
@@ -1561,9 +1567,11 @@ The body still constructs `spec.defs`; those definitions are applied only when
 the specification is later instantiated. Declaring abstract names or methods
 inside an ordinary object does not make that object abstract.
 
-For an anonymous abstract object, ordinary dictionary normalization may omit
-the empty `spec.name` field. Missing `spec.name` and `spec.name = {}` are
-semantically identical throughout access, instantiation, and linearization.
+An anonymous abstract object's spec names it `{}`. A spec without `name`
+takes `{}` as its default, so the two instantiate and linearize alike, though
+only the first defines `spec.name`. A spec's `deps` default to `[]` and its
+`defs` to the default definitions, and an empty spec `{}` takes all three
+defaults.
 
 For `extend Object` this is expressed as `extend abstract Object ...`. It
 composes the extension into `spec.defs` but leaves the resulting object
@@ -1621,12 +1629,13 @@ In many ways, this is more flexible than the method chaining idiom. Beyond basic
 
 Objects and dictionaries serve distinct roles. In particular, an `extends`
 expression must produce an object with a defined `spec`; a plain dictionary is
-not silently treated as a parent. This ensures that an undefined parent does
-not become an empty, no-op dictionary union.
+not silently treated as a parent. An undefined parent is an error to read,
+and a plain dictionary is rejected rather than taken as a no-op mixin.
 
 `object_from_dict Dict` explicitly constructs an anonymous object that unions 
-`Dict` into the inherited base. For the empty dictionary, this is equivalent to
-`object _`. This function diverges if `Dict` contains `spec`.
+`Dict` into the inherited base, a shallow union. For the empty dictionary,
+this is equivalent to `object _`. It fails if `Dict` defines `spec`, whatever
+its value: such a dictionary is an object already.
 
 ## Conditionals
 

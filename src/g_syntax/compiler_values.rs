@@ -950,7 +950,7 @@ fn build_reflection_scanner(
                     .collect(),
             )))
         };
-        // A namespace without `refl` launches nothing (`dict-presence-ops`).
+        // A namespace without `refl` launches nothing (`dict-empty-is-a-value`).
         let final_refl = apply_builtin(
             access,
             Builtin::DictDefault,
@@ -1086,7 +1086,7 @@ fn build_reflection_scanner(
         // The scanner takes ownership of its namespace's reflection state:
         // a second run, as user-defined syntax might spawn, logs an error
         // and halts. Whether the mark is defined decides, never its value
-        // (`dict-presence-ops`).
+        // (`dict-empty-is-a-value`).
         let scanned = locals.push_internal_binding("<reflection-scanned>");
         let mark_and_scan = effect_then(
             access,
@@ -1185,7 +1185,7 @@ fn build_reflection_annotator(
             ],
         );
         // A claim already defined means a task started; its value, a task
-        // handle, is never compared (`dict-presence-ops`).
+        // handle, is never compared (`dict-empty-is-a-value`).
         let existing = locals.push_internal_binding("<reflection-claim>");
         let already_started = effect_call(
             access,

@@ -140,7 +140,7 @@ impl Term {
 
     /// A dict literal's member: a tag or a pun is a path member, an
     /// optional tag an optional member, and any other term, a parenthesized
-    /// tag included, a dict (`dict-path-fusion`).
+    /// tag included, a dict (`dict-literals-introduce-in-order`).
     fn into_dict_member(self) -> Result<DictMember, String> {
         Ok(match self {
             Self::Tag(path, payload) => DictMember::Path(path, payload.into_expr()?),

@@ -5842,7 +5842,7 @@ struct TryTrace {
 }
 
 /// `seq value (.r value)`, the operation `.eval value` tries.
-/// `.try_get`'s work (`dict-presence-ops`): hold the value at `path` in
+/// `.try_get`'s work (`dict-empty-is-a-value`): hold the value at `path` in
 /// `root`, then run `dict.defines`, which fails where `path` is undefined
 /// and otherwise returns unit, on which the held value is delivered.
 fn try_get_work<S: TaskSpecialization>(
@@ -6282,7 +6282,7 @@ enum Request<R, V = RuntimeValueRoot> {
     HeapRewrite(V, V),
     HeapVolume,
     /// The value at a path where defined, a failure where not, and a
-    /// removal (`dict-presence-ops`).
+    /// removal (`dict-empty-is-a-value`).
     TryGet(V),
     Del(V),
     HeapTryGet(V),

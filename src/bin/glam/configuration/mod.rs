@@ -209,7 +209,7 @@ fn load(
 
 /// Replaces a fallback and the configuration with the entry the prelude
 /// selects: the configuration's value at `keys`, or the fallback where that
-/// path is undefined (`dict-presence-ops`).
+/// path is undefined (`dict-empty-is-a-value`).
 pub(super) fn select_entry(
     m: &mut Machine<'_, '_>,
     entry: &str,

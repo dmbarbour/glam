@@ -107,6 +107,11 @@ foo.bar:Data        # path-tagged data: sugar for { foo.bar:Data }
 {a:{b:1}, a.c:2}    # shallower first: {a:{b:1, c:2}}; (a.b:1) in a literal is a dict member
 {(tag:) Value, D}   # a constructor applied, as anywhere
 {:tag Value}        # applies the pun tag:tag to Value, as anywhere
+d.missing           # ERROR: reading what is undefined is an error, never {}
+dict.defines ['a,'b] d    # .r () or .fail, never reading the value
+dict.default ['a] 0 d     # d.a, or 0 where undefined
+dict.remove ['a,'b] d     # removes, pruning the dicts it empties
+{a:1} == {a:1}      # equality is structural; 'tag == {tag:()}
 {                   # multi-line: leading commas
 , name1:Expr1
 , name2:Expr2
@@ -373,6 +378,7 @@ foo <| .bar         # equivalent alternative without parentheses
 ```
 .op                 # sugar for eff:(\api -> api.op)
 .heap.get Path       # dotted effect path: eff:(\api -> api.heap.get Path)
+                     # an error value where Path is undefined
 .heap.set Path Value # blind replacement of shared heap state
 .heap.rewrite Path F # commit-ordered lazy rewrite of shared heap state
 .heap.try_get Path  # the value where defined; .fail where not (also .try_get, .vol.try_get)

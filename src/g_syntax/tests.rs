@@ -5794,7 +5794,7 @@ fn effect_then_requires_unit_result_when_observed() {
 
 #[test]
 fn dict_literals_introduce_their_members_in_order() {
-    // `dict-path-fusion`: a literal introduces its members in written order,
+    // `dict-literals-introduce-in-order`: a literal introduces its members in written order,
     // the inverse of a dict pattern's takes. Paths sharing a prefix fuse, a
     // dict member is a shallow union at the root, a parenthesized tag is a
     // dict member, and `path?:` introduces a list's one value or nothing.
@@ -5878,7 +5878,7 @@ fn dict_literals_introduce_their_members_in_order() {
 
 #[test]
 fn std_dict_path_operations_keep_an_empty_dict_as_a_value() {
-    // `dict-presence-ops`: path first, dict last; `defines` answers as
+    // `dict-empty-is-a-value`: path first, dict last; `defines` answers as
     // comparisons do; `insert` keeps `{}` as a value, and `remove` prunes
     // only the dicts it empties.
     let parsed = parse(concat!(

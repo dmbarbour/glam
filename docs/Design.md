@@ -348,14 +348,18 @@ It is very convenient to assume a standard effects API for generic extensions. P
 - `.fail` - failure for `.alt`, does not continue
 - `.cut op` - scope for `.alt`, selects first success
 - `.fix fn` - `fn` receives result as input but hides `.reset` scope
-- `.get Path` - copy data from state; default is empty dict `{}`
-- `.set Path Val` - overwrite data in state; set `{}` to erase key
+- `.get Path` - copy data from state; where `Path` is undefined, an error
+  value that only a reader of it meets, so the effect goes on
+- `.try_get Path` - the value where `Path` is defined; `.fail` where not, so
+  it composes with `.alt` and `.try`
+- `.set Path Val` - overwrite data in state; `{}` is a value like any other
+- `.del Path` - remove data from state, pruning the dicts it empties
 - `.reset Key op` - scope for delimited continuations
   - shall build upon local state to simplify modeling of coroutines
 - `.shift Key fn` - exits corresponding `.reset` with continuation 
   - continuation invalid outside current task in general usage
 
-The `Path` type for `.get/.set` is a list of keys, assuming state is a hierarchical dictionary. The empty list represents the toplevel dictionary. Some contexts may recognize other `Path` types, e.g. lenses or opaque keys.
+The `Path` type for `.get/.set` and the others is a list of keys, assuming state is a hierarchical dictionary. The empty list represents the toplevel dictionary. Some contexts may recognize other `Path` types, e.g. lenses or opaque keys.
 
 Tentative, deferred:
 

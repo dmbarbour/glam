@@ -1019,7 +1019,7 @@ fn dictionary_composition_matches_source_literals_union_and_paths() {
     for path in [["base"].as_slice(), ["added"].as_slice()] {
         assert_field(&union, "source_union", path);
     }
-    // The union is shallow: both define `nested` (`dict-path-fusion`).
+    // The union is shallow: both define `nested` (`dict-literals-introduce-in-order`).
     let source_union = access_path(&assembler, module.value(), "source_union").unwrap();
     for union in [&union, &source_union] {
         assert!(
@@ -1113,7 +1113,7 @@ fn dictionary_composition_matches_source_literals_union_and_paths() {
 
 #[test]
 fn cached_default_helpers_answer_by_path() {
-    // `dict-presence-ops`: the default and the requirement ask whether a
+    // `dict-empty-is-a-value`: the default and the requirement ask whether a
     // path is defined, never what is there, so an empty dict is a value.
     let assembler = Assembler::new();
     let values = assembler.values();
