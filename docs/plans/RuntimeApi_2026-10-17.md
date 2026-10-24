@@ -977,13 +977,24 @@ handle API goes.
           the volume they name; equality between one and any other value
           is `false`;
         - `tuple:[…]` dicts, which the tuple syntax `(a, b)` builds, order
-          lexicographically, as `Syntax.md` has it ("two tuples"): open,
-          whether tuples keep their ordering;
+          lexicographically, as `Syntax.md` has it ("two tuples"): kept,
+          tuples are the special case (maintainer, 2026-10-24);
         - values of two different comparable kinds compare unequal, and
           ordering them is an error, as `Syntax.md` has it: kept;
-        - to check: an atom against the dict it stands for.
+        - an atom never equals a dict; it should equal the dict it stands
+          for, `[key]:()` (maintainer, 2026-10-24). Unit is a primitive
+          atom, never constructed, so it stands for no dict.
+        Comparing with `{}` is no test of definedness: `{} == \x -> x` is
+        incomparable, an error (maintainer, 2026-10-24). A primitive,
+        `defined X`, takes that role, and the compiler's lowering (the
+        reflection scanner's `== {}` guards) and tests move to it.
         Tests: each incomparable kind under `==` and `<`, directly and
         within a list and a dict, answering `err` under `.try`.
+        Held (2026-10-24) behind [Dict Semantics](DictSemantics_2026-10-24.md),
+        which makes `{}` the empty dict rather than undefined, union
+        shallow, and adds the definedness operations its checks move to.
+        The incomparable arms in `eval/comparison_machine.rs` are a small
+        change, redone when it resumes.
       - `api-refl-child-tasks`: `.child.task`, `.status`, `.recover`,
         `.interrupt` and `.clear`; `.task.*` and task handles retire.
       - `api-refl-call`: `.child.call`, with a child's machine state where
