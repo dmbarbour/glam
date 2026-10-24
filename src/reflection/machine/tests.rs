@@ -6718,6 +6718,35 @@ fn effect_map_runs_left_to_right_and_preserves_result_order() {
 }
 
 #[test]
+fn an_undefined_environment_path_reads_as_an_error_value() {
+    // `.env` answers an undefined path with an error value, so the effect
+    // goes on and only a reader of the value fails (`dict-empty-is-a-value`).
+    let (assembler, effect) = compile_effect(
+        ".env ['glam,'missing] >>= (\\missing -> .r { missing:missing, went_on:\"yes\" })",
+    );
+    let host = Arc::new(TestHost::with_values(assembler.core_values()));
+    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
+    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
+        panic!("an undefined environment path should not stop the effect")
+    };
+    let value = PublicValue::from_runtime_root(*value);
+    assert_eq!(
+        assembler
+            .to_binary(&assembler.get(&value, "went_on").unwrap())
+            .unwrap(),
+        b"yes".as_slice()
+    );
+    let error = assembler
+        .get(&value, "missing")
+        .expect_err("reading the undefined path is an error");
+    let text = error
+        .diagnostic(&assembler.values())
+        .unwrap()
+        .rendered_text_for_test(&assembler.values());
+    assert!(text.contains("`glam.missing` is undefined"), "{text}");
+}
+
+#[test]
 fn reflection_environment_is_available_as_plain_data() {
     let (assembler, version) = compile_effect(".env ['glam,'version]");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
