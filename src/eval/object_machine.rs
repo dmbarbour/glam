@@ -661,7 +661,6 @@ fn classify_deps_in(
 ) -> Result<Option<Value>, EvaluationHalt> {
     match deps {
         value @ Value::List(_) => Ok(Some(value)),
-        Value::Dict(dict) if dict.is_empty() => Ok(None),
         _ => Err(EvaluationHalt::new(
             "object specification deps must evaluate to a list",
         )),

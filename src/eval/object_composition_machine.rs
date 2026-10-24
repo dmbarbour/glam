@@ -29,7 +29,6 @@ enum RegionalCompositionPhase {
         extension_defs: Value,
     },
     WithSpec {
-        object: Value,
         spec: RegionalWhnfWork,
         extension_defs: Value,
     },
@@ -162,7 +161,6 @@ impl RegionalObjectCompositionMachine {
                     ));
                 };
                 self.phase = RegionalCompositionPhase::WithSpec {
-                    object,
                     spec: RegionalWhnfWork::from_focus(access, spec)
                         .with_source_owner(self.source_owner),
                     extension_defs: access.values().duplicate_value(extension_defs),
@@ -170,7 +168,6 @@ impl RegionalObjectCompositionMachine {
                 RegionalBuiltinPoll::Continue
             }
             RegionalCompositionPhase::WithSpec {
-                object,
                 spec,
                 extension_defs,
             } => {
@@ -178,7 +175,7 @@ impl RegionalObjectCompositionMachine {
                     Ok(value) => value,
                     Err(poll) => return poll,
                 };
-                match finish_object_extension_in(access, object, &spec, extension_defs) {
+                match finish_object_extension_in(access, &spec, extension_defs) {
                     Ok(value) => RegionalBuiltinPoll::Ready(value),
                     Err(message) => regional_failure(message),
                 }
@@ -265,13 +262,10 @@ impl RegionalObjectCompositionMachine {
                 trace_compatibility_value_managed_edges(extension_defs, visitor);
             }
             RegionalCompositionPhase::WithSpec {
-                object,
                 spec,
                 extension_defs,
             } => {
-                for value in [object, extension_defs] {
-                    trace_compatibility_value_managed_edges(value, visitor);
-                }
+                trace_compatibility_value_managed_edges(extension_defs, visitor);
                 spec.trace_managed_edges(visitor);
             }
             RegionalCompositionPhase::ComposedPriorBase {
@@ -582,16 +576,12 @@ fn plain_extension_in(
 
 fn finish_object_extension_in(
     access: &EvaluationValueAccess<'_>,
-    object: &Value,
     spec: &Value,
     extension_defs: &Value,
 ) -> Result<Value, &'static str> {
     let Value::Dict(spec) = spec else {
         return Err("object instance builtin requires a specification dictionary");
     };
-    if spec.is_empty() {
-        return Ok(plain_extension_in(access, extension_defs, object));
-    }
     let name = spec
         .get(&*keys::NAME)
         .map(|value| access.values().duplicate_value(value))

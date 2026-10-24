@@ -32,10 +32,6 @@ enum ObjectPhase {
     DiagnosticMessage {
         message: RegionalWhnfWork,
     },
-    DiagnosticSpec {
-        message: Value,
-        spec: RegionalWhnfWork,
-    },
     /// `frames` is a list, and `prior` and `interface` dictionaries.
     ContextDefsPrior {
         frames: Value,
@@ -93,10 +89,6 @@ enum ObjectPhase {
     },
     FromDictValue {
         value: RegionalWhnfWork,
-    },
-    FromDictSpec {
-        value: Value,
-        spec: RegionalWhnfWork,
     },
 }
 
@@ -255,25 +247,11 @@ impl RegionalObjectBuiltinMachine {
                     Ok(spec) => spec,
                     Err(failure) => return RegionalBuiltinPoll::Failed(failure),
                 };
-                let Some(spec) = spec else {
-                    return RegionalBuiltinPoll::Ready(object_from_dict_in(access, &message));
-                };
-                self.phase = ObjectPhase::DiagnosticSpec {
-                    message,
-                    spec: regional_demand(access, spec, source_owner),
-                };
-                RegionalBuiltinPoll::Continue
-            }
-            ObjectPhase::DiagnosticSpec { message, spec } => {
-                let spec = match poll_whnf_in(access, spec, step_budget) {
-                    Ok(value) => value,
-                    Err(poll) => return poll,
-                };
-                if is_undefined_in(access, &spec) {
-                    RegionalBuiltinPoll::Ready(object_from_dict_in(access, message))
-                } else {
-                    RegionalBuiltinPoll::Ready(access.values().duplicate_value(message))
-                }
+                // A message that defines `spec` is an object already.
+                RegionalBuiltinPoll::Ready(match spec {
+                    Some(_) => message,
+                    None => object_from_dict_in(access, &message),
+                })
             }
             ObjectPhase::ContextDefsPrior { frames, prior } => {
                 let prior = match poll_whnf_in(access, prior, step_budget) {
@@ -399,9 +377,6 @@ impl RegionalObjectBuiltinMachine {
                         };
                         RegionalBuiltinPoll::Continue
                     }
-                    Value::Dict(dict) if dict.is_empty() => RegionalBuiltinPoll::Ready(
-                        local_name_in(access, std::slice::from_ref(name)),
-                    ),
                     _ => failure("object local name builtin requires a list of name parts"),
                 }
             }
@@ -469,24 +444,12 @@ impl RegionalObjectBuiltinMachine {
                     Ok(spec) => spec,
                     Err(failure) => return RegionalBuiltinPoll::Failed(failure),
                 };
-                let Some(spec) = spec else {
-                    return RegionalBuiltinPoll::Ready(instance_from_plain_dict_in(access, &value));
-                };
-                self.phase = ObjectPhase::FromDictSpec {
-                    value,
-                    spec: regional_demand(access, spec, source_owner),
-                };
-                RegionalBuiltinPoll::Continue
-            }
-            ObjectPhase::FromDictSpec { value, spec } => {
-                let spec = match poll_whnf_in(access, spec, step_budget) {
-                    Ok(value) => value,
-                    Err(poll) => return poll,
-                };
-                if is_undefined_in(access, &spec) {
-                    RegionalBuiltinPoll::Ready(instance_from_plain_dict_in(access, value))
-                } else {
-                    failure("object_from_dict requires a plain dictionary, not an object")
+                // A dict that defines `spec` is an object, not a plain dict.
+                match spec {
+                    Some(_) => {
+                        failure("object_from_dict requires a plain dictionary, not an object")
+                    }
+                    None => RegionalBuiltinPoll::Ready(instance_from_plain_dict_in(access, &value)),
                 }
             }
         }
@@ -505,14 +468,6 @@ impl ObjectPhase {
             | Self::DiagnosticMessage { message: object }
             | Self::DefaultDefs { base: object }
             | Self::FromDictValue { value: object } => object.trace_managed_edges(visitor),
-            Self::DiagnosticSpec { message, spec }
-            | Self::FromDictSpec {
-                value: message,
-                spec,
-            } => {
-                trace_compatibility_value_managed_edges(message, visitor);
-                spec.trace_managed_edges(visitor);
-            }
             Self::ContextDefsPrior { frames, prior } => {
                 trace_compatibility_value_managed_edges(frames, visitor);
                 prior.trace_managed_edges(visitor);
@@ -595,8 +550,8 @@ fn regional_demand(
 }
 
 /// `prior` with `frames` prepended to its `msg.context`: a list context
-/// follows the frames, an absent or undefined one contributes nothing, and
-/// any other value is one frame.
+/// follows the frames, an absent one contributes nothing, and any other
+/// value is one frame.
 fn finish_context_defs_in(
     access: &EvaluationValueAccess<'_>,
     frames: &Value,
@@ -611,7 +566,6 @@ fn finish_context_defs_in(
     };
     let existing = match context {
         Some(Value::List(context)) => context.clone(),
-        Some(context) if is_undefined_in(access, context) => List::empty(),
         Some(context) => List::from_values(vec![access.values().duplicate_value(context)]),
         None => List::empty(),
     };
@@ -714,9 +668,6 @@ fn optional_spec_member_in(
 
 fn finish_object_spec_in(_access: &EvaluationValueAccess<'_>, spec: Value) -> RegionalBuiltinPoll {
     match spec {
-        Value::Dict(dict) if dict.is_empty() => failure(
-            "object value requires a defined `spec`; use `object_from_dict` to convert a dictionary",
-        ),
         Value::Dict(_) => RegionalBuiltinPoll::Ready(spec),
         _ => failure("object value requires a dictionary-valued `spec`"),
     }
@@ -735,10 +686,6 @@ fn spec_name_in(
         .get(&*keys::NAME)
         .map(|value| access.values().duplicate_value(value))
         .unwrap_or_else(|| Value::Dict(Dict::new_sync())))
-}
-
-fn is_undefined_in(_access: &EvaluationValueAccess<'_>, value: &Value) -> bool {
-    matches!(value, Value::Dict(dict) if dict.is_empty())
 }
 
 fn object_from_dict_in(access: &EvaluationValueAccess<'_>, value: &Value) -> Value {

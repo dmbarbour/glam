@@ -932,7 +932,8 @@ fn recognize_annotation(
             RecognizedAnnotation::Assert(AssertionKind::Undefined, payload_value())
         }
         Some("assert_unit") => RecognizedAnnotation::AssertUnit(payload_value()),
-        _ if matches!(payload, Value::Dict(dict) if dict.is_empty()) => {
+        // `{tag:()}` is the dict the atom `'tag` stands for.
+        _ if matches!(payload, Value::Atom(atom) if *atom == crate::core::Atom::from_key(&keys::UNIT)) => {
             if let Key::Atom(atom) = tag {
                 recognize_simple_annotation(atom).unwrap_or_else(unknown)
             } else {

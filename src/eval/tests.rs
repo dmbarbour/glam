@@ -756,71 +756,37 @@ fn object_dict_defs_resume_the_dict_without_replaying_the_base() {
 }
 
 #[test]
-fn object_from_dict_resumes_a_promised_spec_without_replaying_its_dictionary() {
+fn object_from_dict_rejects_a_dict_defining_spec_without_forcing_it() {
+    // A dict that defines `spec`, whatever its value, is an object, not a
+    // plain dict (`dict-empty-is-a-value`), so the promised spec, never
+    // resolved, is never demanded.
     let (owner, observer, _executor) = same_runtime_contexts();
     let (spec, _spec_task, _spec_owner) = owner
         .task_owned_promise()
         .expect("the owner should allocate a promised specification");
-    let dictionary_demands = Arc::new(AtomicUsize::new(0));
-    let observed = Arc::clone(&dictionary_demands);
-    let values = observer.values().clone();
-    let promised_spec = spec.duplicate_for_test(&values);
-    let dictionary = Value::semantic_thunk(observer.values(), move |context| {
-        observed.fetch_add(1, Ordering::SeqCst);
-        Ok(Value::Dict(
-            Dict::new_sync()
-                .insert(
-                    (*keys::SPEC).clone(),
-                    Value::Promised(promised_spec.duplicate_for_test(context)),
-                )
-                .insert(Key::binary_from_text("answer"), n(42)),
-        ))
-    });
+    let dictionary = Value::Dict(
+        Dict::new_sync()
+            .insert(
+                (*keys::SPEC).clone(),
+                Value::Promised(spec.duplicate_for_test(observer.values())),
+            )
+            .insert(Key::binary_from_text("answer"), n(42)),
+    );
     let application = apply_values(
         &observer,
         Value::Builtin(Builtin::ObjectFromDict),
         vec![dictionary],
     )
     .expect("plain-dictionary conversion should build");
-    let Value::Lazy(application_lazy) = &application else {
-        panic!("a saturated object-from-dictionary builtin should remain lazy")
-    };
-    let application_root = application_lazy.root(observer.values());
 
-    let blocked =
+    let error =
         crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect_err_without_debug(
-                "the promised specification should suspend plain-dictionary conversion",
-            );
-    assert!(blocked.blocked_on().is_some());
-    assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
-    observer
-        .values()
-        .collect_managed_for_test()
-        .expect("the object-from-dictionary checkpoint must retain the dictionary");
-    crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-        .expect_err_without_debug("a later route must resume the exact dictionary specification");
-    assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
-    set_promise(&owner, &spec, Value::Dict(Dict::new_sync()))
-        .expect_without_debug("the specification should accept its undefined assignment");
-    observer
-        .values()
-        .collect_managed_for_test()
-        .expect("the assigned object specification must remain live beneath the checkpoint");
-
-    let Value::Dict(object) =
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&observer, &application)
-            .expect("plain-dictionary conversion should resume")
-    else {
-        panic!("plain-dictionary conversion should produce an object dictionary")
-    };
-    observer.values().assert_same_representation_for_test(
-        &object.get(&Key::binary_from_text("answer")),
-        &Some(&n(42)),
+            .expect_err_without_debug("a dict defining `spec` is no plain dict");
+    assert!(error.blocked_on().is_none(), "the spec was never demanded");
+    assert_eq!(
+        error.to_string(),
+        "object_from_dict requires a plain dictionary, not an object"
     );
-    assert!(matches!(object.get(&*keys::SPEC), Some(Value::Dict(_))));
-    assert_eq!(dictionary_demands.load(Ordering::SeqCst), 1);
-    drop(application_root);
 }
 
 struct DropSignal(Arc<AtomicBool>);
@@ -7976,6 +7942,20 @@ fn list_annotations_rebalance_and_flatten_lists() {
     context
         .values()
         .assert_same_representation_for_test(&binary, &Value::binary_from_text("Hi!"));
+
+    // `{binary:()}` is the dict the atom `'binary` stands for.
+    let binary = eval(builtin2_expr(
+        Builtin::Anno,
+        TestExpr::Value(Value::Dict(Dict::new_sync().insert(
+            Key::atom_from_text("binary"),
+            Value::Atom(crate::core::Atom::from_key(&keys::UNIT)),
+        ))),
+        TestExpr::Value(Value::List(List::from_values(vec![n(72), n(105)]))),
+    ))
+    .expect("the dict an atom stands for annotates as the atom does");
+    context
+        .values()
+        .assert_same_representation_for_test(&binary, &Value::binary_from_text("Hi"));
 
     let array = eval(builtin2_expr(
         Builtin::Anno,

@@ -120,7 +120,6 @@ impl RegionalJournalConflictsMachine {
         journal: bool,
     ) -> Result<(), RegionalBuiltinPoll> {
         match value {
-            Value::Dict(dict) if journal && dict.is_empty() => Ok(()),
             value @ Value::List(_) if journal => {
                 self.frames
                     .push(JournalFrame::Items(RegionalListFront::new_in(

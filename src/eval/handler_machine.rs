@@ -1385,11 +1385,15 @@ fn state_member_in(access: &EvaluationValueAccess<'_>, state: &Value, member: &K
 /// A run's result for one of its outcomes: a success's value with the
 /// user's state and the handler's, or a failure's states.
 fn handler_result_in(access: &EvaluationValueAccess<'_>, outcome: &Dict, success: bool) -> Value {
-    let undefined = || Value::Dict(Dict::new_sync());
-    let state = outcome
-        .get(if success { &keys::STATE } else { &keys::FAILED })
-        .map(|state| access.values().duplicate_value(state))
-        .unwrap_or_else(undefined);
+    let member = |key: &Key| {
+        outcome
+            .get(key)
+            .map(|value| access.values().duplicate_value(value))
+            .unwrap_or_else(|| {
+                super::value::undefined_path_value(access.values(), std::slice::from_ref(key))
+            })
+    };
+    let state = member(if success { &keys::STATE } else { &keys::FAILED });
     let mut result = Dict::new_sync()
         .insert(
             keys::USER.clone(),
@@ -1400,11 +1404,7 @@ fn handler_result_in(access: &EvaluationValueAccess<'_>, outcome: &Dict, success
             state_member_in(access, &state, &keys::HANDLER),
         );
     if success {
-        let value = outcome
-            .get(&keys::VALUE)
-            .map(|value| access.values().duplicate_value(value))
-            .unwrap_or_else(undefined);
-        result = result.insert(keys::VALUE.clone(), value);
+        result = result.insert(keys::VALUE.clone(), member(&keys::VALUE));
     }
     Value::Dict(result)
 }

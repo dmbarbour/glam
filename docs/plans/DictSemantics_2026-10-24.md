@@ -320,6 +320,16 @@ Slices keep the old semantics working until the last flips them.
      handlers' and parsers' decoding of their own state, and the CLI
      renderer's optional diagnostic fields, which it reads as absent where
      they fail.
+   - 6d (2026-10-24): the last places that took `{}` for absent retire. A
+     dict that defines `spec` is an object whatever the spec, so
+     `object_from_dict` rejects it and a diagnostic's conversion keeps it,
+     neither forcing the spec; an empty spec is a spec, whose members take
+     their defaults, both for `object_spec` and for `with`; `deps` must be
+     a list and an object's local name parts a list; a journal is a list;
+     a `msg.context` of `{}` is one frame. An annotation `{tag:()}`, the
+     dict the atom `'tag` stands for, is recognized as the atom is, where
+     `{tag:{}}` was. A pure handler's outcome missing a member answers the
+     undefined error value.
 7. `dict-docs` — the syntax and design docs, the agent context, and an
    ADR revising `dict-literals-compose`.
 

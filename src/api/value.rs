@@ -527,7 +527,7 @@ impl Values {
         })
     }
 
-    /// Constructs Glam's immediate empty dictionary/undefined value.
+    /// Constructs the empty dict, `{}`, a value like any other.
     pub fn empty_dict(&self) -> Value {
         self.with_access(|values| values.wrap(CoreValue::Dict(Dict::new_sync())))
     }
