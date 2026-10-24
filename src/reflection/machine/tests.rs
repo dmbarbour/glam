@@ -1278,11 +1278,13 @@ fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
         blocked,
         exit,
         terminal,
+        machine_state,
         exact_demand_route,
         hosted,
         phase_probe,
         force_unfused,
     } = task;
+    let _: &Option<RuntimeValueRoot> = machine_state;
     let _: &Option<HostedCuts<TestEffects>> = hosted;
     let _: &RuntimeValueRoot = api;
     let _ = (

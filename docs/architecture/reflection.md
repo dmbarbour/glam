@@ -343,6 +343,15 @@ volume to retry. Dropping the Rust owner does not revoke it.
   runs the effect, the turn decides which waits are outside the effect: a
   request it serves parks on a promise it resolves. A raw opaque `Value::Net` is already WHNF and is returned
   unchanged; only an explicit net-arity bridge observes its interface.
+- `.child.task Key Op` queues `Op` on a child machine of the current
+  task's machine, its task input a port named by an abstract global path,
+  and answers the promise of its result; `.child.status Key` reads
+  `'idle`, `'busy` or `'error`, observed within a cut. A task that a child's
+  queue starts runs on that child (`EvalContext::machine`), whose local
+  state the runtime's `MachineHost` keeps between tasks; any other task is
+  an anonymous root, `refl/<abstract task id>`. The finishing task claims
+  its queue item, resolves its reply, flags the machine on failure and
+  starts the next item itself (`EffectTask::finish_machine`).
 - `.task.new Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is
   updated only when the projected state changes between atoms `'launched` and

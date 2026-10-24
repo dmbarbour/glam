@@ -8,11 +8,12 @@ use crate::core::{
 use crate::diagnostic::Severity;
 use crate::evaluation::{
     EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
-    EvaluationTaskStatus, EvaluationWaitPoll, PendingReflectionTask, PendingTaskPolicy,
-    TaskStatusPublisher, TaskStatusWake,
+    EvaluationTaskStatus, EvaluationWaitPoll, MachineHost, MachineTaskOutcome,
+    PendingReflectionTask, PendingTaskPolicy, TaskMachine, TaskStatusPublisher, TaskStatusWake,
 };
 use crate::list::{ListFrontStep, ListItem};
 use crate::number::Number;
+use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
 use super::protocol::{
     CommitResult, EffectRequestSpec, RequestContext, RequestResult, SpecializationRequestInput,
@@ -38,6 +39,8 @@ pub enum ReflectionRequest {
     TaskHalt,
     TaskAcknowledgeError,
     TaskCancel,
+    ChildTask,
+    ChildStatus,
 }
 
 /// Durable interpretation state for one reusable reflection request.
@@ -57,7 +60,29 @@ enum ReflectionRequestOperation {
     TaskControl(TaskControlRequestWork),
     TaskJoin(TaskJoinRequestWork),
     TaskQuery(TaskQueryRequestWork),
+    Child(ChildRequestWork),
     Poisoned,
+}
+
+/// `.child.task Key Op` and `.child.status Key`, which convert their key
+/// first (`reflection-tasks-are-machine-tasks`).
+struct ChildRequestWork {
+    request: ChildRequest,
+    state: ChildRequestState,
+}
+
+#[derive(Clone, Copy)]
+enum ChildRequest {
+    Task,
+    Status,
+}
+
+enum ChildRequestState {
+    Start(Vec<Value>),
+    Key {
+        key: KeyConversionRequestWork,
+        operation: Option<Value>,
+    },
 }
 
 enum InspectionRequestWork {
@@ -240,6 +265,14 @@ impl ReflectionRequestWork {
                     arguments,
                 })
             }
+            ReflectionRequest::ChildTask => ReflectionRequestOperation::Child(ChildRequestWork {
+                request: ChildRequest::Task,
+                state: ChildRequestState::Start(arguments),
+            }),
+            ReflectionRequest::ChildStatus => ReflectionRequestOperation::Child(ChildRequestWork {
+                request: ChildRequest::Status,
+                state: ChildRequestState::Start(arguments),
+            }),
         };
         Self { operation }
     }
@@ -260,6 +293,74 @@ where
         let operation =
             std::mem::replace(&mut self.operation, ReflectionRequestOperation::Poisoned);
         match operation {
+            ReflectionRequestOperation::Child(ChildRequestWork {
+                request,
+                state: ChildRequestState::Start(arguments),
+            }) => {
+                assert!(
+                    input.is_none(),
+                    "new `.child.*` work cannot have demand input"
+                );
+                let name = child_request_name(request);
+                let mut arguments = arguments.into_iter();
+                let key = arguments.next().ok_or_else(|| {
+                    TaskHalt::new(format!("`{name}` received the wrong number of arguments"))
+                })?;
+                let operation = arguments.next();
+                if arguments.next().is_some()
+                    || operation.is_some() != matches!(request, ChildRequest::Task)
+                {
+                    return Err(TaskHalt::new(format!(
+                        "`{name}` received the wrong number of arguments"
+                    )));
+                }
+                self.operation = ReflectionRequestOperation::Child(ChildRequestWork {
+                    request,
+                    state: ChildRequestState::Key {
+                        key: KeyConversionRequestWork::new(key),
+                        operation,
+                    },
+                });
+                Ok(SpecializationRequestPoll::Continue)
+            }
+            ReflectionRequestOperation::Child(ChildRequestWork {
+                request,
+                state:
+                    ChildRequestState::Key {
+                        key: mut conversion,
+                        operation,
+                    },
+            }) => match conversion.poll(input, context)? {
+                PreparationPoll::Progress => {
+                    self.operation = ReflectionRequestOperation::Child(ChildRequestWork {
+                        request,
+                        state: ChildRequestState::Key {
+                            key: conversion,
+                            operation,
+                        },
+                    });
+                    Ok(SpecializationRequestPoll::Continue)
+                }
+                PreparationPoll::Demand(value) => {
+                    self.operation = ReflectionRequestOperation::Child(ChildRequestWork {
+                        request,
+                        state: ChildRequestState::Key {
+                            key: conversion,
+                            operation,
+                        },
+                    });
+                    Ok(SpecializationRequestPoll::Demand(value))
+                }
+                PreparationPoll::Ready(key) => {
+                    let result = match (request, operation) {
+                        (ChildRequest::Task, Some(operation)) => {
+                            queue_child_task(key, operation, context)?
+                        }
+                        _ => child_status(key, context)?,
+                    };
+                    Ok(SpecializationRequestPoll::Complete(result))
+                }
+            },
             ReflectionRequestOperation::Environment(EnvironmentRequestWork::Start(arguments)) => {
                 assert!(input.is_none(), "new `.env` work cannot have demand input");
                 let [path]: [Value; 1] = arguments
@@ -701,6 +802,214 @@ where
         }
     }
     Ok(())
+}
+
+fn child_request_name(request: ChildRequest) -> &'static str {
+    match request {
+        ChildRequest::Task => ".child.task",
+        ChildRequest::Status => ".child.status",
+    }
+}
+
+/// The machine a task without one runs on, as its own anonymous root for
+/// the children it tasks: under `refl`, keyed by its task id, by an abstract
+/// path that names no turn's machine (`reflection-tasks-are-machine-tasks`).
+pub(crate) fn anonymous_root(task: EvaluationTaskId) -> Vec<Key> {
+    vec![
+        Key::atom_from_text("refl"),
+        Key::abstract_global_path(["glam", "anonymous", &task.get().to_string()]),
+    ]
+}
+
+/// Whether `key` keys an anonymous root, which listings leave out.
+pub(crate) fn is_anonymous_key(key: &Key) -> bool {
+    matches!(key, Key::AbstractGlobalPath(parts)
+        if parts.len() == 3 && parts[0] == "glam" && parts[1] == "anonymous")
+}
+
+/// The child `key` of the machine the current task runs on.
+fn child_machine<S>(key: Key, context: &RequestContext<'_, S>) -> Result<Vec<Key>, TaskHalt>
+where
+    S: TaskSpecialization,
+{
+    let eval_context = context.eval_context();
+    let mut path = match eval_context.machine() {
+        Some(machine) => machine.path().to_vec(),
+        None => anonymous_root(
+            eval_context
+                .task_id()
+                .map_err(|error| TaskHalt::new(error.as_ref()))?,
+        ),
+    };
+    path.push(key);
+    Ok(path)
+}
+
+/// `.child.task Key Op`: queues `Op` on the child `Key` and answers the
+/// promise that its result fulfills or its failure breaks. The task reaches
+/// the child when the queueing commits: within a cut, with the outermost
+/// cut, and at once outside one.
+fn queue_child_task<S>(
+    key: Key,
+    operation: Value,
+    context: &mut RequestContext<'_, S>,
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let Machines(host) = context
+        .host()
+        .machines()
+        .ok_or_else(|| TaskHalt::new("`.child.task` needs a host with machines"))?;
+    let path = child_machine(key, context)?;
+    let machine = Arc::new(TaskMachine::new(Arc::from(path.clone()), host));
+    let values = context.values();
+    let promises = match context.transaction() {
+        Some(mut transaction) => transaction.store().snapshot().promises().clone(),
+        None => context.host().snapshot().store().promises().clone(),
+    };
+    let (promise, promised, resolver) = values.with_access(|scoped| {
+        let (promise, promised, resolver) = promises.allocate(scoped.runtime_access());
+        (promise, scoped.wrap(promised), scoped.wrap(resolver))
+    });
+    let task = match values.record([("op", operation), ("reply", resolver)]) {
+        Ok(task) => task,
+        Err(error) => {
+            promises.forget(promise);
+            return Err(TaskHalt::new(error.to_string()));
+        }
+    };
+    let wake = ReflectionUpdate::Wake {
+        machine,
+        context: context.eval_context().clone(),
+    };
+    let no_machines = || TaskHalt::new("`.child.task` needs a host with machines");
+    if let Some(mut transaction) = context.transaction() {
+        let journal = transaction.parts().1.reflection_journal();
+        let Some(events) = journal.events.as_mut() else {
+            promises.forget(promise);
+            return Err(no_machines());
+        };
+        events.queue_task(path, task);
+        journal.updates.push(wake);
+    } else {
+        let snapshot = context.host().snapshot();
+        let store = StoreJournal::new(snapshot.store().clone());
+        let mut journal = S::begin_journal(snapshot.extra());
+        {
+            let reflection = journal.reflection_journal();
+            let Some(events) = reflection.events.as_mut() else {
+                promises.forget(promise);
+                return Err(no_machines());
+            };
+            events.queue_task(path, task);
+            reflection.updates.push(wake);
+        }
+        // Appending to a buffer conflicts with nothing a commit validates.
+        match context
+            .host()
+            .commit(TaskCommit::new(store, snapshot.extra().clone(), journal))
+        {
+            CommitResult::Committed => context.committed(),
+            CommitResult::Conflict => {
+                return Err(TaskHalt::new("queueing a child's task conflicted"));
+            }
+            CommitResult::MissingVolume(volume) => {
+                return Err(TaskHalt::new(format!(
+                    "reflection volume {} is unavailable",
+                    volume.get()
+                )));
+            }
+            CommitResult::Closed => return Ok(RequestResult::Cancelled),
+        }
+    }
+    Ok(RequestResult::Return(promised))
+}
+
+/// `.child.status Key`: `'error` while the child is flagged, `'busy` while
+/// it holds a task, queued or running, and `'idle` otherwise. Within a cut
+/// the read is observed, so a cut that fails on it runs again when the
+/// status changes.
+fn child_status<S>(key: Key, context: &mut RequestContext<'_, S>) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    fn read(events: &mut crate::api::RuntimeEventJournal, machine: &[Key]) -> &'static str {
+        if events.machine_flagged(machine) {
+            "error"
+        } else if events.queued_tasks(machine) > 0 {
+            "busy"
+        } else {
+            "idle"
+        }
+    }
+    let machine = child_machine(key, context)?;
+    let no_machines = || TaskHalt::new("`.child.status` needs a host with machines");
+    let generation = context.transaction_generation();
+    let status = if let Some(mut transaction) = context.transaction() {
+        let events = transaction
+            .parts()
+            .1
+            .reflection_journal()
+            .events
+            .as_mut()
+            .ok_or_else(no_machines)?;
+        read(events, &machine)
+    } else {
+        let snapshot = context.host().snapshot();
+        let mut journal = S::begin_journal(snapshot.extra());
+        let events = journal
+            .reflection_journal()
+            .events
+            .as_mut()
+            .ok_or_else(no_machines)?;
+        read(events, &machine)
+    };
+    if let Some(generation) = generation {
+        context.observe_host_generation(generation);
+    }
+    Ok(RequestResult::Return(
+        context.values().atom_from_text(status),
+    ))
+}
+
+/// Starts each task the child machine runs next, from `task`, a queued
+/// `{op, reply}` record, on: a task that cannot launch fails, as a task
+/// does, and the next goes on.
+pub(super) fn launch_machine_tasks(
+    context: &EvalContext,
+    machine: &Arc<TaskMachine>,
+    mut task: Option<RuntimeValueRoot>,
+) {
+    while let Some(record) = task.take() {
+        let operation = context.values().construct_runtime_value_root(|access| {
+            match record.clone_core_with(access) {
+                CoreValue::Dict(record) => record
+                    .get(&Key::atom_from_text("op"))
+                    .map(|operation| access.duplicate_value(operation))
+                    .unwrap_or_else(|| CoreValue::Dict(Dict::new_sync())),
+                _ => CoreValue::Dict(Dict::new_sync()),
+            }
+        });
+        match context.reserve_reflection_task(operation) {
+            Ok(pending) => pending.launch_on(machine.clone()),
+            Err(reason) => {
+                let failure = RuntimeFailureRoot::new(
+                    context.values(),
+                    Arc::new(crate::core::EvaluationFailure::message(reason.as_ref())),
+                );
+                task = machine.host().finish(
+                    machine.path(),
+                    MachineTaskOutcome::Failed(failure),
+                    None,
+                );
+            }
+        }
+    }
 }
 
 fn create_task<S>(
@@ -1240,6 +1549,12 @@ enum ReflectionUpdate {
     },
     Cancel(EvaluationTaskHandle),
     AcknowledgeError(EvaluationTaskHandle),
+    /// Starts the child machine's next task, where it is idle, once the
+    /// task queued on it commits.
+    Wake {
+        machine: Arc<TaskMachine>,
+        context: EvalContext,
+    },
 }
 
 /// Transactional writes and deferred observations for reflection requests.
@@ -1295,7 +1610,7 @@ impl ReflectionJournal {
                         policy.acknowledge_error();
                     }
                 }
-                ReflectionUpdate::Launch { .. } => {}
+                ReflectionUpdate::Launch { .. } | ReflectionUpdate::Wake { .. } => {}
             }
         }
         for update in &self.updates {
@@ -1315,6 +1630,10 @@ impl ReflectionJournal {
                     if !pending_policies.contains_key(&task.id()) {
                         task.acknowledge_failure();
                     }
+                }
+                ReflectionUpdate::Wake { machine, context } => {
+                    let task = machine.host().start(machine.path());
+                    launch_machine_tasks(context, machine, task);
                 }
             }
         }
@@ -1346,7 +1665,20 @@ pub trait ReflectionServices: Send + Sync {
     fn query_writer(&self) -> Option<Arc<dyn ReflectionQueryWriter>> {
         None
     }
+
+    /// The runtime's child machines, which `.child.*` reaches: a host with
+    /// machines has them, and a test host need not
+    /// (`reflection-tasks-are-machine-tasks`).
+    #[doc(hidden)]
+    fn machines(&self) -> Option<Machines> {
+        None
+    }
 }
+
+/// A host's child machines, which only the runtime makes.
+#[doc(hidden)]
+#[derive(Clone)]
+pub struct Machines(pub(crate) Arc<dyn MachineHost>);
 
 /// Narrow runtime capability for completing protected asynchronous queries.
 #[doc(hidden)]
@@ -1446,6 +1778,18 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 ["reflection_runtime", "v0", "request", "task", "cancel"],
                 1,
                 ReflectionRequest::TaskCancel,
+            ),
+            EffectRequestSpec::at_path(
+                ["child", "task"],
+                ["reflection_runtime", "v0", "request", "child", "task"],
+                2,
+                ReflectionRequest::ChildTask,
+            ),
+            EffectRequestSpec::at_path(
+                ["child", "status"],
+                ["reflection_runtime", "v0", "request", "child", "status"],
+                1,
+                ReflectionRequest::ChildStatus,
             ),
         ])
         .collect()
@@ -1766,7 +2110,9 @@ mod tests {
             | ReflectionRequest::TaskValue
             | ReflectionRequest::TaskHalt
             | ReflectionRequest::TaskAcknowledgeError
-            | ReflectionRequest::TaskCancel => {}
+            | ReflectionRequest::TaskCancel
+            | ReflectionRequest::ChildTask
+            | ReflectionRequest::ChildStatus => {}
         }
     }
 
@@ -1778,6 +2124,10 @@ mod tests {
             }
             ReflectionUpdate::Cancel(task) | ReflectionUpdate::AcknowledgeError(task) => {
                 let _: &EvaluationTaskHandle = task;
+            }
+            ReflectionUpdate::Wake { machine, context } => {
+                let _: &Arc<TaskMachine> = machine;
+                let _: &EvalContext = context;
             }
         }
         let ReflectionJournal {
@@ -1817,6 +2167,19 @@ mod tests {
             | ReflectionRequestOperation::TaskJoin(_)
             | ReflectionRequestOperation::TaskQuery(_)
             | ReflectionRequestOperation::Poisoned => {}
+            ReflectionRequestOperation::Child(work) => {
+                let ChildRequestWork { request, state } = work;
+                let _: &ChildRequest = request;
+                match state {
+                    ChildRequestState::Start(arguments) => {
+                        let _: &Vec<Value> = arguments;
+                    }
+                    ChildRequestState::Key { key, operation } => {
+                        let _: &KeyConversionRequestWork = key;
+                        let _: &Option<Value> = operation;
+                    }
+                }
+            }
         }
     }
 

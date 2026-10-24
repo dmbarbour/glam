@@ -28,7 +28,8 @@ use crate::evaluation::{
     EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPollContext,
     EvaluationPumpOutcome, EvaluationSession, EvaluationTaskBlock, EvaluationTaskId,
     EvaluationTaskMachine, EvaluationValueAccess, EvaluationWaitPoll, EvaluatorStepContext,
-    ExactDemandRoute, ExitIntent, WhnfOwnerPoll, WorkDependency, poll_whnf_computation,
+    ExactDemandRoute, ExitIntent, MachineTaskOutcome, WhnfOwnerPoll, WorkDependency,
+    poll_whnf_computation,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -157,6 +158,10 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     blocked: Option<BlockedExecution<S>>,
     exit: Option<TaskExitState<S>>,
     terminal: Option<TaskTerminal>,
+    /// The local state the task leaves, where its top-level branch ended:
+    /// what a child machine keeps for its next task
+    /// (`reflection-tasks-are-machine-tasks`).
+    machine_state: Option<RuntimeValueRoot>,
     exact_demand_route: ExactDemandRoute,
     /// Where the task's host runs its cuts, what it tells the host.
     hosted: Option<HostedCuts<S>>,
@@ -355,9 +360,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         retain_all: bool,
         exposes_exit: bool,
     ) -> Result<Self, TaskHalt> {
+        // A task on a child machine starts from the state its last task left.
+        let state = eval_context
+            .machine()
+            .and_then(|machine| machine.local_state());
         Self::new_rooted_with_state(
             effect,
-            None,
+            state,
             specialization,
             host,
             eval_context,
@@ -454,6 +463,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             blocked: None,
             exit: None,
             terminal: None,
+            machine_state: None,
             exact_demand_route: ExactDemandRoute::default(),
             hosted: None,
             #[cfg(test)]
@@ -3683,12 +3693,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return self.handle_hosted_outcome(context, outcome, scope_depth);
         }
         match outcome {
-            BranchOutcome::Complete(value, _) => Ok(MachineStep::Terminal(TaskTerminal::Complete(
-                PublicValue::from_runtime_root(value),
-            ))),
-            BranchOutcome::Fail(_) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
-                TaskHalt::new("reflection task failed permanently"),
-            ))),
+            BranchOutcome::Complete(value, branch) => {
+                self.machine_state = Some(branch.state.clone());
+                Ok(MachineStep::Terminal(TaskTerminal::Complete(
+                    PublicValue::from_runtime_root(value),
+                )))
+            }
+            BranchOutcome::Fail(branch) => {
+                self.machine_state = Some(branch.state.clone());
+                Ok(MachineStep::Terminal(TaskTerminal::Failed(TaskHalt::new(
+                    "reflection task failed permanently",
+                ))))
+            }
             BranchOutcome::Fork(_, _) => Ok(MachineStep::Terminal(TaskTerminal::Failed(
                 TaskHalt::new("a choice forked outside every cut"),
             ))),
@@ -4516,10 +4532,69 @@ impl<S: TaskSpecialization> EffectTask<S> {
         notify_publications(wakes);
     }
 
-    /// Finishes this task through its quantum's access.
-    fn finish_in(&mut self, context: &EvaluationPollContext, terminal: TaskTerminal) {
+    /// Finishes this task through its quantum's access. A task on a child
+    /// machine first ends its machine's queued task: it resolves the task's
+    /// reply, keeps the local state the task leaves, and starts the next
+    /// queued task (`reflection-tasks-are-machine-tasks`).
+    fn finish_in(&mut self, context: &mut EvaluationPollContext, terminal: TaskTerminal) {
+        self.finish_machine(context, &terminal);
         let wakes = context.with_runtime_access(|access| self.finish(&access, terminal));
         notify_publications(wakes);
+    }
+
+    fn finish_machine(&mut self, context: &mut EvaluationPollContext, terminal: &TaskTerminal) {
+        if self.terminal.is_some() {
+            return;
+        }
+        let Some(machine) = self.eval_context.machine().cloned() else {
+            return;
+        };
+        let state = self.machine_state.take().or_else(|| self.settled_state());
+        let outcome = context.with_runtime_access(|access| match terminal {
+            TaskTerminal::Complete(value) => {
+                MachineTaskOutcome::Complete(value.clone().into_runtime_root())
+            }
+            TaskTerminal::Failed(error) => MachineTaskOutcome::Failed(
+                error
+                    .clone()
+                    .root_in(&access)
+                    .failure_root()
+                    .cloned()
+                    .unwrap_or_else(|| {
+                        access.root_runtime_failure(Arc::new(EvaluationFailure::message(
+                            error.to_string(),
+                        )))
+                    }),
+            ),
+            TaskTerminal::Cancelled => MachineTaskOutcome::Failed(access.root_runtime_failure(
+                Arc::new(EvaluationFailure::message("the task was cancelled")),
+            )),
+        });
+        let eval_context = self.eval_context.clone();
+        // The host commits, and the next task launches, with no mutator held.
+        context.suspend(|| {
+            let next = machine.host().finish(machine.path(), outcome, state);
+            super::requests::launch_machine_tasks(&eval_context, &machine, next);
+        });
+    }
+
+    /// The local state a failing task leaves on its machine: the state before
+    /// its outermost cut, which the failure undoes, as a turn's cut restores
+    /// its machine's, or else the failing branch's.
+    fn settled_state(&self) -> Option<RuntimeValueRoot> {
+        if let Some(frame) = self.execution.cuts.first() {
+            return Some(frame.outer.state.clone());
+        }
+        let execution = &self.execution;
+        execution
+            .controlling
+            .as_ref()
+            .map(|work| &work.branch)
+            .or_else(|| execution.specializing.as_ref().map(|work| &work.branch))
+            .or_else(|| execution.demanding.as_ref().map(|work| &work.branch))
+            .or_else(|| execution.pathing.as_ref().map(|work| &work.branch))
+            .or_else(|| execution.decoding.as_ref().map(|work| &work.branch))
+            .map(|branch| branch.state.clone())
     }
 
     /// Finishes this task through its driver's mutator.

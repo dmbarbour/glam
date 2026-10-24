@@ -2387,3 +2387,67 @@ fn reasoning_failure_acknowledgement_is_idempotent_and_runtime_bound() {
             if error.to_string() == "public reasoning failure"
     ));
 }
+
+/// Runs each of `names`, annotation tasks that write text to the heap under
+/// their own names, then drains reflection and returns the heap's texts.
+fn run_reflection_texts(source: &str, names: &[&str]) -> Vec<String> {
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["child_tasks"])
+        .script("g", source)
+        .build()
+        .expect("the child task fixture should compile");
+    for name in names {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    let _ = assembler.drain_reasoning();
+    let heap = assembler.test_reflection_heap();
+    names
+        .iter()
+        .map(|name| {
+            let text = assembler
+                .get(&heap, name)
+                .unwrap_or_else(|error| panic!("{name} wrote nothing: {error}"));
+            String::from_utf8_lossy(&assembler.to_binary(&text).unwrap()).into_owned()
+        })
+        .collect()
+}
+
+#[test]
+fn child_tasks_queue_in_order_and_keep_their_machine_s_state() {
+    // `reflection-tasks-are-machine-tasks`: `.child.task` queues a task on a
+    // child machine and answers the promise of its result; the child runs
+    // its tasks one at a time, in order, its local state persisting between
+    // them. A failure breaks the task's promise and flags the child; a
+    // status is `'idle`, `'busy` while a task is queued or running, and
+    // `'error` while flagged.
+    let source = r#"language g0
+import 'std
+queued = anno refl:(.child.task 'a (.set ['n] 41) >>= (\_ -> .child.task 'a (.get ['n] >>= (\n -> .r (n + 1))) >>= (\p -> seq p (.heap.set ['queued] (if p == 42 then "answered" else "wrong"))))) ()
+failed = anno refl:(.child.task 'b (1 / 0) >>= (\p -> .try (seq p (.r ())) >>= (\r -> .child.status 'b >>= (\s -> .heap.set ['failed] (if dict.defines ['err] r then (if s == 'error then "flagged" else "unflagged") else "unbroken"))))) ()
+ordered = anno refl:(.heap.set ['log] [] =>> .child.task 'o (.heap.rewrite ['log] (\l -> l ++ ["first"])) >>= (\_ -> .child.task 'o (.heap.rewrite ['log] (\l -> l ++ ["second"])) >>= (\p -> seq p (.heap.get ['log] >>= (\log -> .heap.set ['ordered] (if log == ["first", "second"] then "in order" else "out of order")))))) ()
+statuses = anno refl:(.child.status 'untouched >>= (\idle -> .child.task 'c (.cut (.heap.try_get ['gate])) >>= (\p -> .child.status 'c >>= (\busy -> .heap.set ['gate] 7 =>> seq p (.child.status 'c >>= (\after -> .heap.set ['statuses] (if [idle, busy, after, p] == ['idle, 'busy, 'idle, 7] then "tracked" else "untracked"))))))) ()
+"#;
+    assert_eq!(
+        run_reflection_texts(source, &["queued", "failed", "ordered", "statuses"]),
+        ["answered", "flagged", "in order", "tracked"]
+    );
+}
+
+#[test]
+fn a_task_queued_within_a_cut_reaches_its_child_when_the_cut_commits() {
+    // A failed cut's task never reaches its child. Awaiting a task's promise
+    // within the cut that queued it can only wait, so the cut drops the
+    // promise with `>>=`, not `=>>`, which requires and so awaits unit.
+    let source = r#"language g0
+import 'std
+undone = anno refl:(.alt (.cut (.child.task 'a (.heap.set ['ran] "undone task") >>= (\_ -> .fail))) (.r ()) =>> .child.task 'a (.r ()) >>= (\p -> seq p (.alt (.heap.try_get ['ran] =>> .heap.set ['undone] "ran") (.heap.set ['undone] "never ran")))) ()
+committed = anno refl:(.cut (.child.task 'b (.r "committed")) >>= (\p -> seq p (.heap.set ['committed] p))) ()
+"#;
+    assert_eq!(
+        run_reflection_texts(source, &["undone", "committed"]),
+        ["never ran", "committed"]
+    );
+}

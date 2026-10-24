@@ -28,8 +28,10 @@ use crate::runtime::{
 };
 
 mod events;
+mod flags;
 #[cfg(test)]
 mod gc_activity_inventory;
+mod machines;
 mod ports;
 mod readiness;
 mod shares;
@@ -212,6 +214,9 @@ pub(crate) struct RuntimeSharedResources {
     /// they bind, as they do once a `Runtime` holds the runtime
     /// (`machines-inherit-an-environment`).
     machine_environment: AtomicBool,
+    /// The child machines' local state, and whether a task runs on each
+    /// (`reflection-tasks-are-machine-tasks`).
+    machines: machines::MachineCells,
     /// Runs once, at the next fulfillment, before it publishes anything, for
     /// ordering tests.
     #[cfg(test)]
@@ -813,6 +818,7 @@ impl EvaluationRuntime {
             mutation_admission,
             work: Arc::downgrade(&work),
             machine_environment: AtomicBool::new(false),
+            machines: machines::MachineCells::default(),
             #[cfg(test)]
             before_fulfillment: Mutex::new(None),
         });
@@ -1915,6 +1921,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
             mutation_admission,
             work: Arc::downgrade(&work),
             machine_environment: AtomicBool::new(false),
+            machines: machines::MachineCells::default(),
             #[cfg(test)]
             before_fulfillment: Mutex::new(None),
         });

@@ -144,6 +144,29 @@ and control flow.
 
 ## Child Tasks and Evaluation
 
+- `.child.task Key Op` queues `Op` on the child machine `Key` of the
+  current task's machine and answers the promise its result fulfills or
+  its failure breaks (`reflection-tasks-are-machine-tasks`). A task queued
+  from a child's queue runs on that child; any other task is an anonymous
+  root, `refl/<abstract task id>`, left out of listings. The queue is the
+  child's task input, a port named by an abstract global path: the task
+  reaches the child when the queueing commits, so a cut that awaits the
+  promise of a task it queued, as `=>>` does by requiring unit, can only
+  wait. A child runs its tasks one at a time, in order; its local state
+  persists from task to task, taken when a task starts and written back
+  when it ends (the state before the outermost cut, where a failure
+  undoes one). A failure claims the task, breaks its reply and flags the
+  machine in one commit, and the queue stops.
+- `.child.status Key` reads `'error` while the child is flagged, `'busy`
+  while its task input holds a task, queued or running (the head stays in
+  the buffer until it finishes), and `'idle` otherwise. Within a cut the
+  read is observed, so a failed cut waits for the status to change.
+- The runtime's `MachineHost` (`api/runtime/machines.rs`) keeps each
+  child's local state and running bit; its task input and flag lie in the
+  transactional event state (`api/runtime/flags.rs`), whose journal
+  validates the flags it read. A queued task's launch is a commit-time
+  `ReflectionUpdate::Wake`; a finishing task starts the next itself.
+
 - `.task.new` reserves an opaque handle and a private transactional status
   query, but journals launch inside a transaction. Losing branches discard
   both. The query stores atoms `'launched` or `'blocked`, terminal tagged values

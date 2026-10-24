@@ -220,6 +220,10 @@ impl TaskEnvironment for AssemblerReflectionHost {
 }
 
 impl ReflectionServices for AssemblerReflectionHost {
+    fn machines(&self) -> Option<crate::reflection::Machines> {
+        Some(crate::reflection::Machines(self.resources.clone()))
+    }
+
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.diagnostics.publish_local(diagnostic);
     }

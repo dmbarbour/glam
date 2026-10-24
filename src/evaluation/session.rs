@@ -18,6 +18,8 @@ use crate::core::{
 use crate::core_net::CoreWaitToken;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
+use super::task_machine::TaskMachine;
+
 use super::coordinator::{
     CausalChildSelection, ClientDemandHandle, ClientDemandOperation, ClientDemandResult,
     ClientDemandSink, ClientDemandSnapshot, CoordinatorWaiterClass, CoordinatorWaiterOutcome,
@@ -179,6 +181,7 @@ impl ReflectionTaskActivationPermit {
                 launch_parent: None,
                 status_publisher: None,
                 error_acknowledged: false,
+                machine: None,
             },
         );
     }
@@ -214,11 +217,34 @@ struct ReflectionLaunchPolicy {
     launch_parent: Option<EvaluationTaskId>,
     status_publisher: Option<TaskStatusPublisher>,
     error_acknowledged: bool,
+    /// The child machine the task runs on, where a queue started it.
+    machine: Option<Arc<TaskMachine>>,
 }
 
 impl PendingReflectionTask {
     pub(crate) fn handle(&self) -> &EvaluationTaskHandle {
         &self.inner.handle
+    }
+
+    /// Launches the task on `machine`, a child whose queue started it
+    /// (`reflection-tasks-are-machine-tasks`). Its failure flags the machine
+    /// and breaks its reply, so it never joins the failure ledger.
+    pub(crate) fn launch_on(&self, machine: Arc<TaskMachine>) {
+        if self.inner.activated.swap(true, Ordering::AcqRel) {
+            return;
+        }
+        self.inner.context.activate_reflection_task(
+            &self.inner.handle,
+            &self.inner.effect,
+            ReflectionTaskResultPolicy::ReturnValue,
+            self.inner.context.task_profile.clone(),
+            ReflectionLaunchPolicy {
+                launch_parent: Some(self.inner.launch_parent),
+                status_publisher: None,
+                error_acknowledged: true,
+                machine: Some(machine),
+            },
+        );
     }
 
     pub(crate) fn commit(&self, publisher: TaskStatusPublisher, policy: PendingTaskPolicy) {
@@ -236,6 +262,7 @@ impl PendingReflectionTask {
                         launch_parent: Some(self.inner.launch_parent),
                         status_publisher: Some(publisher),
                         error_acknowledged: policy.acknowledges_error(),
+                        machine: None,
                     },
                 );
             }
@@ -484,6 +511,9 @@ pub(crate) struct EvalContext {
     scheduled_task: bool,
     retry_observed_client_no_progress: bool,
     originating_task: Option<EvaluationTaskId>,
+    /// The child machine a queued task runs on; a task without one is an
+    /// anonymous root (`reflection-tasks-are-machine-tasks`).
+    machine: Option<Arc<TaskMachine>>,
     #[cfg(test)]
     claimed_task_wait_probe: Option<std::sync::mpsc::Sender<()>>,
     #[cfg(test)]
@@ -568,6 +598,7 @@ impl EvalContext {
             scheduled_task: false,
             retry_observed_client_no_progress: false,
             originating_task: None,
+            machine: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
             #[cfg(test)]
@@ -601,6 +632,7 @@ impl EvalContext {
             scheduled_task: false,
             retry_observed_client_no_progress: false,
             originating_task: None,
+            machine: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
             #[cfg(test)]
@@ -621,6 +653,7 @@ impl EvalContext {
             scheduled_task: false,
             retry_observed_client_no_progress: false,
             originating_task: None,
+            machine: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
             #[cfg(test)]
@@ -647,6 +680,7 @@ impl EvalContext {
             scheduled_task: true,
             retry_observed_client_no_progress: false,
             originating_task,
+            machine: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
             #[cfg(test)]
@@ -675,6 +709,7 @@ impl EvalContext {
             scheduled_task: false,
             retry_observed_client_no_progress: false,
             originating_task: None,
+            machine: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
             #[cfg(test)]
@@ -711,6 +746,7 @@ impl EvalContext {
             scheduled_task: true,
             retry_observed_client_no_progress: false,
             originating_task: Some(id),
+            machine: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
             #[cfg(test)]
@@ -738,6 +774,7 @@ impl EvalContext {
             scheduled_task: true,
             retry_observed_client_no_progress: false,
             originating_task,
+            machine: None,
             #[cfg(test)]
             claimed_task_wait_probe: None,
             #[cfg(test)]
@@ -806,6 +843,18 @@ impl EvalContext {
 
     /// Gives a directly driven effect task a private promise inventory.
     /// Scheduled task contexts use their coordinator work record instead.
+    /// This context on `machine`, the child machine a queued task runs on.
+    fn with_machine(mut self, machine: Option<Arc<TaskMachine>>) -> Self {
+        self.machine = machine;
+        self
+    }
+
+    /// The child machine this task runs on, where a queue started it; a task
+    /// without one is an anonymous root (`reflection-tasks-are-machine-tasks`).
+    pub(crate) fn machine(&self) -> Option<&Arc<TaskMachine>> {
+        self.machine.as_ref()
+    }
+
     pub(crate) fn for_effect_task(mut self) -> Self {
         if !self.scheduled_task && self.local_promise_owner.is_none() {
             self.local_promise_owner = Some(Arc::new(LocalPromiseOwner::default()));
@@ -1699,6 +1748,7 @@ impl EvalContext {
             scheduled_task: false,
             retry_observed_client_no_progress: false,
             originating_task: None,
+            machine: None,
             claimed_task_wait_probe: None,
             deferred_pump_pause: None,
             observed_progress_wait_barrier: None,
@@ -1938,7 +1988,8 @@ impl EvalContext {
                 crate::core::assert_outside_mutator();
                 let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     launcher.build(
-                        Self::for_task(self.session.clone(), handle.id(), task_profile.clone()),
+                        Self::for_task(self.session.clone(), handle.id(), task_profile.clone())
+                            .with_machine(activation.machine.clone()),
                         effect.clone(),
                         result_policy,
                     )

@@ -67,6 +67,7 @@ Each with tests, the full gate, and a commit.
    does; a task's port reads are observed, so a cut that read too few
    waits for arrivals. The groundwork of `api-refl-ports`, whose `.port.*`
    effects can follow on it.
+   Built 2026-10-24.
 2. `child-task-machines` — anonymous roots and the machines below them: a
    reflection task runs on a machine path, annotation tasks on anonymous
    roots `refl/<n>`, `n` a `NonZeroU64`, whose local state clears when
@@ -83,6 +84,23 @@ Each with tests, the full gate, and a commit.
    otherwise) is an observed read that wakes a cut when it changes. A
    task's result fulfills its reply; a failure breaks it, flags the
    machine, and stops the queue.
+   Slices 2 and 3 built together, 2026-10-24: every task without a machine
+   is an anonymous root keyed by its task id (`anonymous_root`), so
+   annotation and `.task.new` tasks task children without a change to
+   their activation; only a task a child's queue starts carries a
+   `TaskMachine`. The runtime's `MachineHost` keeps local state and a
+   running bit per child; flags are a record in the event state whose
+   journal validates its reads, as the share record's store values do for
+   shares. A queued task starts at the commit that queued it (a
+   `ReflectionUpdate::Wake`) and the finishing task starts the next, both
+   outside the mutator; a failing task's state is the one before its
+   outermost cut. A child's failures are acknowledged at launch, so they
+   never reach the failure ledger, and reports of flagged machines wait for
+   `child-task-migration`. Not yet: a child task that panics leaves its
+   item queued and its machine running; interrupts and clearing come with
+   `child-task-control`. Tests: queueing, state between tasks, order,
+   failure flags, status through a gated task, a failed cut's task never
+   running, one task at a time (driven directly), and listings.
 4. `child-task-control` — `.child.recover` (clear the flag and the queue,
    breaking the queued replies with "recovered before it ran"),
    `.child.interrupt Key Reason` (cancel the running task, break its reply

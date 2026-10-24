@@ -2752,7 +2752,11 @@ maps the short names used here to file names.
     abstract numbers; provenance is the front end's to add to the task's
     environment, as reflection boundaries and their claims are its tasks'
     behavior. When its task ends, an annotation machine's local state is
-    cleared, and its children remain.
+    cleared, and its children remain. (Clarified by the maintainer,
+    2026-10-24: each anonymous reflection task is its own root for child
+    tasks, unnamed in listings, unrecoverable and never joined, so no turn
+    reaches the machines below it; `api-refl-child-tasks` keys it by its
+    task id.)
   - Reflection is annotation tasks with their descendants, and the
     configured logger (later the IDE), whose fork's turn runs `conf.log`
     as an effect with the same operations. Macro expansion, `conf.cli` and

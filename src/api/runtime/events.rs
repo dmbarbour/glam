@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
+use super::flags::{FlagJournal, FlagRecord};
 use super::ports::{IMPORTS, PortAddress, PortJournal, PortState};
 use super::shares::{ShareJournal, ShareRecord};
 use super::{RuntimeSharedResources, publish_runtime_observation};
@@ -180,6 +181,8 @@ pub(in crate::api) struct RuntimeEventState {
     pub(in crate::api) ports: PortState,
     /// Which machines have a share of their environment.
     pub(in crate::api) shares: ShareRecord,
+    /// Which child machines are flagged, in error.
+    pub(in crate::api) flags: FlagRecord,
 }
 
 impl RuntimeEventState {
@@ -190,6 +193,7 @@ impl RuntimeEventState {
             diagnostic_routes: BTreeMap::new(),
             ports: PortState::new(),
             shares: ShareRecord::new(),
+            flags: FlagRecord::new(),
         }
     }
 
@@ -199,6 +203,7 @@ impl RuntimeEventState {
             inputs: self.inputs.clone(),
             ports: self.ports.clone(),
             shares: self.shares.clone(),
+            flags: self.flags.clone(),
         }
     }
 
@@ -233,6 +238,7 @@ impl RuntimeEventState {
                     && !self.outputs.accepted.contains(&intent.delivery)
             })
             && self.ports.validate(&journal.ports)
+            && self.flags.validate(&journal.flags)
     }
 
     pub(super) fn commit_validated(&mut self, journal: &RuntimeEventJournal) -> bool {
@@ -282,7 +288,12 @@ impl RuntimeEventState {
         }
         let ports_changed = self.ports.commit(&journal.ports);
         let shares_changed = self.shares.commit(&journal.shares);
-        input_changed || !journal.outputs.is_empty() || ports_changed || shares_changed
+        let flags_changed = self.flags.commit(&journal.flags);
+        input_changed
+            || !journal.outputs.is_empty()
+            || ports_changed
+            || shares_changed
+            || flags_changed
     }
 
     fn admit_input(
@@ -320,6 +331,7 @@ pub struct RuntimeEventSnapshot {
     pub(in crate::api) inputs: RedBlackTreeMapSync<RuntimeInputEndpointId, Arc<RuntimeInputBuffer>>,
     pub(in crate::api) ports: PortState,
     pub(in crate::api) shares: ShareRecord,
+    pub(in crate::api) flags: FlagRecord,
 }
 
 #[derive(Clone)]
@@ -349,6 +361,8 @@ pub struct RuntimeEventJournal {
     pub(in crate::api) ports: PortJournal,
     /// Which machines this transaction gave a share, or took one from.
     pub(in crate::api) shares: ShareJournal,
+    /// Which child machines' flags this transaction read or changed.
+    pub(in crate::api) flags: FlagJournal,
 }
 
 impl RuntimeEventJournal {
@@ -356,6 +370,7 @@ impl RuntimeEventJournal {
     pub fn new(snapshot: RuntimeEventSnapshot) -> Self {
         let ports = PortJournal::new(snapshot.ports.clone());
         let shares = ShareJournal::new(&snapshot.shares);
+        let flags = FlagJournal::new(&snapshot.flags);
         Self {
             runtime: snapshot.runtime,
             snapshot,
@@ -364,14 +379,36 @@ impl RuntimeEventJournal {
             outputs: Vec::new(),
             ports,
             shares,
+            flags,
         }
     }
 
+    /// Queues `task`, an `{op, reply}` record, on the child machine at
+    /// `machine`, appending it to the machine's task input when this journal
+    /// commits (`reflection-tasks-are-machine-tasks`).
+    pub(crate) fn queue_task(&mut self, machine: Vec<Key>, task: Value) {
+        self.ports.append(task_address(machine), task);
+    }
+
+    /// How many tasks the child machine at `machine` holds, queued or
+    /// running, observing its task input's end.
+    pub(crate) fn queued_tasks(&mut self, machine: &[Key]) -> usize {
+        self.ports.available(&task_address(machine.to_vec()))
+    }
+
+    /// Whether the child machine at `machine` is flagged, observing it.
+    pub(crate) fn machine_flagged(&mut self, machine: &[Key]) -> bool {
+        self.flags.read(machine)
+    }
+
     /// The machines below `machine` that hold state here: port state, or a
-    /// share of their environment.
+    /// share of their environment. Anonymous roots, and the child machines
+    /// below them, are left out: they are unnamed in listings
+    /// (`reflection-tasks-are-machine-tasks`).
     pub(in crate::api) fn present_below(&self, machine: &[Key]) -> BTreeSet<Vec<Key>> {
         let mut present = self.ports.present_below(machine);
         present.extend(self.shares.set_below(machine));
+        present.retain(|path| !path.iter().any(crate::reflection::is_anonymous_key));
         present
     }
 
@@ -1005,5 +1042,18 @@ pub(super) fn runtime_delivery_failure_snapshot(
     RuntimeDeliveryFailureSnapshot {
         runtime: resources.id,
         failures,
+    }
+}
+
+/// The input on which a child machine's tasks queue, named by an abstract
+/// global path no turn's port shares (`reflection-tasks-are-machine-tasks`).
+pub(in crate::api) static TASKS: std::sync::LazyLock<Key> =
+    std::sync::LazyLock::new(|| Key::abstract_global_path(["glam", "machine", "tasks"]));
+
+/// The task input of the child machine at `machine`.
+pub(in crate::api) fn task_address(machine: Vec<Key>) -> PortAddress {
+    PortAddress {
+        machine,
+        port: TASKS.clone(),
     }
 }

@@ -180,6 +180,13 @@ impl PortState {
     }
 
     /// Applies a validated journal, returning whether anything changed.
+    /// The first item the buffer at `address` holds, as committed.
+    pub(in crate::api) fn head(&self, address: &PortAddress) -> Option<RuntimeValueRoot> {
+        self.buffers
+            .get(address)
+            .and_then(|buffer| buffer.items.front().cloned())
+    }
+
     pub(in crate::api) fn commit(&mut self, journal: &PortJournal) -> bool {
         let mut changed = false;
         for (address, cursor) in &journal.cursors {

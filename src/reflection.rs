@@ -42,12 +42,15 @@ pub use search::{
 pub use token_parse::{TokenCandidate, TokenExpectation, TokenRun, run_token_parser};
 
 #[cfg(test)]
+pub(crate) use requests::anonymous_root;
+#[cfg(test)]
 pub(crate) use requests::assert_task_handle_family_shape;
+pub(crate) use requests::is_anonymous_key;
 #[cfg(test)]
 pub(crate) use requests::task_status_public_value_for_test;
 pub(crate) use requests::{KeyListRequestWork, PreparationPoll, parse_evaluated_severity};
 pub use requests::{
-    ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
+    Machines, ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
     ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionTransaction,
     environment_diagnostic_request_specs, reflection_request_specs,
 };
