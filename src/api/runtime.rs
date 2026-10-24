@@ -44,6 +44,7 @@ pub(in crate::api) use events::{
     RuntimePreparedInput, admit_runtime_request, register_runtime_diagnostic_route,
     route_runtime_diagnostic_guarded,
 };
+pub(crate) use machines::{break_replies, clear_child_machines, machine_diagnostic};
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire, WireEnd};
 pub use readiness::*;
 use readiness::{

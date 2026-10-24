@@ -161,11 +161,26 @@ and control flow.
   while its task input holds a task, queued or running (the head stays in
   the buffer until it finishes), and `'idle` otherwise. Within a cut the
   read is observed, so a failed cut waits for the status to change.
+- `.child.interrupt Key Reason` takes the running task (the head of an
+  unflagged queue), breaks its reply with `Reason` and flags the child;
+  `.child.recover Key` clears a flagged child's flag and queue, breaking
+  the dropped replies; `.child.clear Key` empties the child and its
+  descendants as a turn's clear does, breaking every reply it drops. Each
+  is a transactional edit, and does nothing where there is nothing to
+  act on. Recovery and clearing observe a queue's end, so a task queued
+  meanwhile conflicts.
 - The runtime's `MachineHost` (`api/runtime/machines.rs`) keeps each
-  child's local state and running bit; its task input and flag lie in the
-  transactional event state (`api/runtime/flags.rs`), whose journal
-  validates the flags it read. A queued task's launch is a commit-time
-  `ReflectionUpdate::Wake`; a finishing task starts the next itself.
+  child's local state and its run, named by the sequence of the running
+  task's item in the queue (`TaskMachine::sequence`); its task input and
+  flag lie in the transactional event state (`api/runtime/flags.rs`),
+  whose journal validates the flags it read. A queued task's launch is a
+  commit-time `ReflectionUpdate::Wake`; a finishing task starts the next
+  itself. An interrupt or a clear stops the run at commit
+  (`ReflectionUpdate::Interrupt`, `Clear`): the stopped task's end claims
+  nothing, since the item is gone, and the machine runs nothing else until
+  it ends. Every way a task on a machine ends, teardown cancellation
+  included, ends its run (`MachineRunEnd`); a panic, or a task its session
+  abandons as it closes, does not yet.
 
 - `.task.new` reserves an opaque handle and a private transactional status
   query, but journals launch inside a transaction. Losing branches discard

@@ -882,6 +882,11 @@ impl<S: TaskSpecialization> TransactionContext<'_, S> {
     pub(crate) fn store(&mut self) -> &mut StoreJournal {
         &mut self.transaction.store
     }
+
+    /// The store journal and the specialization's journal, together.
+    pub(crate) fn journals(&mut self) -> (&mut StoreJournal, &mut S::Journal) {
+        (&mut self.transaction.store, &mut self.transaction.journal)
+    }
 }
 
 pub(super) fn request_value(

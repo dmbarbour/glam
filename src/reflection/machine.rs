@@ -28,7 +28,7 @@ use crate::evaluation::{
     EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPollContext,
     EvaluationPumpOutcome, EvaluationSession, EvaluationTaskBlock, EvaluationTaskId,
     EvaluationTaskMachine, EvaluationValueAccess, EvaluationWaitPoll, EvaluatorStepContext,
-    ExactDemandRoute, ExitIntent, MachineTaskOutcome, WhnfOwnerPoll, WorkDependency,
+    ExactDemandRoute, ExitIntent, MachineTaskOutcome, TaskMachine, WhnfOwnerPoll, WorkDependency,
     poll_whnf_computation,
 };
 use crate::interaction_net::NetBuilder;
@@ -4524,40 +4524,55 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.work = work;
     }
 
-    /// Cancels this task from teardown, outside any mutator.
+    /// Cancels this task from teardown, outside any mutator. A task on a
+    /// child machine ends its run, as `finish_in` does.
     pub(super) fn cancel(&mut self) {
         let values = self.eval_context.values().clone();
+        let run = values
+            .with_boundary_access(|access| self.machine_run_end(&access, &TaskTerminal::Cancelled));
+        if let Some(run) = run {
+            run.finish();
+        }
         let wakes =
             values.with_boundary_access(|access| self.finish(&access, TaskTerminal::Cancelled));
         notify_publications(wakes);
     }
 
     /// Finishes this task through its quantum's access. A task on a child
-    /// machine first ends its machine's queued task: it resolves the task's
-    /// reply, keeps the local state the task leaves, and starts the next
-    /// queued task (`reflection-tasks-are-machine-tasks`).
+    /// machine first ends its run: the host resolves the task's reply, keeps
+    /// the local state the task leaves, and starts the next queued task
+    /// (`reflection-tasks-are-machine-tasks`).
     fn finish_in(&mut self, context: &mut EvaluationPollContext, terminal: TaskTerminal) {
-        self.finish_machine(context, &terminal);
+        let run = context.with_runtime_access(|access| self.machine_run_end(&access, &terminal));
+        if let Some(run) = run {
+            // The host commits, and the next task launches, with no mutator
+            // held.
+            context.suspend(|| run.finish());
+        }
         let wakes = context.with_runtime_access(|access| self.finish(&access, terminal));
         notify_publications(wakes);
     }
 
-    fn finish_machine(&mut self, context: &mut EvaluationPollContext, terminal: &TaskTerminal) {
+    /// How this task's run on its child machine ends, where it has one and
+    /// has not finished.
+    fn machine_run_end(
+        &mut self,
+        access: &RuntimeValueAccess<'_>,
+        terminal: &TaskTerminal,
+    ) -> Option<MachineRunEnd> {
         if self.terminal.is_some() {
-            return;
+            return None;
         }
-        let Some(machine) = self.eval_context.machine().cloned() else {
-            return;
-        };
+        let machine = self.eval_context.machine().cloned()?;
         let state = self.machine_state.take().or_else(|| self.settled_state());
-        let outcome = context.with_runtime_access(|access| match terminal {
+        let outcome = match terminal {
             TaskTerminal::Complete(value) => {
                 MachineTaskOutcome::Complete(value.clone().into_runtime_root())
             }
             TaskTerminal::Failed(error) => MachineTaskOutcome::Failed(
                 error
                     .clone()
-                    .root_in(&access)
+                    .root_in(access)
                     .failure_root()
                     .cloned()
                     .unwrap_or_else(|| {
@@ -4569,13 +4584,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
             TaskTerminal::Cancelled => MachineTaskOutcome::Failed(access.root_runtime_failure(
                 Arc::new(EvaluationFailure::message("the task was cancelled")),
             )),
-        });
-        let eval_context = self.eval_context.clone();
-        // The host commits, and the next task launches, with no mutator held.
-        context.suspend(|| {
-            let next = machine.host().finish(machine.path(), outcome, state);
-            super::requests::launch_machine_tasks(&eval_context, &machine, next);
-        });
+        };
+        Some(MachineRunEnd {
+            machine,
+            outcome,
+            state,
+            context: self.eval_context.clone(),
+        })
     }
 
     /// The local state a failing task leaves on its machine: the state before
@@ -4679,6 +4694,29 @@ impl<S: TaskSpecialization> ContextualValueEffectTask<S> {
             context.runtime_id()
         );
         Self { task, context }
+    }
+}
+
+/// The end of a task's run on its child machine, which the host records
+/// with no mutator held.
+struct MachineRunEnd {
+    machine: Arc<TaskMachine>,
+    outcome: MachineTaskOutcome,
+    state: Option<RuntimeValueRoot>,
+    context: EvalContext,
+}
+
+impl MachineRunEnd {
+    fn finish(self) {
+        let Self {
+            machine,
+            outcome,
+            state,
+            context,
+        } = self;
+        let host = machine.host();
+        let next = host.finish(machine.path(), machine.sequence(), outcome, state);
+        super::requests::launch_machine_tasks(&context, host, machine.path(), next);
     }
 }
 

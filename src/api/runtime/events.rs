@@ -341,6 +341,15 @@ struct RuntimeInputCursor {
     observed_empty: bool,
 }
 
+/// The tasks a clear took from the queues of the machines it cleared.
+#[derive(Default)]
+pub(crate) struct ClearedTasks {
+    /// The tasks that ran: the heads of unflagged machines' queues.
+    pub(crate) running: Vec<Value>,
+    /// The tasks that waited behind them, or in a flagged machine's queue.
+    pub(crate) waiting: Vec<Value>,
+}
+
 /// Transaction-local observations and FIFO input claims.
 ///
 /// Dropping this value abandons every claim; input is removed only by a
@@ -399,6 +408,56 @@ impl RuntimeEventJournal {
     /// Whether the child machine at `machine` is flagged, observing it.
     pub(crate) fn machine_flagged(&mut self, machine: &[Key]) -> bool {
         self.flags.read(machine)
+    }
+
+    /// Interrupts the task running on the child machine at `machine`, as
+    /// this journal sees it: takes it from the queue, whose head it is, and
+    /// flags the machine. Returns its item's sequence and its record, or
+    /// `None`, changing nothing, where nothing runs there: the machine is
+    /// flagged, or its queue empty. Its reads are observed.
+    pub(crate) fn interrupt_task(&mut self, machine: &[Key]) -> Option<(u64, Value)> {
+        if self.flags.read(machine) {
+            return None;
+        }
+        let address = task_address(machine.to_vec());
+        let sequence = self.ports.next_sequence(&address);
+        let task = self.ports.claim(&address, 1)?.pop()?;
+        self.flags.set(machine.to_vec());
+        Some((sequence, task))
+    }
+
+    /// Recovers the child machine at `machine` where it is flagged: clears
+    /// the flag, and takes every task from its queue, observing its end, so
+    /// that a task queued meanwhile conflicts. Returns the tasks it took, or
+    /// `None`, changing nothing, where the machine is not flagged.
+    pub(crate) fn recover_machine(&mut self, machine: &[Key]) -> Option<Vec<Value>> {
+        if !self.flags.read(machine) {
+            return None;
+        }
+        self.flags.clear(machine.to_vec());
+        Some(self.ports.claim_all(&task_address(machine.to_vec())))
+    }
+
+    /// Returns the child machine at `machine` and its descendants to their
+    /// initial transactional state: takes every task from their queues,
+    /// observing their ends, so that a task queued meanwhile conflicts,
+    /// returns their port state to the initial one, and drops their shares
+    /// and flags. Returns the tasks it took: the head of an unflagged
+    /// machine's queue runs, and the rest wait.
+    pub(crate) fn clear_machines(&mut self, machine: &[Key]) -> ClearedTasks {
+        let mut cleared = ClearedTasks::default();
+        for address in self.ports.buffers_below(machine, &TASKS) {
+            let flagged = self.flags.read(&address.machine);
+            let mut tasks = self.ports.claim_all(&address).into_iter();
+            if !flagged {
+                cleared.running.extend(tasks.next());
+            }
+            cleared.waiting.extend(tasks);
+        }
+        self.ports.clear_below(machine);
+        self.shares.clear_below(machine.to_vec());
+        self.flags.clear_below(machine);
+        cleared
     }
 
     /// The machines below `machine` that hold state here: port state, or a

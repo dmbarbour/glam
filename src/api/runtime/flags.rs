@@ -22,7 +22,6 @@ pub(in crate::api) struct FlagRecord {
 }
 
 #[derive(Clone)]
-#[allow(dead_code)]
 enum FlagEdit {
     Set(Vec<Key>),
     Clear(Vec<Key>),
@@ -105,10 +104,22 @@ impl FlagJournal {
         self.edit(FlagEdit::Set(machine));
     }
 
-    // Recovery clears a flag (`child-task-control`).
-    #[allow(dead_code)]
     pub(in crate::api) fn clear(&mut self, machine: Vec<Key>) {
         self.edit(FlagEdit::Clear(machine));
+    }
+
+    /// Clears the flags of the machine at `machine` and its descendants,
+    /// as this journal sees them, observing none.
+    pub(in crate::api) fn clear_below(&mut self, machine: &[Key]) {
+        let flagged: Vec<Vec<Key>> = self
+            .view
+            .iter()
+            .filter(|flagged| flagged.starts_with(machine))
+            .cloned()
+            .collect();
+        for flagged in flagged {
+            self.clear(flagged);
+        }
     }
 
     fn edit(&mut self, edit: FlagEdit) {

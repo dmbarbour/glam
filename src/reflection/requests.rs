@@ -9,11 +9,12 @@ use crate::diagnostic::Severity;
 use crate::evaluation::{
     EvalContext, EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId,
     EvaluationTaskStatus, EvaluationWaitPoll, MachineHost, MachineTaskOutcome,
-    PendingReflectionTask, PendingTaskPolicy, TaskMachine, TaskStatusPublisher, TaskStatusWake,
+    PendingReflectionTask, PendingTaskPolicy, QueuedTask, TaskMachine, TaskStatusPublisher,
+    TaskStatusWake,
 };
 use crate::list::{ListFrontStep, ListItem};
 use crate::number::Number;
-use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+use crate::runtime::RuntimeFailureRoot;
 
 use super::protocol::{
     CommitResult, EffectRequestSpec, RequestContext, RequestResult, SpecializationRequestInput,
@@ -41,6 +42,9 @@ pub enum ReflectionRequest {
     TaskCancel,
     ChildTask,
     ChildStatus,
+    ChildRecover,
+    ChildInterrupt,
+    ChildClear,
 }
 
 /// Durable interpretation state for one reusable reflection request.
@@ -64,8 +68,9 @@ enum ReflectionRequestOperation {
     Poisoned,
 }
 
-/// `.child.task Key Op` and `.child.status Key`, which convert their key
-/// first (`reflection-tasks-are-machine-tasks`).
+/// `.child.task Key Op`, `.child.status Key`, `.child.recover Key`,
+/// `.child.interrupt Key Reason` and `.child.clear Key`, which convert their
+/// key first (`reflection-tasks-are-machine-tasks`).
 struct ChildRequestWork {
     request: ChildRequest,
     state: ChildRequestState,
@@ -75,13 +80,25 @@ struct ChildRequestWork {
 enum ChildRequest {
     Task,
     Status,
+    Recover,
+    Interrupt,
+    Clear,
+}
+
+impl ChildRequest {
+    /// Whether the request takes a value after its key: a task's operation,
+    /// or an interrupt's reason.
+    fn takes_value(self) -> bool {
+        matches!(self, Self::Task | Self::Interrupt)
+    }
 }
 
 enum ChildRequestState {
     Start(Vec<Value>),
     Key {
         key: KeyConversionRequestWork,
-        operation: Option<Value>,
+        /// The value after the key, where the request takes one.
+        value: Option<Value>,
     },
 }
 
@@ -273,6 +290,22 @@ impl ReflectionRequestWork {
                 request: ChildRequest::Status,
                 state: ChildRequestState::Start(arguments),
             }),
+            ReflectionRequest::ChildRecover => {
+                ReflectionRequestOperation::Child(ChildRequestWork {
+                    request: ChildRequest::Recover,
+                    state: ChildRequestState::Start(arguments),
+                })
+            }
+            ReflectionRequest::ChildInterrupt => {
+                ReflectionRequestOperation::Child(ChildRequestWork {
+                    request: ChildRequest::Interrupt,
+                    state: ChildRequestState::Start(arguments),
+                })
+            }
+            ReflectionRequest::ChildClear => ReflectionRequestOperation::Child(ChildRequestWork {
+                request: ChildRequest::Clear,
+                state: ChildRequestState::Start(arguments),
+            }),
         };
         Self { operation }
     }
@@ -306,10 +339,8 @@ where
                 let key = arguments.next().ok_or_else(|| {
                     TaskHalt::new(format!("`{name}` received the wrong number of arguments"))
                 })?;
-                let operation = arguments.next();
-                if arguments.next().is_some()
-                    || operation.is_some() != matches!(request, ChildRequest::Task)
-                {
+                let value = arguments.next();
+                if arguments.next().is_some() || value.is_some() != request.takes_value() {
                     return Err(TaskHalt::new(format!(
                         "`{name}` received the wrong number of arguments"
                     )));
@@ -318,7 +349,7 @@ where
                     request,
                     state: ChildRequestState::Key {
                         key: KeyConversionRequestWork::new(key),
-                        operation,
+                        value,
                     },
                 });
                 Ok(SpecializationRequestPoll::Continue)
@@ -328,7 +359,7 @@ where
                 state:
                     ChildRequestState::Key {
                         key: mut conversion,
-                        operation,
+                        value,
                     },
             }) => match conversion.poll(input, context)? {
                 PreparationPoll::Progress => {
@@ -336,26 +367,31 @@ where
                         request,
                         state: ChildRequestState::Key {
                             key: conversion,
-                            operation,
+                            value,
                         },
                     });
                     Ok(SpecializationRequestPoll::Continue)
                 }
-                PreparationPoll::Demand(value) => {
+                PreparationPoll::Demand(demand) => {
                     self.operation = ReflectionRequestOperation::Child(ChildRequestWork {
                         request,
                         state: ChildRequestState::Key {
                             key: conversion,
-                            operation,
+                            value,
                         },
                     });
-                    Ok(SpecializationRequestPoll::Demand(value))
+                    Ok(SpecializationRequestPoll::Demand(demand))
                 }
                 PreparationPoll::Ready(key) => {
-                    let result = match (request, operation) {
+                    let result = match (request, value) {
                         (ChildRequest::Task, Some(operation)) => {
                             queue_child_task(key, operation, context)?
                         }
+                        (ChildRequest::Interrupt, Some(reason)) => {
+                            interrupt_child(key, reason, context)?
+                        }
+                        (ChildRequest::Recover, _) => recover_child(key, context)?,
+                        (ChildRequest::Clear, _) => clear_child(key, context)?,
                         _ => child_status(key, context)?,
                     };
                     Ok(SpecializationRequestPoll::Complete(result))
@@ -808,6 +844,9 @@ fn child_request_name(request: ChildRequest) -> &'static str {
     match request {
         ChildRequest::Task => ".child.task",
         ChildRequest::Status => ".child.status",
+        ChildRequest::Recover => ".child.recover",
+        ChildRequest::Interrupt => ".child.interrupt",
+        ChildRequest::Clear => ".child.clear",
     }
 }
 
@@ -864,7 +903,7 @@ where
         .machines()
         .ok_or_else(|| TaskHalt::new("`.child.task` needs a host with machines"))?;
     let path = child_machine(key, context)?;
-    let machine = Arc::new(TaskMachine::new(Arc::from(path.clone()), host));
+    let machine: Arc<[Key]> = Arc::from(path.clone());
     let values = context.values();
     let promises = match context.transaction() {
         Some(mut transaction) => transaction.store().snapshot().promises().clone(),
@@ -882,6 +921,7 @@ where
         }
     };
     let wake = ReflectionUpdate::Wake {
+        host,
         machine,
         context: context.eval_context().clone(),
     };
@@ -977,15 +1017,179 @@ where
     ))
 }
 
-/// Starts each task the child machine runs next, from `task`, a queued
-/// `{op, reply}` record, on: a task that cannot launch fails, as a task
-/// does, and the next goes on.
+/// Runs `edit` on the store and machine journals of the current
+/// transaction, within a cut, or else on journals of its own, which it
+/// commits at once, again on a conflict. Answers unit.
+fn transact_on_machines<S>(
+    name: &str,
+    context: &mut RequestContext<'_, S>,
+    mut edit: impl FnMut(
+        &mut StoreJournal,
+        &mut crate::api::RuntimeEventJournal,
+        &mut Vec<ReflectionUpdate>,
+    ),
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let no_machines = || TaskHalt::new(format!("`{name}` needs a host with machines"));
+    if let Some(mut transaction) = context.transaction() {
+        let (store, journal) = transaction.journals();
+        let journal = journal.reflection_journal();
+        let events = journal.events.as_mut().ok_or_else(no_machines)?;
+        edit(store, events, &mut journal.updates);
+        return Ok(RequestResult::ReturnUnit);
+    }
+    loop {
+        let snapshot = context.host().snapshot();
+        let mut store = StoreJournal::new(snapshot.store().clone());
+        let mut journal = S::begin_journal(snapshot.extra());
+        {
+            let reflection = journal.reflection_journal();
+            let events = reflection.events.as_mut().ok_or_else(no_machines)?;
+            edit(&mut store, events, &mut reflection.updates);
+        }
+        match context
+            .host()
+            .commit(TaskCommit::new(store, snapshot.extra().clone(), journal))
+        {
+            CommitResult::Committed => {
+                context.committed();
+                return Ok(RequestResult::ReturnUnit);
+            }
+            CommitResult::Conflict => {}
+            CommitResult::MissingVolume(volume) => {
+                return Err(TaskHalt::new(format!(
+                    "reflection volume {} is unavailable",
+                    volume.get()
+                )));
+            }
+            CommitResult::Closed => return Ok(RequestResult::Cancelled),
+        }
+    }
+}
+
+/// `.child.recover Key`: where the child is flagged, clears its flag and
+/// its queue, breaking the replies of the tasks it drops. Its local state
+/// stays as the failure left it, for the parent's next tasks to inspect and
+/// repair. A child that is not flagged is left as it is.
+fn recover_child<S>(
+    key: Key,
+    context: &mut RequestContext<'_, S>,
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let machine = child_machine(key, context)?;
+    let values = context.values();
+    transact_on_machines(".child.recover", context, |store, events, _| {
+        let Some(tasks) = events.recover_machine(&machine) else {
+            return;
+        };
+        values.with_access(|scoped| {
+            let access = scoped.runtime_access();
+            let reason = crate::api::machine_diagnostic(
+                access,
+                "the task's machine was recovered from an error before the task ran",
+            );
+            crate::api::break_replies(access, store, tasks, &reason);
+        });
+    })
+}
+
+/// `.child.interrupt Key Reason`: stops the task running on the child,
+/// breaks its reply with `Reason`, and flags the child, whose state the
+/// task may have left half-done. A child with nothing running, idle or
+/// flagged, is left as it is.
+fn interrupt_child<S>(
+    key: Key,
+    reason: Value,
+    context: &mut RequestContext<'_, S>,
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let Machines(host) = context
+        .host()
+        .machines()
+        .ok_or_else(|| TaskHalt::new("`.child.interrupt` needs a host with machines"))?;
+    let machine = child_machine(key, context)?;
+    let path: Arc<[Key]> = Arc::from(machine.clone());
+    let values = context.values();
+    transact_on_machines(".child.interrupt", context, |store, events, updates| {
+        let Some((sequence, task)) = events.interrupt_task(&machine) else {
+            return;
+        };
+        values.with_access(|scoped| {
+            crate::api::break_replies(
+                scoped.runtime_access(),
+                store,
+                vec![task],
+                reason.runtime_root(),
+            );
+        });
+        updates.push(ReflectionUpdate::Interrupt {
+            host: host.clone(),
+            machine: path.clone(),
+            sequence,
+        });
+    })
+}
+
+/// `.child.clear Key`: empties the child and its descendants, as a turn's
+/// clear does its machine, and stops their running tasks, breaking the
+/// replies of every task it drops. A cleared child reads `'idle`.
+fn clear_child<S>(key: Key, context: &mut RequestContext<'_, S>) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let Machines(host) = context
+        .host()
+        .machines()
+        .ok_or_else(|| TaskHalt::new("`.child.clear` needs a host with machines"))?;
+    let machine = child_machine(key, context)?;
+    let path: Arc<[Key]> = Arc::from(machine.clone());
+    let values = context.values();
+    transact_on_machines(".child.clear", context, |store, events, updates| {
+        let cleared = crate::api::clear_child_machines(store, events, &machine);
+        values.with_access(|scoped| {
+            let access = scoped.runtime_access();
+            let ran = crate::api::machine_diagnostic(
+                access,
+                "the task's machine was cleared while the task ran",
+            );
+            let waited = crate::api::machine_diagnostic(
+                access,
+                "the task's machine was cleared before the task ran",
+            );
+            crate::api::break_replies(access, store, cleared.running, &ran);
+            crate::api::break_replies(access, store, cleared.waiting, &waited);
+        });
+        updates.push(ReflectionUpdate::Clear {
+            host: host.clone(),
+            machine: path.clone(),
+        });
+    })
+}
+
+/// Starts each task the child machine at `machine` runs next, from `task`
+/// on: a task that cannot launch fails, as a task does, and the next goes
+/// on.
 pub(super) fn launch_machine_tasks(
     context: &EvalContext,
-    machine: &Arc<TaskMachine>,
-    mut task: Option<RuntimeValueRoot>,
+    host: &Arc<dyn MachineHost>,
+    machine: &Arc<[Key]>,
+    mut task: Option<QueuedTask>,
 ) {
-    while let Some(record) = task.take() {
+    while let Some(QueuedTask { sequence, record }) = task.take() {
         let operation = context.values().construct_runtime_value_root(|access| {
             match record.clone_core_with(access) {
                 CoreValue::Dict(record) => record
@@ -996,17 +1200,21 @@ pub(super) fn launch_machine_tasks(
             }
         });
         match context.reserve_reflection_task(operation) {
-            Ok(pending) => pending.launch_on(machine.clone()),
+            Ok(pending) => {
+                let handle = pending.handle().clone();
+                pending.launch_on(Arc::new(TaskMachine::new(
+                    machine.clone(),
+                    host.clone(),
+                    sequence,
+                )));
+                host.attach(machine, sequence, &handle);
+            }
             Err(reason) => {
                 let failure = RuntimeFailureRoot::new(
                     context.values(),
                     Arc::new(crate::core::EvaluationFailure::message(reason.as_ref())),
                 );
-                task = machine.host().finish(
-                    machine.path(),
-                    MachineTaskOutcome::Failed(failure),
-                    None,
-                );
+                task = host.finish(machine, sequence, MachineTaskOutcome::Failed(failure), None);
             }
         }
     }
@@ -1552,8 +1760,21 @@ enum ReflectionUpdate {
     /// Starts the child machine's next task, where it is idle, once the
     /// task queued on it commits.
     Wake {
-        machine: Arc<TaskMachine>,
+        host: Arc<dyn MachineHost>,
+        machine: Arc<[Key]>,
         context: EvalContext,
+    },
+    /// Stops the child machine's run, once its interrupt commits.
+    Interrupt {
+        host: Arc<dyn MachineHost>,
+        machine: Arc<[Key]>,
+        sequence: u64,
+    },
+    /// Empties the child machine and its descendants, once their clear
+    /// commits.
+    Clear {
+        host: Arc<dyn MachineHost>,
+        machine: Arc<[Key]>,
     },
 }
 
@@ -1610,7 +1831,10 @@ impl ReflectionJournal {
                         policy.acknowledge_error();
                     }
                 }
-                ReflectionUpdate::Launch { .. } | ReflectionUpdate::Wake { .. } => {}
+                ReflectionUpdate::Launch { .. }
+                | ReflectionUpdate::Wake { .. }
+                | ReflectionUpdate::Interrupt { .. }
+                | ReflectionUpdate::Clear { .. } => {}
             }
         }
         for update in &self.updates {
@@ -1631,10 +1855,20 @@ impl ReflectionJournal {
                         task.acknowledge_failure();
                     }
                 }
-                ReflectionUpdate::Wake { machine, context } => {
-                    let task = machine.host().start(machine.path());
-                    launch_machine_tasks(context, machine, task);
+                ReflectionUpdate::Wake {
+                    host,
+                    machine,
+                    context,
+                } => {
+                    let task = host.start(machine);
+                    launch_machine_tasks(context, host, machine, task);
                 }
+                ReflectionUpdate::Interrupt {
+                    host,
+                    machine,
+                    sequence,
+                } => host.interrupt(machine, *sequence),
+                ReflectionUpdate::Clear { host, machine } => host.clear(machine),
             }
         }
     }
@@ -1790,6 +2024,24 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 ["reflection_runtime", "v0", "request", "child", "status"],
                 1,
                 ReflectionRequest::ChildStatus,
+            ),
+            EffectRequestSpec::at_path(
+                ["child", "recover"],
+                ["reflection_runtime", "v0", "request", "child", "recover"],
+                1,
+                ReflectionRequest::ChildRecover,
+            ),
+            EffectRequestSpec::at_path(
+                ["child", "interrupt"],
+                ["reflection_runtime", "v0", "request", "child", "interrupt"],
+                2,
+                ReflectionRequest::ChildInterrupt,
+            ),
+            EffectRequestSpec::at_path(
+                ["child", "clear"],
+                ["reflection_runtime", "v0", "request", "child", "clear"],
+                1,
+                ReflectionRequest::ChildClear,
             ),
         ])
         .collect()
@@ -2112,7 +2364,10 @@ mod tests {
             | ReflectionRequest::TaskAcknowledgeError
             | ReflectionRequest::TaskCancel
             | ReflectionRequest::ChildTask
-            | ReflectionRequest::ChildStatus => {}
+            | ReflectionRequest::ChildStatus
+            | ReflectionRequest::ChildRecover
+            | ReflectionRequest::ChildInterrupt
+            | ReflectionRequest::ChildClear => {}
         }
     }
 
@@ -2125,9 +2380,27 @@ mod tests {
             ReflectionUpdate::Cancel(task) | ReflectionUpdate::AcknowledgeError(task) => {
                 let _: &EvaluationTaskHandle = task;
             }
-            ReflectionUpdate::Wake { machine, context } => {
-                let _: &Arc<TaskMachine> = machine;
+            ReflectionUpdate::Wake {
+                host,
+                machine,
+                context,
+            } => {
+                let _: &Arc<dyn MachineHost> = host;
+                let _: &Arc<[Key]> = machine;
                 let _: &EvalContext = context;
+            }
+            ReflectionUpdate::Interrupt {
+                host,
+                machine,
+                sequence,
+            } => {
+                let _: &Arc<dyn MachineHost> = host;
+                let _: &Arc<[Key]> = machine;
+                let _: &u64 = sequence;
+            }
+            ReflectionUpdate::Clear { host, machine } => {
+                let _: &Arc<dyn MachineHost> = host;
+                let _: &Arc<[Key]> = machine;
             }
         }
         let ReflectionJournal {
@@ -2174,9 +2447,9 @@ mod tests {
                     ChildRequestState::Start(arguments) => {
                         let _: &Vec<Value> = arguments;
                     }
-                    ChildRequestState::Key { key, operation } => {
+                    ChildRequestState::Key { key, value } => {
                         let _: &KeyConversionRequestWork = key;
-                        let _: &Option<Value> = operation;
+                        let _: &Option<Value> = value;
                     }
                 }
             }

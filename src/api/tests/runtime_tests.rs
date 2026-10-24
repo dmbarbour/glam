@@ -2451,3 +2451,53 @@ committed = anno refl:(.cut (.child.task 'b (.r "committed")) >>= (\p -> seq p (
         ["never ran", "committed"]
     );
 }
+
+#[test]
+fn an_interrupt_flags_its_child_and_recovery_drops_the_queue() {
+    // `reflection-tasks-are-machine-tasks`: `.child.interrupt` stops the
+    // running task, breaks its promise with the reason, and flags the child,
+    // whose state the task left; the stopped task's end claims nothing
+    // more, so the task queued behind it waits. `.child.recover` clears the
+    // flag and the queue, breaking the waiting task's promise, and the next
+    // task finds the state as the interrupted one left it.
+    let source = r#"language g0
+import 'std
+interrupted = anno refl:(.child.task 'c (.set ['n] 1 =>> .heap.set ['c_started] () =>> .cut (.heap.try_get ['c_gate])) >>= (\p -> .child.task 'c (.r "dropped") >>= (\q -> .cut (.heap.try_get ['c_started]) =>> .child.interrupt 'c "stop" =>> .try (seq p (.r ())) >>= (\rp -> .child.status 'c >>= (\flagged -> .child.recover 'c =>> .try (seq q (.r ())) >>= (\rq -> .child.status 'c >>= (\recovered -> .child.task 'c (.get ['n]) >>= (\n -> seq n (.heap.set ['interrupted] (if [flagged, recovered, n] == ['error, 'idle, 1] then (if rp.err.msg.text == "stop" then rq.err.msg.text else rp.err.msg.text) else "unflagged")))))))))) ()
+repaired = anno refl:(.child.task 'f (.set ['n] 2 =>> .cut (.set ['n] 3 =>> (1 / 0))) >>= (\p -> .try (seq p (.r ())) >>= (\_ -> .child.recover 'f =>> .child.task 'f (.get ['n]) >>= (\n -> seq n (.heap.set ['repaired] (if n == 2 then "as the failure left it" else "changed")))))) ()
+untouched = anno refl:(.child.interrupt 'z "unheard" =>> .child.recover 'z =>> .child.task 'z (.r "ran") >>= (\p -> seq p (.child.status 'z >>= (\s -> .heap.set ['untouched] (if s == 'idle then p else "changed"))))) ()
+"#;
+    assert_eq!(
+        run_reflection_texts(source, &["interrupted", "repaired", "untouched"]),
+        [
+            "the task's machine was recovered from an error before the task ran",
+            "as the failure left it",
+            "ran",
+        ]
+    );
+}
+
+#[test]
+fn a_clear_empties_a_child_and_its_descendants() {
+    // `.child.clear` stops the running tasks of the child and of its
+    // descendants and drops the waiting ones, breaking each promise with
+    // what happened, and leaves the child idle, its state gone.
+    let source = r#"language g0
+import 'std
+cleared = anno refl:(.child.task 'k (.set ['n] 1 =>> .child.task 'g (.heap.set ['g_started] () =>> .cut (.heap.try_get ['g_gate])) >>= (\g -> .r {g:g})) >>= (\p -> seq p (.r p.g) >>= (\g -> .child.task 'k (.heap.set ['k_started] () =>> .cut (.heap.try_get ['k_gate])) >>= (\running -> .child.task 'k (.r "waiting") >>= (\waiting -> .cut (.heap.try_get ['g_started] =>> .heap.try_get ['k_started]) =>> .child.clear 'k =>> .try (seq g (.r ())) >>= (\rg -> .try (seq running (.r ())) >>= (\rr -> .try (seq waiting (.r ())) >>= (\rw -> .child.status 'k >>= (\s -> .child.task 'k (.try (.get ['n])) >>= (\n -> seq n (.heap.set ['cleared] (if [rg.err.msg.text, rr.err.msg.text] == ["the task's machine was cleared while the task ran", "the task's machine was cleared while the task ran"] then (if s == 'idle then (if dict.defines ['err] n then rw.err.msg.text else "state kept") else "busy") else rg.err.msg.text)))))))))))) ()
+"#;
+    assert_eq!(
+        run_reflection_texts(source, &["cleared"]),
+        ["the task's machine was cleared before the task ran"]
+    );
+}
+
+#[test]
+fn an_interrupt_within_a_failed_cut_stops_nothing() {
+    // An interrupt is a write like any other: a cut that fails undoes it,
+    // and the task runs on to its end.
+    let source = r#"language g0
+import 'std
+undone = anno refl:(.child.task 'u (.heap.set ['u_started] () =>> .cut (.heap.try_get ['u_gate]) =>> .r "finished") >>= (\p -> .cut (.heap.try_get ['u_started]) =>> .alt (.cut (.child.interrupt 'u "never" =>> .fail)) (.r ()) =>> .child.status 'u >>= (\s -> .heap.set ['u_gate] () =>> seq p (.heap.set ['undone] (if s == 'busy then p else "interrupted"))))) ()
+"#;
+    assert_eq!(run_reflection_texts(source, &["undone"]), ["finished"]);
+}

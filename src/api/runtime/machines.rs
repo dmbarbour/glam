@@ -11,9 +11,9 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use super::RuntimeSharedResources;
-use super::events::{RuntimeEventJournal, task_address};
-use crate::core::{Key, Value};
-use crate::evaluation::{MachineHost, MachineTaskOutcome};
+use super::events::{ClearedTasks, RuntimeEventJournal, task_address};
+use crate::core::{EvaluationFailure, Key, ManagedResolverRoot, RuntimeValueAccess, Value};
+use crate::evaluation::{EvaluationTaskHandle, MachineHost, MachineTaskOutcome, QueuedTask};
 use crate::reflection::{Resolution, StoreCommitResult, StoreJournal};
 use crate::runtime::RuntimeValueRoot;
 
@@ -23,6 +23,8 @@ use crate::runtime::RuntimeValueRoot;
 pub(super) struct MachineCells {
     /// Leaf lock beside the transaction lock, which it may take inside:
     /// critical sections make only whole updates, so poison is recovered.
+    /// A task is cancelled once the lock is released, since cancelling may
+    /// end the task, and its end comes back here.
     cells: Mutex<HashMap<Vec<Key>, MachineCell>>,
 }
 
@@ -30,14 +32,25 @@ pub(super) struct MachineCells {
 struct MachineCell {
     /// The local state its last task left.
     state: Option<RuntimeValueRoot>,
-    /// Whether a task runs on it, started and not yet finished.
-    running: bool,
+    /// The task that runs on it, started and not yet finished.
+    run: Option<Run>,
+}
+
+/// A task's run on a machine, named by its item's sequence in the queue.
+struct Run {
+    sequence: u64,
+    /// The task, once it launched.
+    task: Option<EvaluationTaskHandle>,
+    /// Whether an interrupt or a clear stopped the run.
+    stopped: bool,
+    /// Whether the state the task leaves is dropped: a clear stopped it.
+    discard: bool,
 }
 
 impl RuntimeSharedResources {
     /// The task the child machine at `machine` runs next, as committed: its
     /// queue's head, unless the machine is flagged.
-    fn queued_head(&self, machine: &[Key]) -> Option<RuntimeValueRoot> {
+    fn queued_head(&self, machine: &[Key]) -> Option<QueuedTask> {
         let state = self
             .transactions
             .state
@@ -46,41 +59,116 @@ impl RuntimeSharedResources {
         if state.events.flags.is_set(machine) {
             return None;
         }
-        state.events.ports.head(&task_address(machine.to_vec()))
+        let (sequence, record) = state.events.ports.head(&task_address(machine.to_vec()))?;
+        Some(QueuedTask { sequence, record })
     }
-}
 
-impl MachineHost for RuntimeSharedResources {
-    fn local_state(&self, machine: &[Key]) -> Option<RuntimeValueRoot> {
+    fn cells(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<Key>, MachineCell>> {
         self.machines
             .cells
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// The resolver of the reply `task`, a queued task's record, holds.
+fn task_reply(
+    access: &RuntimeValueAccess<'_>,
+    task: &RuntimeValueRoot,
+) -> Option<ManagedResolverRoot> {
+    let Value::Dict(task) = task.clone_core_with(access) else {
+        return None;
+    };
+    task.get(&Key::atom_from_text("reply"))
+        .and_then(|reply| access.resolver_root(reply))
+}
+
+/// Stages, in `store`, the break of each reply `tasks` hold, records a
+/// control operation took from their queues, with `reason`: a reply already
+/// resolved keeps its resolution.
+pub(crate) fn break_replies(
+    access: &RuntimeValueAccess<'_>,
+    store: &mut StoreJournal,
+    tasks: Vec<crate::api::Value>,
+    reason: &RuntimeValueRoot,
+) {
+    for task in tasks {
+        if let Some(resolver) = task_reply(access, &task.into_runtime_root()) {
+            let _ = store.resolve(&resolver, Resolution::Break(reason.clone()));
+        }
+    }
+}
+
+/// The diagnostic a control operation breaks a reply with: what happened
+/// to the task's machine.
+pub(crate) fn machine_diagnostic(access: &RuntimeValueAccess<'_>, text: &str) -> RuntimeValueRoot {
+    access.root_runtime_value(crate::diagnostic::failure_diagnostic_in(
+        access,
+        &EvaluationFailure::message(text),
+    ))
+}
+
+/// Clears the child machine at `machine` and its descendants within a
+/// transaction, as a turn's clear does its machine: their queues, port
+/// state, shares and flags (`clear_machines`), and their environment.
+/// Returns the tasks it took from their queues.
+pub(crate) fn clear_child_machines(
+    store: &mut StoreJournal,
+    events: &mut RuntimeEventJournal,
+    machine: &[Key],
+) -> ClearedTasks {
+    store.remove_environment(crate::api::turn::environment::environment_node(machine));
+    events.clear_machines(machine)
+}
+
+impl MachineHost for RuntimeSharedResources {
+    fn local_state(&self, machine: &[Key]) -> Option<RuntimeValueRoot> {
+        self.cells()
             .get(machine)
             .and_then(|cell| cell.state.clone())
     }
 
-    fn start(&self, machine: &[Key]) -> Option<RuntimeValueRoot> {
-        let mut cells = self
-            .machines
-            .cells
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+    fn start(&self, machine: &[Key]) -> Option<QueuedTask> {
+        let mut cells = self.cells();
         let cell = cells.entry(machine.to_vec()).or_default();
-        if cell.running {
+        if cell.run.is_some() {
             return None;
         }
         let head = self.queued_head(machine)?;
-        cell.running = true;
+        cell.run = Some(Run {
+            sequence: head.sequence,
+            task: None,
+            stopped: false,
+            discard: false,
+        });
         Some(head)
+    }
+
+    fn attach(&self, machine: &[Key], sequence: u64, task: &EvaluationTaskHandle) {
+        let stopped = {
+            let mut cells = self.cells();
+            let Some(run) = cells
+                .get_mut(machine)
+                .and_then(|cell| cell.run.as_mut())
+                .filter(|run| run.sequence == sequence)
+            else {
+                return;
+            };
+            run.task = Some(task.clone());
+            run.stopped
+        };
+        if stopped {
+            task.cancel();
+        }
     }
 
     fn finish(
         &self,
         machine: &[Key],
+        sequence: u64,
         outcome: MachineTaskOutcome,
         state: Option<RuntimeValueRoot>,
-    ) -> Option<RuntimeValueRoot> {
+    ) -> Option<QueuedTask> {
         let failed = matches!(outcome, MachineTaskOutcome::Failed(_));
         let resolution = self
             .values
@@ -97,25 +185,27 @@ impl MachineHost for RuntimeSharedResources {
             Resolution::Fulfill(resolution)
         };
         // The task leaves the queue, its reply resolved, in one commit; a
-        // failure flags the machine with it.
+        // failure flags the machine with it. Where an interrupt or a clear
+        // took the task first, the run claims nothing.
         loop {
             let (_, store, events) = self.transaction_snapshot();
             let mut store = StoreJournal::new(store);
             let mut events = RuntimeEventJournal::new(events);
-            let Some(mut claimed) = events.ports.claim(&task_address(machine.to_vec()), 1) else {
+            let address = task_address(machine.to_vec());
+            if events.ports.next_sequence(&address) != sequence {
+                break;
+            }
+            let Some(mut claimed) = events.ports.claim(&address, 1) else {
                 break;
             };
             let task = claimed
                 .pop()
                 .expect("a claim of one holds one")
                 .into_runtime_root();
-            let resolver = self.values.core().with_boundary_access(|access| {
-                let Value::Dict(task) = task.clone_core_with(&access) else {
-                    return None;
-                };
-                task.get(&Key::atom_from_text("reply"))
-                    .and_then(|reply| access.resolver_root(reply))
-            });
+            let resolver = self
+                .values
+                .core()
+                .with_boundary_access(|access| task_reply(&access, &task));
             if let Some(resolver) = resolver {
                 // A reply already resolved keeps its resolution.
                 let _ = store.resolve(&resolver, resolution.clone());
@@ -128,18 +218,63 @@ impl MachineHost for RuntimeSharedResources {
                 StoreCommitResult::Committed | StoreCommitResult::MissingVolume(_) => break,
             }
         }
-        let mut cells = self
-            .machines
-            .cells
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
+        let mut cells = self.cells();
         let cell = cells.entry(machine.to_vec()).or_default();
-        if let Some(state) = state {
+        let run = cell.run.take_if(|run| run.sequence == sequence)?;
+        if let Some(state) = state
+            && !run.discard
+        {
             cell.state = Some(state);
         }
         let next = self.queued_head(machine);
-        cell.running = next.is_some();
+        if let Some(next) = &next {
+            cell.run = Some(Run {
+                sequence: next.sequence,
+                task: None,
+                stopped: false,
+                discard: false,
+            });
+        }
         next
+    }
+
+    fn interrupt(&self, machine: &[Key], sequence: u64) {
+        let task = {
+            let mut cells = self.cells();
+            let Some(run) = cells
+                .get_mut(machine)
+                .and_then(|cell| cell.run.as_mut())
+                .filter(|run| run.sequence == sequence)
+            else {
+                return;
+            };
+            run.stopped = true;
+            run.task.clone()
+        };
+        if let Some(task) = task {
+            task.cancel();
+        }
+    }
+
+    fn clear(&self, machine: &[Key]) {
+        let tasks: Vec<EvaluationTaskHandle> = {
+            let mut cells = self.cells();
+            cells.retain(|path, cell| !path.starts_with(machine) || cell.run.is_some());
+            cells
+                .iter_mut()
+                .filter(|(path, _)| path.starts_with(machine))
+                .filter_map(|(_, cell)| {
+                    cell.state = None;
+                    let run = cell.run.as_mut()?;
+                    run.stopped = true;
+                    run.discard = true;
+                    run.task.clone()
+                })
+                .collect()
+        };
+        for task in tasks {
+            task.cancel();
+        }
     }
 }
 
@@ -181,20 +316,77 @@ mod tests {
         };
 
         let first = resources.start(&machine).expect("the queue holds a task");
-        assert_eq!(task(first), Some(1));
+        assert_eq!(task(first.record), Some(1));
         assert!(resources.start(&machine).is_none(), "one task at a time");
         let second = resources
-            .finish(&machine, MachineTaskOutcome::Complete(unit()), None)
+            .finish(
+                &machine,
+                first.sequence,
+                MachineTaskOutcome::Complete(unit()),
+                None,
+            )
             .expect("finishing hands over the next task");
-        assert_eq!(task(second), Some(2));
+        assert_eq!(task(second.record), Some(2));
         assert!(resources.start(&machine).is_none(), "the second runs");
         assert!(
             resources
-                .finish(&machine, MachineTaskOutcome::Complete(unit()), None)
+                .finish(
+                    &machine,
+                    second.sequence,
+                    MachineTaskOutcome::Complete(unit()),
+                    None
+                )
                 .is_none(),
             "the queue is empty"
         );
         assert!(resources.start(&machine).is_none(), "nothing is queued");
+    }
+
+    #[test]
+    fn a_run_stopped_before_its_task_attaches_cancels_the_task() {
+        // An interrupt may commit between a run's start and its task's
+        // launch: the task, attached once launched, is cancelled then.
+        use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine, EvaluationWaitPoll};
+
+        struct CompleteTask;
+        impl EvaluationTaskMachine for CompleteTask {
+            fn poll(
+                &mut self,
+                context: &mut crate::evaluation::EvaluationPollContext,
+                _step_budget: &mut crate::evaluation::EvaluationStepBudget,
+            ) -> EvaluationMachinePoll {
+                EvaluationMachinePoll::Complete(context.root_unit())
+            }
+        }
+
+        // A dormant runtime runs nothing until pumped.
+        let runtime = EvaluationRuntime::new(0).expect("the runtime should open");
+        let assembler = crate::api::Assembler::builder()
+            .evaluation_runtime(runtime.clone())
+            .build()
+            .expect("the assembler should build");
+        let resources = runtime.state.shared_resources.clone();
+        let machine = vec![Key::atom_from_text("refl"), Key::atom_from_text("a")];
+        let (_, store, events) = resources.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(events);
+        events.queue_task(machine.clone(), runtime.values().integer(1));
+        assert!(matches!(
+            resources.try_commit_transaction(&StoreJournal::new(store), &events),
+            StoreCommitResult::Committed
+        ));
+
+        let run = resources.start(&machine).expect("the queue holds a task");
+        resources.interrupt(&machine, run.sequence);
+        let task = assembler
+            .eval_context()
+            .schedule_task(|_| Ok(Box::new(CompleteTask)))
+            .expect("the task should schedule");
+        resources.attach(&machine, run.sequence, &task);
+        runtime.pump_until_stable();
+        assert!(matches!(
+            assembler.eval_context().poll_reflection_task(&task),
+            EvaluationWaitPoll::Cancelled
+        ));
     }
 
     #[test]

@@ -351,7 +351,10 @@ volume to retry. Dropping the Rust owner does not revoke it.
   state the runtime's `MachineHost` keeps between tasks; any other task is
   an anonymous root, `refl/<abstract task id>`. The finishing task claims
   its queue item, resolves its reply, flags the machine on failure and
-  starts the next item itself (`EffectTask::finish_machine`).
+  starts the next item itself (`MachineRunEnd`). `.child.interrupt`,
+  `.child.recover` and `.child.clear` edit the queue and flags within the
+  transaction and stop runs at commit; a run is named by its item's
+  sequence, so a stopped task's end claims nothing.
 - `.task.new Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is
   updated only when the projected state changes between atoms `'launched` and

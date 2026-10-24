@@ -106,6 +106,28 @@ Each with tests, the full gate, and a commit.
    `.child.interrupt Key Reason` (cancel the running task, break its reply
    with `Reason`, flag the machine), `.child.clear` (empty the child and
    its descendants, breaking the replies of the tasks it drops).
+   Built 2026-10-24. Each is a transactional edit, within a cut or
+   committed at once: an interrupt takes the head of an unflagged queue,
+   breaks its reply and sets the flag; a recovery clears the flag and takes
+   the whole queue, observing its end, so a task queued meanwhile
+   conflicts; a clear takes every queue at or below the child (the heads
+   of unflagged queues "cleared while the task ran", the rest "before"),
+   and drops port state, shares, environment and flags as a turn's clear
+   does. At commit, `ReflectionUpdate::Interrupt` and `Clear` stop the
+   runs: a run is named by its item's sequence in the queue
+   (`TaskMachine::sequence`), so a stopped task's end claims nothing and
+   starts nothing while the machine stays running until it ends, one task
+   at a time. An interrupted task's state stays the machine's; a cleared
+   one's is dropped. A stop that lands before the task's handle attaches
+   cancels it on attaching. A task cancelled from teardown (a blocked
+   task's cancellation) now ends its run, as a polled one does. Tests:
+   interrupt then recovery (reason, flag, the waiting task's break, state
+   kept), a failure's state as recovery finds it (the state before the
+   outermost cut, untested until now), the no-ops, a clear across a
+   grandchild, an interrupt undone by a failed cut, and the attach window
+   driven directly; each guard mutation-checked. Still open: a child task
+   that panics, or that its launching session abandons as it closes,
+   never ends its run, so its machine stays running.
 5. `child-task-migration` — the compiler's annotator and scanner move to
    `.child.task`: the scanner as the boundary task's child, each `refl.*`
    entry as the scanner's child under its key, and the tests from
@@ -129,3 +151,11 @@ Taken unless the maintainer says otherwise (2026-10-24):
 3. Until `api-settlement`, flagged task machines take the failure ledger's
    place in the quiescence report, so the CLI fails a batch on them as it
    does on `task_failures` today.
+4. `child-task-control`: an interrupt where nothing runs (an idle or a
+   flagged child) and a recovery of a child that is not flagged change
+   nothing and answer unit; recovery acts only on an error, so it never
+   drops a running machine's queue.
+5. An interrupt breaks the reply with `Reason` itself, as the Reflection
+   Model says; recovery and clearing break with a diagnostic, "the task's
+   machine was recovered from an error before the task ran", "... cleared
+   while the task ran" or "... cleared before the task ran".

@@ -179,14 +179,15 @@ impl PortState {
         head == cursor.start && cursor.next <= next && cursor.tail.is_none_or(|tail| next == tail)
     }
 
-    /// Applies a validated journal, returning whether anything changed.
-    /// The first item the buffer at `address` holds, as committed.
-    pub(in crate::api) fn head(&self, address: &PortAddress) -> Option<RuntimeValueRoot> {
+    /// The first item the buffer at `address` holds, as committed, with its
+    /// sequence.
+    pub(in crate::api) fn head(&self, address: &PortAddress) -> Option<(u64, RuntimeValueRoot)> {
         self.buffers
             .get(address)
-            .and_then(|buffer| buffer.items.front().cloned())
+            .and_then(|buffer| buffer.items.front().map(|item| (buffer.head, item.clone())))
     }
 
+    /// Applies a validated journal, returning whether anything changed.
     pub(in crate::api) fn commit(&mut self, journal: &PortJournal) -> bool {
         let mut changed = false;
         for (address, cursor) in &journal.cursors {
@@ -407,6 +408,41 @@ impl PortJournal {
         let observation = cursor.clone();
         self.observe(address, observation);
         claimed
+    }
+
+    /// The sequence of the next item this journal would claim from the
+    /// buffer at `address`. It observes nothing: a claim observes what it
+    /// takes.
+    pub(in crate::api) fn next_sequence(&self, address: &PortAddress) -> u64 {
+        self.cursors.get(address).map_or_else(
+            || {
+                self.snapshot
+                    .buffers
+                    .get(address)
+                    .map_or(0, |buffer| buffer.head)
+            },
+            |cursor| cursor.next,
+        )
+    }
+
+    /// Claims everything the buffer at `address` holds beyond this journal's
+    /// claims, observing its end, so that an item arriving meanwhile
+    /// conflicts.
+    pub(in crate::api) fn claim_all(&mut self, address: &PortAddress) -> Vec<Value> {
+        let held = self.available(address);
+        self.claim(address, held)
+            .expect("a claim of what a buffer holds succeeds")
+    }
+
+    /// The buffers of `port` at the machine at `machine` and its
+    /// descendants, in address order. It observes nothing: it is discovery.
+    pub(in crate::api) fn buffers_below(&self, machine: &[Key], port: &Key) -> Vec<PortAddress> {
+        self.snapshot
+            .buffers
+            .keys()
+            .filter(|address| address.port == *port && address.machine.starts_with(machine))
+            .cloned()
+            .collect()
     }
 
     /// How many items the buffer at `address` holds beyond this journal's

@@ -58,7 +58,7 @@ pub(crate) use session::{
 };
 #[cfg(test)]
 pub(crate) use session::{EvaluationTaskRegistryCounts, OwnedEvalContext};
-pub(crate) use task_machine::{MachineHost, MachineTaskOutcome, TaskMachine};
+pub(crate) use task_machine::{MachineHost, MachineTaskOutcome, QueuedTask, TaskMachine};
 pub(crate) use whnf::{
     LazyCheckpointPoll, WhnfOwnerPoll, interpret_poll as interpret_whnf_poll,
     poll_computation as poll_whnf_computation, poll_lazy_checkpoint,
