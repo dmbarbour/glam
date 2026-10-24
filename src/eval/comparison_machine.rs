@@ -445,6 +445,9 @@ fn classify_ordering(
         | (_, Value::Net(_)) => {
             failure_message(format!("{name} builtin cannot compare function values"))
         }
+        (Value::Resolver(_), _) | (_, Value::Resolver(_)) => {
+            failure_message(format!("{name} builtin cannot compare resolvers"))
+        }
         (Value::Opaque(_), _)
         | (_, Value::Opaque(_))
         | (Value::Volume(_), _)
@@ -527,6 +530,11 @@ fn classify_equality(
         | (Value::Net(_), _)
         | (_, Value::Net(_)) => {
             failure_message(format!("{name} builtin cannot compare function values"))
+        }
+        // Resolvers are abstract: no evaluation observes their identity
+        // (`promise-cells-are-weakly-resolved`).
+        (Value::Resolver(_), _) | (_, Value::Resolver(_)) => {
+            failure_message(format!("{name} builtin cannot compare resolvers"))
         }
         (Value::Opaque(left), Value::Opaque(right)) => {
             FrameAction::Complete(ComparisonResult::Equality(left == right))

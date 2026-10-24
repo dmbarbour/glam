@@ -425,10 +425,17 @@ fn managed_graph_holds_no_value_domain_authority_or_registered_root() {
 
 /// Production `Drop` implementations that collector finalization may run,
 /// with the reason each is passive.
-const PASSIVE_MANAGED_DROPS: &[(&str, &str)] = &[(
-    "RuntimeNetCell",
-    "closes and wakes only its edge-free disturbance companion",
-)];
+const PASSIVE_MANAGED_DROPS: &[(&str, &str)] = &[
+    (
+        "RuntimeNetCell",
+        "closes and wakes only its edge-free disturbance companion",
+    ),
+    (
+        "ManagedPromiseBreaker",
+        "queues its promise's ID on an unbounded channel, for the runtime to \
+         act on at a safe point (`passive-managed-destruction-with-drop-records`)",
+    ),
+];
 
 /// Rule: collector finalization never runs an active destructor.
 ///
@@ -569,6 +576,7 @@ pub(super) fn compatibility_variant_name(value: &Value) -> &'static str {
         Value::Metadata(_) => "metadata",
         Value::Opaque(_) => "opaque",
         Value::Volume(_) => "volume",
+        Value::Resolver(_) => "resolver",
     }
 }
 

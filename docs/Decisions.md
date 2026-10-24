@@ -2790,6 +2790,64 @@ maps the short names used here to file names.
 - **Recorded in:** runtime API plan, `api-refl-try`; reflection model plan,
   "Trying an operation".
 
+### A resolver is an edge to a breaker; the store holds pending cells weakly
+`promise-cells-are-weakly-resolved` · 2026-10-24 · maintainer · accepted
+- **Context:** a promise had two identities, its cell's and the store's
+  record's, and `.try`, which learns of a wait by the cell, found the record
+  by a scan. The store's record rooted each pending cell, so a promise no
+  one could read lived as long as its resolver.
+- **Decision:**
+  - A promise's only identity is its cell's ID, a counter, never an
+    address, so a moving collector keeps it.
+  - A resolver is a value kind, an edge to a managed breaker, which holds
+    the promise's ID and its status: pending, then fulfilled or broken as
+    its resolution commits. Copies of a resolver share one breaker.
+  - The store holds a weak reference to each pending promise's cell, keyed
+    by its ID: a lookup, never a scan, and it keeps no cell alive. The
+    promised value alone does. The entry goes when the promise resolves or
+    its resolver is lost.
+  - A breaker that dies queues its promise's ID on the runtime's channel,
+    as passive destruction allows
+    (`passive-managed-destruction-with-drop-records`); after the
+    collection, the runtime breaks the promise, if still pending, with
+    "resolver lost", in a commit.
+  - A staged resolution holds the resolver's breaker until its transaction
+    ends, so it never races the breaker's death. Its commit settles the
+    breaker's status and publishes the value into the cell where the cell
+    still lives; where it does not, no one could read the value.
+  - Resolvers are abstract: pure evaluation cannot compare them, not even
+    a resolver with its copy. Reflection may see a resolver's
+    representation, its breaker's identity.
+  - `.try` answers `wait` where its block rests on a cell the store holds
+    pending.
+- **Reasons:**
+  - One identity removes the translation, and the scan with it.
+  - A store that holds promises weakly lets the many promises no one
+    awaits, a task's unit result among them, be reclaimed while their
+    resolvers live.
+  - A managed breaker over an opaque resolver is a performance choice,
+    since Glam sees no difference: the external-owner registry's drain
+    checks every live owner, at every collection and host call
+    (`perf-external-owner-drain`), and every use takes its lock.
+  - Status lives with the breaker, so it answers whether or not the cell
+    lives, and a forgotten promise is not a forgotten obligation:
+    settlement reads an accepted promise's status from its breaker.
+- **Alternatives rejected:** an external-owner token held by the breaker,
+  the same notice by a detour, an external owner inside the managed graph;
+  a sweep of ephemerons keyed on breakers after each collection, work in
+  proportion to the pending promises; a breaker's destructor breaking the
+  cell itself, against passive destruction; a `'forgotten` status, which
+  waits for a use case.
+- **Consequences:**
+  - Revises `opaque-resources-reclaimed-when-unreachable`: resolvers are no
+    longer opaque payloads, and a resolver no longer keeps its promise's
+    cell alive.
+  - The breaker holds no edge to the cell: the store's weak reference
+    serves both resolution and a lost resolver, where the design note drew
+    an edge from the breaker.
+- **Recorded in:** runtime API plan, `api-promise-cells`;
+  [Promise Cells](plans/PromiseCells_2026-10-23.md).
+
 ### Resumable WHNF through bounded regional quanta and durable checkpoints
 `resumable-whnf-regional-quanta` · 2026-09-12 · agent · accepted
 - **Context:** the recursive evaluator replayed prefixes after retryable
@@ -3394,7 +3452,10 @@ maps the short names used here to file names.
     never the reverse, and a pending promise reaches nothing, so a
     resolver's liveness is exact. A dying payload's destructor queues a
     notice; the runtime drains the registry after each collection and acts
-    on the notices there, a safe point.
+    on the notices there, a safe point. Revised by
+    `promise-cells-are-weakly-resolved` (2026-10-24): a resolver is an edge
+    to a managed breaker, which queues the notice itself, and keeps no cell
+    alive.
   - Volumes become cells in the managed heap, a value kind to which
     handles are edges, and the store holds their committed values through
     ephemerons keyed on the cell: glam-gc managed cells, living as any

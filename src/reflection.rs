@@ -21,10 +21,8 @@ pub use lifecycle::{
 pub(crate) use machine::ContinuationKey;
 pub(crate) use machine::volume_effects;
 pub use promises::PromiseStatus;
-pub(crate) use promises::{
-    Promises, Resolution, SELF_AWAITED, Settled, publish_settled, resolver_promise,
-};
-pub(crate) use store::{DeathNotice, contents_at_path};
+pub(crate) use promises::{Promises, Resolution, SELF_AWAITED, Settled, publish_settled};
+pub(crate) use store::contents_at_path;
 #[cfg(test)]
 pub(crate) use volume_handle::handle_volume;
 

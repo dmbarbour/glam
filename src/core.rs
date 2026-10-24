@@ -35,10 +35,11 @@ pub(crate) use managed::{
     ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry, LazyProducerView,
     ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot, ManagedDropRecord, ManagedFamily,
     ManagedLazyAccess, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromisePublication,
-    ManagedPromiseRoot, ManagedVolumeDraft, ManagedVolumeRoot, ManagedVolumeVersion,
-    OpaquePayloadFamily, OpaquePayloadRecord, PreparedRuntimeValueRoot, RuntimeValueAccess,
-    RuntimeValueMutator, RuntimeValueObserver, VolumeCellView, VolumeContentsView,
-    assert_outside_mutator, managed_slot_extent, trace_compatibility_value_managed_edges,
+    ManagedPromiseRoot, ManagedPromiseWeakRoot, ManagedResolverRoot, ManagedVolumeDraft,
+    ManagedVolumeRoot, ManagedVolumeVersion, OpaquePayloadFamily, OpaquePayloadRecord,
+    PreparedRuntimeValueRoot, RuntimeValueAccess, RuntimeValueMutator, RuntimeValueObserver,
+    VolumeCellView, VolumeContentsView, assert_outside_mutator, managed_slot_extent,
+    trace_compatibility_value_managed_edges,
 };
 use runtime_cache::{RuntimeCacheEntry, RuntimeCacheMap, SharedRuntimeCacheMap};
 pub(crate) use runtime_cache::{RuntimeCacheFamily, RuntimeCacheFamilyRecord};
@@ -54,6 +55,28 @@ impl LazyId {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub(crate) struct PromiseId(NonZeroU64);
+
+/// A promise's status, read from its resolver, never its value.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PromiseStatus {
+    /// Not yet resolved.
+    Pending,
+    /// Resolved with a value.
+    Fulfilled,
+    /// Broken, with a message or diagnostic.
+    Broken,
+}
+
+impl PromiseStatus {
+    /// The status's name, as reflection's atom spells it.
+    pub(crate) fn name(self) -> &'static str {
+        match self {
+            Self::Pending => "pending",
+            Self::Fulfilled => "fulfilled",
+            Self::Broken => "broken",
+        }
+    }
+}
 
 /// One shared-state partition within an evaluation runtime's reflection store.
 ///
@@ -313,6 +336,13 @@ pub(crate) struct VolumeValue {
     edge: managed::ManagedVolumeEdge,
 }
 
+/// A resolver: one edge to its promise's breaker, which its copies share
+/// (`promise-cells-are-weakly-resolved`). Glam sees it as opaque, and cannot
+/// compare it.
+pub(crate) struct ResolverValue {
+    edge: managed::ManagedBreakerEdge,
+}
+
 // Target-specific representation latches: each handle is one managed edge
 // with no drop glue. They are not a language-level value-size policy.
 #[cfg(all(target_arch = "x86_64", target_pointer_width = "64"))]
@@ -320,9 +350,11 @@ const _: () = {
     assert!(std::mem::size_of::<LazyValue>() == 8);
     assert!(std::mem::size_of::<PromisedValue>() == 8);
     assert!(std::mem::size_of::<VolumeValue>() == 8);
+    assert!(std::mem::size_of::<ResolverValue>() == 8);
     assert!(!std::mem::needs_drop::<LazyValue>());
     assert!(!std::mem::needs_drop::<PromisedValue>());
     assert!(!std::mem::needs_drop::<VolumeValue>());
+    assert!(!std::mem::needs_drop::<ResolverValue>());
 };
 
 /// Runtime-selected construction authority for values which allocate stable
@@ -1044,6 +1076,34 @@ impl LazyValue {
     }
 }
 
+impl ResolverValue {
+    pub(in crate::core) fn from_edge(edge: managed::ManagedBreakerEdge) -> Self {
+        Self { edge }
+    }
+
+    pub(crate) fn trace_managed_edge(&self, visitor: &mut glam_gc::Visitor<'_>) {
+        self.edge.trace(visitor);
+    }
+
+    #[inline(always)]
+    pub(crate) fn duplicate_in(&self, access: &RuntimeValueAccess<'_>) -> Self {
+        Self {
+            edge: self.edge.duplicate_in(access),
+        }
+    }
+
+    /// Whether two resolvers share one breaker: Rust's identity, never
+    /// Glam's.
+    pub(crate) fn same_breaker_in(&self, other: &Self, access: &RuntimeValueAccess<'_>) -> bool {
+        self.edge.same_allocation_in(&other.edge, access)
+    }
+
+    /// A root on the breaker. The caller holds the resolver under `access`.
+    pub(crate) fn root_in(&self, access: &RuntimeValueAccess<'_>) -> managed::ManagedResolverRoot {
+        self.edge.root_in(access)
+    }
+}
+
 impl VolumeValue {
     pub(in crate::core) fn from_edge(edge: managed::ManagedVolumeEdge) -> Self {
         Self { edge }
@@ -1317,6 +1377,9 @@ pub enum Value {
     /// A volume's handle, which Glam programs see as opaque: one edge to the
     /// volume's managed cell, compared by the volume it names.
     Volume(VolumeValue),
+    /// A promise's resolver, which Glam programs see as opaque and cannot
+    /// compare: one edge to the promise's managed breaker.
+    Resolver(ResolverValue),
 }
 
 /// A sealed unit carrier with reflection-only associated Glam metadata.
@@ -2701,6 +2764,7 @@ impl fmt::Debug for DiagnosticValueDebug<'_, '_> {
             Value::Metadata(_) => formatter.write_str("Sealed(..)"),
             Value::Opaque(_) => formatter.write_str("Opaque(..)"),
             Value::Volume(_) => formatter.write_str("Volume(..)"),
+            Value::Resolver(_) => formatter.write_str("Resolver(..)"),
         }
     }
 }
@@ -2820,6 +2884,7 @@ impl RuntimeValueAccess<'_> {
                 handle: value.handle.clone(),
             }),
             Value::Volume(value) => Value::Volume(value.duplicate_in(self)),
+            Value::Resolver(value) => Value::Resolver(value.duplicate_in(self)),
         }
     }
 
@@ -2839,8 +2904,10 @@ impl RuntimeValueAccess<'_> {
             Value::Lazy(_) | Value::Promised(_) => "Lazy",
             Value::Metadata(_) => "Sealed",
             Value::Opaque(_) => "Opaque",
-            // Evaluation sees a handle as opaque; diagnostics name it.
+            // Evaluation sees a handle or a resolver as opaque; diagnostics
+            // name it.
             Value::Volume(_) => "Volume",
+            Value::Resolver(_) => "Resolver",
         }
     }
 
@@ -2900,7 +2967,8 @@ impl RuntimeValueAccess<'_> {
             | Value::Promised(_)
             | Value::Metadata(_)
             | Value::Opaque(_)
-            | Value::Volume(_) => None,
+            | Value::Volume(_)
+            | Value::Resolver(_) => None,
         }
     }
 
@@ -3050,6 +3118,12 @@ impl RuntimeValueAccess<'_> {
                     unreachable!("equal value discriminants must select the same variant")
                 };
                 left.same_volume_in(right, self)
+            }
+            Value::Resolver(left) => {
+                let Value::Resolver(right) = right else {
+                    unreachable!("equal value discriminants must select the same variant")
+                };
+                left.same_breaker_in(right, self)
             }
         }
     }
@@ -3406,7 +3480,8 @@ impl Value {
                 | Value::Promised(_)
                 | Value::Metadata(_)
                 | Value::Opaque(_)
-                | Value::Volume(_) => None,
+                | Value::Volume(_)
+                | Value::Resolver(_) => None,
             },
         }
     }

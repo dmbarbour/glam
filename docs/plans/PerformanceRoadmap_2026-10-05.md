@@ -350,7 +350,8 @@ Their sections hold their earlier evidence.
   clone drops, as passive destruction now allows
   (`passive-managed-destruction-with-drop-records`), so that a drain visits
   only the dead. Measure once host calls are frequent with many opaque
-  values alive.
+  values alive. With it, review the opaque families as a whole, when
+  performance plans resume (maintainer, 2026-10-23).
 - **Port routing** (`perf-port-routing`), not measured, after the
   representations, as the runtime API plan goes ahead of performance
   (maintainer, 2026-10-19). As `api-ports` built them, each write walks

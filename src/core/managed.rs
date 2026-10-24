@@ -443,6 +443,8 @@ mod external_owners;
 pub(crate) use external_owners::{ExternalOwnerHandle, ExternalOwnerKey, ExternalOwnerRegistry};
 mod value_node;
 pub(crate) use value_node::PreparedRuntimeValueRoot;
+mod promise_breakers;
+pub(crate) use promise_breakers::{ManagedBreakerEdge, ManagedResolverRoot};
 mod volume_cells;
 pub(crate) use volume_cells::{
     ManagedVolumeDraft, ManagedVolumeEdge, ManagedVolumeRoot, ManagedVolumeVersion, VolumeCellView,
@@ -452,7 +454,7 @@ mod recursive_cells;
 pub(crate) use recursive_cells::{
     LazyProducerView, ManagedCoreNetAccess, ManagedCoreNetEdge, ManagedCoreNetRoot,
     ManagedLazyAccess, ManagedLazyEdge, ManagedLazyRoot, ManagedPromiseAccess, ManagedPromiseEdge,
-    ManagedPromisePublication, ManagedPromiseRoot,
+    ManagedPromisePublication, ManagedPromiseRoot, ManagedPromiseWeakRoot,
 };
 
 // SAFETY: this is the existing scalar collector-access probe. It has no
@@ -1056,6 +1058,25 @@ impl RuntimeValueAccess<'_> {
         self.scope.ephemeron_entry(ephemeron)
     }
 
+    /// Allocates a weak reference to `value` and roots it: it views the
+    /// value while some other path reaches it, and keeps it alive by no
+    /// means of its own.
+    pub(crate) fn root_weak<T: ManagedFamily>(
+        &self,
+        value: GcRef<'_, T>,
+    ) -> Root<glam_gc::Weak<T>> {
+        self.scope.root_weak(value)
+    }
+
+    /// Views a rooted weak reference's value, or `None` once a collection
+    /// found it unreachable.
+    pub(crate) fn weak_target<'access, T: ManagedFamily>(
+        &'access self,
+        weak: &Root<glam_gc::Weak<T>>,
+    ) -> Option<GcRef<'access, T>> {
+        self.scope.weak_target(weak)
+    }
+
     /// Views a detached edge without validation, under the provenance claim
     /// `because` names (`root-evidence`).
     pub(crate) fn view_edge<T: ManagedFamily>(
@@ -1278,6 +1299,23 @@ impl CoreValueAllocationScope<'_> {
         ephemeron: &Root<Ephemeron<K, V>>,
     ) -> Option<(GcRef<'access, K>, GcRef<'access, V>)> {
         ephemeron.as_gc(self.mutator).entry()
+    }
+
+    /// Allocates a weak reference to `value` and roots it. The weak
+    /// reference is glam-gc's own cell, with no drop glue, whose value is an
+    /// admitted family.
+    fn root_weak<T: ManagedFamily>(&self, value: GcRef<'_, T>) -> Root<glam_gc::Weak<T>> {
+        let weak = self.mutator.weak(value);
+        self.mutator.root(weak)
+    }
+
+    /// Views a rooted weak reference's value while this region supplies
+    /// access authority.
+    fn weak_target<'access, T: ManagedFamily>(
+        &'access self,
+        weak: &Root<glam_gc::Weak<T>>,
+    ) -> Option<GcRef<'access, T>> {
+        weak.as_gc(self.mutator).target()
     }
 
     /// Borrows one same-domain root while this region supplies access

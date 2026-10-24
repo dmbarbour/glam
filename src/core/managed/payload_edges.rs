@@ -62,7 +62,8 @@ impl CompatibilityValueEdges for Value {
             | Self::Lazy(_)
             | Self::Promised(_)
             | Self::Opaque(_)
-            | Self::Volume(_) => {}
+            | Self::Volume(_)
+            | Self::Resolver(_) => {}
         }
     }
 
@@ -81,7 +82,8 @@ impl CompatibilityValueEdges for Value {
             | Self::Promised(_)
             | Self::Metadata(_)
             | Self::Opaque(_)
-            | Self::Volume(_) => {}
+            | Self::Volume(_)
+            | Self::Resolver(_) => {}
         }
     }
 }

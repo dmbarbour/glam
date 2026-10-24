@@ -23,6 +23,7 @@ impl ManagedIdentityStops for ManagedIdentityEdges {
             Value::Lazy(lazy) => lazy.trace_managed_edge(visitor),
             Value::Promised(promise) => promise.trace_managed_edge(visitor),
             Value::Volume(volume) => volume.trace_managed_edge(visitor),
+            Value::Resolver(resolver) => resolver.trace_managed_edge(visitor),
             Value::Function(function) => function.stage().runtime().trace_managed_edge(visitor),
             Value::Net(net) => net.runtime().trace_managed_edge(visitor),
             _ => return false,

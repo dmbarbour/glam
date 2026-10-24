@@ -25,8 +25,9 @@ use super::promises::{PromiseId, PromiseStatus, Promises, Resolution, Settled};
 use crate::api::{Value as PublicValue, Values};
 pub use crate::core::VolumeId;
 use crate::core::{
-    Builtin, CoreValueFactory, Dict, Key, LazyValue, List, ManagedVolumeDraft, ManagedVolumeRoot,
-    ManagedVolumeVersion, RuntimeValueAccess, Value, VolumeCellView, VolumeContentsView,
+    Builtin, CoreValueFactory, Dict, Key, LazyValue, List, ManagedResolverRoot, ManagedVolumeDraft,
+    ManagedVolumeRoot, ManagedVolumeVersion, RuntimeValueAccess, Value, VolumeCellView,
+    VolumeContentsView,
 };
 use crate::core_net::CoreDataKey;
 use crate::number::Number;
@@ -302,9 +303,13 @@ enum StoreEdit {
     },
     /// Resolves a promise, at its place in the runtime's volume, which it
     /// writes without changing data (`promise-resolution-commits-with-its-cut`).
+    /// The edit holds the resolver's breaker until the transaction ends, so a
+    /// staged resolution never races the breaker's death; a lost resolver's
+    /// break has none.
     Resolve {
         address: ConflictAddress,
         promise: PromiseId,
+        resolver: Option<ManagedResolverRoot>,
         resolution: Resolution,
     },
 }
@@ -717,26 +722,45 @@ impl StoreJournal {
     /// conflicts.
     pub(crate) fn resolve(
         &mut self,
-        promise: PromiseId,
+        resolver: &ManagedResolverRoot,
         resolution: Resolution,
     ) -> Result<(), Arc<str>> {
-        match self.snapshot.promises.status(promise) {
-            Some(PromiseStatus::Pending) => {}
-            Some(_) => return Err("the promise was already resolved".into()),
-            None => return Err("the runtime has no such promise".into()),
+        if resolver.status() != PromiseStatus::Pending {
+            return Err("the promise was already resolved".into());
         }
+        let promise = resolver.id();
         if self.staged_status(promise).is_some() {
             return Err("the transaction resolves the promise already".into());
         }
+        self.stage_resolution(promise, Some(resolver.clone()), resolution);
+        Ok(())
+    }
+
+    /// Stages the break of `promise`, whose resolver is lost, with
+    /// `resolution`, where it is pending. Returns whether it staged one.
+    pub(crate) fn break_lost(&mut self, promise: PromiseId, resolution: Resolution) -> bool {
+        if !self.snapshot.promises.is_pending(promise) || self.staged_status(promise).is_some() {
+            return false;
+        }
+        self.stage_resolution(promise, None, resolution);
+        true
+    }
+
+    fn stage_resolution(
+        &mut self,
+        promise: PromiseId,
+        resolver: Option<ManagedResolverRoot>,
+        resolution: Resolution,
+    ) {
         self.edits.push(StoreEdit::Resolve {
             address: ConflictAddress::reflection(
                 self.snapshot.runtime_volume,
                 ConflictPath::from_keys(promise_path(promise)),
             ),
             promise,
+            resolver,
             resolution,
         });
-        Ok(())
     }
 
     /// The status this transaction gives `promise`, where it resolves it.
@@ -758,13 +782,12 @@ impl StoreJournal {
             .any(|edit| matches!(edit, StoreEdit::Resolve { .. }))
     }
 
-    /// Whether this transaction resolves the promise whose cell is `cell`:
-    /// one whose value it cannot read, since only its commit settles it.
-    pub(crate) fn resolves_cell(&self, cell: crate::core::PromiseId) -> bool {
-        self.edits.iter().any(|edit| {
-            matches!(edit, StoreEdit::Resolve { promise, .. }
-                if self.snapshot.promises.cell(*promise) == Some(cell))
-        })
+    /// Whether this transaction resolves `promise`: one whose value it
+    /// cannot read, since only its commit settles it.
+    pub(crate) fn resolves_cell(&self, promise: PromiseId) -> bool {
+        self.edits.iter().any(
+            |edit| matches!(edit, StoreEdit::Resolve { promise: staged, .. } if *staged == promise),
+        )
     }
 
     /// Whether `branch`, a branch of this journal, resolves a promise that
@@ -1021,15 +1044,6 @@ impl StoreJournal {
     }
 }
 
-/// What a dying payload reports to its store
-/// (`opaque-resources-reclaimed-when-unreachable`). A volume reports
-/// nothing: its committed versions clear when it dies (`api-volume-cells`).
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum DeathNotice {
-    /// A promise's resolver is gone.
-    Resolver(PromiseId),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum StoreCommitResult {
     Committed,
@@ -1050,7 +1064,10 @@ pub struct ReflectionStore {
     query_retirements: Receiver<EvaluationQueryId>,
     next_volume: Arc<AtomicU64>,
     promises: Arc<Promises>,
-    death_notice_receiver: Receiver<DeathNotice>,
+    /// The promises whose breakers died, as each queued its promise's ID
+    /// (`promise-cells-are-weakly-resolved`). A volume reports nothing: its
+    /// committed versions clear when it dies (`api-volume-cells`).
+    lost_resolvers: Receiver<PromiseId>,
     /// The cells of the volumes the store keeps: its own, which live as
     /// long as it does, and those a host created, until revoked. Glam's
     /// volumes live while their handles do.
@@ -1080,7 +1097,7 @@ impl ReflectionStore {
         let runtime_volume = VolumeId::from_u64(2).expect("two is a nonzero volume ID");
         let environment_volume = VolumeId::from_u64(3).expect("three is a nonzero volume ID");
         let (query_domain, query_retirements) = QueryDomain::new();
-        let (death_notices, death_notice_receiver) = mpsc::channel();
+        let (lost, lost_resolvers) = mpsc::channel();
         let mut kept = RedBlackTreeMapSync::new_sync();
         let mut versions = RedBlackTreeMapSync::new_sync();
         values.with_boundary_access(|access| {
@@ -1101,8 +1118,8 @@ impl ReflectionStore {
             query_domain,
             query_retirements,
             next_volume: Arc::new(AtomicU64::new(4)),
-            promises: Arc::new(Promises::new(death_notices)),
-            death_notice_receiver,
+            promises: Arc::new(Promises::new(lost)),
+            lost_resolvers,
             kept,
             revoked: BTreeSet::new(),
             settled: Vec::new(),
@@ -1257,10 +1274,9 @@ impl ReflectionStore {
         std::mem::take(&mut self.settled)
     }
 
-    /// The death notices that dying volume handles and resolvers have
-    /// queued since the last call.
-    pub(crate) fn take_death_notices(&self) -> Vec<DeathNotice> {
-        self.death_notice_receiver.try_iter().collect()
+    /// The promises whose breakers died since the last call.
+    pub(crate) fn take_lost_resolvers(&self) -> Vec<PromiseId> {
+        self.lost_resolvers.try_iter().collect()
     }
 
     #[doc(hidden)]
@@ -1335,7 +1351,7 @@ impl ReflectionStore {
         // transaction, running again, finds the promise resolved.
         if journal.edits.iter().any(|edit| {
             matches!(edit, StoreEdit::Resolve { promise, .. }
-                if self.promises.status(*promise) != Some(PromiseStatus::Pending))
+                if !self.promises.is_pending(*promise))
         }) {
             return StoreCommitResult::Conflict;
         }
@@ -1390,12 +1406,16 @@ impl ReflectionStore {
         for edit in &journal.edits {
             if let StoreEdit::Resolve {
                 promise,
+                resolver,
                 resolution,
                 ..
             } = edit
-                && let Some(root) = self.promises.settle(*promise, resolution.fulfilled())
+                && let Some(cell) = self.promises.settle(*promise)
             {
-                self.settled.push(Settled::new(root, resolution.clone()));
+                if let Some(resolver) = resolver {
+                    resolver.settle(resolution.fulfilled());
+                }
+                self.settled.push(Settled::new(cell, resolution.clone()));
             }
         }
         self.retire_queries();
@@ -1585,7 +1605,7 @@ fn virtual_keys(path: &[Key]) -> Vec<Key> {
 fn promise_path(promise: PromiseId) -> Vec<Key> {
     vec![
         PROMISE_NAMESPACE.clone(),
-        Key::Number(Number::from_u64(promise)),
+        Key::Number(Number::from_u64(promise.get())),
     ]
 }
 

@@ -342,10 +342,10 @@ fn a_lost_resolver_breaks_its_promise_and_wakes_its_reader() {
 }
 
 #[test]
-fn a_resolved_promise_s_record_goes_with_its_resolver() {
+fn a_promise_leaves_the_store_as_it_resolves_and_its_resolver_keeps_its_status() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     rt.run("m", |m| {
-        let records = |m: &Machine<'_, '_>| {
+        let pending = |m: &Machine<'_, '_>| {
             m.resources()
                 .reflection_snapshot()
                 .1
@@ -353,11 +353,18 @@ fn a_resolved_promise_s_record_goes_with_its_resolver() {
                 .len_for_test()
         };
         m.promise_new();
+        assert_eq!(pending(m), 1);
+        m.dup(1)?;
         m.int_push(1);
         m.promise_fulfill()?;
-        assert_eq!(records(m), 1, "the record keeps how it resolved");
+        assert_eq!(pending(m), 0, "the store holds only pending promises");
         collect(m);
-        assert_eq!(records(m), 0, "nothing can ask it any more");
+        assert_eq!(
+            m.promise_status()?,
+            PromiseStatus::Fulfilled,
+            "the resolver answers"
+        );
+        m.discard(1)?;
         assert_eq!(m.int_pop()?, 1, "the promised value stands");
         Ok(())
     })

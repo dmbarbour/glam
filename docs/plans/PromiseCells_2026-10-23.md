@@ -1,5 +1,7 @@
 # Promise Cells — 2026-10-23
 
+Built 2026-10-24 (`promise-cells-are-weakly-resolved`); see "As built".
+
 A design note, for the maintainer's review before any build, on the model
 of promises that machines, reflection and requests resolve: one identity
 per promise, the promise's cell held weakly by its resolver, and the store
@@ -209,6 +211,35 @@ Alternatives:
      pending promise whose value no one holds is reclaimed; a cut that
      resolves holds its breaker until it ends; `.try` answers `wait` on a
      resolver's promise and waits out a producer's.
+
+## As built (2026-10-24)
+
+- The breaker holds no edge to its cell. The store's weak reference, one
+  per pending promise, keyed by the cell's ID, serves both resolution and a
+  lost resolver, so an edge from the breaker would have been a second weak
+  reference to the same cell, used by nothing. The model's
+  `Breaker -(weak)-> Cell` holds through that ID.
+- The breaker's status is an `Arc` it shares with the holds on it, so a
+  staged resolution and a request read it without an access region. Its
+  commit settles it under the store's lock.
+- Pending is the store holding the entry: a commit's validation, a lost
+  resolver's break and `.try` read that, and the breaker's status agrees
+  with it once the commit is done.
+- `.try` looks the awaited cell up in the store's table, by ID, rather
+  than reading the cell's producer: a store promise is exactly one the
+  table holds pending.
+- A lost resolver's break is a resolution with no breaker, staged by
+  `StoreJournal::break_lost`.
+- `DeathNotice` is gone: the channel carries the IDs of lost resolvers.
+- Resolvers no longer compare under pure evaluation, ordering or
+  equality, where opaque resolvers compared by identity. Opaque values and
+  volume handles still compare by identity, a difference to revisit.
+- Tests: a pending promise no one awaits is reclaimed while its resolver
+  lives, and resolving it then publishes nothing while its status answers;
+  a staged resolution holds its breaker until its transaction ends (checked
+  by removing the hold); a promise leaves the store as it resolves, its
+  resolver keeping its status; resolvers cannot be compared. The lost
+  resolver, `.try` and cut tests stand as they were.
 
 ## Answers (maintainer, 2026-10-23)
 

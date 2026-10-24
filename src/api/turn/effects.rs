@@ -788,7 +788,7 @@ impl Machine<'_, '_> {
     /// The store's pending promise that the effect's evaluation, waiting on
     /// `wait`, rests on: a wait outside the effect's control, unlike the
     /// requests the turn serves, which park on promises it resolves itself.
-    fn awaited_store_promise(&self, wait: &EvaluationWaitToken) -> Option<u64> {
+    fn awaited_store_promise(&self, wait: &EvaluationWaitToken) -> Option<crate::core::PromiseId> {
         let cell = self
             .runtime
             .assembler
@@ -796,7 +796,7 @@ impl Machine<'_, '_> {
             .core()
             .work_coordinator()?
             .awaited_promise(&WorkDependency::Wait(wait.clone()))?;
-        self.promises().pending_with_cell(cell)
+        self.promises().is_pending(cell).then_some(cell)
     }
 
     fn awaiting(&self, wait: EvaluationWaitToken) -> Error {

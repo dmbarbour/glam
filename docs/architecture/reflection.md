@@ -252,16 +252,23 @@ its map, if a collection has completed since it last pruned. A read roots
 its result alone, under an access region; a machine's poll, which holds
 one, uses the journal's `_in` forms.
 
-Promises are shared with machines through the store, which records each one
-(`reflection/promises.rs`). `.promise.new` returns `{promise, resolver}`;
-`.promise.status`, `.promise.fulfill` and `.promise.break` take the resolver,
-which decoding evaluates and identifies as it does a volume handle. A status
-is `'pending`, `'fulfilled` or `'broken`; a promised value has none, since it
-stands for whatever it evaluates to. Within a cut a status read observes the
+Promises are shared with machines through the store
+(`reflection/promises.rs`, `promise-cells-are-weakly-resolved`). A promise's
+identity is its cell's ID. `.promise.new` returns `{promise, resolver}`; the
+resolver is an edge to the promise's breaker, which keeps its status, and
+the store holds each pending promise's cell only weakly, by its ID, so the
+promised value alone keeps the cell. `.promise.status`, `.promise.fulfill`
+and `.promise.break` take the resolver, which decoding evaluates, and the
+request holds its breaker until it completes. A status is `'pending`,
+`'fulfilled` or `'broken`; a promised value has none, since it stands for
+whatever it evaluates to. A lost resolver's breaker queues its promise's ID,
+and the runtime breaks the promise, if still pending, after the
+collection. Within a cut a status read observes the
 promise's place in the runtime's volume, which a resolution writes once it
 has published the value, so the read conflicts and wakes precisely. A
-resolution is a store edit (`promise-resolution-commits-with-its-cut`):
-within a cut it commits with the cut, which sees it in the promise's status
+resolution is a store edit (`promise-resolution-commits-with-its-cut`),
+which holds the breaker until its transaction ends: within a cut it commits
+with the cut, which sees it in the promise's status
 but not in its value, and outside one it commits on its own. A resolution
 that another commits first conflicts, and the rerun finds the promise
 resolved.

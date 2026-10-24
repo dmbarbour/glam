@@ -1,4 +1,4 @@
-use super::promises::{PromiseId, Promises, Resolution, resolver_promise};
+use super::promises::{PromiseId, Promises, Resolution};
 use super::volume_handle::handle_volume;
 use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
@@ -16,8 +16,8 @@ use super::store::{StoreJournal, StoreSnapshot, VolumeId, contents_at_path};
 use crate::api::{EvaluatedValue, Value as PublicValue, Values};
 use crate::core::{
     Atom, Builtin, BuiltinCall, CoreValueFactory, Dict, EvaluationFailure, FunctionValue, Key,
-    LazyValue, List, NetValue, PromisedValue, RuntimeValueAccess, Value, VolumeCellView,
-    VolumeContentsView, keys,
+    LazyValue, List, ManagedResolverRoot, NetValue, PromisedValue, RuntimeValueAccess, Value,
+    VolumeCellView, VolumeContentsView, keys,
 };
 use crate::core_net::{CoreDataKey, CoreSpecialization};
 use crate::eval;
@@ -2572,13 +2572,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
         &self,
         context: &mut EvaluationPollContext,
         branch: &mut Branch<S>,
-        promise: PromiseId,
+        resolver: ManagedResolverRoot,
         resolution: Resolution,
     ) -> Result<(), TaskHalt> {
         if let Some(transaction) = branch.transaction.as_mut() {
             return transaction
                 .store
-                .resolve(promise, resolution)
+                .resolve(&resolver, resolution)
                 .map_err(|error| TaskHalt::new(error.as_ref()));
         }
         // One suspension covers each attempt's snapshot, staging and commit.
@@ -2587,7 +2587,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 let snapshot = self.host.snapshot();
                 let mut store = StoreJournal::new(snapshot.store().clone());
                 store
-                    .resolve(promise, resolution.clone())
+                    .resolve(&resolver, resolution.clone())
                     .map_err(|error| TaskHalt::new(error.as_ref()))?;
                 match self.host.commit(TaskCommit::new(
                     store,
@@ -2945,20 +2945,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 });
                 MachineWork::deliver_root(pair, branch, scope_depth)
             }
-            Request::PromiseStatus(promise) => {
+            Request::PromiseStatus(resolver) => {
                 let checkpoint = branch.retry_candidate();
+                let promise = resolver.id();
                 // The cut sees its own resolution, as its own writes.
-                let staged = branch
+                let status = branch
                     .transaction
                     .as_ref()
-                    .and_then(|transaction| transaction.store.staged_status(promise));
-                let status = match staged {
-                    Some(status) => status,
-                    None => self
-                        .promises(context, &branch)
-                        .status(promise)
-                        .ok_or_else(|| TaskHalt::new("the runtime has no such promise"))?,
-                };
+                    .and_then(|transaction| transaction.store.staged_status(promise))
+                    .unwrap_or_else(|| resolver.status());
                 // Within a cut the read joins the transaction, which the
                 // promise's resolution then conflicts with.
                 if let Some(transaction) = branch.transaction.as_mut() {
@@ -3998,7 +3993,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
             .snapshot
             .store()
             .promises()
-            .pending_with_cell(cell)
+            .is_pending(cell)
+            .then_some(cell)
     }
 
     /// Answers the innermost `.try` with `wait`, where its host found the
@@ -6020,9 +6016,9 @@ enum Request<R, V = RuntimeValueRoot> {
     VolumeRewrite(VolumeTarget<V>, V, V),
     VolumeNew(V),
     PromiseNew,
-    PromiseStatus(PromiseId),
-    PromiseFulfill(PromiseId, V),
-    PromiseBreak(PromiseId, V),
+    PromiseStatus(ManagedResolverRoot),
+    PromiseFulfill(ManagedResolverRoot, V),
+    PromiseBreak(ManagedResolverRoot, V),
     Reset(V, V),
     Shift(V, V),
     Resume(EvaluationTaskId, u64, V),
@@ -6511,9 +6507,10 @@ impl<R: Clone> RequestDecodeWork<R> {
                         })
                     }
                     HandleOperation::Promise(operation) => {
+                        // The request holds the breaker until it completes.
                         let promise = poll_context.evaluate(context, |evaluator| {
                             evaluator.project_root(&handle, |access, resolver| {
-                                resolver_promise(access.values(), &resolver)
+                                access.values().resolver_root(&resolver)
                             })
                         });
                         let Some(promise) = promise else {

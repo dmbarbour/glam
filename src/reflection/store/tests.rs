@@ -127,10 +127,12 @@ fn assert_store_root_boundary_inventory(
         StoreEdit::Resolve {
             address,
             promise,
+            resolver,
             resolution,
         } => {
             let _: &ConflictAddress = address;
             let _: &PromiseId = promise;
+            let _: &Option<crate::core::ManagedResolverRoot> = resolver;
             let _: &Resolution = resolution;
         }
     }
@@ -162,7 +164,7 @@ fn assert_store_root_boundary_inventory(
         query_retirements,
         next_volume,
         promises,
-        death_notice_receiver,
+        lost_resolvers,
         kept,
         revoked,
         settled,
@@ -181,7 +183,7 @@ fn assert_store_root_boundary_inventory(
     let _: &Receiver<EvaluationQueryId> = query_retirements;
     let _: &Arc<AtomicU64> = next_volume;
     let _: &Arc<Promises> = promises;
-    let _: &Receiver<DeathNotice> = death_notice_receiver;
+    let _: &Receiver<PromiseId> = lost_resolvers;
     let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot> = kept;
     let _: &BTreeSet<VolumeId> = revoked;
     let _: &Vec<Settled> = settled;
@@ -1101,7 +1103,11 @@ fn a_revoked_volume_s_late_writes_stay_an_error() {
 fn of_two_transactions_resolving_one_promise_the_second_conflicts() {
     let mut store = store();
     let values = store.values.clone();
-    let promise = values.with_boundary_access(|access| store.promises().allocate(&access).0);
+    let resolver = values.with_boundary_access(|access| {
+        let (_, _, resolver) = store.promises().allocate(&access);
+        access.resolver_root(&resolver).expect("a resolver")
+    });
+    let promise = resolver.id();
     let public = crate::api::Values::from_core_factory(values.clone());
     let resolution = |value: &str| {
         Resolution::Fulfill(
@@ -1113,23 +1119,20 @@ fn of_two_transactions_resolving_one_promise_the_second_conflicts() {
     let mut first = StoreJournal::new(store.snapshot());
     let mut second = StoreJournal::new(store.snapshot());
     first
-        .resolve(promise, resolution("first"))
+        .resolve(&resolver, resolution("first"))
         .expect("the promise is pending");
     assert!(
-        first.resolve(promise, resolution("again")).is_err(),
+        first.resolve(&resolver, resolution("again")).is_err(),
         "a transaction resolves a promise once"
     );
     assert_eq!(first.staged_status(promise), Some(PromiseStatus::Fulfilled));
     second
-        .resolve(promise, resolution("second"))
+        .resolve(&resolver, resolution("second"))
         .expect("the promise is still pending");
 
     assert_eq!(store.try_commit(&first), StoreCommitResult::Committed);
     assert_eq!(store.take_settled().len(), 1, "the commit settled it");
-    assert_eq!(
-        store.promises().status(promise),
-        Some(PromiseStatus::Fulfilled)
-    );
+    assert_eq!(resolver.status(), PromiseStatus::Fulfilled);
     assert_eq!(
         store.try_commit(&second),
         StoreCommitResult::Conflict,
@@ -1138,7 +1141,87 @@ fn of_two_transactions_resolving_one_promise_the_second_conflicts() {
     assert!(store.take_settled().is_empty());
     let mut late = StoreJournal::new(store.snapshot());
     assert!(
-        late.resolve(promise, resolution("late")).is_err(),
+        late.resolve(&resolver, resolution("late")).is_err(),
         "running again, it finds the promise resolved"
     );
+}
+
+/// A promise and a hold on its breaker, in a collectable store, with its
+/// promised value rooted where `awaited`.
+fn resolvable(
+    store: &ReflectionStore,
+    awaited: bool,
+) -> (
+    Option<crate::runtime::RuntimeValueRoot>,
+    crate::core::ManagedResolverRoot,
+) {
+    store.values.clone().with_boundary_access(|access| {
+        let (_, promised, resolver) = store.promises().allocate(&access);
+        (
+            awaited.then(|| access.root_runtime_value(promised)),
+            access.resolver_root(&resolver).expect("a resolver"),
+        )
+    })
+}
+
+fn fulfillment(store: &ReflectionStore, value: &str) -> Resolution {
+    Resolution::Fulfill(
+        crate::api::Values::from_core_factory(store.values.clone())
+            .wrap(Value::binary_from_text(value))
+            .into_runtime_root(),
+    )
+}
+
+#[test]
+fn a_pending_promise_no_one_awaits_is_reclaimed_while_its_resolver_lives() {
+    let mut store = collectable_store();
+    let (_, resolver) = resolvable(&store, false);
+    collect(&store);
+    assert!(store.take_lost_resolvers().is_empty(), "its resolver lives");
+    assert!(store.promises().is_pending(resolver.id()));
+    assert_eq!(
+        store.promises().live_cells_for_test(&store.values),
+        0,
+        "the store holds no promise alive"
+    );
+    assert_eq!(resolver.status(), PromiseStatus::Pending);
+
+    let mut journal = StoreJournal::new(store.snapshot());
+    journal
+        .resolve(&resolver, fulfillment(&store, "unread"))
+        .expect("the promise is pending");
+    assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
+    // No one could read the value: nothing is published.
+    let settled = store.take_settled();
+    crate::reflection::publish_settled(&store.values, settled);
+    assert_eq!(resolver.status(), PromiseStatus::Fulfilled);
+    assert!(!store.promises().is_pending(resolver.id()));
+}
+
+#[test]
+fn a_staged_resolution_holds_its_resolver_until_its_transaction_ends() {
+    let mut store = collectable_store();
+    let (promised, resolver) = resolvable(&store, true);
+    let promise = resolver.id();
+    let mut journal = StoreJournal::new(store.snapshot());
+    journal
+        .resolve(&resolver, fulfillment(&store, "kept"))
+        .expect("the promise is pending");
+    drop(resolver);
+    collect(&store);
+    assert!(
+        store.take_lost_resolvers().is_empty(),
+        "the transaction holds the breaker"
+    );
+    assert_eq!(store.try_commit(&journal), StoreCommitResult::Committed);
+    let settled = store.take_settled();
+    crate::reflection::publish_settled(&store.values, settled);
+    drop(journal);
+    collect(&store);
+    assert_eq!(
+        store.take_lost_resolvers(),
+        vec![promise],
+        "the breaker dies once the transaction is gone, its promise resolved"
+    );
+    drop(promised);
 }

@@ -1061,7 +1061,8 @@ fn classify_regional_key_value(
         | Value::Promised(_)
         | Value::Metadata(_)
         | Value::Opaque(_)
-        | Value::Volume(_) => RegionalClassifiedKeyValue::Invalid,
+        | Value::Volume(_)
+        | Value::Resolver(_) => RegionalClassifiedKeyValue::Invalid,
     }
 }
 

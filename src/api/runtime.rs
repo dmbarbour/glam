@@ -16,9 +16,9 @@ use crate::evaluation::{
     ValidatedRuntimeSettlementPlan,
 };
 use crate::reflection::{
-    ConflictAnalysisStrategy, DeathNotice, ExactConflictAnalysis, ReasoningSessionId,
-    ReflectionQueryMutation, ReflectionQueryWriter, ReflectionStore, Resolution,
-    RuntimeInputEndpointId, StoreCommitResult, VolumeId,
+    ConflictAnalysisStrategy, ExactConflictAnalysis, ReasoningSessionId, ReflectionQueryMutation,
+    ReflectionQueryWriter, ReflectionStore, Resolution, RuntimeInputEndpointId, StoreCommitResult,
+    VolumeId,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeCoreState, RuntimeGcLeaseOutcome, RuntimeGcMaintenanceDisposition,
@@ -514,34 +514,30 @@ impl RuntimeSharedResources {
     }
 
     /// Destroys the external owners whose last copy is gone, then acts on
-    /// the death notices their payloads queued
-    /// (`opaque-resources-reclaimed-when-unreachable`): a lost resolver's
-    /// promise breaks with "resolver lost" and its record goes. A volume
-    /// queues none: its versions clear when it dies (`api-volume-cells`).
-    /// Returns whether a notice changed anything. The caller holds no
-    /// mutator, as after a collection.
+    /// the death notices that dying breakers queued
+    /// (`opaque-resources-reclaimed-when-unreachable`,
+    /// `promise-cells-are-weakly-resolved`): a lost resolver's promise, if
+    /// still pending, breaks with "resolver lost". A volume queues none: its
+    /// versions clear when it dies (`api-volume-cells`). Returns whether a
+    /// notice changed anything. The caller holds no mutator, as after a
+    /// collection.
     pub(crate) fn process_death_notices(&self) -> bool {
         let values = self.values.core();
         values.drain_retired_external_owners();
-        let (notices, promises) = {
+        let (resolvers, promises) = {
             let state = self
                 .transactions
                 .state
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
             (
-                state.reflection.take_death_notices(),
+                state.reflection.take_lost_resolvers(),
                 state.reflection.promises().clone(),
             )
         };
-        let resolvers = notices
-            .into_iter()
-            .map(|notice| match notice {
-                DeathNotice::Resolver(promise) => promise,
-            })
-            .collect::<Vec<_>>();
         // A lost resolver's promise breaks as any resolution does, with a
-        // commit, and its record goes either way.
+        // commit, which wakes what observed its status, and its entry goes
+        // either way.
         let mut broken = false;
         if !resolvers.is_empty() {
             let lost = values.construct_runtime_value_root(|_| {
@@ -552,9 +548,7 @@ impl RuntimeSharedResources {
                     crate::reflection::StoreJournal::new(self.reflection_snapshot().1);
                 let mut staged = false;
                 for &promise in &resolvers {
-                    staged |= journal
-                        .resolve(promise, Resolution::Break(lost.clone()))
-                        .is_ok();
+                    staged |= journal.break_lost(promise, Resolution::Break(lost.clone()));
                 }
                 if !staged {
                     break;

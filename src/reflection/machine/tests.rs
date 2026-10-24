@@ -649,8 +649,8 @@ impl TestHost {
     }
 
     /// Allocates a promise in the host's store, as a machine would, giving
-    /// its identity and its resolver.
-    fn promise(&self) -> (PromiseId, PublicValue) {
+    /// a hold on its breaker and its resolver.
+    fn promise(&self) -> (ManagedResolverRoot, PublicValue) {
         let (values, promises) = {
             let state = self.state.lock().unwrap();
             (
@@ -660,18 +660,18 @@ impl TestHost {
         };
         let mut promise = None;
         let resolver = public_value_with(&values, |access| {
-            let (id, _, resolver) = promises.allocate(access);
-            promise = Some(id);
+            let (_, _, resolver) = promises.allocate(access);
+            promise = access.resolver_root(&resolver);
             resolver
         });
-        (promise.expect("allocation names the promise"), resolver)
+        (promise.expect("allocation gives a resolver"), resolver)
     }
 
-    /// Allocates a promise in the host's store, giving its identity, its
-    /// promised value, which waits until it is resolved, and its resolver,
-    /// which a test holds while the promise is to stay pending: a resolver
-    /// collected breaks its promise.
-    fn promised(&self) -> (PromiseId, PublicValue, PublicValue) {
+    /// Allocates a promise in the host's store, giving a hold on its
+    /// breaker, its promised value, which waits until it is resolved, and
+    /// its resolver, which a test holds while the promise is to stay
+    /// pending: a resolver collected breaks its promise.
+    fn promised(&self) -> (ManagedResolverRoot, PublicValue, PublicValue) {
         let (values, promises) = {
             let state = self.state.lock().unwrap();
             (
@@ -682,13 +682,13 @@ impl TestHost {
         let mut promise = None;
         let mut resolver = None;
         let promised = public_value_with(&values, |access| {
-            let (id, promised, kept) = promises.allocate(access);
-            promise = Some(id);
+            let (_, promised, kept) = promises.allocate(access);
+            promise = access.resolver_root(&kept);
             resolver = Some(access.root_runtime_value(kept));
             promised
         });
         (
-            promise.expect("allocation names the promise"),
+            promise.expect("allocation gives a resolver"),
             promised,
             PublicValue::from_runtime_root(resolver.expect("allocation gives a resolver")),
         )
@@ -696,7 +696,7 @@ impl TestHost {
 
     /// Fulfills `promise` as a resolver outside this host would: the
     /// promised value, then its place in the store.
-    fn fulfill(&self, promise: PromiseId, value: PublicValue) {
+    fn fulfill(&self, promise: &ManagedResolverRoot, value: PublicValue) {
         let (values, settled) = {
             let mut state = self.state.lock().unwrap();
             let mut journal = StoreJournal::new(state.store.snapshot());
@@ -3296,10 +3296,10 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
         | Request::ExitError(value)
         | Request::VolumeNew(value) => assert_request_value(value),
         Request::PromiseStatus(promise) => {
-            let _: &PromiseId = promise;
+            let _: &ManagedResolverRoot = promise;
         }
         Request::PromiseFulfill(promise, value) | Request::PromiseBreak(promise, value) => {
-            let _: &PromiseId = promise;
+            let _: &ManagedResolverRoot = promise;
             assert_request_value(value);
         }
         Request::Seq(left, right)
@@ -9445,6 +9445,20 @@ fn a_promise_effect_needs_a_resolver_and_resolves_once() {
 }
 
 #[test]
+fn resolvers_cannot_be_compared() {
+    // Resolvers are abstract (`promise-cells-are-weakly-resolved`): not even
+    // a resolver and its copy compare.
+    let (assembler, effect) = compile_effect(
+        ".promise.new >>= (\\p -> seq (p.resolver == p.resolver) (.r \"compared\"))",
+    );
+    let error = effect_text(&assembler, &effect).expect_err("resolvers do not compare");
+    assert!(
+        error.to_string().contains("cannot compare resolvers"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_cut_s_resolution_commits_with_it() {
     let (assembler, effect) = compile_effect(
         ".promise.new >>= (\\p -> .cut (.promise.fulfill p.resolver \"sent\" =>> .promise.status p.resolver) >>= (\\inside -> .promise.status p.resolver >>= (\\after -> .r (if inside == 'fulfilled then (if after == 'fulfilled then p.promise else \"unsent\") else \"unseen\"))))",
@@ -9498,7 +9512,7 @@ fn a_cut_that_read_a_promise_pending_retries_once_it_resolves() {
         }
     };
 
-    host.fulfill(promise, assembler.values().integer(1));
+    host.fulfill(&promise, assembler.values().integer(1));
     assert!(host.wait_for_change(generation));
     let results = poll_isolated_search(&mut search);
     assert_eq!(results.len(), 1);
@@ -9671,7 +9685,7 @@ fn a_cut_that_fails_on_a_try_s_wait_parks_until_its_promise_is_kept() {
                 && blocked.retry.is_some()),
         "the failed cut parks on what it observed: the promise its `.try` waited on"
     );
-    host.fulfill(promise, assembler.values().integer(1));
+    host.fulfill(&promise, assembler.values().integer(1));
     let TaskOutcome::Complete(value) = task.run().expect("the cut should run again") else {
         panic!("the watcher should complete")
     };

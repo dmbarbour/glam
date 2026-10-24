@@ -1,87 +1,49 @@
 //! Promises that machines and reflection allocate and resolve
-//! (`machines-inherit-an-environment`, `requests-travel-on-ports`).
+//! (`machines-inherit-an-environment`, `requests-travel-on-ports`,
+//! `promise-cells-are-weakly-resolved`).
 //!
-//! A resolver is an opaque glam value, which may hold no managed root, so it
-//! carries only its promise's identity, and the store holds each unresolved
-//! promise's root here until it is resolved, then how it resolved, so its
-//! resolver reads its status. A promise's status is a read of the store, too:
-//! within a transaction a read observes the promise's place in the runtime's
-//! volume, which its resolution writes, so a transaction that read it pending
-//! conflicts with the resolution, and one that failed wakes to it.
+//! A promise has one identity, its cell's ID. Its resolver is an edge to its
+//! breaker, which keeps its status, and the store holds each pending
+//! promise's cell only weakly, by that ID: the promised value alone keeps
+//! its cell, so the store holds no promise alive. A promise's status is a
+//! read of its breaker; within a transaction a read observes the promise's
+//! place in the runtime's volume, which its resolution writes, so a
+//! transaction that read it pending conflicts with the resolution, and one
+//! that failed wakes to it.
 //!
 //! A resolution is an edit of a transaction (`promise-resolution-commits-with-its-cut`):
-//! staged in its journal, it settles the record with the commit, under the
-//! store's lock, and the committer then publishes the value and wakes what
-//! waits on it.
+//! staged in its journal, with a hold on the resolver's breaker, it settles
+//! the breaker's status and the store's entry with the commit, under the
+//! store's lock, and the committer then publishes the value into the cell,
+//! where it still lives, and wakes what waits on it.
 //!
-//! A resolver's payload reports its death to the store, and the runtime then
-//! breaks its promise, if still pending, with "resolver lost", and drops its
-//! record (`opaque-resources-reclaimed-when-unreachable`). A resolver keeps
-//! its promise alive through the record, never the reverse: a pending
-//! promise reaches nothing.
+//! A breaker that dies queues its promise's ID on the store's channel of
+//! lost resolvers, and the runtime then breaks the promise, if still
+//! pending, with "resolver lost" (`opaque-resources-reclaimed-when-unreachable`).
 
 use std::collections::BTreeMap;
 use std::sync::mpsc::Sender;
 use std::sync::{Arc, Mutex, PoisonError};
 
+pub(crate) use crate::core::PromiseId;
+pub use crate::core::PromiseStatus;
 use crate::core::{
-    EvaluationFailure, ManagedPromiseRoot, OpaquePayloadFamily, OpaquePayloadRecord, OpaqueValue,
-    PromiseAssignment, PromisedValue, RuntimeValueAccess, Value,
+    EvaluationFailure, ManagedPromiseWeakRoot, PromiseAssignment, RuntimeValueAccess, Value,
 };
-use crate::runtime::{EvaluationRuntimeId, RuntimeValueRoot};
-
-use super::store::DeathNotice;
+use crate::runtime::RuntimeValueRoot;
 
 /// Why a transaction cannot wait on the value of a promise it resolves: only
 /// its commit would settle it.
 pub(crate) const SELF_AWAITED: &str =
     "the cut waits on the value of a promise it resolves, which only its commit settles";
 
-/// A promise's identity among its store's promises.
-pub(crate) type PromiseId = u64;
-
-/// The promises a store's machines and reflection allocated, by their
-/// resolvers' identities.
+/// The pending promises a store's machines and reflection allocated, by
+/// their cells' IDs, each held weakly.
 pub(crate) struct Promises {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
-    pending: Mutex<PendingPromises>,
-    /// Where each resolver reports its death.
-    notices: Sender<DeathNotice>,
-}
-
-#[derive(Default)]
-struct PendingPromises {
-    next: PromiseId,
-    entries: BTreeMap<PromiseId, PromiseEntry>,
-}
-
-/// A promise, until it resolves, then how it resolved: a bounded record
-/// that keeps no value, until its resolver dies.
-enum PromiseEntry {
-    Pending(ManagedPromiseRoot),
-    Resolved { fulfilled: bool },
-}
-
-/// A promise's status, read from its resolver, never its value.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum PromiseStatus {
-    /// Not yet resolved.
-    Pending,
-    /// Resolved with a value.
-    Fulfilled,
-    /// Broken, with a message or diagnostic.
-    Broken,
-}
-
-impl PromiseStatus {
-    /// The status's name, as reflection's atom spells it.
-    pub(crate) fn name(self) -> &'static str {
-        match self {
-            Self::Pending => "pending",
-            Self::Fulfilled => "fulfilled",
-            Self::Broken => "broken",
-        }
-    }
+    pending: Mutex<BTreeMap<PromiseId, ManagedPromiseWeakRoot>>,
+    /// Where each breaker reports its death.
+    lost: Sender<PromiseId>,
 }
 
 /// How a promise resolves: with a value, or broken with a message or a
@@ -109,13 +71,13 @@ impl Resolution {
 
 /// A resolution committed and settled, its promised value not yet published.
 pub(crate) struct Settled {
-    root: ManagedPromiseRoot,
+    cell: ManagedPromiseWeakRoot,
     resolution: Resolution,
 }
 
 impl Settled {
-    pub(super) fn new(root: ManagedPromiseRoot, resolution: Resolution) -> Self {
-        Self { root, resolution }
+    pub(super) fn new(cell: ManagedPromiseWeakRoot, resolution: Resolution) -> Self {
+        Self { cell, resolution }
     }
 
     fn assignment(&self, access: &RuntimeValueAccess<'_>) -> PromiseAssignment {
@@ -141,9 +103,11 @@ pub(crate) fn publish_settled(values: &crate::core::CoreValueFactory, settled: V
     let publications = values.with_boundary_access(|access| {
         settled
             .into_iter()
+            // A cell no one holds any longer has no one to read its value.
             .filter_map(|settled| {
+                let cell = settled.cell.cell_in(&access)?;
                 let assignment = settled.assignment(&access);
-                settled.root.publish(&access, assignment).ok()
+                cell.publish(&access, assignment).ok()
             })
             .collect::<Vec<_>>()
     });
@@ -152,145 +116,61 @@ pub(crate) fn publish_settled(values: &crate::core::CoreValueFactory, settled: V
     }
 }
 
-/// A resolver's payload: which promise of which runtime it resolves, and
-/// where to report its death.
-struct PromiseCapability {
-    runtime: EvaluationRuntimeId,
-    id: PromiseId,
-    notices: Sender<DeathNotice>,
-}
-
-impl Drop for PromiseCapability {
-    fn drop(&mut self) {
-        // A store already gone has no record left to settle.
-        let _ = self.notices.send(DeathNotice::Resolver(self.id));
-    }
-}
-
-// SAFETY: the payload holds a runtime's identity, a number, and a channel's
-// sending end. It contains no Glam value, runtime root, managed pointer, or
-// active runtime capability: the promise's root stays in the store's
-// `Promises`, and its `Drop` only queues a notice for the store, which acts
-// on it later, at a safe point.
-unsafe impl OpaquePayloadFamily for PromiseCapability {
-    const PAYLOAD_RECORD: OpaquePayloadRecord =
-        OpaquePayloadRecord::external("promise resolver", "src/reflection/promises.rs");
-}
-
-/// The promise that `resolver`, evaluated, resolves, where it is a resolver
-/// of this runtime's promise.
-pub(crate) fn resolver_promise(
-    access: &RuntimeValueAccess<'_>,
-    resolver: &Value,
-) -> Option<PromiseId> {
-    let Value::Opaque(opaque) = resolver else {
-        return None;
-    };
-    let values = access.values();
-    opaque
-        .downcast::<PromiseCapability>(values)
-        .filter(|capability| capability.runtime == values.runtime_id())
-        .map(|capability| capability.id)
-}
-
 impl Promises {
-    pub(super) fn new(notices: Sender<DeathNotice>) -> Self {
+    pub(super) fn new(lost: Sender<PromiseId>) -> Self {
         Self {
             pending: Mutex::default(),
-            notices,
+            lost,
         }
     }
 
-    fn pending(&self) -> std::sync::MutexGuard<'_, PendingPromises> {
+    fn pending(&self) -> std::sync::MutexGuard<'_, BTreeMap<PromiseId, ManagedPromiseWeakRoot>> {
         self.pending.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     /// Allocates a promise: its identity, its promised value, which waits
-    /// until it is resolved, and its resolver.
+    /// until it is resolved, and its resolver. The values gain an owner
+    /// before `access` ends.
     pub(crate) fn allocate(&self, access: &RuntimeValueAccess<'_>) -> (PromiseId, Value, Value) {
-        let promise = access
-            .construct_rooted_managed_promise()
-            .expect("managed promise representation must fit one collector run");
-        let promised = Value::Promised(PromisedValue::from_root(&promise, access));
-        let id = {
-            let mut pending = self.pending();
-            let id = pending.next;
-            pending.next += 1;
-            pending.entries.insert(id, PromiseEntry::Pending(promise));
-            id
-        };
-        let values = access.values();
-        let capability = PromiseCapability {
-            runtime: values.runtime_id(),
-            id,
-            notices: self.notices.clone(),
-        };
-        let resolver = Value::Opaque(OpaqueValue::new(values, Arc::new(capability)));
+        let (id, promised, resolver, cell) = access.construct_resolvable_promise(&self.lost);
+        self.pending().insert(id, cell);
         (id, promised, resolver)
     }
 
-    /// The status of `promise`, or `None` where this store has no such
-    /// promise.
-    pub(crate) fn status(&self, promise: PromiseId) -> Option<PromiseStatus> {
-        self.pending()
-            .entries
-            .get(&promise)
-            .map(|entry| match entry {
-                PromiseEntry::Pending(_) => PromiseStatus::Pending,
-                PromiseEntry::Resolved { fulfilled: true } => PromiseStatus::Fulfilled,
-                PromiseEntry::Resolved { fulfilled: false } => PromiseStatus::Broken,
-            })
+    /// Whether `promise` is one of this store's, still pending: one that
+    /// only a resolver, from outside evaluation, resolves.
+    pub(crate) fn is_pending(&self, promise: PromiseId) -> bool {
+        self.pending().contains_key(&promise)
     }
 
-    /// The cell of `promise`, while it is pending: the identity that an
-    /// evaluation waiting on its value reports.
-    pub(crate) fn cell(&self, promise: PromiseId) -> Option<crate::core::PromiseId> {
-        match self.pending().entries.get(&promise)? {
-            PromiseEntry::Pending(root) => Some(root.id()),
-            PromiseEntry::Resolved { .. } => None,
-        }
-    }
-
-    /// The pending promise whose cell is `cell`: the promise an evaluation
-    /// that waits on `cell` waits on, where the store holds it. A scan, for
-    /// the rare `.try` that waits (`api-refl-try`).
-    pub(crate) fn pending_with_cell(&self, cell: crate::core::PromiseId) -> Option<PromiseId> {
-        self.pending()
-            .entries
-            .iter()
-            .find_map(|(promise, entry)| match entry {
-                PromiseEntry::Pending(root) if root.id() == cell => Some(*promise),
-                _ => None,
-            })
-    }
-
-    /// How many promises the record holds, pending or resolved.
+    /// How many promises are pending.
     #[cfg(test)]
     pub(crate) fn len_for_test(&self) -> usize {
-        self.pending().entries.len()
+        self.pending().len()
+    }
+
+    /// How many pending promises' cells still live.
+    #[cfg(test)]
+    pub(crate) fn live_cells_for_test(&self, values: &crate::core::CoreValueFactory) -> usize {
+        values.with_boundary_access(|access| {
+            self.pending()
+                .values()
+                .filter(|cell| cell.cell_in(&access).is_some())
+                .count()
+        })
     }
 
     /// Forgets `promise`, which nothing can have read, as an operation that
     /// allocated it and then failed does.
     pub(crate) fn forget(&self, promise: PromiseId) {
-        self.pending().entries.remove(&promise);
+        self.pending().remove(&promise);
     }
 
     /// Settles `promise` as a commit resolving it does, under the store's
-    /// lock, returning its root for the committer to publish the
-    /// resolution into once the lock is released, or `None` where it was
-    /// not pending.
-    pub(super) fn settle(&self, promise: PromiseId, fulfilled: bool) -> Option<ManagedPromiseRoot> {
-        let mut pending = self.pending();
-        let Some(PromiseEntry::Pending(_)) = pending.entries.get(&promise) else {
-            return None;
-        };
-        match pending
-            .entries
-            .insert(promise, PromiseEntry::Resolved { fulfilled })
-        {
-            Some(PromiseEntry::Pending(root)) => Some(root),
-            _ => unreachable!("the entry was pending"),
-        }
+    /// lock, returning its cell, held weakly, for the committer to publish
+    /// the resolution into once the lock is released, or `None` where it
+    /// was not pending.
+    pub(super) fn settle(&self, promise: PromiseId) -> Option<ManagedPromiseWeakRoot> {
+        self.pending().remove(&promise)
     }
 }

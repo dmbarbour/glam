@@ -47,10 +47,10 @@ use crate::evaluation::{EvaluationPumpOutcome, ExactDemandRoute, WorkDependency}
 /// How many reductions a cut whose evaluation waited lets each pump of the
 /// work it waits on make.
 const AWAIT_PUMP_ALLOWANCE: usize = 4_096;
-use crate::core::{RuntimeValueAccess, VolumeCellView};
+use crate::core::{ManagedResolverRoot, RuntimeValueAccess, VolumeCellView};
 use crate::reflection::{
     ConflictAnalysisStrategy, Promises, Resolution, StoreCommitResult, StoreJournal,
-    contents_at_path, resolver_promise,
+    contents_at_path,
 };
 
 /// What opening a runtime takes. It configures the runtime alone:
@@ -2361,7 +2361,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let top = self.peek()?.clone();
         let evaluated = self.runtime.assembler.evaluator().eval(&top);
         let resolver = self.note_evaluation(evaluated)?.into_value();
-        let promise = self.resolver_promise(&resolver)?;
+        let resolver = self.resolver_root(&resolver)?;
+        let promise = resolver.id();
         if let Some(cut) = &mut self.cut {
             // The cut sees its own resolution, as its own writes.
             if let Some(staged) = cut.journal.staged_status(promise) {
@@ -2369,21 +2370,20 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             }
             cut.observed |= cut.journal.observe_promise_read(promise);
         }
-        self.promises()
-            .status(promise)
-            .ok_or_else(|| Error::new("the runtime has no such promise"))
+        Ok(resolver.status())
     }
 
-    /// The promise that `resolver`, evaluated, resolves.
-    fn resolver_promise(&self, resolver: &HandleValue) -> Result<u64, Error> {
+    /// A hold on the breaker of `resolver`, evaluated.
+    fn resolver_root(&self, resolver: &HandleValue) -> Result<ManagedResolverRoot, Error> {
         self.runtime
             .assembler
             .values()
             .with_access(|scoped| {
-                Ok::<_, Error>(resolver_promise(
-                    scoped.runtime_access(),
-                    &scoped.clone_core(resolver)?,
-                ))
+                Ok::<_, Error>(
+                    scoped
+                        .runtime_access()
+                        .resolver_root(&scoped.clone_core(resolver)?),
+                )
             })?
             .ok_or_else(|| Error::new("the value is not a resolver of this runtime's promise"))
     }
@@ -2431,11 +2431,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.runtime.assembler.values().require(&value)?;
         let evaluated = self.runtime.assembler.evaluator().eval(&resolver);
         let resolver = self.note_evaluation(evaluated)?.into_value();
-        let promise = self.resolver_promise(&resolver)?;
+        let resolver = self.resolver_root(&resolver)?;
         let resolution = resolution(value.into_runtime_root());
         self.transact(|store, _| {
             store
-                .resolve(promise, resolution.clone())
+                .resolve(&resolver, resolution.clone())
                 .map_err(|error| Error::new(error.as_ref()))
         })?;
         self.state.stack.truncate(depth - 2);

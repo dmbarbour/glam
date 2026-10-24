@@ -124,6 +124,7 @@ it hides the cycle.
 | `ManagedValueNode` | `core/managed/value_node.rs` |
 | lazy, promise and core-net cells | `core/managed/recursive_cells.rs` |
 | volume cells and contents | `core/managed/volume_cells.rs` |
+| promise breakers | `core/managed/promise_breakers.rs` |
 | `ManagedLazyCheckpointCell` (WHNF state) | `eval/whnf/managed_state.rs` |
 | six typed lazy-producer checkpoints | `eval/lazy_checkpoint.rs` |
 | list-front and key-conversion checkpoints | `eval/list_machine.rs`, `eval/access_machine.rs` |
@@ -217,7 +218,7 @@ lives in the domain's `ExternalOwnerRegistry`.
 
 - `OpaquePayloadFamily` records each family as `edge_free` (compilation
   origins, net construction tokens) or `external` (effect tokens, task
-  handles, promise resolvers). No payload directly holds a
+  handles). No payload directly holds a
   `Gc`, raw value or root.
 - `downcast` checks runtime, lease and family and returns an owning `Arc<T>`,
   sound only because payloads are external. Glam equality compares owners.
@@ -226,17 +227,20 @@ lives in the domain's `ExternalOwnerRegistry`.
   panics. Production drains in `HostCallProducer::invoke` and after each
   runtime collection, else at teardown.
 - The collector never retires an external owner; the runtime drains the
-  registry once a collection is done. A resolver's destructor queues a
-  death notice, which the runtime then acts on: a lost resolver's promise
-  breaks with "resolver lost"
-  (`opaque-resources-reclaimed-when-unreachable`). A task result holding its
-  own handle survives until runtime teardown (accepted).
+  registry once a collection is done. A task result holding its own handle
+  survives until runtime teardown (accepted).
 - A volume's handle is not opaque in representation: it is the `Volume`
   value kind, one edge to the volume's managed cell (`api-volume-cells`),
   which Glam sees as opaque and compares by volume. The reflection store
   holds each committed version through a rooted ephemeron keyed on the
   cell, so volumes are collected with their contents, even where those
   reach their handles; see [`reflection.md`](reflection.md).
+- A promise's resolver is not opaque in representation either: it is the
+  `Resolver` value kind, one edge to the promise's managed breaker, which
+  Glam sees as opaque and cannot compare
+  (`promise-cells-are-weakly-resolved`). A dying breaker queues its
+  promise's ID, the passive notice its destruction record states, and the
+  runtime then breaks the promise, if still pending, with "resolver lost".
 
 `HostCallProducer` traces its Glam captures and keeps its closure in the
 registry. Invocation roots the captures into a `HostCallRootBundle`, closes the

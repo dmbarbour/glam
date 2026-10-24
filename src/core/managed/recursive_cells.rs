@@ -129,6 +129,13 @@ pub(crate) struct ManagedLazyRoot {
     root: Root<ManagedLazyCell>,
 }
 
+/// A weak reference to a promise's cell, rooted: it views the cell while some
+/// other path reaches it, and keeps it alive by no means of its own
+/// (`promise-cells-are-weakly-resolved`).
+pub(crate) struct ManagedPromiseWeakRoot {
+    root: Root<glam_gc::Weak<ManagedPromiseCell>>,
+}
+
 #[derive(Clone)]
 pub(crate) struct ManagedPromiseRoot {
     id: PromiseId,
@@ -414,6 +421,17 @@ impl ManagedPromiseEdge {
         visitor.visit(&self.0);
     }
 
+    /// A rooted weak reference to the cell. The caller reaches the edge from
+    /// a live owner under `authority`.
+    pub(in crate::core) fn root_weak(
+        &self,
+        authority: &RuntimeValueAccess<'_>,
+    ) -> ManagedPromiseWeakRoot {
+        ManagedPromiseWeakRoot {
+            root: authority.root_weak(authority.view_edge(&self.0, EdgeLiveness::HeldValue)),
+        }
+    }
+
     #[inline(always)]
     pub(crate) fn duplicate_in(&self, authority: &RuntimeValueAccess<'_>) -> Self {
         Self(authority.duplicate_edge(&self.0))
@@ -523,6 +541,14 @@ impl ManagedLazyRoot {
         self.access(authority)
             .expect("lazy root and publication access must share one value domain")
             .cache(result)
+    }
+}
+
+impl ManagedPromiseWeakRoot {
+    /// The cell, rooted, or `None` once a collection found it unreachable.
+    pub(crate) fn cell_in(&self, authority: &RuntimeValueAccess<'_>) -> Option<ManagedPromiseRoot> {
+        let cell = authority.weak_target(&self.root)?;
+        Some(authority.root_managed_promise(&ManagedPromiseEdge(cell.edge())))
     }
 }
 
