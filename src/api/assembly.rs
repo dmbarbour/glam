@@ -277,15 +277,22 @@ impl ReflectionQueryWriter for RuntimeSharedResources {
 
 impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
-        let (generation, store) = self.resources.reflection_snapshot();
-        HostSnapshot::new(generation, store, ())
+        let (generation, store, events) = self.resources.transaction_snapshot();
+        HostSnapshot::new(generation, store, Some(events))
     }
 
     fn validate(
         &self,
         validation: crate::reflection::TaskValidation<'_, ReflectionEffects>,
     ) -> crate::reflection::ValidationResult {
-        let (result, generation) = self.resources.validate_reflection(validation.store());
+        // A transaction's port actions validate with its store edits, as a
+        // turn's cut does (`api-refl-child-tasks`).
+        let (result, generation) = match validation.extra().events() {
+            Some(events) => self
+                .resources
+                .validate_transaction(validation.store(), events),
+            None => self.resources.validate_reflection(validation.store()),
+        };
         match result {
             crate::reflection::StoreCommitResult::Committed => {
                 crate::reflection::ValidationResult::Current { generation }
@@ -301,7 +308,11 @@ impl TaskHost<ReflectionEffects> for AssemblerReflectionHost {
 
     fn commit(&self, commit: TaskCommit<ReflectionEffects>) -> CommitResult {
         let (store, _extra_snapshot, extra) = commit.into_parts();
-        match self.resources.commit_reflection(&store) {
+        let committed = match extra.events() {
+            Some(events) => self.resources.try_commit_transaction(&store, events),
+            None => self.resources.commit_reflection(&store),
+        };
+        match committed {
             crate::reflection::StoreCommitResult::Committed => {}
             crate::reflection::StoreCommitResult::Conflict => {
                 return CommitResult::Conflict;

@@ -1013,7 +1013,8 @@ impl TaskHost<ReflectionEffects> for TestHost {
     fn snapshot(&self) -> HostSnapshot<ReflectionEffects> {
         self.probe_callback_boundary(CallbackProbeKind::Snapshot);
         let state = self.state.lock().unwrap();
-        HostSnapshot::new(state.generation, state.store.snapshot(), ())
+        // A test host has no machines, so no port state.
+        HostSnapshot::new(state.generation, state.store.snapshot(), None)
     }
 
     fn validate(&self, validation: TaskValidation<'_, ReflectionEffects>) -> ValidationResult {

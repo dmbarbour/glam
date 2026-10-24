@@ -305,8 +305,15 @@ impl TaskSpecialization for ReflectionEffects {
     type Host = dyn ReflectionHost<Self>;
     type Request = ReflectionRequest;
     type RequestWork = ReflectionRequestWork;
-    type Snapshot = ();
+    /// The machines' port state, where the host has machines: the
+    /// assembler's host does, and a test host need not
+    /// (`api-refl-child-tasks`).
+    type Snapshot = Option<crate::api::RuntimeEventSnapshot>;
     type Journal = ReflectionJournal;
+
+    fn begin_journal(snapshot: &Self::Snapshot) -> Self::Journal {
+        ReflectionJournal::begin(snapshot.as_ref())
+    }
 
     fn requests(&self) -> Vec<EffectRequestSpec<Self::Request>> {
         reflection_request_specs()

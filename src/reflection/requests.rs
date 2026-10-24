@@ -1247,9 +1247,25 @@ enum ReflectionUpdate {
 pub struct ReflectionJournal {
     diagnostics: Vec<Diagnostic>,
     updates: Vec<ReflectionUpdate>,
+    /// The machines' port actions, which commit with the store journal,
+    /// where the host has machines (`api-refl-child-tasks`).
+    events: Option<crate::api::RuntimeEventJournal>,
 }
 
 impl ReflectionJournal {
+    pub(super) fn begin(snapshot: Option<&crate::api::RuntimeEventSnapshot>) -> Self {
+        Self {
+            events: snapshot.cloned().map(crate::api::RuntimeEventJournal::new),
+            ..Self::default()
+        }
+    }
+
+    /// The machines' port actions, where the host has machines.
+    #[doc(hidden)]
+    pub fn events(&self) -> Option<&crate::api::RuntimeEventJournal> {
+        self.events.as_ref()
+    }
+
     pub fn diagnostics(&self) -> &[Diagnostic] {
         &self.diagnostics
     }
@@ -1767,9 +1783,12 @@ mod tests {
         let ReflectionJournal {
             diagnostics,
             updates,
+            events,
         } = journal;
         let _: &Vec<Diagnostic> = diagnostics;
         let _: &Vec<ReflectionUpdate> = updates;
+        // Port actions hold handle values, roots of their own.
+        let _: &Option<crate::api::RuntimeEventJournal> = events;
     }
 
     fn assert_tagged_task_state_inventory(state: &TaggedTaskState) {
@@ -1835,6 +1854,7 @@ mod tests {
                     .expect("retained request fixture uses one runtime"),
             ],
             updates: Vec::new(),
+            events: None,
         };
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained.upgrade().is_some());
