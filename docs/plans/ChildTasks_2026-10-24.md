@@ -36,86 +36,78 @@ maintainer's review before building.
   `task_failures`, which fail a batch (`bin/glam/batch.rs:295-301`). No
   sample or prelude uses `.task.*`; about 200 test sites do.
 
-## The question: where a tasked machine's state lives
+## The model, clarified (maintainer, 2026-10-24)
 
-A task runs on a worker while the runtime's holder thread may take turns,
-so a machine driven by tasks cannot live by value inside the holder's
-tree. Its state, local state persisting from task to task, its error flag,
-its queue and its children tasks' machines, must be reachable by workers,
-and by turns that reach it (`m.recover`, `m.failed`, `m.machines`, and a
-turn waiting for a busy machine).
+The draft asked where a tasked machine's state lives so that turns and
+tasks share one tree, offering a shared flat table, delegated subtrees or a
+separate table. That question does not arise: each anonymous reflection
+task is its own root for child tasks (maintainer). Its machine is
+anonymous, unnamed in listings and unrecoverable, and nothing joins it, so
+its children, the only machines tasks create, are reachable only from
+tasks within its subtree. No turn enters, lists, recovers or joins them,
+and the turn tree is unchanged.
 
-Options:
+So the machines below an anonymous root live on the reflection side, in
+the runtime's shared resources where workers reach them, keyed by path
+under the root. Their ports, a task input among them, live in the
+transactional port state like any machine's, under the root's anonymous
+key, which turns' listings leave out.
 
-1. **One shared, flat machine table.** Every machine, turn-driven or
-   tasked, is an entry keyed by path in the runtime's shared resources; a
-   driver checks an entry out and in; children are entries below a path.
-   The end state the model describes, and what `.child.call` wants, since
-   its staging is per entry. It rewrites the turn tree: cut snapshots of
-   descendants, forks, `prune`, `machines`.
-2. **Delegated subtrees (recommended).** A machine that is ever tasked
-   becomes a shared cell, as a fork's subtree leaves its parent:
-   `Child::Tasked(cell)` beside `Idle` and `Forked`, with the cells also
-   indexed by path for workers. A cell holds the machine's state, its error
-   flag, and whether a driver holds it. Turn-only machines stay inline,
-   untouched. A turn that reaches a tasked child waits while it is busy, as
-   the model says, and otherwise takes its state for the turn; a task's
-   children it tasks are cells too. A cut's snapshot keeps the cell, not
-   its contents: the child's state is its own tasks', which run only once
-   the cut that queued them commits. Option 1 can follow, entry by entry,
-   when `.child.call` needs staging.
-3. **A separate task-machine table**, disjoint from the turn tree, which
-   turns cannot enter. The smallest step, but `m.recover`, `m.failed` and
-   `m.machines` would see two trees, against the model.
+A task's commit carries only the store journal today; ports travel in a
+turn's event journal (`api/runtime.rs:455`, `commit_reflection`). The task
+queue is a port, so reflection transactions first gain the port journal,
+the groundwork of `api-refl-ports`, pulled forward.
 
 ## Proposed slices
 
 Each with tests, the full gate, and a commit.
 
-1. `child-task-machines` — the cells and machine identity: a task runs on
-   a machine path, its `.get`/`.set` state is the machine's local state,
-   taken when the task starts and written back when it ends, as a turn's
-   is, cuts within the task still undoing their own. Annotation tasks run
-   on anonymous machines `refl/<n>`, `n` a `NonZeroU64`, cleared when
-   their task ends (pulled forward from `api-refl-annotations`, since
-   `.child.task` needs its caller's machine). `.env` keeps today's
-   committed reading.
-2. `child-task-queue` — `.child.task Key Op` writes `{op, reply}` to the
+1. `task-port-journal` — reflection transactions carry the port and wiring
+   journal beside the store journal, and commit both, as a turn's cut
+   does; a task's port reads are observed, so a cut that read too few
+   waits for arrivals. The groundwork of `api-refl-ports`, whose `.port.*`
+   effects can follow on it.
+2. `child-task-machines` — anonymous roots and the machines below them: a
+   reflection task runs on a machine path, annotation tasks on anonymous
+   roots `refl/<n>`, `n` a `NonZeroU64`, whose local state clears when
+   their task ends. A child machine's local state persists from task to
+   task: a task takes it when it starts and writes it back when it ends,
+   as a turn's is, cuts within the task still undoing their own.
+   Listings of `refl` leave anonymous roots out.
+3. `child-task-queue` — `.child.task Key Op` writes `{op, reply}` to the
    child's task input, a port named by an abstract global path, and
    returns the reply's promise. A committed write to an idle machine's
    task input starts its task on a worker; the head item stays in the
    buffer while it runs and is claimed when it ends, so `.child.status`
-   (`'busy` while the buffer holds a task, `'error` while flagged,
-   `'idle` otherwise) is an observed read that wakes a cut when it
-   changes. A task's result fulfills its reply; a failure breaks it,
-   flags the machine, and stops the queue.
-3. `child-task-control` — `.child.recover` (clear the flag and the queue,
+   (`'busy` while the buffer holds a task, `'error` while flagged, `'idle`
+   otherwise) is an observed read that wakes a cut when it changes. A
+   task's result fulfills its reply; a failure breaks it, flags the
+   machine, and stops the queue.
+4. `child-task-control` — `.child.recover` (clear the flag and the queue,
    breaking the queued replies with "recovered before it ran"),
    `.child.interrupt Key Reason` (cancel the running task, break its reply
    with `Reason`, flag the machine), `.child.clear` (empty the child and
    its descendants, breaking the replies of the tasks it drops).
-4. `child-task-migration` — the compiler's annotator and scanner move to
+5. `child-task-migration` — the compiler's annotator and scanner move to
    `.child.task`: the scanner as the boundary task's child, each `refl.*`
    entry as the scanner's child under its key, and the tests from
    `.task.*` to `.child.*`. Failures reach the CLI as flagged machines in
    place of the ledger's `task_failures`, until `api-settlement` reports
    them.
-5. `child-task-retirement` — `.task.*`, `TaskHandleCell`, the status
+6. `child-task-retirement` — `.task.*`, `TaskHandleCell`, the status
    queries, `acknowledge_reasoning_failure` and the failure ledger retire,
    with their docs.
 
-## Questions for the maintainer
+## Defaults, open to the maintainer
 
-1. Option 2, delegated subtrees, for now, with option 1 later if
-   `.child.call` needs it?
-2. Annotation machines (`refl/<n>`) first, pulled forward from
-   `api-refl-annotations`?
-3. A task's local state as the machine's, taken at the task's start and
-   written back at its end, as a turn's is, rather than staged
-   transactionally? (`.child.call` would stage it later.)
-4. Keys for the compiler's tasks: the scanner as the boundary task's child
+Taken unless the maintainer says otherwise (2026-10-24):
+
+1. A child machine's local state persists from task to task, as the
+   Reflection Model says, taken at a task's start and written back at its
+   end rather than staged transactionally; `.child.call` stages it later.
+2. The compiler's keys: the scanner as the boundary task's child
    `'scanner`, each `refl.*` entry as the scanner's child under its own
-   key?
-5. Until `api-settlement`, may flagged task machines take the ledger's
+   key.
+3. Until `api-settlement`, flagged task machines take the failure ledger's
    place in the quiescence report, so the CLI fails a batch on them as it
-   does on `task_failures` today?
+   does on `task_failures` today.
