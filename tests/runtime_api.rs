@@ -79,10 +79,10 @@ fn clear_returns_a_machine_to_its_initial_state() {
     rt.run("m", |m| {
         assert_eq!((m.depth(), m.stash_depth()), (0, 0));
         assert!(m.take("child", 1).is_err(), "cleared children are gone");
-        m.local_get("x");
-        m.dict_unpack(Vec::<&str>::new())
+        assert!(!m.local_defines("x"), "cleared state is gone");
+        Ok(())
     })
-    .expect("cleared state reads as `{}`");
+    .expect("the turn should succeed");
 }
 
 #[test]

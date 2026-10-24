@@ -18,8 +18,7 @@ use crate::evaluation::{EvaluationStepBudget, EvaluationValueAccess};
 use crate::number::Number;
 
 use super::super::super::access_machine::{
-    AccessMachine, AccessRegionalPoll, RegionalConversionPoll, RegionalKeyConversion,
-    RegionalKeyList,
+    RegionalConversionPoll, RegionalKeyConversion, RegionalKeyList,
 };
 use super::super::super::builtin_machine::RegionalBuiltinPoll;
 use super::super::super::whnf::{
@@ -427,7 +426,6 @@ pub(in crate::eval) struct RegionalBuilderBuiltinMachine {
     state: Option<Value>,
     state_demand: Option<RegionalWhnfWork>,
     decoded: Option<DecodedBuilderState>,
-    access: Option<Box<AccessMachine>>,
     result_demand: Option<RegionalWhnfWork>,
 }
 
@@ -600,7 +598,6 @@ impl RegionalBuilderBuiltinMachine {
             state: Some(state),
             state_demand: None,
             decoded: None,
-            access: None,
             result_demand: None,
         }
     }
@@ -712,7 +709,7 @@ impl RegionalBuilderBuiltinMachine {
         }
 
         match &self.operation {
-            BuilderStateOperation::Get => self.poll_get_in(access, step_budget),
+            BuilderStateOperation::Get => self.poll_get_in(access),
             BuilderStateOperation::Set { .. } => self.poll_set_in(access, step_budget),
             BuilderStateOperation::Reset { .. } => self.poll_reset_in(access),
             BuilderStateOperation::Shift { .. } => self.poll_shift_in(access),
@@ -723,86 +720,32 @@ impl RegionalBuilderBuiltinMachine {
         }
     }
 
-    fn poll_get_in(
-        &mut self,
-        access: &EvaluationValueAccess<'_>,
-        step_budget: &mut EvaluationStepBudget,
-    ) -> RegionalBuiltinPoll {
-        if self
+    /// The value at the path in the user's state, as a lazy access: the
+    /// effect goes on, and only an observer of the value meets an undefined
+    /// path's error, as with the pure handler's `get`
+    /// (`dict-empty-is-a-value`).
+    fn poll_get_in(&mut self, access: &EvaluationValueAccess<'_>) -> RegionalBuiltinPoll {
+        let keys = self
             .keys
             .as_ref()
-            .expect("builder path conversion must finish")
-            .is_empty()
-        {
-            let value = access.values().duplicate_value(
-                &self
-                    .decoded
-                    .as_ref()
-                    .expect("builder state decoding must finish")
-                    .user_state,
-            );
-            return self.finish_in(access, value, None);
-        }
-
-        if let Some(demand) = &mut self.result_demand {
-            let value =
-                match drive_regional_in_place(access, demand, step_budget, reduce_semantic_shell) {
-                    RegionalWhnfStatus::Ready(value) => value,
-                    RegionalWhnfStatus::Boundary(request) => {
-                        return RegionalBuiltinPoll::Boundary(request);
-                    }
-                    RegionalWhnfStatus::BudgetExhausted => {
-                        return RegionalBuiltinPoll::BudgetExhausted;
-                    }
-                    RegionalWhnfStatus::Failed(failure) => {
-                        return RegionalBuiltinPoll::Failed(failure);
-                    }
-                };
-            let value = EvaluatedValue::from_whnf_in(access.values(), value)
-                .expect("builder state read must reach WHNF")
-                .into_value_in(access.values());
-            return self.finish_in(access, value, None);
-        }
-
-        if self.access.is_none() {
-            let path = self
-                .keys
+            .expect("builder path conversion must finish");
+        let state = access.values().duplicate_value(
+            &self
+                .decoded
                 .as_ref()
-                .expect("builder path conversion must finish")
-                .iter()
-                .cloned()
-                .map(CoreDataKey::Key)
-                .collect::<Arc<[_]>>();
-            let state = access.values().duplicate_value(
-                &self
-                    .decoded
-                    .as_ref()
-                    .expect("builder state decoding must finish")
-                    .user_state,
-            );
-            self.access = Some(Box::new(AccessMachine::new_in(
-                access,
-                self.source_owner,
-                path,
-                &[state],
-            )));
-        }
-        let machine = self
-            .access
-            .as_mut()
-            .expect("builder state read must install its access machine");
-        match machine.poll_in(access, step_budget) {
-            AccessRegionalPoll::Ready(value) => self.finish_in(access, value, None),
-            AccessRegionalPoll::Whnf(demand) => {
-                self.access = None;
-                self.result_demand = Some(demand);
-                RegionalBuiltinPoll::Continue
-            }
-            AccessRegionalPoll::Boundary(request) => RegionalBuiltinPoll::Boundary(request),
-            AccessRegionalPoll::Continue => RegionalBuiltinPoll::Continue,
-            AccessRegionalPoll::BudgetExhausted => RegionalBuiltinPoll::BudgetExhausted,
-            AccessRegionalPoll::Failed(failure) => RegionalBuiltinPoll::Failed(failure),
-        }
+                .expect("builder state decoding must finish")
+                .user_state,
+        );
+        let value = if keys.is_empty() {
+            state
+        } else {
+            Value::Lazy(LazyValue::from_access_in(
+                access.values(),
+                keys.iter().cloned().map(CoreDataKey::Key).collect(),
+                Arc::from([state]),
+            ))
+        };
+        self.finish_in(access, value, None)
     }
 
     fn poll_set_in(
@@ -1196,9 +1139,6 @@ impl RegionalBuilderBuiltinMachine {
         }
         if let Some(state) = &self.decoded {
             state.trace_managed_edges(visitor);
-        }
-        if let Some(machine) = &self.access {
-            machine.trace_managed_edges(visitor);
         }
         if let Some(demand) = &self.result_demand {
             demand.trace_managed_edges(visitor);

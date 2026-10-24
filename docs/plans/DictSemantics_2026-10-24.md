@@ -304,6 +304,22 @@ Slices keep the old semantics working until the last flips them.
      builder) inserting. The public `Values::dict_update` becomes
      `dict_insert`, with `dict_remove` beside it. An anonymous object's
      spec now names it `{}`.
+   - 6c (2026-10-24): reading what is undefined is an error, "`a.b` is
+     undefined". Static and computed access fail; `.get` and `.env` walk
+     the dicts on the way and answer an error value where the path ends,
+     so the effect goes on and only a reader of the value fails; `.heap.get`
+     and `.vol.get` were lazy reads already. The net builder's `get`
+     answers a lazy read, as the pure handler's does, so it no longer
+     forces the value it reads. The turn API's `local_get`, `local_take`
+     and `dict_unpack` push an error value where absent, and its lazy
+     reads (`dict_get`, the extracts, `heap_get`, `volume_get`) are errors
+     when forced; `dict_defines`, `dict_defines_path` and `local_defines`
+     ask without reading. `_spec` within an object body is undefined, an
+     error to read, as Syntax.md says. Left as they are: a spec's optional
+     `name`, `deps` and `defs`, whose defaults are the spec's own, the
+     handlers' and parsers' decoding of their own state, and the CLI
+     renderer's optional diagnostic fields, which it reads as absent where
+     they fail.
 7. `dict-docs` — the syntax and design docs, the agent context, and an
    ADR revising `dict-literals-compose`.
 

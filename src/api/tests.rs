@@ -109,13 +109,10 @@ fn value_i64(assembler: &Assembler, value: &Value) -> Option<i64> {
     assembler.evaluator().eval(value).unwrap().as_i64().unwrap()
 }
 
-fn value_is_undefined(assembler: &Assembler, value: &Value) -> bool {
-    assembler
-        .evaluator()
-        .eval(value)
-        .unwrap()
-        .same_representation(&assembler.values().empty_dict())
-        .unwrap()
+/// Whether evaluating `value` is an error, as reading what is undefined is
+/// (`dict-empty-is-a-value`).
+fn evaluation_fails(assembler: &Assembler, value: &Value) -> bool {
+    assembler.evaluator().eval(value).is_err()
 }
 
 fn assert_unclaimed_lazy(assembler: &Assembler, value: &Value) {
@@ -791,9 +788,11 @@ fn value_paths_preserve_complete_names_and_empty_identity() {
 
     let split_name = values
         .access_names(&root, ["a", "b"])
-        .and_then(|value| assembler.evaluate(&value))
-        .expect("a missing semantic path returns undefined");
-    assert!(value_is_undefined(&assembler, &split_name));
+        .expect("a missing semantic path remains an ordinary access");
+    assert!(
+        evaluation_fails(&assembler, &split_name),
+        "reading an undefined path is an error"
+    );
 
     let empty_path = values
         .access_path(&root, std::iter::empty::<Value>())
@@ -1099,7 +1098,12 @@ fn dictionary_composition_matches_source_literals_union_and_paths() {
     let identity = values
         .dict_union(values.empty_dict(), singleton.clone())
         .expect("empty dictionary should be union identity");
-    assert_field(&identity, "source_remove", &["missing"]);
+    assert!(
+        values
+            .access_names(&identity, ["missing"])
+            .is_ok_and(|missing| evaluation_fails(&assembler, &missing)),
+        "the union defines only what its operands define"
+    );
     let only = values
         .access_names(&identity, ["only"])
         .and_then(|value| assembler.evaluate(&value))
@@ -2054,7 +2058,7 @@ fn callers_can_attach_path_context_to_semantic_access() {
     let missing = values
         .access_names(&root, ["missing", "member"])
         .expect("an absent path remains an ordinary semantic access");
-    assert!(value_is_undefined(&assembler, &missing));
+    assert!(evaluation_fails(&assembler, &missing));
 }
 
 #[test]
@@ -2068,7 +2072,7 @@ fn semantic_binary_conversion_preserves_structured_failures() {
             .diagnostic(&assembler.values())
             .unwrap()
             .rendered_text_for_test(&assembler.values())
-            .contains("requires a list or binary")
+            .contains("`missing` is undefined")
     );
     assert!(missing.structured_diagnostic().is_some());
 

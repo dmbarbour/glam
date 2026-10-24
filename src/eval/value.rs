@@ -2056,6 +2056,24 @@ pub(crate) fn format_name_part(key: &Key) -> String {
     }
 }
 
+/// The error of reading `path` where it is undefined
+/// (`dict-empty-is-a-value`).
+pub(crate) fn undefined_path_message(path: &[Key]) -> String {
+    format!(
+        "`{}` is undefined",
+        path.iter()
+            .map(format_name_part)
+            .collect::<Vec<_>>()
+            .join(".")
+    )
+}
+
+/// The error value of reading `path` where it is undefined, which only an
+/// observer of the value meets.
+pub(crate) fn undefined_path_value(access: &RuntimeValueAccess<'_>, path: &[Key]) -> Value {
+    Value::Lazy(LazyValue::error_in(access, undefined_path_message(path)))
+}
+
 /// Forces a list chunk for a test walking a list. The walk holds no
 /// mutator: forcing runs a driver, which takes its own.
 #[cfg(test)]

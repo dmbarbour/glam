@@ -6058,15 +6058,16 @@ fn dictionaries_remain_lazy_under_eval_value() {
 }
 
 #[test]
-fn missing_access_can_evaluate_to_an_undefined_key() {
+fn missing_access_is_no_key() {
+    // Reading what is undefined is an error (`dict-empty-is-a-value`).
     let root = Value::Dict(crate::core::Dict::new_sync());
-    let key = eval_key(&apply_rooted_fixture(
+    let error = eval_key(&apply_rooted_fixture(
         &root,
         global_access(vec![TestKey::Key(Key::atom_from_text("missing"))]),
     ))
-    .expect("missing names should now resolve to empty dictionaries");
+    .expect_err_without_debug("a missing name is an error, not a key");
 
-    assert_eq!(key, Key::Dict(Arc::from([])));
+    assert_eq!(error.to_string(), "`missing` is undefined");
 }
 
 #[test]
@@ -6551,12 +6552,12 @@ fn names_can_expand_list_valued_path_segments() {
 }
 
 #[test]
-fn missing_dictionary_members_resolve_to_empty_dictionary() {
+fn missing_dictionary_members_are_errors() {
     let root = Value::Dict(crate::core::Dict::new_sync().insert(
         Key::atom_from_text("present"),
         Value::Dict(crate::core::Dict::new_sync()),
     ));
-    let resolved = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
+    let error = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
         &test_context(),
         &apply_rooted_fixture(
             &root,
@@ -6566,12 +6567,9 @@ fn missing_dictionary_members_resolve_to_empty_dictionary() {
             ]),
         ),
     )
-    .expect("missing member access should stay evaluable");
+    .expect_err_without_debug("reading a missing member is an error");
 
-    crate::core::test_value_factory().assert_same_representation_for_test(
-        &resolved,
-        &Value::Dict(crate::core::Dict::new_sync()),
-    );
+    assert_eq!(error.to_string(), "`present.missing` is undefined");
 }
 
 #[test]

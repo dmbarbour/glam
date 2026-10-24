@@ -3,7 +3,7 @@
 
 use std::sync::mpsc;
 
-use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig, ValueKind};
+use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -61,17 +61,18 @@ fn a_machine_s_environment_composes_its_ancestors_shares() {
 }
 
 #[test]
-fn an_unbound_environment_is_an_empty_object() {
+fn an_unbound_environment_defines_nothing() {
     let mut rt = runtime();
-    let kind = rt
+    let (defined, read) = rt
         .run(["a", "b"], |m| {
             m.env_get();
+            let defined = m.dict_defines("greeting")?;
             m.dict_get("greeting")?;
-            m.eval()?;
-            m.kind()
+            Ok((defined, m.eval().is_ok()))
         })
         .expect("the environment reads");
-    assert_eq!(kind, ValueKind::Dict, "an undefined name reads `{{}}`");
+    assert!(!defined, "an unbound environment defines nothing");
+    assert!(!read, "reading an undefined name is an error");
 }
 
 #[test]
@@ -88,19 +89,16 @@ fn bindings_are_transactional_and_clear_unbinds_a_subtree() {
             ErrorKind::Failure
         );
         c.env_get();
-        c.dict_get("name")?;
-        c.eval()?;
-        assert_eq!(c.kind()?, ValueKind::Dict, "the failed cut bound nothing");
+        assert!(!c.dict_defines("name")?, "the failed cut bound nothing");
+        c.discard(1)?;
 
         bind(c, "root_share")?;
         c.run("g", |g| bind(g, "child_share"))?;
         c.clear()?;
         c.run("g", |g| {
             g.env_get();
-            g.dict_get("name")?;
-            g.eval()?;
-            assert_eq!(g.kind()?, ValueKind::Dict, "clear unbound the subtree");
-            Ok(())
+            assert!(!g.dict_defines("name")?, "clear unbound the subtree");
+            g.discard(1)
         })
     })
     .expect("the turn should succeed");
@@ -116,15 +114,14 @@ fn a_cut_waiting_on_its_environment_wakes_when_an_ancestor_binds() {
                 let mut attempts = 0;
                 c.cut(|c| {
                     c.env_get();
-                    c.dict_get("name")?;
-                    c.eval()?;
-                    if c.kind()? == ValueKind::Dict {
+                    if !c.dict_defines("name")? {
                         attempts += 1;
                         if attempts == 1 {
                             waiting.send(()).expect("the parent waits for the attempt");
                         }
                         return Err(c.retry());
                     }
+                    c.dict_get("name")?;
                     c.text_pop()
                 })
                 .map(|name| c.text_push(&name))
@@ -149,9 +146,10 @@ fn a_machine_extends_its_own_mixin_and_may_clear_it() {
     let (extended, kept) = rt
         .run("c", |c| {
             c.env_mixin_get();
-            c.dict_get("greeting")?;
-            c.eval()?;
-            assert_eq!(c.kind()?, ValueKind::Dict, "it has no mixin of its own yet");
+            assert!(
+                !c.dict_defines("greeting")?,
+                "it has no mixin of its own yet"
+            );
             c.discard(1)?;
 
             bind(c, "own_share")?;
@@ -165,9 +163,7 @@ fn a_machine_extends_its_own_mixin_and_may_clear_it() {
 
             c.env_mixin_clear()?;
             c.env_get();
-            c.dict_get("own")?;
-            c.eval()?;
-            assert_eq!(c.kind()?, ValueKind::Dict, "its mixin is gone");
+            assert!(!c.dict_defines("own")?, "its mixin is gone");
             c.discard(1)?;
             Ok((extended, read(c, "greeting")?))
         })

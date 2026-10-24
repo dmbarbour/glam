@@ -12,8 +12,8 @@ use std::sync::{Arc, Mutex, TryLockError};
 use glam_gc::{Root, Trace, Visitor};
 
 use crate::core::{
-    Dict, EvaluationFailure, EvaluationHalt, Key, LazyId, List, ManagedDropRecord, ManagedFamily,
-    Value, managed_slot_extent, trace_compatibility_value_managed_edges,
+    EvaluationFailure, EvaluationHalt, Key, LazyId, List, ManagedDropRecord, ManagedFamily, Value,
+    managed_slot_extent, trace_compatibility_value_managed_edges,
 };
 use crate::core_net::CoreDataKey;
 use crate::evaluation::{
@@ -1121,10 +1121,14 @@ fn select_dict_member_in(
     let Value::Dict(dict) = current else {
         return Err(EvaluationHalt::new("value access base is not a dictionary"));
     };
-    Ok(dict
-        .get(key)
+    // Reading what is undefined is an error (`dict-empty-is-a-value`).
+    dict.get(key)
         .map(|value| access.values().duplicate_value(value))
-        .unwrap_or_else(|| Value::Dict(Dict::new_sync())))
+        .ok_or_else(|| {
+            EvaluationHalt::new(super::value::undefined_path_message(std::slice::from_ref(
+                key,
+            )))
+        })
 }
 
 fn root_message(context: &EvaluatorStepContext<'_>, message: &str) -> RuntimeFailureRoot {
@@ -1136,7 +1140,7 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     use super::*;
-    use crate::core::{CoreValueFactory, LazyValue, ListThunk, PromisedValue};
+    use crate::core::{CoreValueFactory, Dict, LazyValue, ListThunk, PromisedValue};
     use crate::evaluation::EvaluationStepBudget;
     use crate::runtime::{RuntimeIds, allocate_evaluation_runtime_id};
 

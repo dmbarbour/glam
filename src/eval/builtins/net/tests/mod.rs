@@ -940,9 +940,11 @@ fn hidden_builder_composition_threads_branch_local_state_through_list_search() {
             vec![path(access, [visible])],
         )
     });
+    let [visible, _] = run_builder_at(&context, get_visible, selected_state, 0);
     assert_same_representation(
         &context,
-        &run_builder_at(&context, get_visible, selected_state, 0)[0],
+        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &visible)
+            .expect("the selected branch's state should read"),
         &Value::Number(20.into()),
     );
 }
@@ -1382,7 +1384,10 @@ fn hidden_builder_state_paths_preserve_control_and_whole_state_semantics() {
 }
 
 #[test]
-fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_ones() {
+fn hidden_builder_get_reads_lazily_and_answers_undefined_paths_with_error_values() {
+    // `get` resumes a lazy path, and answers with a lazy read, as the pure
+    // handler's does: an undefined path, or one through a value that is no
+    // dict, is an error only its reader meets (`dict-empty-is-a-value`).
     let context = EvalContext::standalone();
     let outer = crate::core::Key::atom_from_text("outer");
     let inner = crate::core::Key::atom_from_text("inner");
@@ -1419,16 +1424,18 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
         );
         (state, get, get_missing)
     });
+    let read = |value: &Value| {
+        crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, value)
+    };
+    let [ready, _] = run_builder_at(&context, get, duplicate_value(&context, &state), 0);
     assert_same_representation(
         &context,
-        &run_builder_at(&context, get, duplicate_value(&context, &state), 0)[0],
+        &read(&ready).expect("a defined path reads through its lazy intermediate"),
         &Value::binary_from_text("ready"),
     );
-    assert_same_representation(
-        &context,
-        &run_builder_at(&context, get_missing, state, 0)[0],
-        &Value::Dict(Dict::new_sync()),
-    );
+    let [missing, _] = run_builder_at(&context, get_missing, state, 0);
+    let error = read(&missing).expect_err_without_debug("an undefined path reads as an error");
+    assert_eq!(error.to_string(), "`missing` is undefined");
 
     let (invalid_state, invalid_get) = with_access(&context, |access| {
         let Value::Dict(user_state) = super::builder::initial_user_state(access) else {
@@ -1449,8 +1456,9 @@ fn hidden_builder_get_resumes_lazy_paths_and_intermediates_and_rejects_invalid_o
         );
         (state, get)
     });
-    let error = builder_result_at(&context, invalid_get, invalid_state, 0)
-        .expect_err_without_debug("a non-dictionary path intermediate must fail");
+    let [invalid, _] = run_builder_at(&context, invalid_get, invalid_state, 0);
+    let error = read(&invalid)
+        .expect_err_without_debug("a path through a value that is no dict reads as an error");
     assert!(error.to_string().contains("not a dictionary"), "{error}");
 }
 

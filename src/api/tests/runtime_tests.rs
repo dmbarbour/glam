@@ -77,10 +77,6 @@ fn value_bytes(runtime: &EvaluationRuntime, value: &Value) -> Option<bytes::Byte
     Some(bytes)
 }
 
-fn value_is_undefined(runtime: &EvaluationRuntime, value: &Value) -> bool {
-    same_representation(runtime, value, &runtime.values().empty_dict())
-}
-
 #[test]
 fn evaluation_runtime_workers_activate_only_once() {
     let runtime = EvaluationRuntime::new(0).expect("dormant runtime should build");
@@ -2086,7 +2082,8 @@ fn independent_runtimes_have_independent_reflection_heaps() {
     assert!(
         foreign
             .get(&foreign.test_reflection_heap(), "runtime_only")
-            .is_ok_and(|value| value_is_undefined(&foreign.evaluation_runtime(), &value))
+            .is_err(),
+        "reading what is undefined is an error"
     );
 }
 
@@ -2117,9 +2114,8 @@ fn runtime_combines_reflection_and_event_commit() {
         crate::reflection::StoreCommitResult::Conflict
     );
     assert!(
-        assembler
-            .get(&runtime.reflection_root(), "atomic")
-            .is_ok_and(|value| value_is_undefined(&runtime, &value))
+        assembler.get(&runtime.reflection_root(), "atomic").is_err(),
+        "the conflicted write left `atomic` undefined"
     );
 
     let (_, store, snapshot) = runtime.transaction_snapshot();

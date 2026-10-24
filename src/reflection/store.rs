@@ -216,14 +216,14 @@ impl StoreSnapshot {
     }
 
     /// The value at `path` in the user heap, as a lazy access, so nothing is
-    /// evaluated: a missing key reads `{}`.
+    /// evaluated: what is undefined reads as an error.
     pub(crate) fn heap_value(&self, path: &[Key]) -> PublicValue {
         self.volume_value(self.heap_volume, path)
             .expect("the user heap volume must always exist")
     }
 
     /// The value at `path` in the machines' environment volume, as a lazy
-    /// access: a missing key reads `{}`.
+    /// access: what is undefined reads as an error.
     pub(crate) fn environment_value(&self, path: &[Key]) -> PublicValue {
         self.volume_value(self.environment_volume, path)
             .expect("the environment volume must always exist")
@@ -694,7 +694,8 @@ impl StoreJournal {
     }
 
     /// The value at `path` in the machines' environment volume, with this
-    /// journal's writes, as a lazy access: a missing key reads `{}`.
+    /// journal's writes, as a lazy access: what is undefined reads as an
+    /// error.
     pub(crate) fn environment_value(&self, path: &[Key]) -> PublicValue {
         self.volume_value(self.snapshot.environment_volume, path)
             .expect("the environment volume must always exist")

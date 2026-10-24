@@ -5595,22 +5595,34 @@ impl ValuePathMachine {
             }
         };
         let key = &self.path[self.next];
+        let walked = &self.path[..=self.next];
         let selected = poll_context.evaluate(context, |evaluator| {
             evaluator.project_root(&current, |access, current| {
                 let Value::Dict(dict) = current else {
                     return Err(TaskHalt::new("state path traverses a non-dictionary value"));
                 };
-                Ok(access.root_value(
-                    dict.get(key)
-                        .map(|value| access.values().duplicate_value(value))
-                        .unwrap_or_else(|| Value::Dict(Dict::new_sync())),
-                ))
+                // What is undefined reads as an error value, which only an
+                // observer of the value meets (`dict-empty-is-a-value`).
+                Ok(match dict.get(key) {
+                    Some(value) => (
+                        access.root_value(access.values().duplicate_value(value)),
+                        true,
+                    ),
+                    None => (
+                        access.root_value(eval::undefined_path_value(access.values(), walked)),
+                        false,
+                    ),
+                })
             })
         });
         match selected {
-            Ok(selected) => {
+            Ok((selected, defined)) => {
                 self.current = selected;
-                self.next += 1;
+                self.next = if defined {
+                    self.next + 1
+                } else {
+                    self.path.len()
+                };
                 self.demand = None;
                 ValuePathPoll::Continue
             }

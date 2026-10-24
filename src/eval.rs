@@ -85,6 +85,7 @@ pub(crate) use token_machine::{token_api_in, token_state_in};
 pub(crate) use value::format_name_part as format_key_name;
 pub(crate) use value::lazy_root_wait;
 pub(crate) use value::poll_lazy_route;
+pub(crate) use value::undefined_path_value;
 #[cfg(test)]
 pub(crate) use value::{
     evaluation_context_frame, evaluation_context_frame_with_args, failure_diagnostic_value,

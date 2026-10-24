@@ -495,7 +495,7 @@ fn undefined_configuration_env_defaults_assembly_env_to_empty_object() {
     let output = glam_command()
         .env("GLAM_CONF", &config)
         .arg("--script.g")
-        .arg("language g0\nasm.result = { [{}]:\"missing\" }.[env.missing]\n")
+        .arg("language g0\nimport 'std\nasm.result = dict.default ['missing] \"missing\" env\n")
         .output()
         .expect("failed to run glam");
 

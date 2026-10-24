@@ -411,12 +411,9 @@ fn query_state_is_transactional_and_retired_after_the_last_handle() {
         crate::api::Value::from_runtime_root(store.values.construct_runtime_value_root(|access| {
             lazy_core_value_path(access, root.clone_core_in(access), &query_path(id))
         }));
-    let retired = assembler.evaluate(&retired).unwrap();
     assert!(
-        assembler
-            .reflection()
-            .same_representation(&retired, &assembler.values().empty_dict())
-            .unwrap()
+        assembler.evaluate(&retired).is_err(),
+        "a retired query's state is removed, so reading it is an error"
     );
 }
 

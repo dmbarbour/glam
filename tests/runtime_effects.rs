@@ -53,13 +53,11 @@ impl EffectProvider for Counter {
 
 /// The calls counted in the state on top of the stack, which stays.
 fn calls(m: &mut Machine<'_, '_>) -> Result<i64, Error> {
-    m.dup(1)?;
-    m.dict_get("calls")?;
-    m.eval()?;
-    if m.kind()? == ValueKind::Dict {
-        m.discard(1)?;
+    if !m.dict_defines("calls")? {
         return Ok(0);
     }
+    m.dup(1)?;
+    m.dict_get("calls")?;
     m.int_pop()
 }
 
@@ -207,13 +205,12 @@ fn state_is_the_effect_s_own() {
             let seen = m.int_pop()?;
             m.discard(1)?;
             let count = m.int_pop()?;
-            m.local_get("count");
-            Ok((read, count, seen, m.kind()?))
+            Ok((read, count, seen, m.local_defines("count")))
         })
         .expect("the turn should succeed");
     assert_eq!(read, (1, 1), "the effect reads the state it was given");
     assert_eq!((count, seen), (5, 1), "and returns the state it left");
-    assert_eq!(local, ValueKind::Dict, "the machine's locals are untouched");
+    assert!(!local, "the machine's locals are untouched");
 }
 
 #[test]
@@ -473,10 +470,8 @@ fn a_failed_first_operand_leaves_nothing_behind() {
             "the effect's state rolls back with its branch"
         );
         assert!(!heap_defined(m, "written")?, "the heap rolls back");
-        m.local_get("marked");
-        assert_eq!(
-            m.kind()?,
-            ValueKind::Dict,
+        assert!(
+            !m.local_defines("marked"),
             "what the provider did rolls back"
         );
         Ok(())

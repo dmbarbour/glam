@@ -824,19 +824,35 @@ impl ValuePathRequestWork {
         }
         let current = demand_value(input, "resumed value-path work")?;
         let key = &self.path[self.next];
+        let walked = &self.path[..=self.next];
         let selected = current.with_core_access(|value, access| {
             let CoreValue::Dict(dict) = value else {
                 return Err(TaskHalt::new("state path traverses a non-dictionary value"));
             };
-            Ok(context.values().wrap_in(
-                access,
-                dict.get(key)
-                    .map(|value| access.duplicate_value(value))
-                    .unwrap_or_else(|| CoreValue::Dict(Dict::new_sync())),
-            ))
+            // What is undefined reads as an error value, which only an
+            // observer of the value meets (`dict-empty-is-a-value`).
+            Ok(match dict.get(key) {
+                Some(value) => (
+                    context
+                        .values()
+                        .wrap_in(access, access.duplicate_value(value)),
+                    true,
+                ),
+                None => (
+                    context
+                        .values()
+                        .wrap_in(access, crate::eval::undefined_path_value(access, walked)),
+                    false,
+                ),
+            })
         })??;
+        let (selected, defined) = selected;
         self.current = selected;
-        self.next += 1;
+        self.next = if defined {
+            self.next + 1
+        } else {
+            self.path.len()
+        };
         self.awaiting = false;
         Ok(PreparationPoll::Progress)
     }

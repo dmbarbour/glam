@@ -79,18 +79,15 @@ fn static_access_resumes_at_the_exact_intermediate_dictionary() {
 }
 
 #[test]
-fn static_access_preserves_missing_and_nondictionary_results() {
+fn static_access_fails_on_missing_and_nondictionary_bases() {
     let context = context();
     let missing = Key::atom_from_text("missing");
     let mut absent = static_access(&context, Value::Dict(Dict::new_sync()), [missing.clone()]);
-    assert!(matches!(
-        poll(&context, &mut absent),
-        WhnfPoll::BudgetExhausted
-    ));
-    let WhnfPoll::Ready(value) = poll(&context, &mut absent) else {
-        panic!("a missing static key must produce undefined")
+    // Reading what is undefined is an error (`dict-empty-is-a-value`).
+    let WhnfPoll::Failed(failure) = poll(&context, &mut absent) else {
+        panic!("a missing static key must fail")
     };
-    assert!(matches!(value.clone_core_for_test(), Value::Dict(dict) if dict.is_empty()));
+    assert_eq!(failure.as_failure().to_string(), "`missing` is undefined");
 
     let mut invalid = static_access(&context, Value::Number(1.into()), [missing]);
     let WhnfPoll::Failed(failure) = poll(&context, &mut invalid) else {

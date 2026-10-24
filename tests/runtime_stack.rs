@@ -22,12 +22,12 @@ fn push(m: &mut Machine<'_, '_>, values: &[i64]) {
 }
 
 /// Whether the top value is `{}`, popping it.
-fn undefined(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
-    if m.kind()? == ValueKind::Dict && m.dict_unpack(Vec::<&str>::new()).is_ok() {
-        return Ok(true);
-    }
+/// Whether the top value, which it drops, is an error where evaluated, as
+/// reading what is undefined is (`dict-empty-is-a-value`).
+fn errs(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
+    let errs = m.eval().is_err();
     m.discard(1)?;
-    Ok(false)
+    Ok(errs)
 }
 
 #[test]
@@ -121,7 +121,7 @@ fn dicts_pack_and_unpack_as_twins_that_drop_nothing() {
         );
         assert_eq!(m.depth(), 2, "the failed unpack changes nothing");
         m.dict_unpack(["b", "a", "c"])?;
-        assert!(undefined(m)?, "an absent key unpacks as `{{}}`");
+        assert!(errs(m)?, "an absent key unpacks as an error");
         assert_eq!(ints(m, 2)?, [2, 1]);
 
         // Keys are any keys, byte strings among them.
@@ -233,17 +233,20 @@ fn tags_pack_and_unpack_only_as_themselves() {
 }
 
 #[test]
-fn local_state_reads_undefined_where_absent_and_moves_out() {
+fn local_state_reads_an_error_where_absent_and_moves_out() {
     let mut rt = runtime();
     rt.run("m", |m| {
+        assert!(!m.local_defines("missing"));
         m.local_get("missing");
-        assert!(undefined(m)?, "absent local state reads as `{{}}`");
+        assert!(errs(m)?, "absent local state reads as an error");
         m.int_push(3);
         m.local_set("x")?;
+        assert!(m.local_defines("x"));
         m.local_take("x");
         assert_eq!(m.int_pop()?, 3);
-        m.local_get("x");
-        assert!(undefined(m)?, "taking it left nothing");
+        assert!(!m.local_defines("x"), "taking it left nothing");
+        m.local_take("x");
+        assert!(errs(m)?, "taking what is absent pushes an error");
         Ok(())
     })
     .expect("the turn should succeed");

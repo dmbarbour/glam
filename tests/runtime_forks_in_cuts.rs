@@ -6,7 +6,7 @@ use std::cell::Cell;
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex};
 
-use glam::{Error, Machine, Runtime, RuntimeConfig};
+use glam::{Error, ErrorKind, Machine, Runtime, RuntimeConfig};
 
 fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
@@ -113,20 +113,16 @@ fn a_failed_cut_undoes_its_forks_which_join_at_its_end() {
         });
         assert!(failed.is_err());
         m.run("child", |c| {
-            c.local_get("mark");
-            assert!(
-                c.dict_unpack(Vec::<&str>::new()).is_ok(),
-                "the cut undid the fork's machine, which holds `{{}}` at `mark`"
-            );
+            assert!(!c.local_defines("mark"), "the cut undid the fork's machine");
             Ok(())
         })
     })
     .expect("the turn should succeed");
     let x = rt
-        .run("reader", |m| {
-            m.heap_get(["x"]);
-            m.eval()?;
-            Ok(m.kind()? == glam::ValueKind::Dict)
+        .run("reader", |m| match m.heap_try_get(["x"]) {
+            Ok(()) => m.discard(1).map(|()| false),
+            Err(error) if error.kind() == ErrorKind::Backtrack => Ok(true),
+            Err(error) => Err(error),
         })
         .expect("the read should succeed");
     assert!(x, "the cut undid the fork's write");
@@ -239,7 +235,7 @@ fn a_failed_cut_waits_on_what_its_forks_read() {
             // The reader fails until the value is ready, and its join
             // passes the failure on, so the cut waits on what it read.
             let reader = m.fork("reader", |r| {
-                r.heap_get(["ready"]);
+                r.heap_try_get(["ready"])?;
                 r.eval()?;
                 if r.kind()? == glam::ValueKind::Number {
                     return Ok(());

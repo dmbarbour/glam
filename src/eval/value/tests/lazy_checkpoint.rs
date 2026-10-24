@@ -2288,6 +2288,9 @@ fn builder_checkpoint_survives_path_and_state_dependencies_without_replay() {
         crate::eval::builtins::decode_outcome_for_test(&access, &outcome)
             .expect("builder get must retain the strict outcome schema")
     });
+    // `get` answers with a lazy read (`dict-empty-is-a-value`).
+    let value = crate::evaluation::EvalContext::evaluate_compatibility_whnf(&context, &value)
+        .expect("the read value should evaluate");
     assert_same_value(&context, &value, &number(73));
     assert!(
         route_losses >= 3,

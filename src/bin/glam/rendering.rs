@@ -1349,16 +1349,12 @@ mod tests {
                 .as_deref(),
             Some(b"xterm-256color".as_slice())
         );
-        let viewer = logger
-            .evaluator
-            .get_evaluated(diagnostic.emission(), "viewer")
-            .expect("the raw diagnostic should expose undefined viewer metadata");
         assert!(
             logger
                 .evaluator
-                .reflection()
-                .dictionary_items(viewer.as_value())
-                .is_ok_and(|items| items.is_empty())
+                .get_evaluated(diagnostic.emission(), "viewer")
+                .is_err(),
+            "the raw diagnostic defines no viewer metadata"
         );
     }
 }

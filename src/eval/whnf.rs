@@ -866,10 +866,15 @@ fn resume_static_access(
             "value access base is not a dictionary",
         )));
     };
-    let value = dict
+    // Reading what is undefined is an error (`dict-empty-is-a-value`).
+    let Some(value) = dict
         .get(&keys[next])
         .map(|value| access.values().duplicate_value(value))
-        .unwrap_or_else(|| Value::Dict(crate::core::Dict::new_sync()));
+    else {
+        return RegionalWhnfStep::Failed(Arc::new(EvaluationFailure::message(
+            super::value::undefined_path_message(&keys[..=next]),
+        )));
+    };
     let next = next + 1;
     if next < keys.len() {
         work.frames

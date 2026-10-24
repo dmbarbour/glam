@@ -42,14 +42,19 @@ fn a_volume_removal_prunes_what_it_empties() {
             m.dup(1)?;
             m.volume_del(["a", "b"])?;
             m.dup(1)?;
-            m.volume_get(["a"])?;
-            m.eval()?;
-            let pruned = m.dict_unpack(Vec::<&str>::new()).is_ok();
+            let pruned = match m.volume_try_get(["a"]) {
+                Ok(()) => m.discard(1).map(|()| false)?,
+                // A failed read changes nothing, so the handle stays.
+                Err(error) if error.kind() == ErrorKind::Backtrack => {
+                    m.discard(1).map(|()| true)?
+                }
+                Err(error) => return Err(error),
+            };
             m.volume_get(["c"])?;
             Ok((pruned, m.int_pop()?))
         })
         .expect("the turn should succeed");
-    assert!(pruned, "`a` reads as missing");
+    assert!(pruned, "`a` is undefined");
     assert_eq!(kept, 2);
 }
 

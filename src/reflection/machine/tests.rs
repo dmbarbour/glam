@@ -109,15 +109,6 @@ fn value_i64(assembler: &Assembler, value: &PublicValue) -> Option<i64> {
     assembler.evaluator().eval(value).unwrap().as_i64().unwrap()
 }
 
-fn value_is_undefined(assembler: &Assembler, value: &PublicValue) -> bool {
-    assembler
-        .evaluator()
-        .eval(value)
-        .unwrap()
-        .same_representation(&assembler.values().empty_dict())
-        .unwrap()
-}
-
 macro_rules! assert_same_value {
     ($assembler:expr, $left:expr, $right:expr $(,)?) => {{
         let left = &$left;
@@ -4720,7 +4711,7 @@ fn isolated_search_retries_observed_errors_without_advancing_choice() {
                 let error = blocked
                     .error()
                     .expect("the retryable search must retain its evaluation error");
-                assert!(error.to_string().contains("requires a function value"));
+                assert!(error.to_string().contains("`handler` is undefined"));
                 assert_eq!(
                     error
                         .failure_root()
@@ -5160,11 +5151,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
     let exit = poll_machine_exit(&mut machine, &context);
     assert_eq!(exit.intent, ExitIntent::Success);
     assert_eq!(exit.observed_epoch, None);
-    assert!(
-        assembler
-            .get(&host.heap(), "discarded")
-            .is_ok_and(|value| value_is_undefined(&assembler, &value))
-    );
+    assert!(assembler.get(&host.heap(), "discarded").is_err());
     assert!(host.diagnostics().is_empty());
     assert!(host.stderr().is_empty());
     assert_eq!(builds.load(Ordering::Acquire), 0);
@@ -5195,11 +5182,7 @@ fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
     let first = poll_machine_exit(&mut machine, &context);
     assert_eq!(first.intent, ExitIntent::Success);
     assert!(first.observed_epoch.is_some());
-    assert!(
-        assembler
-            .get(&host.heap(), "attempt")
-            .is_ok_and(|value| value_is_undefined(&assembler, &value))
-    );
+    assert!(assembler.get(&host.heap(), "attempt").is_err());
     assert!(host.stderr().is_empty());
     assert!(host.diagnostics().is_empty());
     assert!(matches!(
@@ -8995,11 +8978,7 @@ fn root_local_state_replacement_does_not_replace_shared_heap() {
     };
     assert_same_value!(assembler, value, assembler.values().empty_dict());
     assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
-    assert!(
-        assembler
-            .get(&value, "answer")
-            .is_ok_and(|answer| value_is_undefined(&assembler, &answer))
-    );
+    assert!(assembler.get(&value, "answer").is_err());
 }
 
 #[test]
@@ -9013,12 +8992,9 @@ fn child_tasks_start_with_fresh_local_state_and_share_heap() {
         panic!("child task should complete")
     };
     let value = PublicValue::from_runtime_root(*value);
-    assert_same_value!(
-        assembler,
-        assembler
-            .evaluate(&assembler.get(&value, "local").unwrap())
-            .unwrap(),
-        assembler.values().empty_dict()
+    assert!(
+        assembler.get(&value, "local").is_err(),
+        "a child's fresh local state defines nothing"
     );
     assert_eq!(
         assembler
@@ -9090,20 +9066,11 @@ fn failed_alternative_rolls_back_local_and_heap_changes() {
     else {
         panic!("clean alternative should complete")
     };
-    assert_same_value!(
-        assembler,
-        assembler
-            .evaluate(&assembler.get(&value, "local").unwrap())
-            .unwrap(),
-        assembler.values().empty_dict()
-    );
-    assert_same_value!(
-        assembler,
-        assembler
-            .evaluate(&assembler.get(&value, "shared").unwrap())
-            .unwrap(),
-        assembler.values().empty_dict()
-    );
+    // `.get` answers what is undefined with an error value, so the
+    // effect completes and only a reader of the value fails
+    // (`dict-empty-is-a-value`).
+    assert!(assembler.get(&value, "local").is_err());
+    assert!(assembler.get(&value, "shared").is_err());
     assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
 }
 

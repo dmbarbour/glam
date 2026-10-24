@@ -536,8 +536,8 @@ impl Values {
     ///
     /// Neither operand is evaluated while constructing the value. Demand on
     /// the returned value evaluates the key and follows the same dictionary
-    /// access semantics as `.g` source, including returning `{}` for a
-    /// missing key.
+    /// access semantics as `.g` source: reading a missing key is an error
+    /// (`dict-empty-is-a-value`).
     pub fn access(&self, base: &Value, key: Value) -> Result<Value, Error> {
         self.with_access(|values| values.access(base, &key))
     }

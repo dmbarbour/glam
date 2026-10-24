@@ -64,7 +64,7 @@ fn heap_actions_outside_a_cut_commit_at_once() {
     let mut rt = runtime();
     assert!(
         heap_undefined(&mut rt, &["counter"]),
-        "a missing key reads {{}}"
+        "nothing defines `counter` yet"
     );
     rt.run("writer", |m| {
         m.int_push(41);
@@ -435,11 +435,7 @@ fn a_child_turn_joins_its_parent_s_cut() {
         });
         assert!(failed.is_err());
         m.run("child", |c| {
-            c.local_get("mark");
-            assert!(
-                c.dict_unpack(Vec::<&str>::new()).is_ok(),
-                "the cut undid the child's state, which reads `{{}}` at `mark`"
-            );
+            assert!(!c.local_defines("mark"), "the cut undid the child's state");
             Ok(())
         })?;
         m.cut(|m| {
@@ -560,10 +556,9 @@ fn an_atomic_failure_or_pushback_returns_at_once_undone() {
                 });
                 assert_eq!(attempts.get(), 1, "an atomic transaction runs once");
                 assert_eq!(m.depth(), 0, "the transaction undid its stack");
-                m.local_get("undone");
                 assert!(
-                    m.dict_unpack(Vec::<&str>::new()).is_ok(),
-                    "the transaction undid its state, which reads `{{}}`"
+                    !m.local_defines("undone"),
+                    "the transaction undid its state"
                 );
                 kinds.push(outcome.expect_err("the body failed").kind());
             }

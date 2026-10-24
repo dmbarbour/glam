@@ -1490,7 +1490,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Evaluates the top value to a dict holding no keys but these, and
-    /// replaces it with their values, `{}` where absent:
+    /// replaces it with their values, an error value where absent:
     /// `{k1:v1 … kn:vn} -- v1 … vn`, the twin of [`Self::dict_pack`]. A dict
     /// with any other key fails, changing nothing, as would dropping it.
     pub fn dict_unpack<K: Into<Key>>(
@@ -1513,7 +1513,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                     scoped.wrap(
                         dict.get(key)
                             .map(|value| access.duplicate_value(value))
-                            .unwrap_or_else(|| undefined(access)),
+                            .unwrap_or_else(|| {
+                                crate::eval::undefined_path_value(access, std::slice::from_ref(key))
+                            }),
                     )
                 })
                 .collect::<Vec<_>>())
@@ -1540,7 +1542,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// `d -- i1 … in d'`, lazily: the items under these keys, `{}` where
+    /// `d -- i1 … in d'`, lazily: the items under these keys, an error where
     /// absent, and `d` without them, the twin of [`Self::dict_insert_keys`].
     pub fn dict_extract_keys<K: Into<Key>>(
         &mut self,
@@ -1575,7 +1577,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// `dict key -- item dict'`, lazily: the item under `key`, `{}` where
+    /// `dict key -- item dict'`, lazily: the item under `key`, an error where
     /// absent, and `dict` without it, the twin of [`Self::dict_insert`].
     pub fn dict_extract(&mut self) -> Result<(), Error> {
         self.rewrite_top(2, |access, items| {
@@ -1674,9 +1676,26 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// `d -- v`, lazily: the member at `key`, `{}` where absent.
+    /// `d -- v`, lazily: the member at `key`, an error where absent.
     pub fn dict_get(&mut self, key: impl Into<Key>) -> Result<(), Error> {
         self.dict_get_path([key])
+    }
+
+    /// Whether the dict on top, which stays, defines `key`, forcing it and
+    /// never the member (`dict-empty-is-a-value`).
+    pub fn dict_defines(&mut self, key: impl Into<Key>) -> Result<bool, Error> {
+        self.dict_defines_path([key])
+    }
+
+    /// Whether the dict on top, which stays, defines `path`, a path of keys,
+    /// forcing the dicts on the way and nothing else.
+    pub fn dict_defines_path<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<bool, Error> {
+        let path = key_path(path);
+        let dict = self.peek()?.clone();
+        self.defines(&dict, &path)
     }
 
     /// `d -- v`, lazily: the member at `path`, a path of keys.
@@ -1705,8 +1724,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// `d -- item d'`, lazily: the item at `path`, `{}` where absent, and `d`
-    /// without it, the twin of [`Self::dict_insert_path`].
+    /// `d -- item d'`, lazily: the item at `path`, an error where absent, and
+    /// `d` without it, the twin of [`Self::dict_insert_path`].
     pub fn dict_extract_path<K: Into<Key>>(
         &mut self,
         path: impl IntoIterator<Item = K>,
@@ -2438,7 +2457,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Pushes the value at `path` in the shared heap, without evaluating
-    /// it: a missing key reads `{}`. Within a cut, the read joins the cut's
+    /// it: what is undefined reads as an error. Within a cut, the read joins the cut's
     /// transaction and sees its writes; outside one, it reads the heap as it
     /// stands.
     pub fn heap_get<K: Into<Key>>(&mut self, path: impl IntoIterator<Item = K>) {
@@ -2585,7 +2604,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     }
 
     /// Replaces the top value, a volume's handle, with the value at `path`
-    /// in the volume, without evaluating it: a missing key reads `{}`. It
+    /// in the volume, without evaluating it: what is undefined reads as an
+    /// error. It
     /// evaluates the handle, never the value. Within a cut, the read joins
     /// the cut's transaction, as [`Self::heap_get`]'s does.
     pub fn volume_get<K: Into<Key>>(
@@ -3564,24 +3584,40 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
-    /// Pushes the local state at `key`, or `{}` where the machine holds
-    /// none there.
+    /// Pushes the local state at `key`, or an error value where the machine
+    /// holds none there (`dict-empty-is-a-value`).
     pub fn local_get(&mut self, key: impl Into<Key>) {
-        let value = match self.state.locals.get(&key.into()) {
+        let key = key.into();
+        let value = match self.state.locals.get(&key) {
             Some(value) => value.clone(),
-            None => self.runtime.assembler.values().empty_dict(),
+            None => self.undefined_local(key),
         };
         self.push(value);
     }
 
-    /// Moves the local state at `key` to the stack, or pushes `{}` where the
-    /// machine holds none there: the twin of [`Self::local_set`].
+    /// Moves the local state at `key` to the stack, or pushes an error value
+    /// where the machine holds none there: the twin of [`Self::local_set`].
     pub fn local_take(&mut self, key: impl Into<Key>) {
-        let value = match self.state.locals.remove(&key.into()) {
+        let key = key.into();
+        let value = match self.state.locals.remove(&key) {
             Some(value) => value,
-            None => self.runtime.assembler.values().empty_dict(),
+            None => self.undefined_local(key),
         };
         self.push(value);
+    }
+
+    /// Whether the machine holds local state at `key`.
+    pub fn local_defines(&self, key: impl Into<Key>) -> bool {
+        self.state.locals.contains_key(&key.into())
+    }
+
+    fn undefined_local(&self, key: Key) -> HandleValue {
+        self.runtime.assembler.values().with_access(|scoped| {
+            scoped.wrap(crate::eval::undefined_path_value(
+                scoped.runtime_access(),
+                &[key],
+            ))
+        })
     }
 
     /// Returns the machine to its initial state: an empty stack, stash,
@@ -3723,11 +3759,6 @@ fn nonempty_path<K: Into<Key>>(path: impl IntoIterator<Item = K>) -> Result<Vec<
         return Err(Error::new("a path names at least one key"));
     }
     Ok(path)
-}
-
-/// Glam's undefined value, `{}`.
-fn undefined(_access: &RuntimeValueAccess<'_>) -> CoreValue {
-    CoreValue::Dict(Dict::new_sync())
 }
 
 /// The lazy application of `builtin` to `arguments`.

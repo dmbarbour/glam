@@ -4057,7 +4057,7 @@ fn prefix_if_preserves_selected_result_laziness_and_guard_errors() {
     );
     assert_eq!(
         unsupported.to_string(),
-        "application requires a function value, received Dict",
+        "`heap` is undefined",
         "the isolated conditional handler must identify its missing host capability as undefined"
     );
 }
@@ -4304,14 +4304,14 @@ refl.try_access = .heap.set ['visible] 42 =>> (try 42 <- .heap.get ['visible] th
 refl.try_rollback = (try (.heap.set ['try_rolled_back] "bad" =>> .fail) then 1 / 0 else ()) =>> (not (.heap.try_get ['try_rolled_back]))
 refl.try_match_rollback = try_match 42 as {
   42 when (.heap.set ['rolled_back] "bad" =>> .fail) => ();
-  42 when ({}) <- .heap.get ['rolled_back] => ();
+  42 when (not (.heap.try_get ['rolled_back])) => ();
 }
 refl.try_match_when = try_match when { 42 <- .heap.get ['visible] => (); }
 refl.try_match_exhaustion = try (try_match 1 as {}) then 1 / 0 else ()
 refl.try_tentative_rollback = (try _ then? (.heap.set ['tentative_try] "bad" =>> .fail) else ()) =>> (not (.heap.try_get ['tentative_try]))
 refl.try_match_tentative_rollback = (try_match when {
   _ =>? (.heap.set ['tentative_match] "bad" =>> .fail);
-  {} <- .heap.get ['tentative_match] => ();
+  () <- not (.heap.try_get ['tentative_match]) => ();
 })
 ordinary = "ordinary"
 "#;
@@ -4808,7 +4808,11 @@ fn empty_dictionaries_explicitly_convert_to_empty_anonymous_objects() {
 
 #[test]
 fn object_parents_reject_implicit_dictionary_conversion() {
-    for parent in ["missing", "base"] {
+    // An undefined parent is an error to read (`dict-empty-is-a-value`).
+    for (parent, expected) in [
+        ("missing", "`missing` is undefined"),
+        ("base", "use `object_from_dict` to convert a dictionary"),
+    ] {
         let source = format!(
             "language g0\nbase = {{ text:\"not an object\" }}\nobject child extends {parent} with\n  text = \"Hello\"\nasm.result = child.text\n"
         );
@@ -4824,12 +4828,7 @@ fn object_parents_reject_implicit_dictionary_conversion() {
             &result,
         )
         .expect_err_without_debug("plain dictionary parent should fail");
-        assert!(
-            error
-                .to_string()
-                .contains("use `object_from_dict` to convert a dictionary"),
-            "{parent}: {error}"
-        );
+        assert!(error.to_string().contains(expected), "{parent}: {error}");
     }
 }
 
@@ -5103,7 +5102,7 @@ fn with_expressions_reinstantiate_adapting_objects() {
 #[test]
 fn object_body_edits_do_not_observe_direct_spec_definitions() {
     let parsed = parse(
-        "language g0\nobject hello with\n  spec = { bad:\"bad\" }\n  text = { [{}]:\"Hello, World!\" }.[_spec]\nasm.result = hello.text\n",
+        "language g0\nimport 'std\nobject hello with\n  spec = { bad:\"bad\" }\n  text = if ^dict.defines ['spec] _self then \"bad\" else \"Hello, World!\"\nasm.result = hello.text\n",
     );
     let context = CompileContext::from_module_path(["assembly"]);
     let lowered = lower_parsed_source(parsed, &context);
