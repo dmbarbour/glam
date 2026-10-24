@@ -236,11 +236,33 @@ Slices keep the old semantics working until the last flips them.
      `local_get`, `dict_get`, `dict_unpack` and environment reads of what is
      missing; `_self` and `_spec` as `{}`; the old semantics' own Rust
      tests (deep union, `{foo:{}}` ≡ `{}`, key elision).
-4. `dict-path-fusion` — the front end groups static paths; a run-time
-   builtin fuses computed paths by shared prefix, rejecting a prefix or a
-   repeat; literals stop relying on deep union.
-5. `dict-optional-patterns` — `path?:P` matches `[]` or `[V]`; the rule
-   for exact path patterns.
+4. `dict-path-fusion` — a literal builds by insertion, the inverse of a
+   dict pattern's takes (maintainer, 2026-10-24):
+   - Members insert in written order, as patterns take in written order,
+     never sorted. A path member `p:V` introduces `V` at `p`: an error
+     where `p` is already defined, creating the dicts on the way where
+     absent and deferring through a lazy one. An optional member `p?:L`
+     introduces `V` where `L` is `[V]` and nothing where `[]`. Any other
+     member, a parenthesized expression included, is opaque to the syntax:
+     a dict inserted at the root, each of its keys new, so `{D1, D2}` is a
+     shallow union, the depth-0 case.
+   - Order is the user's: shallowest first for construction, as
+     `{a:{b:1}, a.c:2}`, deepest first for patterns, as
+     `{a.c:C, a:A}`. Where the written order makes a conflict the compiler
+     can see, it reports it and suggests the order.
+   - Errors are reported where noticed: the compiler reports `{a:1, a:2}`
+     locally, and evaluation reports a conflict as soon as it is
+     convenient, but never forces a value only to notice one sooner.
+   - `dict.introduce Path Value Dict` is the insertion that errors where
+     `Path` is defined; `dict.insert` replaces.
+   - `path?:L` reads alike outside braces: an optional singleton.
+   - A literal keeps a `{}` member as a value, so this step changes what
+     depended on literals dropping one.
+5. `dict-optional-patterns` — `path?:P` matches `[]` or `[V]`; a take
+   prunes the dicts it empties, as `dict.remove` does, so an exact path
+   pattern leaves no `{root:{}}` behind. Known gap: taking `a.b` from what
+   `{a:{}, a.b:1}` built prunes `a`, which the literal wrote; a finer take
+   can come if it matters.
 6. `dict-empty-is-a-value` — the flip: `{}` is the empty dict, reads of
    what is undefined diverge, union is shallow, with eager and lazy forms
    by annotation, normalization and elision of `{}` go, dict equality is
