@@ -410,6 +410,13 @@ impl RuntimeEventJournal {
         self.flags.read(machine)
     }
 
+    /// Whether the child machine at `machine` is busy: unflagged, with a
+    /// task queued or running, as this journal's snapshot shows it. The
+    /// reads are observed.
+    pub(crate) fn machine_busy(&mut self, machine: &[Key]) -> bool {
+        !self.flags.read(machine) && self.queued_tasks(machine) > 0
+    }
+
     /// Interrupts the task running on the child machine at `machine`, as
     /// this journal sees it: takes it from the queue, whose head it is, and
     /// flags the machine. Returns its item's sequence and its record, or
@@ -441,11 +448,15 @@ impl RuntimeEventJournal {
     /// Returns the child machine at `machine` and its descendants to their
     /// initial transactional state: takes every task from their queues,
     /// observing their ends, so that a task queued meanwhile conflicts,
-    /// returns their port state to the initial one, and drops their shares
-    /// and flags. Returns the tasks it took: the head of an unflagged
-    /// machine's queue runs, and the rest wait.
+    /// drops the tasks this journal queued on them, returns their port state
+    /// to the initial one, and drops their shares and flags. Returns the
+    /// tasks it took or dropped: the head of an unflagged machine's queue
+    /// runs, and the rest wait.
     pub(crate) fn clear_machines(&mut self, machine: &[Key]) -> ClearedTasks {
-        let mut cleared = ClearedTasks::default();
+        let mut cleared = ClearedTasks {
+            waiting: self.ports.appended_below(machine, &TASKS),
+            ..ClearedTasks::default()
+        };
         for address in self.ports.buffers_below(machine, &TASKS) {
             let flagged = self.flags.read(&address.machine);
             let mut tasks = self.ports.claim_all(&address).into_iter();

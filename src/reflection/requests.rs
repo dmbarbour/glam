@@ -1017,9 +1017,16 @@ where
     ))
 }
 
+/// The child an edit acts on is busy, so the edit waits, as `.child.call`
+/// does: for the child to finish what was committed to it.
+struct ChildBusy;
+
 /// Runs `edit` on the store and machine journals of the current
 /// transaction, within a cut, or else on journals of its own, which it
-/// commits at once, again on a conflict. Answers unit.
+/// commits at once, again on a conflict. Answers unit. Where the child is
+/// busy, the edit fails having observed it, so it runs again once the
+/// child's state changes: a cut waits, unless an alternative succeeds, and
+/// outside a cut the task waits.
 fn transact_on_machines<S>(
     name: &str,
     context: &mut RequestContext<'_, S>,
@@ -1027,7 +1034,7 @@ fn transact_on_machines<S>(
         &mut StoreJournal,
         &mut crate::api::RuntimeEventJournal,
         &mut Vec<ReflectionUpdate>,
-    ),
+    ) -> Result<(), ChildBusy>,
 ) -> Result<RequestResult, TaskHalt>
 where
     S: TaskSpecialization,
@@ -1035,11 +1042,17 @@ where
     S::Journal: ReflectionTransaction,
 {
     let no_machines = || TaskHalt::new(format!("`{name}` needs a host with machines"));
-    if let Some(mut transaction) = context.transaction() {
+    if let Some(generation) = context.transaction_generation() {
+        let mut transaction = context
+            .transaction()
+            .expect("a transaction has a generation");
         let (store, journal) = transaction.journals();
         let journal = journal.reflection_journal();
         let events = journal.events.as_mut().ok_or_else(no_machines)?;
-        edit(store, events, &mut journal.updates);
+        if edit(store, events, &mut journal.updates).is_err() {
+            context.observe_host_generation(generation);
+            return Ok(RequestResult::Fail);
+        }
         return Ok(RequestResult::ReturnUnit);
     }
     loop {
@@ -1049,7 +1062,10 @@ where
         {
             let reflection = journal.reflection_journal();
             let events = reflection.events.as_mut().ok_or_else(no_machines)?;
-            edit(&mut store, events, &mut reflection.updates);
+            if edit(&mut store, events, &mut reflection.updates).is_err() {
+                context.observe_host_generation(snapshot.generation());
+                return Ok(RequestResult::Fail);
+            }
         }
         match context
             .host()
@@ -1074,7 +1090,8 @@ where
 /// `.child.recover Key`: where the child is flagged, clears its flag and
 /// its queue, breaking the replies of the tasks it drops. Its local state
 /// stays as the failure left it, for the parent's next tasks to inspect and
-/// repair. A child that is not flagged is left as it is.
+/// repair. It waits while the child is busy, as `.child.call` does, and
+/// leaves an idle child as it is.
 fn recover_child<S>(
     key: Key,
     context: &mut RequestContext<'_, S>,
@@ -1087,8 +1104,11 @@ where
     let machine = child_machine(key, context)?;
     let values = context.values();
     transact_on_machines(".child.recover", context, |store, events, _| {
+        if events.machine_busy(&machine) {
+            return Err(ChildBusy);
+        }
         let Some(tasks) = events.recover_machine(&machine) else {
-            return;
+            return Ok(());
         };
         values.with_access(|scoped| {
             let access = scoped.runtime_access();
@@ -1098,6 +1118,7 @@ where
             );
             crate::api::break_replies(access, store, tasks, &reason);
         });
+        Ok(())
     })
 }
 
@@ -1124,7 +1145,7 @@ where
     let values = context.values();
     transact_on_machines(".child.interrupt", context, |store, events, updates| {
         let Some((sequence, task)) = events.interrupt_task(&machine) else {
-            return;
+            return Ok(());
         };
         values.with_access(|scoped| {
             crate::api::break_replies(
@@ -1139,12 +1160,14 @@ where
             machine: path.clone(),
             sequence,
         });
+        Ok(())
     })
 }
 
 /// `.child.clear Key`: empties the child and its descendants, as a turn's
-/// clear does its machine, and stops their running tasks, breaking the
-/// replies of every task it drops. A cleared child reads `'idle`.
+/// clear does its machine, breaking the replies of every task it drops. It
+/// waits while the child is busy, as `.child.call` does; the running tasks
+/// of its descendants it stops. A cleared child reads `'idle`.
 fn clear_child<S>(key: Key, context: &mut RequestContext<'_, S>) -> Result<RequestResult, TaskHalt>
 where
     S: TaskSpecialization,
@@ -1159,6 +1182,9 @@ where
     let path: Arc<[Key]> = Arc::from(machine.clone());
     let values = context.values();
     transact_on_machines(".child.clear", context, |store, events, updates| {
+        if events.machine_busy(&machine) {
+            return Err(ChildBusy);
+        }
         let cleared = crate::api::clear_child_machines(store, events, &machine);
         values.with_access(|scoped| {
             let access = scoped.runtime_access();
@@ -1177,6 +1203,7 @@ where
             host: host.clone(),
             machine: path.clone(),
         });
+        Ok(())
     })
 }
 

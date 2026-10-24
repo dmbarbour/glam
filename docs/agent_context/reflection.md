@@ -166,9 +166,12 @@ and control flow.
   `.child.recover Key` clears a flagged child's flag and queue, breaking
   the dropped replies; `.child.clear Key` empties the child and its
   descendants as a turn's clear does, breaking every reply it drops. Each
-  is a transactional edit, and does nothing where there is nothing to
-  act on. Recovery and clearing observe a queue's end, so a task queued
-  meanwhile conflicts.
+  is a transactional edit. An interrupt with nothing running does
+  nothing; recovering or clearing a busy child waits, as `.child.call`
+  does (it fails having observed the child, so a cut waits, and `.try`
+  reports `'fail`), while a clear stops its descendants' running tasks.
+  Recovery and clearing observe a queue's end, so a task queued meanwhile
+  conflicts.
 - The runtime's `MachineHost` (`api/runtime/machines.rs`) keeps each
   child's local state and its run, named by the sequence of the running
   task's item in the queue (`TaskMachine::sequence`); its task input and

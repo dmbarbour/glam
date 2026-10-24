@@ -2478,17 +2478,36 @@ untouched = anno refl:(.child.interrupt 'z "unheard" =>> .child.recover 'z =>> .
 
 #[test]
 fn a_clear_empties_a_child_and_its_descendants() {
-    // `.child.clear` stops the running tasks of the child and of its
-    // descendants and drops the waiting ones, breaking each promise with
-    // what happened, and leaves the child idle, its state gone.
+    // `.child.clear` empties a child that is not busy, here flagged by an
+    // interrupt, with its descendants: it stops their running tasks and
+    // drops the waiting ones, breaking each promise with what happened, and
+    // leaves the child idle, the stopped tasks' state gone. A task queued
+    // within the clear's own transaction is dropped as a waiting one.
     let source = r#"language g0
 import 'std
-cleared = anno refl:(.child.task 'k (.set ['n] 1 =>> .child.task 'g (.heap.set ['g_started] () =>> .cut (.heap.try_get ['g_gate])) >>= (\g -> .r {g:g})) >>= (\p -> seq p (.r p.g) >>= (\g -> .child.task 'k (.heap.set ['k_started] () =>> .cut (.heap.try_get ['k_gate])) >>= (\running -> .child.task 'k (.r "waiting") >>= (\waiting -> .cut (.heap.try_get ['g_started] =>> .heap.try_get ['k_started]) =>> .child.clear 'k =>> .try (seq g (.r ())) >>= (\rg -> .try (seq running (.r ())) >>= (\rr -> .try (seq waiting (.r ())) >>= (\rw -> .child.status 'k >>= (\s -> .child.task 'k (.try (.get ['n])) >>= (\n -> seq n (.heap.set ['cleared] (if [rg.err.msg.text, rr.err.msg.text] == ["the task's machine was cleared while the task ran", "the task's machine was cleared while the task ran"] then (if s == 'idle then (if dict.defines ['err] n then rw.err.msg.text else "state kept") else "busy") else rg.err.msg.text)))))))))))) ()
+cleared = anno refl:(.child.task 'k (.child.task 'g (.set ['m] 1 =>> .heap.set ['g_started] () =>> .cut (.heap.try_get ['g_gate])) >>= (\g -> .r {g:g})) >>= (\p -> seq p (.r p.g) >>= (\g -> .child.task 'k (.set ['n] 1 =>> .heap.set ['k_started] () =>> .cut (.heap.try_get ['k_gate])) >>= (\running -> .child.task 'k (.r "waiting") >>= (\waiting -> .cut (.heap.try_get ['g_started] =>> .heap.try_get ['k_started]) =>> .child.interrupt 'k "stop" =>> .child.clear 'k =>> .try (seq g (.r ())) >>= (\rg -> .try (seq running (.r ())) >>= (\rr -> .try (seq waiting (.r ())) >>= (\rw -> .child.status 'k >>= (\s -> .child.task 'k (.child.task 'g (.try (.get ['m])) >>= (\q -> .r {q:q})) >>= (\p2 -> seq p2 (.r p2.q) >>= (\q -> seq q (.heap.set ['cleared] (if [rg.err.msg.text, rr.err.msg.text] == ["the task's machine was cleared while the task ran", "stop"] then (if s == 'idle then (if dict.defines ['err] q then rw.err.msg.text else "state kept") else "busy") else rg.err.msg.text))))))))))))) ()
+dropped = anno refl:(.cut (.child.task 'x (.r "ran") >>= (\p -> .child.clear 'x =>> .r {p:p})) >>= (\d -> .try (seq d.p (.r ())) >>= (\r -> .heap.set ['dropped] r.err.msg.text))) ()
 "#;
     assert_eq!(
-        run_reflection_texts(source, &["cleared"]),
-        ["the task's machine was cleared before the task ran"]
+        run_reflection_texts(source, &["cleared", "dropped"]),
+        [
+            "the task's machine was cleared before the task ran",
+            "the task's machine was cleared before the task ran",
+        ]
     );
+}
+
+#[test]
+fn recovery_and_clearing_wait_while_the_child_is_busy() {
+    // As `.child.call` does, `.child.recover` and `.child.clear` wait while
+    // the child is busy: `.try`, which never waits, reports them failed, and
+    // a clear outside a cut acts once the child's task has finished, whose
+    // promise it leaves fulfilled.
+    let source = r#"language g0
+import 'std
+waited = anno refl:(.child.task 'w (.cut (.heap.try_get ['w_gate]) =>> .set ['n] 5 =>> .r "done") >>= (\p -> .try (.child.clear 'w) >>= (\early -> .try (.child.recover 'w) >>= (\recovered -> .child.task 'o (.cut (.heap.try_get ['w_waiting]) =>> .heap.set ['w_gate] ()) >>= (\_ -> .heap.set ['w_waiting] () =>> .child.clear 'w =>> seq p (.child.task 'w (.try (.get ['n])) >>= (\n -> seq n (.heap.set ['waited] (if [early, recovered] == ['fail, 'fail] then (if dict.defines ['err] n then p else "state kept") else "acted while busy"))))))))) ()
+"#;
+    assert_eq!(run_reflection_texts(source, &["waited"]), ["done"]);
 }
 
 #[test]

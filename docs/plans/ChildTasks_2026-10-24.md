@@ -112,8 +112,13 @@ Each with tests, the full gate, and a commit.
    the whole queue, observing its end, so a task queued meanwhile
    conflicts; a clear takes every queue at or below the child (the heads
    of unflagged queues "cleared while the task ran", the rest "before"),
-   and drops port state, shares, environment and flags as a turn's clear
-   does. At commit, `ReflectionUpdate::Interrupt` and `Clear` stop the
+   with the tasks its own transaction queued there, and drops port state,
+   shares, environment and flags as a turn's clear does. Recovering and
+   clearing wait while the child is busy, as `.child.call` does
+   (maintainer, the same day): the edit fails having observed the child,
+   so a cut waits for it to change, unless an alternative succeeds, and a
+   task outside a cut waits; `.try` reports them `'fail`. A clear still
+   stops its descendants' running tasks. At commit, `ReflectionUpdate::Interrupt` and `Clear` stop the
    runs: a run is named by its item's sequence in the queue
    (`TaskMachine::sequence`), so a stopped task's end claims nothing and
    starts nothing while the machine stays running until it ends, one task
@@ -125,7 +130,9 @@ Each with tests, the full gate, and a commit.
    kept), a failure's state as recovery finds it (the state before the
    outermost cut, untested until now), the no-ops, a clear across a
    grandchild, an interrupt undone by a failed cut, and the attach window
-   driven directly; each guard mutation-checked. Still open: a child task
+   driven directly, then recovery and clearing waiting out a busy child
+   and a clear dropping its own transaction's task; each guard
+   mutation-checked. Still open: a child task
    that panics, or that its launching session abandons as it closes,
    never ends its run, so its machine stays running.
 5. `child-task-migration` — the compiler's annotator and scanner move to
@@ -152,9 +159,12 @@ Taken unless the maintainer says otherwise (2026-10-24):
    place in the quiescence report, so the CLI fails a batch on them as it
    does on `task_failures` today.
 4. `child-task-control`: an interrupt where nothing runs (an idle or a
-   flagged child) and a recovery of a child that is not flagged change
-   nothing and answer unit; recovery acts only on an error, so it never
-   drops a running machine's queue.
+   flagged child) changes nothing (maintainer: reasonable), as does a
+   recovery of an idle child. Recovering or clearing a busy child waits
+   (maintainer, 2026-10-24: synchronous, under `.child.call`'s
+   conditions); only the child itself is waited for, and a clear stops
+   its descendants' running tasks, since a parent has no other way to stop
+   a grandchild's work before `.child.call`.
 5. An interrupt breaks the reply with `Reason` itself, as the Reflection
    Model says; recovery and clearing break with a diagnostic, "the task's
    machine was recovered from an error before the task ran", "... cleared

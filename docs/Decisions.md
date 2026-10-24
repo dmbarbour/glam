@@ -2734,7 +2734,14 @@ maps the short names used here to file names.
     clears the flag and the queue, which never resumes; the parent
     decides what follows. `.child.interrupt` stops a task and flags its
     machine, and settlement's kills are interrupts, so killed machines
-    stay recoverable. Only `.child.clear` clears a machine.
+    stay recoverable. Only `.child.clear` clears a machine. (Clarified by
+    the maintainer, 2026-10-24, at `child-task-control`: recovering and
+    clearing are synchronous, available under the same conditions as
+    `.child.call`, so they wait while the child is busy; interrupting a
+    child with nothing running changes nothing. Reasons, as the build
+    reads them: both replace what a child keeps between its tasks, so,
+    like a call, they act between tasks, and stopping a running task
+    stays the interrupt's.)
   - `.child.call Key Op` is the one synchronous operation: within a
     transaction, a transactional remote procedure call, which awaits what
     was committed to the child before the caller's transaction, then runs

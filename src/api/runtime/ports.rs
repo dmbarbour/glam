@@ -434,6 +434,16 @@ impl PortJournal {
             .expect("a claim of what a buffer holds succeeds")
     }
 
+    /// What this journal is to append to `port` at the machine at `machine`
+    /// and its descendants, in order.
+    pub(in crate::api) fn appended_below(&self, machine: &[Key], port: &Key) -> Vec<Value> {
+        self.appends
+            .iter()
+            .filter(|(address, _)| address.port == *port && address.machine.starts_with(machine))
+            .map(|(_, value)| Value::from_runtime_root(value.clone()))
+            .collect()
+    }
+
     /// The buffers of `port` at the machine at `machine` and its
     /// descendants, in address order. It observes nothing: it is discovery.
     pub(in crate::api) fn buffers_below(&self, machine: &[Key], port: &Key) -> Vec<PortAddress> {
