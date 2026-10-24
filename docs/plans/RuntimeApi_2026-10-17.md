@@ -965,6 +965,25 @@ handle API goes.
         lookup, the scan gone. Resolvers no longer compare. Ahead of child
         tasks, which answer with promises. See
         [Promise Cells](PromiseCells_2026-10-23.md).
+      - `api-comparables` (maintainer, 2026-10-24): only comparables
+        compare, as specified: numbers, and lists or dicts of comparables.
+        Ordering is for numbers and lists, never dicts; texts and binaries
+        are lists of bytes, and atoms are dicts. Comparing anything else,
+        for equality or order, is an evaluation error that reports it
+        incomparable: `err` under `.try`, never `'fail`, never `false`.
+        Resolvers already are (`promise-cells-are-weakly-resolved`). What
+        differs today, in `eval/comparison_machine.rs`:
+        - opaque values compare equal by identity, and volume handles by
+          the volume they name; equality between one and any other value
+          is `false`;
+        - `tuple:[…]` dicts, which the tuple syntax `(a, b)` builds, order
+          lexicographically, as `Syntax.md` has it ("two tuples"): open,
+          whether tuples keep their ordering;
+        - values of two different comparable kinds compare unequal, and
+          ordering them is an error, as `Syntax.md` has it: kept;
+        - to check: an atom against the dict it stands for.
+        Tests: each incomparable kind under `==` and `<`, directly and
+        within a list and a dict, answering `err` under `.try`.
       - `api-refl-child-tasks`: `.child.task`, `.status`, `.recover`,
         `.interrupt` and `.clear`; `.task.*` and task handles retire.
       - `api-refl-call`: `.child.call`, with a child's machine state where
