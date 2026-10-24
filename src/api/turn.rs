@@ -2315,9 +2315,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     pub fn env_mixin_clear(&mut self) -> Result<(), Error> {
         let machine = self.path.clone();
         let path = environment::environment_share(&machine);
-        let unset = self.runtime.assembler.values().empty_dict();
         self.transact(|store, events| {
-            store.write_environment(path.clone(), unset.clone());
+            store.remove_environment(path.clone());
             events.shares.clear(machine.clone());
             Ok(())
         })
@@ -3601,7 +3600,6 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             ));
         }
         let path = self.path.clone();
-        let unset = self.runtime.assembler.values().empty_dict();
         let cleared = if path.is_empty() {
             vec![
                 vec![environment::SHARE.clone()],
@@ -3617,7 +3615,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.transact(|store, events| {
             events.ports.clear_below(&path);
             for node in &cleared {
-                store.write_environment(node.clone(), unset.clone());
+                store.remove_environment(node.clone());
             }
             events.shares.clear_below(path.clone());
             Ok(())

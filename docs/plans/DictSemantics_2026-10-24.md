@@ -295,8 +295,8 @@ Slices keep the old semantics working until the last flips them.
    - 6b (2026-10-24): `{}` is kept and never erases. A singleton,
      `dict_from_entries`, a dict key and an insertion keep it as a value;
      what erased by writing `{}` removes instead: the `spec` an object's
-     definitions drop, the store's retired queries, and the turn API's
-     extracts. The deep union and `MergeDuplicate` retire: `DictUnion` is
+     definitions drop, the store's retired queries, the turn API's
+     extracts, and the environment shares a machine clears. The deep union and `MergeDuplicate` retire: `DictUnion` is
      the shallow union, `dict.union`, which the compiler's records of
      distinct names and an object's dict definitions use, and `DictUpdate`
      is `dict.update`; the old update that erased with `{}` is gone, its

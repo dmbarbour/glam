@@ -705,6 +705,12 @@ impl StoreJournal {
         self.write_by_id(self.snapshot.environment_volume, path, value);
     }
 
+    /// Removes what is at `path` in the machines' environment volume,
+    /// pruning the dicts the removal empties.
+    pub(crate) fn remove_environment(&mut self, path: Vec<Key>) {
+        self.remove_by_id(self.snapshot.environment_volume, path);
+    }
+
     fn observe_read_by_id(&mut self, volume: VolumeId, path: &[Key]) -> bool {
         let path = ConflictPath::from_keys(path.to_vec());
         // A branch's read depends on the transaction's state at the fork,
