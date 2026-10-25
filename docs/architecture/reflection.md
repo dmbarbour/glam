@@ -279,6 +279,19 @@ but not in its value, and outside one it commits on its own. A resolution
 that another commits first conflicts, and the rerun finds the promise
 resolved.
 
+A machine accepts a promise as an obligation
+(`obligations-are-accepted-promises`): `.promise.accept Resolver Diagnostic`
+records the branch's machine as an acceptor, holding the resolver's breaker,
+in the event state's accepted record (`api/runtime/accepted.rs`);
+`.promise.abandon Resolver` removes it; `.promise.accepted Resolver` answers
+unit where any machine accepted the promise and fails otherwise, a read
+observed within a cut. Acceptance is explicit: a queued task's reply is not
+accepted. A commit that resolves a promise discharges it for every acceptor,
+under the transaction lock, and an acceptance committed after another's
+resolution owes nothing. Clearing a machine abandons what it accepted; a
+flag keeps it, and reclamation keeps a machine that owes, as one in error.
+The quiescence analysis lists each pending obligation with its acceptors.
+
 The runtime transaction lock makes reflection-store and generic event changes
 atomic. A failed validation cannot partially edit the heap, consume admitted
 input, or leak buffered output from an abandoned choice. The outer mutation

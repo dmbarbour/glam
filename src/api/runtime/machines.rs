@@ -101,7 +101,10 @@ impl RuntimeSharedResources {
             .state
             .lock()
             .expect("runtime transaction mutex should not be poisoned");
-        let flags = state.events.flags.clone();
+        // What is not in a clear state stays visible: a machine in error, or
+        // one that owes (maintainer, 2026-10-25).
+        let (flags, accepted) = (state.events.flags.clone(), state.events.accepted.clone());
+        let unclear = |machine: &[Key]| flags.is_set(machine) || accepted.owes(machine);
         if state
             .events
             .ports
@@ -109,16 +112,10 @@ impl RuntimeSharedResources {
         {
             return;
         }
-        state
-            .events
-            .ports
-            .remove_below(root, |machine| flags.is_set(machine));
-        state
-            .events
-            .states
-            .remove_below(root, |machine| flags.is_set(machine));
+        state.events.ports.remove_below(root, unclear);
+        state.events.states.remove_below(root, unclear);
         drop(state);
-        cells.retain(|path, _| !path.starts_with(root) || flags.is_set(path));
+        cells.retain(|path, _| !path.starts_with(root) || unclear(path));
         drop(cells);
         ended().remove(root);
     }

@@ -2705,3 +2705,184 @@ broken = anno refl:(1 / 0) ()
         RuntimeReadiness::Deadlocked(_)
     ));
 }
+
+/// The anonymous root `path` lies under, and the keys below it.
+fn below_root(path: &[Key]) -> usize {
+    path.len().saturating_sub(2)
+}
+
+#[test]
+fn accepted_promises_are_obligations_until_resolved() {
+    // `obligations-are-accepted-promises`: a machine accepts a promise with
+    // a diagnostic saying what it owes, a tracked read says whether any
+    // machine did, and abandoning or a failed cut takes it back. A cut
+    // reads its own acceptances, and one that read a promise unaccepted
+    // conflicts with another's acceptance meanwhile, so servers checking
+    // before accepting serialize. An acceptance whose promise another
+    // resolved before it committed owes nothing. The
+    // analysis reports each pending acceptance with all its acceptors; a
+    // resolution discharges it, later or within the accepting transaction.
+    let source = r#"language g0
+import 'std
+accepted = anno refl:(.promise.new >>= (\pr -> .heap.set ['r1] pr.resolver =>> .alt (.promise.accepted pr.resolver =>> .r "early") (.r "unaccepted") >>= (\before -> .promise.accept pr.resolver {msg:{text:"the root owes r1"}} =>> .alt (.promise.accepted pr.resolver =>> .r "accepted") (.r "unaccepted") >>= (\after -> .heap.set ['accepted] (if [before, after] == ["unaccepted", "accepted"] then "tracked" else "untracked"))))) ()
+abandoned = anno refl:(.promise.new >>= (\pr -> .heap.set ['r2] pr.resolver =>> .promise.accept pr.resolver {msg:{text:"abandoned"}} =>> .promise.abandon pr.resolver =>> .alt (.promise.accepted pr.resolver =>> .r "accepted") (.r "abandoned") >>= (\a -> .heap.set ['abandoned] a))) ()
+undone = anno refl:(.promise.new >>= (\pr -> .heap.set ['r3] pr.resolver =>> .alt (.cut (.promise.accept pr.resolver {msg:{text:"undone"}} =>> .fail)) (.r ()) =>> .alt (.promise.accepted pr.resolver =>> .r "accepted") (.r "undone") >>= (\a -> .heap.set ['undone] a))) ()
+shared = anno refl:(.promise.new >>= (\pr -> .heap.set ['r4] pr.resolver =>> .promise.accept pr.resolver {msg:{text:"the root owes r4"}} =>> .child.task 'k (.promise.accept pr.resolver {msg:{text:"k owes r4"}}) >>= (\p -> seq p (.heap.set ['shared] "shared")))) ()
+same = anno refl:(.promise.new >>= (\pr -> .cut (.promise.accept pr.resolver {msg:{text:"same"}} =>> .promise.fulfill pr.resolver 1) =>> .heap.set ['same] "resolved")) ()
+viewed = anno refl:(.promise.new >>= (\pr -> .heap.set ['r5] pr.resolver =>> .cut (.promise.accept pr.resolver {msg:{text:"viewed"}} =>> .alt (.promise.accepted pr.resolver =>> .r "seen") (.r "unseen")) >>= (\v -> .heap.set ['viewed] v))) ()
+raced = anno refl:(.promise.new >>= (\pr -> .heap.set ['r6] pr.resolver =>> .cut (.alt (.promise.accepted pr.resolver =>> .r "taken") (.TEST_ONLY.accept_now pr.resolver {msg:{text:"another took r6"}} =>> .promise.accept pr.resolver {msg:{text:"raced"}} =>> .r "served")) >>= (\v -> .heap.set ['raced] v))) ()
+resolve = anno refl:(.heap.get ['r1] >>= (\r -> .promise.fulfill r 1) =>> .heap.set ['resolve] "resolved") ()
+resolved_in_a_cut = anno refl:(.heap.get ['r4] >>= (\r -> .cut (.promise.fulfill r 1)) =>> .heap.set ['resolved_in_a_cut] "resolved") ()
+stale = anno refl:(.promise.new >>= (\pr -> .cut (.promise.accept pr.resolver {msg:{text:"stale"}} =>> .TEST_ONLY.queue_now 'k (.promise.fulfill pr.resolver 1) >>= (\p -> seq p (.r ()))) =>> .heap.set ['stale] "resolved")) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["accepted"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    let run = |names: &[&str]| {
+        for name in names {
+            assembler
+                .evaluate(&assembler.get(module.value(), name).unwrap())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+        let _ = assembler.drain_reasoning();
+    };
+    run(&[
+        "accepted",
+        "abandoned",
+        "undone",
+        "shared",
+        "same",
+        "viewed",
+        "raced",
+        "stale",
+    ]);
+    let text = |name: &str| {
+        let value = assembler
+            .get(&assembler.test_reflection_heap(), name)
+            .unwrap_or_else(|error| panic!("{name} wrote nothing: {error}"));
+        String::from_utf8_lossy(&assembler.to_binary(&value).unwrap()).into_owned()
+    };
+    assert_eq!(
+        [
+            text("accepted"),
+            text("abandoned"),
+            text("undone"),
+            text("same"),
+            text("viewed"),
+            text("raced"),
+            text("stale"),
+        ],
+        [
+            "tracked",
+            "abandoned",
+            "undone",
+            "resolved",
+            "seen",
+            "taken",
+            "resolved",
+        ]
+    );
+    let owed = |assembler: &Assembler| {
+        let analysis = assembler.evaluation_runtime().analysis().unwrap();
+        let mut owed: Vec<Vec<(usize, String)>> = analysis
+            .obligations()
+            .iter()
+            .map(|obligation| {
+                obligation
+                    .acceptors()
+                    .iter()
+                    .map(|(path, diagnostic)| {
+                        (
+                            below_root(path.keys()),
+                            diagnostic.rendered_text_for_test(&assembler.values()),
+                        )
+                    })
+                    .collect()
+            })
+            .collect();
+        owed.sort();
+        let families = analysis
+            .issues()
+            .iter()
+            .filter(|issue| issue.family() == RuntimeIssueFamily::PendingObligation)
+            .count();
+        assert_eq!(families, owed.len());
+        owed
+    };
+    assert_eq!(
+        owed(&assembler),
+        [
+            vec![(0, "another took r6".to_owned())],
+            vec![(0, "the root owes r1".to_owned())],
+            vec![
+                (0, "the root owes r4".to_owned()),
+                (1, "k owes r4".to_owned())
+            ],
+            vec![(0, "viewed".to_owned())],
+        ]
+    );
+    run(&["resolve", "resolved_in_a_cut"]);
+    assert_eq!(text("resolve"), "resolved");
+    assert_eq!(text("resolved_in_a_cut"), "resolved");
+    assert_eq!(
+        owed(&assembler),
+        [
+            vec![(0, "another took r6".to_owned())],
+            vec![(0, "viewed".to_owned())],
+        ],
+        "a resolution, within a cut or not, discharges the promise for every acceptor"
+    );
+}
+
+#[test]
+fn clearing_abandons_what_a_machine_accepted_and_owing_keeps_it() {
+    // Clearing a machine abandons what it accepted; a machine in error
+    // keeps it, for recovery; and a machine that owes stays visible, as one
+    // in error does, when its root's subtree is reclaimed.
+    let source = r#"language g0
+import 'std
+cleared = anno refl:(.promise.new >>= (\pr -> .heap.set ['r1] pr.resolver =>> .child.task 'c (.promise.accept pr.resolver {msg:{text:"c owes"}}) >>= (\p -> seq p (.child.clear 'c =>> .heap.set ['cleared] "cleared")))) ()
+flagged = anno refl:(.promise.new >>= (\pr -> .heap.set ['r2] pr.resolver =>> .child.task 'f (.promise.accept pr.resolver {msg:{text:"f owes"}} =>> (1 / 0)) >>= (\p -> .try (seq p (.r ())) >>= (\_ -> .heap.set ['flagged] "flagged")))) ()
+owing = anno refl:(.promise.new >>= (\pr -> .heap.set ['r3] pr.resolver =>> .child.task 'o (.set ['n] 1 =>> .promise.accept pr.resolver {msg:{text:"o owes"}}) >>= (\p -> seq p (.child.task 'q (.set ['n] 2) >>= (\q -> seq q (.heap.set ['owing] "owing")))))) ()
+"#;
+    assert_eq!(
+        run_reflection_texts(source, &["cleared", "flagged", "owing"]),
+        ["cleared", "flagged", "owing"]
+    );
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["child_tasks"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    for name in ["cleared", "flagged", "owing"] {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    let _ = assembler.drain_reasoning();
+    let analysis = assembler.evaluation_runtime().analysis().unwrap();
+    let mut acceptors: Vec<String> = analysis
+        .obligations()
+        .iter()
+        .flat_map(|obligation| obligation.acceptors())
+        .map(|(_, diagnostic)| diagnostic.rendered_text_for_test(&assembler.values()))
+        .collect();
+    acceptors.sort();
+    assert_eq!(acceptors, ["f owes", "o owes"]);
+    let left = assembler
+        .evaluation_runtime()
+        .state
+        .shared_resources
+        .anonymous_machines_for_test();
+    let last = |key: &str| {
+        left.iter()
+            .any(|path| path.last() == Some(&Key::atom_from_text(key)))
+    };
+    assert!(last("o"), "the owing child stays: {left:?}");
+    assert!(last("f"), "the child in error stays: {left:?}");
+    assert!(!last("q"), "its clear sibling goes: {left:?}");
+}

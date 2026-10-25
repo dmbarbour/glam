@@ -26,6 +26,7 @@ use crate::runtime::{
     RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
 };
 
+mod accepted;
 mod analysis;
 mod events;
 mod flags;
@@ -414,9 +415,12 @@ impl RuntimeSharedResources {
             }
             let reflection_changed = state.reflection.commit_validated(store);
             let event_changed = state.events.commit_validated(events);
+            // A resolution discharges its promise for every acceptor, in
+            // the commit that resolves it.
+            let discharged = state.events.accepted.discharge(store.resolved_promises());
             (
                 crate::reflection::StoreCommitResult::Committed,
-                reflection_changed || event_changed,
+                reflection_changed || event_changed || discharged,
                 state.reflection.take_settled(),
             )
         };
@@ -474,7 +478,15 @@ impl RuntimeSharedResources {
                 .lock()
                 .expect("runtime transaction mutex should not be poisoned");
             contain_client_conflict_analysis(|| state.reflection.try_commit_with_change(journal))
-                .map(|committed| (committed, state.reflection.take_settled()))
+                .map(|(result, changed)| {
+                    let discharged =
+                        matches!(result, crate::reflection::StoreCommitResult::Committed)
+                            && state.events.accepted.discharge(journal.resolved_promises());
+                    (
+                        (result, changed || discharged),
+                        state.reflection.take_settled(),
+                    )
+                })
         };
         let ((result, changed), settled) = match committed {
             Ok(committed) => committed,

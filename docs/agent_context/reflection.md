@@ -216,7 +216,17 @@ and control flow.
   cannot: `.TEST_ONLY.queue_now Key Op` queues on a child and commits at
   once even within a transaction, as another writer (a Rust turn,
   settlement) would, so a test forces a commit between a cut's read and
-  its commit. Prefer such an effect to testing journals by hand.
+  its commit; `.TEST_ONLY.accept_now Resolver Diagnostic` accepts at once
+  likewise. Prefer such an effect to testing journals by hand; a cut that
+  awaits the reply of a task `queue_now` committed lets that task commit
+  before the cut does.
+- Accepted promises (`api/runtime/accepted.rs`) are keyed by promise,
+  each acceptor a machine path with its diagnostic, the entry holding a
+  `ManagedResolverRoot`. `RuntimeEventState::commit_validated` applies
+  acceptances only while the promise is still pending; both commit paths
+  in `api/runtime.rs` then discharge what the store journal resolves
+  (`StoreJournal::resolved_promises`). Reclamation keeps machines that
+  owe (`AcceptedRecord::owes`), as flagged ones.
 - An anonymous root's subtree is unreachable once the root's task ends: its
   keys name a task id never reused. The root's task, once it tasks or calls a child,
   holds an `AnonymousRootGuard` reporting its end, and the host reclaims

@@ -94,6 +94,27 @@ default unresolved.
    another's resolution; several acceptors; a cut's failure undoing an
    acceptance; clearing abandons, a flag keeps; an ended root owing is
    kept and reported.
+   Built 2026-10-25: `AcceptedRecord` and `AcceptedJournal`
+   (`api/runtime/accepted.rs`) in the event state, each entry holding the
+   root on its resolver's breaker; `.promise.accept`, `.promise.abandon`
+   and `.promise.accepted` as reflection requests on the branch's machine,
+   edits staged within a cut and committed at once outside one, through
+   the child edits' path. Both commit paths, the combined one and the
+   store's own, discharge what their store journal resolves, under the
+   transaction lock. An acceptance whose promise another resolved before
+   it committed owes nothing, since the acceptance reads nothing that the
+   resolution would conflict with: its commit skips it. Reclamation keeps
+   what is not clear, a machine in error or one that owes. The analysis
+   lists `PendingObligation`s, with each acceptor's path and diagnostic, a
+   diagnostic being a record such as `{msg:{text:"..."}}`. A test-only
+   `.TEST_ONLY.accept_now` accepts at once within a cut, as another server
+   would, to force the tracked read's conflict. Mutation-checked: the
+   skip of a resolved promise, discharge on both paths, abandonment, the
+   journal's view, the read's validation, several acceptors, clearing,
+   reclamation and the read's answer.
+   Left open: a machine kept for owing stays after its obligation is
+   discharged, until a host clears it, since reclamation runs again only
+   as its root or a run ends; `quiescence-options` takes it up.
 2. `obligations-turns` — the turn operations.
 
 A slice for children accepting their tasks' replies was dropped by

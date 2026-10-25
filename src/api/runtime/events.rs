@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use rpds::RedBlackTreeMapSync;
 
+use super::accepted::{AcceptedJournal, AcceptedRecord};
 use super::flags::{FlagJournal, FlagRecord};
 use super::ports::{IMPORTS, PortAddress, PortJournal, PortState};
 use super::shares::{ShareJournal, ShareRecord};
@@ -186,6 +187,8 @@ pub(in crate::api) struct RuntimeEventState {
     pub(in crate::api) flags: FlagRecord,
     /// The child machines' local states.
     pub(in crate::api) states: StateRecord,
+    /// The promises machines accepted (`obligations-are-accepted-promises`).
+    pub(in crate::api) accepted: AcceptedRecord,
 }
 
 impl RuntimeEventState {
@@ -198,6 +201,7 @@ impl RuntimeEventState {
             shares: ShareRecord::new(),
             flags: FlagRecord::new(),
             states: StateRecord::new(),
+            accepted: AcceptedRecord::new(),
         }
     }
 
@@ -209,6 +213,7 @@ impl RuntimeEventState {
             shares: self.shares.clone(),
             flags: self.flags.clone(),
             states: self.states.clone(),
+            accepted: self.accepted.clone(),
         }
     }
 
@@ -245,6 +250,7 @@ impl RuntimeEventState {
             && self.ports.validate(&journal.ports)
             && self.flags.validate(&journal.flags)
             && self.states.validate(&journal.states)
+            && self.accepted.validate(&journal.accepted)
     }
 
     pub(super) fn commit_validated(&mut self, journal: &RuntimeEventJournal) -> bool {
@@ -296,12 +302,14 @@ impl RuntimeEventState {
         let shares_changed = self.shares.commit(&journal.shares);
         let flags_changed = self.flags.commit(&journal.flags);
         let states_changed = self.states.commit(&journal.states);
+        let accepted_changed = self.accepted.commit(&journal.accepted);
         input_changed
             || !journal.outputs.is_empty()
             || ports_changed
             || shares_changed
             || flags_changed
             || states_changed
+            || accepted_changed
     }
 
     fn admit_input(
@@ -341,6 +349,7 @@ pub struct RuntimeEventSnapshot {
     pub(in crate::api) shares: ShareRecord,
     pub(in crate::api) flags: FlagRecord,
     pub(in crate::api) states: StateRecord,
+    pub(in crate::api) accepted: AcceptedRecord,
 }
 
 #[derive(Clone)]
@@ -374,6 +383,9 @@ pub struct RuntimeEventJournal {
     pub(in crate::api) flags: FlagJournal,
     /// Which child machines' states this transaction read or wrote.
     pub(in crate::api) states: StateJournal,
+    /// Which promises this transaction accepted, abandoned or read the
+    /// acceptance of.
+    pub(in crate::api) accepted: AcceptedJournal,
 }
 
 impl RuntimeEventJournal {
@@ -383,6 +395,7 @@ impl RuntimeEventJournal {
         let shares = ShareJournal::new(&snapshot.shares);
         let flags = FlagJournal::new(&snapshot.flags);
         let states = StateJournal::new(&snapshot.states);
+        let accepted = AcceptedJournal::new(&snapshot.accepted);
         Self {
             runtime: snapshot.runtime,
             snapshot,
@@ -393,7 +406,30 @@ impl RuntimeEventJournal {
             shares,
             flags,
             states,
+            accepted,
         }
+    }
+
+    /// Accepts `resolver`'s promise for the machine at `machine`, owing what
+    /// `diagnostic` says (`obligations-are-accepted-promises`).
+    pub(crate) fn accept_promise(
+        &mut self,
+        machine: Vec<Key>,
+        resolver: crate::core::ManagedResolverRoot,
+        diagnostic: RuntimeValueRoot,
+    ) {
+        self.accepted.accept(machine, resolver, diagnostic);
+    }
+
+    /// Removes the machine at `machine` from `promise`'s acceptors, without
+    /// resolving it.
+    pub(crate) fn abandon_promise(&mut self, machine: Vec<Key>, promise: crate::core::PromiseId) {
+        self.accepted.abandon(machine, promise);
+    }
+
+    /// Whether any machine accepted `promise`, observing it.
+    pub(crate) fn promise_accepted(&self, promise: crate::core::PromiseId) -> bool {
+        self.accepted.accepted(promise)
     }
 
     /// Queues `task`, an `{op, reply}` record, on the child machine at
@@ -509,6 +545,7 @@ impl RuntimeEventJournal {
         self.shares.clear_below(machine.to_vec());
         self.flags.clear_below(machine);
         self.states.clear_below(machine);
+        self.accepted.clear_below(machine);
         cleared
     }
 

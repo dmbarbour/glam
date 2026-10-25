@@ -1042,7 +1042,9 @@ handle API goes.
         and `.env.clear` for tasks.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
         Designed in [Obligations](Obligations_2026-10-25.md), drafted
-        2026-10-25 for review.
+        2026-10-25 for review, decided the same day (acceptance explicit,
+        what is not clear stays visible); `obligations-record` built the
+        same day, for tasks, and `obligations-turns` is next.
       - `api-refl-retry` (maintainer, 2026-10-25, candidate): an explicit
         `.retry`, intentional divergence until something observable
         changes, as opposed to `.fail`'s backtracking, the counterpart of

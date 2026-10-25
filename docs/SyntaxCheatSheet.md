@@ -388,6 +388,8 @@ foo <| .bar         # equivalent alternative without parentheses
 .heap.vol >>= (\h -> .vol.get h Path)  # volume handles: .vol.new/get/set/rewrite
 .promise.new >>= (\p -> .promise.fulfill p.resolver 7)  # {promise, resolver}
 .promise.status R   # 'pending, 'fulfilled or 'broken, from resolver R
+.promise.accept R {msg:{text:"owed"}}  # this machine owes R's promise; .promise.abandon R
+.promise.accepted R # unit where any machine accepted it; .fail otherwise
 .movl 'eax 42       # applied effect: eff:(\api -> api.movl 'eax 42)
 
 my_proc = do

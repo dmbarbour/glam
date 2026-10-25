@@ -688,6 +688,14 @@ impl StoreJournal {
         });
     }
 
+    /// The promises this transaction resolves.
+    pub(crate) fn resolved_promises(&self) -> impl Iterator<Item = PromiseId> + '_ {
+        self.edits.iter().filter_map(|edit| match edit {
+            StoreEdit::Resolve { promise, .. } => Some(*promise),
+            _ => None,
+        })
+    }
+
     /// The status this transaction gives `promise`, where it resolves it.
     pub(crate) fn staged_status(&self, promise: PromiseId) -> Option<PromiseStatus> {
         self.edits.iter().find_map(|edit| match edit {

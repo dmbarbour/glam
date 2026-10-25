@@ -33,11 +33,19 @@ pub enum ReflectionRequest {
     ChildCall,
     /// The close of a `.child.call`, which Glam code cannot name.
     ChildCallLeave,
+    PromiseAccept,
+    PromiseAbandon,
+    PromiseAccepted,
     /// `.TEST_ONLY.queue_now Key Op`: queues `Op` on the child `Key`,
     /// committing at once even within a transaction, as another writer
     /// would, so that a test orders a commit against a transaction.
     #[cfg(test)]
     TestQueueNow,
+    /// `.TEST_ONLY.accept_now Resolver Diagnostic`: accepts the promise for
+    /// the current machine, committing at once even within a transaction,
+    /// as another machine would.
+    #[cfg(test)]
+    TestAcceptNow,
 }
 
 /// Durable interpretation state for one reusable reflection request.
@@ -55,7 +63,53 @@ enum ReflectionRequestOperation {
     Log(LogRequestWork),
     Child(ChildRequestWork),
     ChildCallLeave,
+    Acceptance(AcceptanceRequestWork),
     Poisoned,
+}
+
+/// `.promise.accept Resolver Diagnostic`, `.promise.abandon Resolver` and
+/// `.promise.accepted Resolver`, which evaluate their resolver first
+/// (`obligations-are-accepted-promises`).
+enum AcceptanceRequestWork {
+    Start {
+        request: AcceptanceRequest,
+        arguments: Vec<Value>,
+    },
+    Awaiting {
+        request: AcceptanceRequest,
+        /// What an acceptance owes, kept as given.
+        diagnostic: Option<Value>,
+    },
+}
+
+#[derive(Clone, Copy)]
+enum AcceptanceRequest {
+    Accept,
+    Abandon,
+    Accepted,
+    #[cfg(test)]
+    AcceptNow,
+}
+
+impl AcceptanceRequest {
+    fn name(self) -> &'static str {
+        match self {
+            Self::Accept => ".promise.accept",
+            Self::Abandon => ".promise.abandon",
+            Self::Accepted => ".promise.accepted",
+            #[cfg(test)]
+            Self::AcceptNow => ".TEST_ONLY.accept_now",
+        }
+    }
+
+    /// Whether the request takes a diagnostic after its resolver.
+    fn takes_diagnostic(self) -> bool {
+        #[cfg(test)]
+        if matches!(self, Self::AcceptNow) {
+            return true;
+        }
+        matches!(self, Self::Accept)
+    }
 }
 
 /// `.child.task Key Op`, `.child.status Key`, `.child.recover Key`,
@@ -234,6 +288,31 @@ impl ReflectionRequestWork {
                 state: ChildRequestState::Start(arguments),
             }),
             ReflectionRequest::ChildCallLeave => ReflectionRequestOperation::ChildCallLeave,
+            ReflectionRequest::PromiseAccept => {
+                ReflectionRequestOperation::Acceptance(AcceptanceRequestWork::Start {
+                    request: AcceptanceRequest::Accept,
+                    arguments,
+                })
+            }
+            ReflectionRequest::PromiseAbandon => {
+                ReflectionRequestOperation::Acceptance(AcceptanceRequestWork::Start {
+                    request: AcceptanceRequest::Abandon,
+                    arguments,
+                })
+            }
+            ReflectionRequest::PromiseAccepted => {
+                ReflectionRequestOperation::Acceptance(AcceptanceRequestWork::Start {
+                    request: AcceptanceRequest::Accepted,
+                    arguments,
+                })
+            }
+            #[cfg(test)]
+            ReflectionRequest::TestAcceptNow => {
+                ReflectionRequestOperation::Acceptance(AcceptanceRequestWork::Start {
+                    request: AcceptanceRequest::AcceptNow,
+                    arguments,
+                })
+            }
             #[cfg(test)]
             ReflectionRequest::TestQueueNow => {
                 ReflectionRequestOperation::Child(ChildRequestWork {
@@ -503,6 +582,50 @@ where
                     context,
                 )?))
             }
+            ReflectionRequestOperation::Acceptance(AcceptanceRequestWork::Start {
+                request,
+                arguments,
+            }) => {
+                assert!(
+                    input.is_none(),
+                    "new acceptance work cannot have demand input"
+                );
+                let mut arguments = arguments.into_iter();
+                let resolver = arguments.next();
+                let diagnostic = arguments.next();
+                let expected = request.takes_diagnostic();
+                let (Some(resolver), true) = (
+                    resolver,
+                    diagnostic.is_some() == expected && arguments.next().is_none(),
+                ) else {
+                    return Err(TaskHalt::new(format!(
+                        "`{}` received the wrong number of arguments",
+                        request.name()
+                    )));
+                };
+                self.operation =
+                    ReflectionRequestOperation::Acceptance(AcceptanceRequestWork::Awaiting {
+                        request,
+                        diagnostic,
+                    });
+                Ok(SpecializationRequestPoll::Demand(resolver))
+            }
+            ReflectionRequestOperation::Acceptance(AcceptanceRequestWork::Awaiting {
+                request,
+                diagnostic,
+            }) => {
+                let resolver = demand_value(input, "resumed acceptance work")?;
+                let resolver = resolver.with_core_access(|value, access| match value {
+                    CoreValue::Resolver(resolver) => Ok(resolver.root_in(access)),
+                    _ => Err(TaskHalt::new(format!(
+                        "`{}` expects a resolver",
+                        request.name()
+                    ))),
+                })??;
+                Ok(SpecializationRequestPoll::Complete(act_on_acceptance(
+                    request, resolver, diagnostic, context,
+                )?))
+            }
             ReflectionRequestOperation::Poisoned => {
                 panic!("completed reflection request work was polled again")
             }
@@ -539,14 +662,14 @@ pub(crate) fn is_anonymous_key(key: &Key) -> bool {
         if parts.len() == 3 && parts[0] == "glam" && parts[1] == "anonymous")
 }
 
-/// The child `key` of the machine the current branch runs on: within a
-/// call, the call's child, and otherwise its task's machine.
-fn child_machine<S>(key: Key, context: &RequestContext<'_, S>) -> Result<Vec<Key>, TaskHalt>
+/// The machine the current branch runs on: within a call, the call's
+/// child, and otherwise its task's machine, or its anonymous root.
+fn branch_machine<S>(context: &RequestContext<'_, S>) -> Result<Vec<Key>, TaskHalt>
 where
     S: TaskSpecialization,
 {
     let eval_context = context.eval_context();
-    let mut path = match (context.called_machine(), eval_context.machine()) {
+    Ok(match (context.called_machine(), eval_context.machine()) {
         (Some(machine), _) => machine.to_vec(),
         (None, Some(machine)) => machine.path().to_vec(),
         (None, None) => anonymous_root(
@@ -554,9 +677,109 @@ where
                 .task_id()
                 .map_err(|error| TaskHalt::new(error.as_ref()))?,
         ),
-    };
+    })
+}
+
+/// The child `key` of the machine the current branch runs on.
+fn child_machine<S>(key: Key, context: &RequestContext<'_, S>) -> Result<Vec<Key>, TaskHalt>
+where
+    S: TaskSpecialization,
+{
+    let mut path = branch_machine(context)?;
     path.push(key);
     Ok(path)
+}
+
+/// Accepts, abandons or reads the acceptance of `resolver`'s promise for
+/// the machine the current branch runs on
+/// (`obligations-are-accepted-promises`). An acceptance or an abandonment
+/// is an edit, staged within a cut and committed at once outside one; a
+/// read answers unit where any machine accepted the promise and fails
+/// otherwise, observed, so a cut can choose with it.
+fn act_on_acceptance<S>(
+    request: AcceptanceRequest,
+    resolver: crate::core::ManagedResolverRoot,
+    diagnostic: Option<Value>,
+    context: &mut RequestContext<'_, S>,
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let machine = branch_machine(context)?;
+    match request {
+        AcceptanceRequest::Accept => {
+            let diagnostic = diagnostic
+                .expect("an acceptance carries its diagnostic")
+                .into_runtime_root();
+            transact_on_machines(request.name(), context, |_, events, _| {
+                events.accept_promise(machine.clone(), resolver.clone(), diagnostic.clone());
+                Ok(())
+            })
+        }
+        AcceptanceRequest::Abandon => {
+            transact_on_machines(request.name(), context, |_, events, _| {
+                events.abandon_promise(machine.clone(), resolver.id());
+                Ok(())
+            })
+        }
+        #[cfg(test)]
+        AcceptanceRequest::AcceptNow => {
+            let diagnostic = diagnostic
+                .expect("an acceptance carries its diagnostic")
+                .into_runtime_root();
+            let snapshot = context.host().snapshot();
+            let store = StoreJournal::new(snapshot.store().clone());
+            let mut journal = S::begin_journal(snapshot.extra());
+            journal
+                .reflection_journal()
+                .events
+                .as_mut()
+                .ok_or_else(|| TaskHalt::new("`.TEST_ONLY.accept_now` needs machines"))?
+                .accept_promise(machine, resolver, diagnostic);
+            match context
+                .host()
+                .commit(TaskCommit::new(store, snapshot.extra().clone(), journal))
+            {
+                CommitResult::Committed => Ok(RequestResult::ReturnUnit),
+                _ => Err(TaskHalt::new("`.TEST_ONLY.accept_now` did not commit")),
+            }
+        }
+        AcceptanceRequest::Accepted => {
+            let no_machines = || TaskHalt::new("`.promise.accepted` needs a host with machines");
+            let generation = context.transaction_generation();
+            let accepted = if let Some(mut transaction) = context.transaction() {
+                let events = transaction
+                    .parts()
+                    .1
+                    .reflection_journal()
+                    .events
+                    .as_mut()
+                    .ok_or_else(no_machines)?;
+                events.promise_accepted(resolver.id())
+            } else {
+                let snapshot = context.host().snapshot();
+                let mut journal = S::begin_journal(snapshot.extra());
+                let events = journal
+                    .reflection_journal()
+                    .events
+                    .as_mut()
+                    .ok_or_else(no_machines)?;
+                let accepted = events.promise_accepted(resolver.id());
+                context.observe_host_generation(snapshot.generation());
+                accepted
+            };
+            if let Some(generation) = generation {
+                context.observe_host_generation(generation);
+            }
+            Ok(if accepted {
+                RequestResult::ReturnUnit
+            } else {
+                RequestResult::Fail
+            })
+        }
+    }
 }
 
 /// `.child.task Key Op`: queues `Op` on the child `Key` and answers the
@@ -1732,6 +1955,24 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 ReflectionRequest::ChildCall,
             ),
             child_call_leave_spec(),
+            EffectRequestSpec::at_path(
+                ["promise", "accept"],
+                ["reflection_runtime", "v0", "request", "promise", "accept"],
+                2,
+                ReflectionRequest::PromiseAccept,
+            ),
+            EffectRequestSpec::at_path(
+                ["promise", "abandon"],
+                ["reflection_runtime", "v0", "request", "promise", "abandon"],
+                1,
+                ReflectionRequest::PromiseAbandon,
+            ),
+            EffectRequestSpec::at_path(
+                ["promise", "accepted"],
+                ["reflection_runtime", "v0", "request", "promise", "accepted"],
+                1,
+                ReflectionRequest::PromiseAccepted,
+            ),
             #[cfg(test)]
             EffectRequestSpec::at_path(
                 ["TEST_ONLY", "queue_now"],
@@ -1744,6 +1985,19 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 ],
                 2,
                 ReflectionRequest::TestQueueNow,
+            ),
+            #[cfg(test)]
+            EffectRequestSpec::at_path(
+                ["TEST_ONLY", "accept_now"],
+                [
+                    "reflection_runtime",
+                    "v0",
+                    "request",
+                    "TEST_ONLY",
+                    "accept_now",
+                ],
+                2,
+                ReflectionRequest::TestAcceptNow,
             ),
         ])
         .collect()
@@ -1800,7 +2054,11 @@ mod tests {
             | ReflectionRequest::ChildClear
             | ReflectionRequest::ChildCall
             | ReflectionRequest::ChildCallLeave
-            | ReflectionRequest::TestQueueNow => {}
+            | ReflectionRequest::PromiseAccept
+            | ReflectionRequest::PromiseAbandon
+            | ReflectionRequest::PromiseAccepted
+            | ReflectionRequest::TestQueueNow
+            | ReflectionRequest::TestAcceptNow => {}
         }
     }
 
@@ -1847,6 +2105,20 @@ mod tests {
             | ReflectionRequestOperation::Log(_)
             | ReflectionRequestOperation::ChildCallLeave
             | ReflectionRequestOperation::Poisoned => {}
+            ReflectionRequestOperation::Acceptance(work) => match work {
+                AcceptanceRequestWork::Start {
+                    request: _,
+                    arguments,
+                } => {
+                    let _: &Vec<Value> = arguments;
+                }
+                AcceptanceRequestWork::Awaiting {
+                    request: _,
+                    diagnostic,
+                } => {
+                    let _: &Option<Value> = diagnostic;
+                }
+            },
             ReflectionRequestOperation::Child(work) => {
                 let ChildRequestWork { request, state } = work;
                 let _: &ChildRequest = request;
