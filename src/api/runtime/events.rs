@@ -341,15 +341,6 @@ struct RuntimeInputCursor {
     observed_empty: bool,
 }
 
-/// The tasks a clear took from the queues of the machines it cleared.
-#[derive(Default)]
-pub(crate) struct ClearedTasks {
-    /// The tasks that ran: the heads of unflagged machines' queues.
-    pub(crate) running: Vec<Value>,
-    /// The tasks that waited behind them, or in a flagged machine's queue.
-    pub(crate) waiting: Vec<Value>,
-}
-
 /// Transaction-local observations and FIFO input claims.
 ///
 /// Dropping this value abandons every claim; input is removed only by a
@@ -417,20 +408,40 @@ impl RuntimeEventJournal {
         !self.flags.read(machine) && self.queued_tasks(machine) > 0
     }
 
-    /// Interrupts the task running on the child machine at `machine`, as
-    /// this journal sees it: takes it from the queue, whose head it is, and
-    /// flags the machine. Returns its item's sequence and its record, or
-    /// `None`, changing nothing, where nothing runs there: the machine is
-    /// flagged, or its queue empty. Its reads are observed.
-    pub(crate) fn interrupt_task(&mut self, machine: &[Key]) -> Option<(u64, Value)> {
-        if self.flags.read(machine) {
-            return None;
+    /// Whether the child machine at `machine`, or one of its descendants, is
+    /// busy, as this journal's snapshot shows them. The reads are observed,
+    /// up to the first busy machine.
+    pub(crate) fn machines_busy(&mut self, machine: &[Key]) -> bool {
+        self.ports
+            .buffers_below(machine, &TASKS)
+            .iter()
+            .any(|address| self.machine_busy(&address.machine))
+    }
+
+    /// Interrupts the tasks running on the child machine at `machine` and
+    /// its descendants, as this journal sees them: takes each from its
+    /// queue, whose head it is, and flags its machine. Returns each stopped
+    /// task's machine, its item's sequence and its record; where nothing
+    /// runs, on a flagged or an idle machine, it changes nothing. Its reads
+    /// are observed.
+    pub(crate) fn interrupt_tasks(&mut self, machine: &[Key]) -> Vec<(Vec<Key>, u64, Value)> {
+        let mut stopped = Vec::new();
+        for address in self.ports.buffers_below(machine, &TASKS) {
+            if self.flags.read(&address.machine) {
+                continue;
+            }
+            let sequence = self.ports.next_sequence(&address);
+            let Some(task) = self
+                .ports
+                .claim(&address, 1)
+                .and_then(|mut claimed| claimed.pop())
+            else {
+                continue;
+            };
+            self.flags.set(address.machine.clone());
+            stopped.push((address.machine, sequence, task));
         }
-        let address = task_address(machine.to_vec());
-        let sequence = self.ports.next_sequence(&address);
-        let task = self.ports.claim(&address, 1)?.pop()?;
-        self.flags.set(machine.to_vec());
-        Some((sequence, task))
+        stopped
     }
 
     /// Recovers the child machine at `machine` where it is flagged: clears
@@ -445,25 +456,17 @@ impl RuntimeEventJournal {
         Some(self.ports.claim_all(&task_address(machine.to_vec())))
     }
 
-    /// Returns the child machine at `machine` and its descendants to their
-    /// initial transactional state: takes every task from their queues,
-    /// observing their ends, so that a task queued meanwhile conflicts,
-    /// drops the tasks this journal queued on them, returns their port state
-    /// to the initial one, and drops their shares and flags. Returns the
-    /// tasks it took or dropped: the head of an unflagged machine's queue
-    /// runs, and the rest wait.
-    pub(crate) fn clear_machines(&mut self, machine: &[Key]) -> ClearedTasks {
-        let mut cleared = ClearedTasks {
-            waiting: self.ports.appended_below(machine, &TASKS),
-            ..ClearedTasks::default()
-        };
+    /// Returns the child machine at `machine` and its descendants, none of
+    /// them busy, to their initial transactional state: takes every task
+    /// from their queues, which only flagged machines hold, observing their
+    /// ends, so that a task queued meanwhile conflicts, drops the tasks this
+    /// journal queued on them, returns their port state to the initial one,
+    /// and drops their shares and flags. Returns the tasks it took or
+    /// dropped, none of which ran.
+    pub(crate) fn clear_machines(&mut self, machine: &[Key]) -> Vec<Value> {
+        let mut cleared = self.ports.appended_below(machine, &TASKS);
         for address in self.ports.buffers_below(machine, &TASKS) {
-            let flagged = self.flags.read(&address.machine);
-            let mut tasks = self.ports.claim_all(&address).into_iter();
-            if !flagged {
-                cleared.running.extend(tasks.next());
-            }
-            cleared.waiting.extend(tasks);
+            cleared.extend(self.ports.claim_all(&address));
         }
         self.ports.clear_below(machine);
         self.shares.clear_below(machine.to_vec());

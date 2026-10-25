@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::{Mutex, PoisonError};
 
 use super::RuntimeSharedResources;
-use super::events::{ClearedTasks, RuntimeEventJournal, task_address};
+use super::events::{RuntimeEventJournal, task_address};
 use crate::core::{EvaluationFailure, Key, ManagedResolverRoot, RuntimeValueAccess, Value};
 use crate::evaluation::{EvaluationTaskHandle, MachineHost, MachineTaskOutcome, QueuedTask};
 use crate::reflection::{Resolution, StoreCommitResult, StoreJournal};
@@ -41,9 +41,10 @@ struct Run {
     sequence: u64,
     /// The task, once it launched.
     task: Option<EvaluationTaskHandle>,
-    /// Whether an interrupt or a clear stopped the run.
+    /// Whether an interrupt stopped the run.
     stopped: bool,
-    /// Whether the state the task leaves is dropped: a clear stopped it.
+    /// Whether the state the task leaves is dropped: a clear came while
+    /// the stopped or failed task wound down.
     discard: bool,
 }
 
@@ -116,7 +117,7 @@ pub(crate) fn clear_child_machines(
     store: &mut StoreJournal,
     events: &mut RuntimeEventJournal,
     machine: &[Key],
-) -> ClearedTasks {
+) -> Vec<crate::api::Value> {
     store.remove_environment(crate::api::turn::environment::environment_node(machine));
     events.clear_machines(machine)
 }
@@ -257,23 +258,16 @@ impl MachineHost for RuntimeSharedResources {
     }
 
     fn clear(&self, machine: &[Key]) {
-        let tasks: Vec<EvaluationTaskHandle> = {
-            let mut cells = self.cells();
-            cells.retain(|path, cell| !path.starts_with(machine) || cell.run.is_some());
-            cells
-                .iter_mut()
-                .filter(|(path, _)| path.starts_with(machine))
-                .filter_map(|(_, cell)| {
-                    cell.state = None;
-                    let run = cell.run.as_mut()?;
-                    run.stopped = true;
-                    run.discard = true;
-                    run.task.clone()
-                })
-                .collect()
-        };
-        for task in tasks {
-            task.cancel();
+        let mut cells = self.cells();
+        cells.retain(|path, cell| !path.starts_with(machine) || cell.run.is_some());
+        for (_, cell) in cells
+            .iter_mut()
+            .filter(|(path, _)| path.starts_with(machine))
+        {
+            cell.state = None;
+            if let Some(run) = &mut cell.run {
+                run.discard = true;
+            }
         }
     }
 }
@@ -387,6 +381,42 @@ mod tests {
             assembler.eval_context().poll_reflection_task(&task),
             EvaluationWaitPoll::Cancelled
         ));
+    }
+
+    #[test]
+    fn a_clear_drops_the_state_a_winding_down_task_leaves() {
+        // A clear stops nothing, but a stopped or failed task may still be
+        // winding down when it commits: the state that task leaves is
+        // dropped, where a run the clear did not meet keeps its own.
+        let runtime = EvaluationRuntime::new(0).expect("the runtime should open");
+        let resources = runtime.state.shared_resources.clone();
+        let values = runtime.values();
+        let cleared = vec![Key::atom_from_text("refl"), Key::atom_from_text("a")];
+        let kept = vec![Key::atom_from_text("refl"), Key::atom_from_text("b")];
+        let (_, store, events) = resources.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(events);
+        for machine in [&cleared, &kept] {
+            events.queue_task(machine.clone(), values.integer(1));
+        }
+        assert!(matches!(
+            resources.try_commit_transaction(&StoreJournal::new(store), &events),
+            StoreCommitResult::Committed
+        ));
+        let root = |value: i64| values.integer(value).into_runtime_root();
+        for machine in [&cleared, &kept] {
+            let run = resources.start(machine).expect("the queue holds a task");
+            if machine == &cleared {
+                resources.clear(machine);
+            }
+            resources.finish(
+                machine,
+                run.sequence,
+                MachineTaskOutcome::Complete(root(0)),
+                Some(root(7)),
+            );
+        }
+        assert!(resources.local_state(&cleared).is_none());
+        assert!(resources.local_state(&kept).is_some());
     }
 
     #[test]

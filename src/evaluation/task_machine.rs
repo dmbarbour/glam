@@ -6,9 +6,10 @@
 //! keyed by its task id, unnamed in listings and never joined.
 //!
 //! A task's item stays at the head of its machine's queue while it runs, and
-//! the item's sequence in the queue names the run: an interrupt or a clear
-//! takes the item, and the task, stopped, ends a run that is no longer the
-//! machine's, so its end claims nothing and starts nothing.
+//! the item's sequence in the queue names the run: an interrupt takes the
+//! item, and the task, stopped, ends a run that is no longer the machine's,
+//! so its end claims nothing and starts nothing. Only an interrupt stops a
+//! task; a clear waits for the machines it clears to be idle or flagged.
 
 use std::fmt;
 use std::sync::Arc;
@@ -92,14 +93,14 @@ pub(crate) trait MachineHost: Send + Sync {
     fn start(&self, machine: &[Key]) -> Option<QueuedTask>;
 
     /// Records `task` as the task of the machine's run `sequence`, which an
-    /// interrupt or a clear stops. Where one stopped the run before the task
-    /// launched, it cancels the task.
+    /// interrupt stops. Where one stopped the run before the task launched,
+    /// it cancels the task.
     fn attach(&self, machine: &[Key], sequence: u64, task: &EvaluationTaskHandle);
 
     /// Ends the machine's run `sequence` with `outcome`, keeping `state` as
     /// its local state where given: takes the task from the queue, resolves
-    /// its reply, and flags the machine on a failure. A run an interrupt or a
-    /// clear took the task from claims nothing. Returns the next task where
+    /// its reply, and flags the machine on a failure. A run an interrupt took
+    /// the task from claims nothing. Returns the next task where
     /// the machine goes on, which the caller starts.
     fn finish(
         &self,
@@ -115,7 +116,8 @@ pub(crate) trait MachineHost: Send + Sync {
     fn interrupt(&self, machine: &[Key], sequence: u64);
 
     /// Empties the machine and its descendants, as a clear committed: their
-    /// local state goes, and each running task is cancelled, the state it
-    /// leaves dropped.
+    /// local state goes, and so does the state a task still winding down
+    /// there, stopped or failed, leaves. It stops nothing: a clear waits for
+    /// its machines to be idle or flagged.
     fn clear(&self, machine: &[Key]);
 }

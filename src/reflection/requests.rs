@@ -1122,10 +1122,10 @@ where
     })
 }
 
-/// `.child.interrupt Key Reason`: stops the task running on the child,
-/// breaks its reply with `Reason`, and flags the child, whose state the
-/// task may have left half-done. A child with nothing running, idle or
-/// flagged, is left as it is.
+/// `.child.interrupt Key Reason`: stops the tasks running on the child and
+/// its descendants, breaks their replies with `Reason`, and flags each
+/// machine it stopped a task on, whose state the task may have left
+/// half-done. Where nothing runs, it changes nothing.
 fn interrupt_child<S>(
     key: Key,
     reason: Value,
@@ -1141,24 +1141,20 @@ where
         .machines()
         .ok_or_else(|| TaskHalt::new("`.child.interrupt` needs a host with machines"))?;
     let machine = child_machine(key, context)?;
-    let path: Arc<[Key]> = Arc::from(machine.clone());
     let values = context.values();
     transact_on_machines(".child.interrupt", context, |store, events, updates| {
-        let Some((sequence, task)) = events.interrupt_task(&machine) else {
-            return Ok(());
-        };
+        let stopped = events.interrupt_tasks(&machine);
+        let mut tasks = Vec::with_capacity(stopped.len());
+        for (machine, sequence, task) in stopped {
+            tasks.push(task);
+            updates.push(ReflectionUpdate::Interrupt {
+                host: host.clone(),
+                machine: Arc::from(machine),
+                sequence,
+            });
+        }
         values.with_access(|scoped| {
-            crate::api::break_replies(
-                scoped.runtime_access(),
-                store,
-                vec![task],
-                reason.runtime_root(),
-            );
-        });
-        updates.push(ReflectionUpdate::Interrupt {
-            host: host.clone(),
-            machine: path.clone(),
-            sequence,
+            crate::api::break_replies(scoped.runtime_access(), store, tasks, reason.runtime_root());
         });
         Ok(())
     })
@@ -1166,8 +1162,9 @@ where
 
 /// `.child.clear Key`: empties the child and its descendants, as a turn's
 /// clear does its machine, breaking the replies of every task it drops. It
-/// waits while the child is busy, as `.child.call` does; the running tasks
-/// of its descendants it stops. A cleared child reads `'idle`.
+/// stops no work: it waits while the child or a descendant is busy, as
+/// `.child.call` does, so a parent interrupts first what it means to stop.
+/// A cleared child reads `'idle`.
 fn clear_child<S>(key: Key, context: &mut RequestContext<'_, S>) -> Result<RequestResult, TaskHalt>
 where
     S: TaskSpecialization,
@@ -1182,22 +1179,17 @@ where
     let path: Arc<[Key]> = Arc::from(machine.clone());
     let values = context.values();
     transact_on_machines(".child.clear", context, |store, events, updates| {
-        if events.machine_busy(&machine) {
+        if events.machines_busy(&machine) {
             return Err(ChildBusy);
         }
         let cleared = crate::api::clear_child_machines(store, events, &machine);
         values.with_access(|scoped| {
             let access = scoped.runtime_access();
-            let ran = crate::api::machine_diagnostic(
-                access,
-                "the task's machine was cleared while the task ran",
-            );
-            let waited = crate::api::machine_diagnostic(
+            let reason = crate::api::machine_diagnostic(
                 access,
                 "the task's machine was cleared before the task ran",
             );
-            crate::api::break_replies(access, store, cleared.running, &ran);
-            crate::api::break_replies(access, store, cleared.waiting, &waited);
+            crate::api::break_replies(access, store, cleared, &reason);
         });
         updates.push(ReflectionUpdate::Clear {
             host: host.clone(),

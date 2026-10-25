@@ -2477,21 +2477,24 @@ untouched = anno refl:(.child.interrupt 'z "unheard" =>> .child.recover 'z =>> .
 }
 
 #[test]
-fn a_clear_empties_a_child_and_its_descendants() {
-    // `.child.clear` empties a child that is not busy, here flagged by an
-    // interrupt, with its descendants: it stops their running tasks and
-    // drops the waiting ones, breaking each promise with what happened, and
-    // leaves the child idle, the stopped tasks' state gone. A task queued
+fn a_clear_empties_a_child_and_its_descendants_once_none_is_busy() {
+    // `.child.clear` stops no work: it waits while the child or a
+    // descendant is busy, so a parent interrupts first, and an interrupt
+    // reaches the descendants' running tasks, flagging their machines. The
+    // clear then drops the waiting tasks, breaking their promises, and
+    // leaves the child idle, its descendants' state gone. A task queued
     // within the clear's own transaction is dropped as a waiting one.
     let source = r#"language g0
 import 'std
-cleared = anno refl:(.child.task 'k (.child.task 'g (.set ['m] 1 =>> .heap.set ['g_started] () =>> .cut (.heap.try_get ['g_gate])) >>= (\g -> .r {g:g})) >>= (\p -> seq p (.r p.g) >>= (\g -> .child.task 'k (.set ['n] 1 =>> .heap.set ['k_started] () =>> .cut (.heap.try_get ['k_gate])) >>= (\running -> .child.task 'k (.r "waiting") >>= (\waiting -> .cut (.heap.try_get ['g_started] =>> .heap.try_get ['k_started]) =>> .child.interrupt 'k "stop" =>> .child.clear 'k =>> .try (seq g (.r ())) >>= (\rg -> .try (seq running (.r ())) >>= (\rr -> .try (seq waiting (.r ())) >>= (\rw -> .child.status 'k >>= (\s -> .child.task 'k (.child.task 'g (.try (.get ['m])) >>= (\q -> .r {q:q})) >>= (\p2 -> seq p2 (.r p2.q) >>= (\q -> seq q (.heap.set ['cleared] (if [rg.err.msg.text, rr.err.msg.text] == ["the task's machine was cleared while the task ran", "stop"] then (if s == 'idle then (if dict.defines ['err] q then rw.err.msg.text else "state kept") else "busy") else rg.err.msg.text))))))))))))) ()
+cleared = anno refl:(.child.task 'k (.child.task 'g (.set ['m] 1 =>> .heap.set ['g_started] () =>> .cut (.heap.try_get ['g_gate])) >>= (\g -> .r {g:g})) >>= (\p -> seq p (.r p.g) >>= (\g -> .child.task 'k (.set ['n] 1 =>> .heap.set ['k_started] () =>> .cut (.heap.try_get ['k_gate])) >>= (\running -> .child.task 'k (.r "waiting") >>= (\waiting -> .cut (.heap.try_get ['g_started] =>> .heap.try_get ['k_started]) =>> .try (.child.clear 'k) >>= (\busy -> .child.interrupt 'k "stop" =>> .child.clear 'k =>> .try (seq g (.r ())) >>= (\rg -> .try (seq running (.r ())) >>= (\rr -> .try (seq waiting (.r ())) >>= (\rw -> .child.status 'k >>= (\s -> .child.task 'k (.child.task 'g (.try (.get ['m])) >>= (\q -> .r {q:q})) >>= (\p2 -> seq p2 (.r p2.q) >>= (\q -> seq q (.heap.set ['cleared] (if busy == 'fail then (if [rg.err.msg.text, rr.err.msg.text] == ["stop", "stop"] then (if s == 'idle then (if dict.defines ['err] q then rw.err.msg.text else "state kept") else "busy") else rg.err.msg.text) else "cleared while busy")))))))))))))) ()
+deep = anno refl:(.child.task 'd (.child.task 'e (.heap.set ['e_started] () =>> .cut (.heap.try_get ['e_gate])) >>= (\e -> .r {e:e})) >>= (\p -> seq p (.r p.e) >>= (\e -> .cut (.heap.try_get ['e_started]) =>> .child.status 'd >>= (\s -> .try (.child.clear 'd) >>= (\busy -> .child.interrupt 'd "halt" =>> .child.status 'd >>= (\after -> .child.clear 'd =>> .try (seq e (.r ())) >>= (\re -> .heap.set ['deep] (if [s, after] == ['idle, 'idle] then (if busy == 'fail then re.err.msg.text else "cleared a busy grandchild") else "child busy")))))))) ()
 dropped = anno refl:(.cut (.child.task 'x (.r "ran") >>= (\p -> .child.clear 'x =>> .r {p:p})) >>= (\d -> .try (seq d.p (.r ())) >>= (\r -> .heap.set ['dropped] r.err.msg.text))) ()
 "#;
     assert_eq!(
-        run_reflection_texts(source, &["cleared", "dropped"]),
+        run_reflection_texts(source, &["cleared", "deep", "dropped"]),
         [
             "the task's machine was cleared before the task ran",
+            "halt",
             "the task's machine was cleared before the task ran",
         ]
     );

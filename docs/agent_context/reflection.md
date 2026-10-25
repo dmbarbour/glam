@@ -161,27 +161,28 @@ and control flow.
   while its task input holds a task, queued or running (the head stays in
   the buffer until it finishes), and `'idle` otherwise. Within a cut the
   read is observed, so a failed cut waits for the status to change.
-- `.child.interrupt Key Reason` takes the running task (the head of an
-  unflagged queue), breaks its reply with `Reason` and flags the child;
-  `.child.recover Key` clears a flagged child's flag and queue, breaking
-  the dropped replies; `.child.clear Key` empties the child and its
-  descendants as a turn's clear does, breaking every reply it drops. Each
-  is a transactional edit. An interrupt with nothing running does
-  nothing; recovering or clearing a busy child waits, as `.child.call`
-  does (it fails having observed the child, so a cut waits, and `.try`
-  reports `'fail`), while a clear stops its descendants' running tasks.
-  Recovery and clearing observe a queue's end, so a task queued meanwhile
-  conflicts.
+- `.child.interrupt Key Reason` takes the running tasks (the heads of
+  unflagged queues) of the child and its descendants, breaks their replies
+  with `Reason` and flags their machines; `.child.recover Key` clears a
+  flagged child's flag and queue, breaking the dropped replies;
+  `.child.clear Key` empties the child and its descendants as a turn's
+  clear does, breaking every reply it drops. Each is a transactional
+  edit. Only an interrupt stops work (`reflection-tasks-are-machine-tasks`):
+  recovering waits while the child is busy, and clearing while it or a
+  descendant is, as `.child.call` does (the edit fails having observed the
+  busy machine, so a cut waits, and `.try` reports `'fail`). Recovery and
+  clearing observe a queue's end, so a task queued meanwhile conflicts.
 - The runtime's `MachineHost` (`api/runtime/machines.rs`) keeps each
   child's local state and its run, named by the sequence of the running
   task's item in the queue (`TaskMachine::sequence`); its task input and
   flag lie in the transactional event state (`api/runtime/flags.rs`),
   whose journal validates the flags it read. A queued task's launch is a
   commit-time `ReflectionUpdate::Wake`; a finishing task starts the next
-  itself. An interrupt or a clear stops the run at commit
-  (`ReflectionUpdate::Interrupt`, `Clear`): the stopped task's end claims
-  nothing, since the item is gone, and the machine runs nothing else until
-  it ends. Every way a task on a machine ends, teardown cancellation
+  itself. An interrupt stops the run at commit
+  (`ReflectionUpdate::Interrupt`): the stopped task's end claims nothing,
+  since the item is gone, and the machine runs nothing else until it ends.
+  A clear's commit (`ReflectionUpdate::Clear`) drops local state, and the
+  state a task still winding down there leaves. Every way a task on a machine ends, teardown cancellation
   included, ends its run (`MachineRunEnd`); a panic, or a task its session
   abandons as it closes, does not yet.
 

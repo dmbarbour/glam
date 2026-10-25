@@ -353,10 +353,11 @@ volume to retry. Dropping the Rust owner does not revoke it.
   its queue item, resolves its reply, flags the machine on failure and
   starts the next item itself (`MachineRunEnd`). `.child.interrupt`,
   `.child.recover` and `.child.clear` edit the queue and flags within the
-  transaction and stop runs at commit; a run is named by its item's
-  sequence, so a stopped task's end claims nothing. Recovering or
-  clearing a busy child fails having observed it (`ChildBusy`), so it
-  waits as `.child.call` does.
+  transaction; an interrupt, transitive, stops runs at commit, and a run
+  is named by its item's sequence, so a stopped task's end claims nothing.
+  Recovering a busy child, or clearing a subtree with a busy machine,
+  fails having observed it (`ChildBusy`), so it waits as `.child.call`
+  does.
 - `.task.new Effect` reserves an opaque child handle plus a private status
   query; launch is commit-ordered inside a transaction. The status query is
   updated only when the projected state changes between atoms `'launched` and

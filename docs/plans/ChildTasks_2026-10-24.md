@@ -106,32 +106,35 @@ Each with tests, the full gate, and a commit.
    `.child.interrupt Key Reason` (cancel the running task, break its reply
    with `Reason`, flag the machine), `.child.clear` (empty the child and
    its descendants, breaking the replies of the tasks it drops).
-   Built 2026-10-24. Each is a transactional edit, within a cut or
-   committed at once: an interrupt takes the head of an unflagged queue,
-   breaks its reply and sets the flag; a recovery clears the flag and takes
+   Built 2026-10-24, revised 2026-10-25. Each is a transactional edit,
+   within a cut or committed at once. An interrupt is transitive: at the
+   child and each descendant it takes the head of an unflagged queue,
+   breaks its reply and sets the flag. A recovery clears the flag and takes
    the whole queue, observing its end, so a task queued meanwhile
-   conflicts; a clear takes every queue at or below the child (the heads
-   of unflagged queues "cleared while the task ran", the rest "before"),
-   with the tasks its own transaction queued there, and drops port state,
-   shares, environment and flags as a turn's clear does. Recovering and
-   clearing wait while the child is busy, as `.child.call` does
-   (maintainer, the same day): the edit fails having observed the child,
-   so a cut waits for it to change, unless an alternative succeeds, and a
-   task outside a cut waits; `.try` reports them `'fail`. A clear still
-   stops its descendants' running tasks. At commit, `ReflectionUpdate::Interrupt` and `Clear` stop the
+   conflicts. A clear takes every queue at or below the child, which only
+   flagged machines hold, with the tasks its own transaction queued there,
+   and drops port state, shares, environment and flags as a turn's clear
+   does. Interrupting is the only way work stops (maintainer, 2026-10-25),
+   so recovering waits while the child is busy, and clearing while the
+   child or a descendant is, as `.child.call` does (maintainer,
+   2026-10-24): the edit fails having observed the busy machine, so a cut
+   waits for it to change, unless an alternative succeeds, and a task
+   outside a cut waits; `.try` reports them `'fail`. At commit, `ReflectionUpdate::Interrupt` and `Clear` stop the
    runs: a run is named by its item's sequence in the queue
    (`TaskMachine::sequence`), so a stopped task's end claims nothing and
    starts nothing while the machine stays running until it ends, one task
-   at a time. An interrupted task's state stays the machine's; a cleared
-   one's is dropped. A stop that lands before the task's handle attaches
+   at a time. An interrupted task's state stays the machine's, unless a
+   clear comes while it winds down, which drops it. A stop that lands before the task's handle attaches
    cancels it on attaching. A task cancelled from teardown (a blocked
    task's cancellation) now ends its run, as a polled one does. Tests:
    interrupt then recovery (reason, flag, the waiting task's break, state
    kept), a failure's state as recovery finds it (the state before the
    outermost cut, untested until now), the no-ops, a clear across a
    grandchild, an interrupt undone by a failed cut, and the attach window
-   driven directly, then recovery and clearing waiting out a busy child
-   and a clear dropping its own transaction's task; each guard
+   driven directly, then recovery and clearing waiting out a busy child,
+   a clear waiting out a busy grandchild until a transitive interrupt, a
+   clear dropping its own transaction's task, and a clear dropping a
+   winding-down task's state (driven directly); each guard
    mutation-checked. Still open: a child task
    that panics, or that its launching session abandons as it closes,
    never ends its run, so its machine stays running.
@@ -158,14 +161,12 @@ Taken unless the maintainer says otherwise (2026-10-24):
 3. Until `api-settlement`, flagged task machines take the failure ledger's
    place in the quiescence report, so the CLI fails a batch on them as it
    does on `task_failures` today.
-4. `child-task-control`: an interrupt where nothing runs (an idle or a
-   flagged child) changes nothing (maintainer: reasonable), as does a
-   recovery of an idle child. Recovering or clearing a busy child waits
-   (maintainer, 2026-10-24: synchronous, under `.child.call`'s
-   conditions); only the child itself is waited for, and a clear stops
-   its descendants' running tasks, since a parent has no other way to stop
-   a grandchild's work before `.child.call`.
-5. An interrupt breaks the reply with `Reason` itself, as the Reflection
+4. `child-task-control`: an interrupt where nothing runs changes nothing
+   (maintainer: reasonable), as does a recovery of an idle child.
+   Recovering a busy child, or clearing a subtree with a busy machine,
+   waits (maintainer, 2026-10-24 and 2026-10-25: synchronous, under
+   `.child.call`'s conditions; interruption is explicit, and transitive).
+5. An interrupt breaks each reply with `Reason` itself, as the Reflection
    Model says; recovery and clearing break with a diagnostic, "the task's
-   machine was recovered from an error before the task ran", "... cleared
-   while the task ran" or "... cleared before the task ran".
+   machine was recovered from an error before the task ran" or "... was
+   cleared before the task ran".
