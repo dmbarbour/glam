@@ -2318,6 +2318,29 @@ tried = anno refl:(.child.task 'e (.set ['n] 1) >>= (\p -> seq p (.try (.child.c
 }
 
 #[test]
+fn a_plain_call_waits_for_its_task_on_the_child() {
+    // `child-call-plain`: outside a transaction, `.child.call` queues its
+    // operation on the child, after what was queued before it, and waits
+    // for the reply: it answers the operation's result, on the child's
+    // state, or fails with its failure, which flags the child. A child in
+    // error it fails at once.
+    let source = r#"language g0
+import 'std
+plain = anno refl:(.heap.set ['log] [] =>> .child.task 'a (.set ['n] 1 =>> .heap.rewrite ['log] (\l -> l ++ ["queued"])) >>= (\_ -> .child.call 'a (.heap.rewrite ['log] (\l -> l ++ ["called"]) =>> .get ['n]) >>= (\n -> .heap.get ['log] >>= (\log -> .heap.set ['plain] (if [n, log] == [1, ["queued", "called"]] then "after its queue" else "out of order"))))) ()
+failing = anno refl:(.child.task 'p (.child.call 'c (1 / 0) >>= (\_ -> .r "went on")) >>= (\p -> .try (seq p (.r ())) >>= (\r -> .child.task 'd (1 / 0) >>= (\d -> .try (seq d (.r ())) >>= (\rd -> .child.recover 'p =>> .child.task 'p (.child.status 'c) >>= (\s -> seq s (.heap.set ['failing] (if s == 'error then (if r.err.msg.text == rd.err.msg.text then "flagged" else r.err.msg.text) else "unflagged")))))))) ()
+refused = anno refl:(.child.task 'p (.child.task 'f (1 / 0) >>= (\x -> .try (seq x (.r ())) >>= (\_ -> .child.call 'f (.r "entered")))) >>= (\p -> .try (seq p (.r ())) >>= (\r -> .heap.set ['refused] r.err.msg.text))) ()
+"#;
+    assert_eq!(
+        run_reflection_texts(source, &["plain", "failing", "refused"]),
+        [
+            "after its queue",
+            "flagged",
+            "`.child.call` cannot enter a child in error until its parent recovers it",
+        ]
+    );
+}
+
+#[test]
 fn calls_nest_on_their_children_s_children() {
     // Within a call, requests act on the child's children: a call nests in
     // a call, on the grandchild, and the caller's child of the same key is

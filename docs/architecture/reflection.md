@@ -370,7 +370,11 @@ volume to retry. Dropping the Rust owner does not revoke it.
   requests act on, else the task's own. A failed or tried branch drops the
   call with itself. Since the reset stack is part of a branch's state, a
   `.shift` within `Op` reaches only `Op`'s own resets. Outside a
-  transaction a call fails with an error, for now.
+  transaction a call is plain (`child-call-plain`): it queues `Op` as
+  `.child.task` does, admitting the child by its flag in the queueing's
+  journal so a child in error fails it at once, and answers
+  `RequestResult::Await` on the reply, which waits for it and fails with
+  the task's failure.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,

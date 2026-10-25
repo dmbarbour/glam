@@ -294,7 +294,8 @@ becomes clearing a machine with its descendants.
 - `.child.call` needs a child's machine state within the transactional
   store, as a Rust synchronous turn's is within its parent's state; tasks'
   machines must therefore keep their state where a caller's transaction
-  can stage it.
+  can stage it. (Done 2026-10-25: `child-state-transactional`, then the
+  call itself, in [Child Calls](ChildCalls_2026-10-25.md).)
 - A build today drains the runtime's whole background reflection domain
   and fails on any unfinished task, so a `refl.*` server that never
   returns would fail every later build; it should wait only until nothing

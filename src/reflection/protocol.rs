@@ -128,6 +128,10 @@ pub enum RequestResult {
         operation: PublicValue,
         close: PublicValue,
     },
+    /// Answers `value` once evaluated to weak-head normal form, as `seq
+    /// value (.r value)` does: the branch waits for it, and an error
+    /// evaluating it is the request's.
+    Await(PublicValue),
     ReturnUnit,
     Fail,
     Cancelled,
@@ -988,6 +992,9 @@ mod root_inventory_tests {
             RequestResult::Scoped { operation, close } => {
                 let _: &PublicValue = operation;
                 let _: &PublicValue = close;
+            }
+            RequestResult::Await(value) => {
+                let _: &PublicValue = value;
             }
             RequestResult::ReturnUnit | RequestResult::Fail | RequestResult::Cancelled => {}
         }

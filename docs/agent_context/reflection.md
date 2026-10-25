@@ -202,8 +202,13 @@ and control flow.
   `Op` left (`set_machine_state`). `child_machine` takes the innermost
   call's child before the task's machine. Within a cut, an error in `Op`
   waits for a change like any error after an observation; under `.try` it
-  answers `err` and undoes, so no flag stages. Outside a transaction the
-  call is an error until `child-call-plain`.
+  answers `err` and undoes, so no flag stages. Outside a transaction
+  (`child-call-plain`) the call queues through `queue_on_child`, as
+  `.child.task` does, whose `admit` refuses a flagged child in the
+  queueing's own journal (a flag set meanwhile conflicts, and the queueing
+  runs again), and answers `RequestResult::Await(reply)`: the branch runs
+  `seq reply (.r reply)`, waiting for the child, and a broken reply is the
+  call's error.
 - An anonymous root's subtree is unreachable once the root's task ends: its
   keys name a task id never reused. The root's task, once it tasks or calls a child,
   holds an `AnonymousRootGuard` reporting its end, and the host reclaims

@@ -541,11 +541,29 @@ where
     S::Host: ReflectionHost<S>,
     S::Journal: ReflectionTransaction,
 {
-    let Machines(host) = context
-        .host()
-        .machines()
-        .ok_or_else(|| TaskHalt::new("`.child.task` needs a host with machines"))?;
     let path = child_machine(key, context)?;
+    queue_on_child(".child.task", path, operation, context, |_| Ok(()))
+}
+
+/// Queues `operation` on the child machine at `path`, for the request
+/// `name`, and answers the promise of its reply: within a transaction,
+/// staged with it, and otherwise committed at once, once `admit` accepts
+/// the child as the commit's journal reads it, so that what it read
+/// changing meanwhile runs the queueing again.
+fn queue_on_child<S>(
+    name: &str,
+    path: Vec<Key>,
+    operation: Value,
+    context: &mut RequestContext<'_, S>,
+    admit: impl Fn(&mut crate::api::RuntimeEventJournal) -> Result<(), TaskHalt>,
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let no_machines = || TaskHalt::new(format!("`{name}` needs a host with machines"));
+    let Machines(host) = context.host().machines().ok_or_else(no_machines)?;
     if context.eval_context().machine().is_none() {
         context.note_anonymous_children(host.clone());
     }
@@ -571,37 +589,40 @@ where
         machine,
         context: context.eval_context().clone(),
     };
-    let no_machines = || TaskHalt::new("`.child.task` needs a host with machines");
+    let queue = |events: Option<&mut crate::api::RuntimeEventJournal>,
+                 updates: &mut Vec<ReflectionUpdate>| {
+        let events = events.ok_or_else(no_machines)?;
+        admit(events)?;
+        events.queue_task(path.clone(), task.clone());
+        updates.push(wake.clone());
+        Ok::<_, TaskHalt>(())
+    };
     if let Some(mut transaction) = context.transaction() {
         let journal = transaction.parts().1.reflection_journal();
-        let Some(events) = journal.events.as_mut() else {
+        if let Err(error) = queue(journal.events.as_mut(), &mut journal.updates) {
             promises.forget(promise);
-            return Err(no_machines());
-        };
-        events.queue_task(path, task);
-        journal.updates.push(wake);
-    } else {
+            return Err(error);
+        }
+        return Ok(RequestResult::Return(promised));
+    }
+    loop {
         let snapshot = context.host().snapshot();
         let store = StoreJournal::new(snapshot.store().clone());
         let mut journal = S::begin_journal(snapshot.extra());
-        {
-            let reflection = journal.reflection_journal();
-            let Some(events) = reflection.events.as_mut() else {
-                promises.forget(promise);
-                return Err(no_machines());
-            };
-            events.queue_task(path, task);
-            reflection.updates.push(wake);
+        let reflection = journal.reflection_journal();
+        if let Err(error) = queue(reflection.events.as_mut(), &mut reflection.updates) {
+            promises.forget(promise);
+            return Err(error);
         }
-        // Appending to a buffer conflicts with nothing a commit validates.
         match context
             .host()
             .commit(TaskCommit::new(store, snapshot.extra().clone(), journal))
         {
-            CommitResult::Committed => context.committed(),
-            CommitResult::Conflict => {
-                return Err(TaskHalt::new("queueing a child's task conflicted"));
+            CommitResult::Committed => {
+                context.committed();
+                return Ok(RequestResult::Return(promised));
             }
+            CommitResult::Conflict => {}
             CommitResult::MissingVolume(volume) => {
                 return Err(TaskHalt::new(format!(
                     "reflection volume {} is unavailable",
@@ -611,7 +632,6 @@ where
             CommitResult::Closed => return Ok(RequestResult::Cancelled),
         }
     }
-    Ok(RequestResult::Return(promised))
 }
 
 /// `.child.status Key`: `'error` while the child is flagged, `'busy` while
@@ -848,9 +868,16 @@ where
     })
 }
 
-/// `.child.call Key Op`, within a transaction: runs `Op` on the child `Key`
-/// within the caller's transaction and answers its result
-/// (`child-call-frame`). `Op` runs on the child's local state, and its
+/// `.child.call Key Op`: runs `Op` on the child `Key` and answers its
+/// result. Outside a transaction, a plain remote procedure call
+/// (`child-call-plain`): it queues `Op` on the child, as `.child.task`
+/// does, and waits for its reply, so it answers `Op`'s result after what
+/// was queued before it, or fails with its failure, which flags the child
+/// as any task's does. A child in error it fails at once, rather than queue
+/// behind a stopped queue.
+///
+/// Within a transaction, it runs `Op` on the child within the caller's
+/// transaction (`child-call-frame`). `Op` runs on the child's local state, and its
 /// requests act on the child's children; as the call returns, the state
 /// `Op` left becomes the child's, committing or aborting with the caller.
 /// The call reads the child's flag, queue and state, all observed:
@@ -881,15 +908,27 @@ where
     S::Host: ReflectionHost<S>,
     S::Journal: ReflectionTransaction,
 {
+    let in_error = || {
+        TaskHalt::new("`.child.call` cannot enter a child in error until its parent recovers it")
+    };
     let Machines(host) = context
         .host()
         .machines()
         .ok_or_else(|| TaskHalt::new("`.child.call` needs a host with machines"))?;
     let machine = child_machine(key, context)?;
     let Some(generation) = context.transaction_generation() else {
-        return Err(TaskHalt::new(
-            "`.child.call` runs only within a cut or a `.try`, for now",
-        ));
+        let check = machine.clone();
+        let queued = queue_on_child(".child.call", machine, operation, context, |events| {
+            if events.machine_flagged(&check) {
+                Err(in_error())
+            } else {
+                Ok(())
+            }
+        })?;
+        return Ok(match queued {
+            RequestResult::Return(reply) => RequestResult::Await(reply),
+            result => result,
+        });
     };
     context.observe_host_generation(generation);
     let state = {
@@ -904,9 +943,7 @@ where
             .as_mut()
             .ok_or_else(|| TaskHalt::new("`.child.call` needs a host with machines"))?;
         if events.machine_flagged(&machine) {
-            return Err(TaskHalt::new(
-                "`.child.call` cannot enter a child in error until its parent recovers it",
-            ));
+            return Err(in_error());
         }
         if events.queues_tasks_on(&machine) {
             return Err(TaskHalt::new(

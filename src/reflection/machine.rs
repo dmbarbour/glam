@@ -3201,6 +3201,16 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     scope_depth,
                 }
             }
+            RequestResult::Await(value) => {
+                let operation = context.with_runtime_access(|access| {
+                    let value = value.into_runtime_root().clone_core_with(&access);
+                    branch.root_value(&access, evaluation_effect_in(&access, value))
+                });
+                MachineWork::Drive {
+                    branch: branch.with_effect_root(operation),
+                    scope_depth,
+                }
+            }
             RequestResult::ReturnUnit => context.with_runtime_access(|access| {
                 MachineWork::deliver_unit(&access, branch, scope_depth)
             }),
@@ -3229,6 +3239,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 validate(operation)?;
                 validate(close)
             }
+            RequestResult::Await(value) => validate(value),
             RequestResult::ReturnUnit | RequestResult::Fail | RequestResult::Cancelled => Ok(()),
         }
     }
@@ -5934,7 +5945,6 @@ struct TryTrace {
     waited: Option<PromiseId>,
 }
 
-/// `seq value (.r value)`, the operation `.eval value` tries.
 /// What a read of state answers where its path is undefined: `.get` is an
 /// error naming the path, and `.try_get` fails (`dict-empty-is-a-value`).
 #[derive(Clone, Copy)]
@@ -5999,6 +6009,8 @@ fn key_path_in(access: &RuntimeValueAccess<'_>, keys: &[Key]) -> Value {
     ))
 }
 
+/// `seq value (.r value)`: the operation `.eval value` tries, and the one a
+/// request's [`RequestResult::Await`] runs.
 fn evaluation_effect_in(access: &RuntimeValueAccess<'_>, value: Value) -> Value {
     let returned = Value::Dict(Dict::new_sync().insert(
         keys::EFF.clone(),

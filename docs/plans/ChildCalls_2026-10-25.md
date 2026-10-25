@@ -194,6 +194,17 @@ Each with tests, the full gate, and a commit.
 3. `child-call-plain` — the call outside a transaction, queued and
    awaited. Tests: order after earlier tasks, the result, the failure and
    the child's flag, and a flagged child.
+   Built 2026-10-25: the call queues as `.child.task` does, through one
+   `queue_on_child`, which admits the child in the queueing's own journal,
+   so a flag set before the commit conflicts and the queueing runs again
+   rather than queue behind a stopped queue; it then answers a new
+   `RequestResult::Await` on the reply, by which a request answers a
+   value once evaluated, as `seq value (.r value)` does, so the caller
+   waits for the child and fails with the task's failure, the very
+   diagnostic. Mutation-checked: the wait, the child's admission, and the
+   anonymous root's guard. The conflict between the admission and a flag
+   committed meanwhile is a guard Glam cannot force in order, as the flag
+   comes only from the child's own run ending in between.
 
 Turns get the same rule for what the transaction sent a child, in the
 runtime API plan's `turn-pending-input-conflicts`.
