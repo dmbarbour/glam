@@ -185,6 +185,44 @@ Each with tests, the full gate, and a commit.
    mutation-checked. Noted: `EffectLifecycle`'s descendant tracking now
    serves only child tasks a hosted root queues, on hosts with machines; its
    tests of `.task.new` descendants and abandonment retired with them.
+7. `child-task-halts` — every run on a child machine ends: a run whose
+   task ends abnormally, by a panic above all, halts with the error flag
+   (maintainer, 2026-10-25), its reply broken with what happened and its
+   machine freed, so the parent reads `'error` and may recover it. Today a
+   panicked child's item stays at its queue's head, its machine `'busy`,
+   and its reply pending, all for good. A guard on each run posts the
+   abnormal end to the host, which halts the run where it is safe to.
+   Session closure cannot abandon a child today, since only annotation
+   tasks, whose work lives in the runtime's background domain, have
+   children, and no Rust-scheduled root's host has machines; the guard
+   would cover it too. Once sessions go away, a turn-hosted root's
+   children are its machine's, with no session to choose (maintainer:
+   child tasks join the parent machine).
+   Built 2026-10-25. Each run's `TaskMachine` holds a halt action, from
+   `launch_machine_tasks`, which ending the run takes, so a run ends once;
+   the effect task holds a `MachineRunGuard`, whose drop halts a run not
+   yet ended, and a task that fails to build or panics while building
+   halts it too. A halt fails the run as a failure does, breaking the reply
+   with "the task halted before it finished", and starts the next task
+   where the machine goes on. Where the thread holds a mutator, or unwinds,
+   the host keeps the action for its next safe point, death-notice
+   processing among them. Tests: a child forcing a panicking thunk halts,
+   flagged, and recovers to run its next task; a halt under a mutator waits
+   for the safe point, and halts once; the guard and the deferral are
+   mutation-checked. The halt of a task that fails to build has no test:
+   glam code cannot make a launcher fail. A task settlement retires on its
+   exit vote ends its run as exited, its reply broken but its machine
+   unflagged, which goes with exit votes (`api-refl-retirements`); the
+   existing exit settlement test covers it. `launch_machine_tasks` is the
+   first entry on the recursion audit's `BOUNDED_RECURSION`: a halt
+   relaunches through it only where a clear came between an interrupt and
+   the halt, and a failed relaunch flags the machine.
+8. `anonymous-root-reclamation` — once an anonymous root's task has ended
+   and no task runs or waits in its subtree, nothing can reach the subtree,
+   whose keys name a task id never reused: the runtime drops its machines'
+   cells and port state. Failed machines stay whole, flag and state, for
+   settlement to decide when to clear them, as later inspection tools
+   might at a finer grain (maintainer, 2026-10-25).
 
 ## Defaults, open to the maintainer
 

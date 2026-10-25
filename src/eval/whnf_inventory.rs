@@ -25,7 +25,10 @@ use syn::{Attribute, ExprCall, ExprMethodCall, ImplItemFn, ItemFn, Meta, Token};
 /// Recursive call families whose depth is bounded independently of user
 /// data. Each entry names one function on a cycle, keyed by module and item,
 /// with the reason the cycle cannot grow with user input.
-const BOUNDED_RECURSION: &[(&str, &str)] = &[];
+const BOUNDED_RECURSION: &[(&str, &str)] = &[(
+    "crate::reflection::requests::launch_machine_tasks",
+    "a run's halt action starts the machine's next task through it, and a halt fails its run, flagging the machine, which then starts nothing: only a clear between an interrupt and the halt leaves a next task, whose own halt flags the machine again",
+)];
 
 /// Open defects, not approvals: cycles whose depth follows user data. Each
 /// awaits an iterative rewrite. They are listed so that a new cycle still

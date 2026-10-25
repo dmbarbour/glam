@@ -2754,6 +2754,11 @@ maps the short names used here to file names.
     error never clears a flag. The CLI logger's `.task.new` children retire
     with `.task.*`, to return as `.child.task` once the logger runs as a
     turn.)
+  - (Decided by the maintainer, 2026-10-25, at `child-task-halts`: a
+    child task that panics halts with its machine's error flag, its reply
+    broken, so its parent can recover it. Reasons: a run that never ends
+    leaves its machine busy and its reply pending for good, where an error
+    is the parent's to see and act on.)
   - `.child.call Key Op` is the one synchronous operation: within a
     transaction, a transactional remote procedure call, which awaits what
     was committed to the child before the caller's transaction, then runs

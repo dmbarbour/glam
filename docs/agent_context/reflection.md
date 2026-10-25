@@ -182,8 +182,13 @@ and control flow.
   since the item is gone, and the machine runs nothing else until it ends.
   A clear's commit (`ReflectionUpdate::Clear`) drops local state, and the
   state a task still winding down there leaves. Every way a task on a machine ends, teardown cancellation
-  included, ends its run (`MachineRunEnd`); a panic, or a task its session
-  abandons as it closes, does not yet.
+  included, ends its run (`MachineRunEnd`), and a run ends once
+  (`TaskMachine::end`). A task that stops without finishing, as a panic
+  stops one, or that never launches, halts its run through the
+  `MachineRunGuard` it holds: the reply breaks with "the task halted before
+  it finished" and the machine is flagged. A halt where the thread holds a
+  mutator, or unwinds, waits on the host for its next safe point
+  (`run_deferred`, also run with the death notices).
 - An annotation task (`anno refl:` or `anno meta_refl:`) has no machine of
   its own: it is an anonymous root, `refl/<abstract task id>`, and its
   failure flags that root for good, since no parent can recover it, even

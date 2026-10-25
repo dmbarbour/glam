@@ -2331,6 +2331,42 @@ observed = anno refl:(.fail) "never"
 }
 
 #[test]
+fn a_panicking_child_task_halts_with_its_machine_flagged() {
+    // `child-task-halts`: a task that stops without finishing, as a panic
+    // stops one, halts its run: its reply breaks and its machine is flagged,
+    // so its parent reads `'error` and recovers it, and the queue serves the
+    // next task.
+    let source = r#"language g0
+import 'std
+launch = \bomb -> anno refl:(.child.task 'p (seq bomb (.r ())) >>= (\p -> .cut (.child.status 'p >>= (\s -> if s == 'error then .r () else .fail)) =>> .try (seq p (.r ())) >>= (\r -> .child.recover 'p =>> .child.task 'p (.r "recovered") >>= (\q -> seq q (.heap.set ['halted] (if q == "recovered" then r.err.msg.text else "unrecovered")))))) "launched"
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["panicking_child"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    let values = assembler.values();
+    let bomb = Value::from_runtime_root(values.core().construct_runtime_value_root(|access| {
+        CoreValue::Lazy(crate::core::LazyValue::semantic_thunk_in(access, |_| {
+            panic!("a child task's deliberate panic")
+        }))
+    }));
+    let launch = assembler.get(module.value(), "launch").unwrap();
+    let launched = values.apply(&launch, [bomb]).unwrap();
+    assembler
+        .evaluate(&launched)
+        .expect("the parent should see its child halt");
+    let _ = assembler.drain_reasoning();
+    let heap = assembler.test_reflection_heap();
+    let halted = assembler.get(&heap, "halted").expect("the parent wrote");
+    assert_eq!(
+        String::from_utf8_lossy(&assembler.to_binary(&halted).unwrap()),
+        "the task halted before it finished"
+    );
+}
+
+#[test]
 fn an_interrupt_within_a_failed_cut_stops_nothing() {
     // An interrupt is a write like any other: a cut that fails undoes it,
     // and the task runs on to its end.

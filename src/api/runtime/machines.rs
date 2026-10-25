@@ -13,7 +13,9 @@ use std::sync::{Mutex, PoisonError};
 use super::RuntimeSharedResources;
 use super::events::{RuntimeEventJournal, task_address};
 use crate::core::{EvaluationFailure, Key, ManagedResolverRoot, RuntimeValueAccess, Value};
-use crate::evaluation::{EvaluationTaskHandle, MachineHost, MachineTaskOutcome, QueuedTask};
+use crate::evaluation::{
+    DeferredHalt, EvaluationTaskHandle, MachineHost, MachineTaskOutcome, QueuedTask,
+};
 use crate::reflection::{Resolution, StoreCommitResult, StoreJournal};
 use crate::runtime::RuntimeValueRoot;
 
@@ -26,6 +28,11 @@ pub(super) struct MachineCells {
     /// A task is cancelled once the lock is released, since cancelling may
     /// end the task, and its end comes back here.
     cells: Mutex<HashMap<Vec<Key>, MachineCell>>,
+    /// The halt actions of runs whose tasks stopped where no halt could run,
+    /// as under a mutator, which run at the next safe point.
+    ///
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
+    deferred: Mutex<Vec<DeferredHalt>>,
 }
 
 #[derive(Default)]
@@ -180,6 +187,7 @@ impl MachineHost for RuntimeSharedResources {
         outcome: MachineTaskOutcome,
         state: Option<RuntimeValueRoot>,
     ) -> Option<QueuedTask> {
+        let completed = matches!(outcome, MachineTaskOutcome::Complete(_));
         let failed = matches!(outcome, MachineTaskOutcome::Failed(_));
         let resolution = self
             .values
@@ -189,12 +197,16 @@ impl MachineHost for RuntimeSharedResources {
                 MachineTaskOutcome::Failed(failure) => {
                     crate::diagnostic::failure_diagnostic_in(access, failure.as_failure())
                 }
+                MachineTaskOutcome::Exited => crate::diagnostic::failure_diagnostic_in(
+                    access,
+                    &EvaluationFailure::message("the task exited before it finished"),
+                ),
             });
         let flag = failed.then(|| resolution.clone());
-        let resolution = if failed {
-            Resolution::Break(resolution)
-        } else {
+        let resolution = if completed {
             Resolution::Fulfill(resolution)
+        } else {
+            Resolution::Break(resolution)
         };
         // The task leaves the queue, its reply resolved, in one commit; a
         // failure flags the machine with it. Where an interrupt or a clear
@@ -265,6 +277,31 @@ impl MachineHost for RuntimeSharedResources {
         };
         if let Some(task) = task {
             task.cancel();
+        }
+    }
+
+    fn defer(&self, halt: DeferredHalt) {
+        self.machines
+            .deferred
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .push(halt);
+    }
+
+    fn run_deferred(&self) {
+        let deferred = std::mem::take(
+            &mut *self
+                .machines
+                .deferred
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner),
+        );
+        // A torn runtime commits nothing more.
+        if self.transactions.state.is_poisoned() {
+            return;
+        }
+        for halt in deferred {
+            halt();
         }
     }
 
@@ -428,6 +465,40 @@ mod tests {
         }
         assert!(resources.local_state(&cleared).is_none());
         assert!(resources.local_state(&kept).is_some());
+    }
+
+    #[test]
+    fn a_halt_under_a_mutator_waits_for_the_next_safe_point() {
+        // A run may halt where its thread holds a mutator, under which no
+        // halt may commit: the host keeps the halt action, and death-notice
+        // processing, a safe point, runs it. A run halts once.
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let runtime = EvaluationRuntime::new(0).expect("the runtime should open");
+        let resources = runtime.state.shared_resources.clone();
+        let halts = Arc::new(AtomicUsize::new(0));
+        let machine = crate::evaluation::TaskMachine::new(
+            Arc::from(vec![Key::atom_from_text("refl"), Key::atom_from_text("a")]),
+            resources.clone(),
+            0,
+            Box::new({
+                let halts = halts.clone();
+                move |_| {
+                    halts.fetch_add(1, Ordering::SeqCst);
+                }
+            }),
+        );
+        runtime
+            .values()
+            .core()
+            .with_boundary_access(|_| machine.halt(crate::evaluation::RunHalt::Stopped));
+        assert_eq!(halts.load(Ordering::SeqCst), 0, "no halt under a mutator");
+        resources.process_death_notices();
+        assert_eq!(halts.load(Ordering::SeqCst), 1);
+        machine.halt(crate::evaluation::RunHalt::Stopped);
+        resources.process_death_notices();
+        assert_eq!(halts.load(Ordering::SeqCst), 1, "a run halts once");
     }
 
     #[test]

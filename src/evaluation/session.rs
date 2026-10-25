@@ -1953,6 +1953,10 @@ impl EvalContext {
                             coordinator.settle_panicked_work(handle.work, report);
                             drop(coordinator.retire_reflection(handle.work));
                         }
+                        // A task that never launched halts its run.
+                        if let Some(machine) = &activation.machine {
+                            machine.halt(crate::evaluation::RunHalt::Stopped);
+                        }
                         return;
                     }
                 }
@@ -1983,6 +1987,9 @@ impl EvalContext {
                         promise_failure,
                     );
                     drop(coordinator.retire_reflection(handle.work));
+                }
+                if let Some(machine) = &activation.machine {
+                    machine.halt(crate::evaluation::RunHalt::Stopped);
                 }
             }
         }

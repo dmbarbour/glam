@@ -10,13 +10,35 @@
 //! item, and the task, stopped, ends a run that is no longer the machine's,
 //! so its end claims nothing and starts nothing. Only an interrupt stops a
 //! task; a clear waits for the machines it clears to be idle or flagged.
+//!
+//! Every run ends once. A task that stops without finishing, as a panic
+//! stops one, or that never launches, halts its run, which fails as a
+//! failure would: its reply breaks and its machine is flagged. A task that
+//! settlement retires on its exit vote ends its run as exited, its reply
+//! broken and its machine unflagged.
 
 use std::fmt;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::EvaluationTaskHandle;
 use crate::core::Key;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
+
+/// How a run ended without its task finishing.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum RunHalt {
+    /// The task stopped, as a panic stops it, or never launched.
+    Stopped,
+    /// Settlement retired the task on its exit vote.
+    Exited,
+}
+
+/// What halting a run does: it ends the run as `RunHalt` says, and starts
+/// the machine's next task where it goes on. It runs with no mutator held.
+pub(crate) type HaltAction = Box<dyn FnOnce(RunHalt) + Send>;
+
+/// A halt the host runs at its next safe point.
+pub(crate) type DeferredHalt = Box<dyn FnOnce() + Send>;
 
 /// A task's run on a child machine: the machine, by its path from the root,
 /// the host that keeps its state and its queue, and the sequence of the
@@ -25,14 +47,46 @@ pub(crate) struct TaskMachine {
     path: Arc<[Key]>,
     host: Arc<dyn MachineHost>,
     sequence: u64,
+    /// The run's halt action, until the run ends.
+    ///
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
+    halt: Mutex<Option<HaltAction>>,
 }
 
 impl TaskMachine {
-    pub(crate) fn new(path: Arc<[Key]>, host: Arc<dyn MachineHost>, sequence: u64) -> Self {
+    pub(crate) fn new(
+        path: Arc<[Key]>,
+        host: Arc<dyn MachineHost>,
+        sequence: u64,
+        halt: HaltAction,
+    ) -> Self {
         Self {
             path,
             host,
             sequence,
+            halt: Mutex::new(Some(halt)),
+        }
+    }
+
+    /// Ends the run, returning its halt action, unless it already ended; the
+    /// caller ends it some other way, or halts it with the action.
+    pub(crate) fn end(&self) -> Option<HaltAction> {
+        self.halt
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .take()
+    }
+
+    /// Halts the run, unless it already ended, as `how` says. Where this
+    /// thread holds a mutator, or unwinds, the host halts it at its next
+    /// safe point.
+    pub(crate) fn halt(&self, how: RunHalt) {
+        let Some(halt) = self.end() else {
+            return;
+        };
+        self.host.defer(Box::new(move || halt(how)));
+        if !std::thread::panicking() && !glam_gc::Heap::thread_holds_mutator() {
+            self.host.run_deferred();
         }
     }
 
@@ -78,6 +132,8 @@ pub(crate) enum MachineTaskOutcome {
     Complete(RuntimeValueRoot),
     /// Its failure, which breaks the reply and flags the machine.
     Failed(RuntimeFailureRoot),
+    /// Its exit, which breaks the reply and leaves the machine unflagged.
+    Exited,
 }
 
 /// The runtime's child machines, as the tasks on them need them: their
@@ -120,4 +176,38 @@ pub(crate) trait MachineHost: Send + Sync {
     /// there, stopped or failed, leaves. It stops nothing: a clear waits for
     /// its machines to be idle or flagged.
     fn clear(&self, machine: &[Key]);
+
+    /// Keeps `halt` for [`Self::run_deferred`].
+    fn defer(&self, halt: DeferredHalt);
+
+    /// Runs the halt actions deferred so far. The caller holds no mutator.
+    fn run_deferred(&self);
+}
+
+/// Halts its run when dropped, unless the run ended: a task on a child
+/// machine holds one, so a task that stops without finishing halts its run,
+/// and one retired on its exit vote ends it as exited.
+pub(crate) struct MachineRunGuard {
+    machine: Arc<TaskMachine>,
+    /// Whether the task holds an exit vote.
+    pub(crate) exiting: bool,
+}
+
+impl MachineRunGuard {
+    pub(crate) fn new(machine: Arc<TaskMachine>) -> Self {
+        Self {
+            machine,
+            exiting: false,
+        }
+    }
+}
+
+impl Drop for MachineRunGuard {
+    fn drop(&mut self) {
+        self.machine.halt(if self.exiting {
+            RunHalt::Exited
+        } else {
+            RunHalt::Stopped
+        });
+    }
 }

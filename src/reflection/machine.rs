@@ -162,6 +162,9 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     /// what a child machine keeps for its next task
     /// (`reflection-tasks-are-machine-tasks`).
     machine_state: Option<RuntimeValueRoot>,
+    /// Halts the task's run on its child machine where the task stops
+    /// without finishing, as a panic stops it.
+    _run_guard: Option<crate::evaluation::MachineRunGuard>,
     exact_demand_route: ExactDemandRoute,
     /// Where the task's host runs its cuts, what it tells the host.
     hosted: Option<HostedCuts<S>>,
@@ -410,6 +413,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
         exposes_exit: bool,
     ) -> Result<Self, TaskHalt> {
         let eval_context = eval_context.for_effect_task();
+        let run_guard = eval_context
+            .machine()
+            .cloned()
+            .map(crate::evaluation::MachineRunGuard::new);
         let tags = Tags::new();
         let (api, specialized_requests) = effect_api(
             eval_context.values(),
@@ -464,6 +471,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             exit: None,
             terminal: None,
             machine_state: None,
+            _run_guard: run_guard,
             exact_demand_route: ExactDemandRoute::default(),
             hosted: None,
             #[cfg(test)]
@@ -933,7 +941,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         MachineStep::Exit(intent) => {
                             let exit = self.prepare_exit(intent);
                             let poll = exit.poll.clone();
-                            self.exit = Some(exit);
+                            self.set_exit(Some(exit));
                             return EffectTaskPoll::Exit(poll);
                         }
                         MachineStep::Terminal(terminal) => {
@@ -1071,7 +1079,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 Ok(MachineStep::Exit(intent)) => {
                     let exit = self.prepare_exit(intent);
                     let poll = exit.poll.clone();
-                    self.exit = Some(exit);
+                    self.set_exit(Some(exit));
                     return EffectTaskPoll::Exit(poll);
                 }
                 Err(error) => {
@@ -4402,12 +4410,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
 
         let retry = self
-            .exit
-            .take()
+            .set_exit(None)
             .and_then(|exit| exit.restart)
             .expect("a changed exit observation must retain its restart capsule");
         self.apply_wake(context, retry.action);
         None
+    }
+
+    /// Records the task's exit vote, or its withdrawal, which its run on a
+    /// child machine ends by where settlement retires the task. Returns the
+    /// vote it replaces.
+    fn set_exit(&mut self, exit: Option<TaskExitState<S>>) -> Option<TaskExitState<S>> {
+        if let Some(guard) = &mut self._run_guard {
+            guard.exiting = exit.is_some();
+        }
+        std::mem::replace(&mut self.exit, exit)
     }
 
     fn prepare_exit(&mut self, intent: ExitIntent) -> TaskExitState<S> {
@@ -4711,6 +4728,10 @@ impl MachineRunEnd {
             state,
             context,
         } = self;
+        // A run ends once: a halt may have ended it.
+        if machine.end().is_none() {
+            return;
+        }
         let host = machine.host();
         let next = host.finish(machine.path(), machine.sequence(), outcome, state);
         super::requests::launch_machine_tasks(&context, host, machine.path(), next);

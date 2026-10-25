@@ -529,6 +529,9 @@ impl RuntimeSharedResources {
     /// notice changed anything. The caller holds no mutator, as after a
     /// collection.
     pub(crate) fn process_death_notices(&self) -> bool {
+        // So do the runs whose tasks stopped where no halt could run
+        // (`reflection-tasks-are-machine-tasks`).
+        <Self as crate::evaluation::MachineHost>::run_deferred(self);
         let values = self.values.core();
         values.drain_retired_external_owners();
         let (resolvers, promises) = {
