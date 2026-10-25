@@ -2901,6 +2901,70 @@ owing = anno refl:(.promise.new >>= (\pr -> .heap.set ['r3] pr.resolver =>> .chi
 }
 
 #[test]
+fn an_owing_machine_is_reclaimed_once_its_obligation_is_discharged() {
+    // What is not clear stays visible until it is: a machine kept for
+    // owing under an ended root goes once a resolution discharges what it
+    // owes, whether the resolution commits alone or with a cut, while a
+    // machine in error stays, owing or not.
+    let source = r#"language g0
+import 'std
+alone = anno refl:(.promise.new >>= (\pr -> .heap.set ['r1] pr.resolver =>> .child.task 'a (.set ['n] 1 =>> .promise.accept pr.resolver {msg:{text:"a owes"}}) >>= (\p -> seq p (.heap.set ['alone] "owing")))) ()
+in_a_cut = anno refl:(.promise.new >>= (\pr -> .heap.set ['r2] pr.resolver =>> .child.task 'c (.set ['n] 1 =>> .promise.accept pr.resolver {msg:{text:"c owes"}}) >>= (\p -> seq p (.heap.set ['in_a_cut] "owing")))) ()
+flagged = anno refl:(.promise.new >>= (\pr -> .heap.set ['r3] pr.resolver =>> .child.task 'f (.promise.accept pr.resolver {msg:{text:"f owes"}} =>> (1 / 0)) >>= (\p -> .try (seq p (.r ())) >>= (\_ -> .heap.set ['flagged] "flagged")))) ()
+resolve_in_a_cut = anno refl:(.heap.get ['r2] >>= (\r -> .cut (.promise.fulfill r 2)) =>> .heap.set ['resolve_in_a_cut] "resolved") ()
+resolve_alone = anno refl:(.heap.get ['r1] >>= (\r -> .promise.fulfill r 1) =>> .heap.get ['r3] >>= (\r -> .promise.fulfill r 3) =>> .heap.set ['resolve_alone] "resolved") ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["reclaimed_once_clear"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    let run = |names: &[&str]| {
+        for name in names {
+            assembler
+                .evaluate(&assembler.get(module.value(), name).unwrap())
+                .unwrap_or_else(|error| panic!("{name}: {error}"));
+        }
+        let _ = assembler.drain_reasoning();
+    };
+    // The children left below anonymous roots.
+    let left = || -> std::collections::BTreeSet<Key> {
+        assembler
+            .evaluation_runtime()
+            .state
+            .shared_resources
+            .anonymous_machines_for_test()
+            .into_iter()
+            .filter(|path| path.len() > 2)
+            .filter_map(|path| path.last().cloned())
+            .collect()
+    };
+    let keys = |names: &[&str]| names.iter().map(Key::atom_from_text).collect();
+    let ended = || {
+        assembler
+            .evaluation_runtime()
+            .state
+            .shared_resources
+            .ended_roots_for_test()
+    };
+    run(&["alone", "in_a_cut", "flagged"]);
+    assert_eq!(
+        left(),
+        keys(&["a", "c", "f"]),
+        "owing and failed machines stay"
+    );
+    assert_eq!(ended(), 3, "each root waits for what it owes");
+    run(&["resolve_in_a_cut"]);
+    assert_eq!(left(), keys(&["a", "f"]), "a cut's resolution discharges");
+    run(&["resolve_alone"]);
+    let analysis = assembler.evaluation_runtime().analysis().unwrap();
+    assert!(analysis.obligations().is_empty(), "every promise resolved");
+    assert_eq!(left(), keys(&["f"]), "the machine in error stays");
+    assert_eq!(ended(), 0, "nothing is owed, and no root waits");
+}
+
+#[test]
 fn an_analysis_lists_queued_tasks_that_have_not_started() {
     // `quiescence-is-analyzed`: tasks queued behind a task waiting idle,
     // or on a child in error whose queue stopped, have not started: a

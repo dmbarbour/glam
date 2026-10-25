@@ -391,7 +391,7 @@ impl RuntimeSharedResources {
             return crate::reflection::StoreCommitResult::Conflict;
         }
         let mutation = self.mutation_guard();
-        let (result, changed, settled) = {
+        let (result, changed, settled, discharged) = {
             let mut state = self
                 .transactions
                 .state
@@ -421,6 +421,7 @@ impl RuntimeSharedResources {
                 crate::reflection::StoreCommitResult::Committed,
                 reflection_changed || event_changed || discharged,
                 state.reflection.take_settled(),
+                discharged,
             )
         };
         if changed {
@@ -429,6 +430,9 @@ impl RuntimeSharedResources {
             drop(mutation);
         }
         self.fulfill_settled(settled);
+        if discharged {
+            self.reclaim_ended_roots();
+        }
         result
     }
 
@@ -482,12 +486,12 @@ impl RuntimeSharedResources {
                         matches!(result, crate::reflection::StoreCommitResult::Committed)
                             && state.events.accepted.discharge(journal.resolved_promises());
                     (
-                        (result, changed || discharged),
+                        (result, changed || discharged, discharged),
                         state.reflection.take_settled(),
                     )
                 })
         };
-        let ((result, changed), settled) = match committed {
+        let ((result, changed, discharged), settled) = match committed {
             Ok(committed) => committed,
             Err(payload) => {
                 drop(mutation);
@@ -500,6 +504,9 @@ impl RuntimeSharedResources {
             drop(mutation);
         }
         self.fulfill_settled(settled);
+        if discharged {
+            self.reclaim_ended_roots();
+        }
         result
     }
 

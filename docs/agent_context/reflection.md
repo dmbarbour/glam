@@ -231,8 +231,12 @@ and control flow.
   keys name a task id never reused. The root's task, once it tasks or calls a child,
   holds an `AnonymousRootGuard` reporting its end, and the host reclaims
   the subtree, its cells and port buffers, when the last of the root and
-  its runs ends with no task waiting in an unflagged queue. Failed machines
-  stay whole for settlement.
+  its runs ends with no task waiting in an unflagged queue. Machines not in
+  a clear state, flagged or owing, stay whole for an analysis. The root
+  stays among the ended roots while a machine there owes, and a commit that
+  discharges an obligation, on either commit path, reclaims the ended
+  roots again (`reclaim_ended_roots`); only a clear, which drops what it
+  clears, takes a flag from a machine nothing runs on.
 - An annotation task (`anno refl:` or `anno meta_refl:`) has no machine of
   its own: it is an anonymous root, `refl/<abstract task id>`, and its
   failure flags that root for good, since no parent can recover it, even

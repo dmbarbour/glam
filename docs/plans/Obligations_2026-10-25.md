@@ -115,6 +115,9 @@ default unresolved.
    Left open: a machine kept for owing stays after its obligation is
    discharged, until a host clears it, since reclamation runs again only
    as its root or a run ends; `quiescence-options` takes it up.
+   Built 2026-10-25 there, as `reclaim-once-clear`: a root stays ended
+   while a machine below it owes, and a commit that discharges reclaims
+   the ended roots again.
 2. `obligations-turns` — the turn operations.
    Built 2026-10-25: `m.accept_promise` (a diagnostic over a resolver),
    `m.abandon_promise` and `m.promise_is_accepted` (the resolver stays),

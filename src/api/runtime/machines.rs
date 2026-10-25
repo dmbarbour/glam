@@ -34,7 +34,8 @@ pub(super) struct MachineCells {
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     deferred: Mutex<Vec<DeferredHalt>>,
     /// The anonymous roots whose tasks ended and whose subtrees wait to be
-    /// reclaimed.
+    /// reclaimed, or keep machines that owe, until what they owe is
+    /// discharged.
     ///
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     ended_roots: Mutex<BTreeSet<Vec<Key>>>,
@@ -77,8 +78,12 @@ impl RuntimeSharedResources {
 
     /// Reclaims the subtree of the anonymous root at `root` where the root
     /// ended and no task runs or waits there: drops its machines' cells and
-    /// port state, those of flagged machines aside, which stay whole for
-    /// settlement to report (`reflection-tasks-are-machine-tasks`).
+    /// port state, those of machines not in a clear state aside, which stay
+    /// whole for an analysis to report (`reflection-tasks-are-machine-tasks`).
+    /// The root stays ended while a machine there owes, to be reclaimed
+    /// again once what it owes is discharged; nothing else there can become
+    /// clear, since only a clear, which drops what it clears, takes a flag
+    /// from a machine that nothing runs on.
     fn reclaim_if_idle(&self, root: &[Key]) {
         let ended = || {
             self.machines
@@ -117,7 +122,35 @@ impl RuntimeSharedResources {
         drop(state);
         cells.retain(|path, _| !path.starts_with(root) || unclear(path));
         drop(cells);
-        ended().remove(root);
+        if !accepted.owes_below(root) {
+            ended().remove(root);
+        }
+    }
+
+    /// Reclaims again each ended root that kept a machine that owes, after
+    /// a commit that discharged an obligation.
+    pub(super) fn reclaim_ended_roots(&self) {
+        let roots: Vec<Vec<Key>> = self
+            .machines
+            .ended_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .iter()
+            .cloned()
+            .collect();
+        for root in roots {
+            self.reclaim_if_idle(&root);
+        }
+    }
+
+    /// How many anonymous roots ended and are not reclaimed whole.
+    #[cfg(test)]
+    pub(in crate::api) fn ended_roots_for_test(&self) -> usize {
+        self.machines
+            .ended_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .len()
     }
 
     /// The machines below anonymous roots that hold a cell or port state.

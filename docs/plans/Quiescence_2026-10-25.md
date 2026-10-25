@@ -121,6 +121,16 @@ the CLI moves onto it.
    entries, interrupts flagging what they halt early, with the call's
    callees. Recovery and acting go through turns as they do now.
    Settlement Clearing's slices fold in here.
+   First, `reclaim-once-clear`, the reclamation Obligations left open.
+   Built 2026-10-25: an ended anonymous root stays among the ended roots
+   while a machine below it owes, and a commit that discharges an
+   obligation, alone or with a cut, reclaims the ended roots again
+   (`reclaim_ended_roots`), so an owing machine goes once what it owes is
+   discharged, while a machine in error stays. Only discharge needs the
+   rerun: under an ended root nothing but a clear, which drops what it
+   clears, can take a flag or an acceptance away. Mutation-checked: the
+   root's keeping and release, both commit paths, and the subtree
+   test.
 5. Later: turns counted in quiescence once settlement's runtime and the
    turn runtime meet, as `rt.analysis()`; and the analysis as a
    reflection effect, for a logger's or an IDE's status.

@@ -184,6 +184,14 @@ impl AcceptedRecord {
             .any(|entry| entry.acceptors.contains_key(machine))
     }
 
+    /// Whether the machine at `root` or one of its descendants accepted a
+    /// promise still pending.
+    pub(in crate::api) fn owes_below(&self, root: &[Key]) -> bool {
+        self.entries
+            .values()
+            .any(|entry| entry.acceptors.keys().any(|path| path.starts_with(root)))
+    }
+
     /// Each accepted promise, by ID, with its acceptors and what they owe,
     /// by path.
     pub(in crate::api) fn pending(&self) -> Vec<(PromiseId, Vec<Acceptor>)> {

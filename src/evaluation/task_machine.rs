@@ -166,7 +166,8 @@ pub(crate) trait MachineHost: Send + Sync {
 
     /// Records that the anonymous root at `root` ended: its task did, so
     /// nothing outside reaches its subtree, which the host reclaims once no
-    /// task runs or waits in it, failed machines aside.
+    /// task runs or waits in it, machines not in a clear state aside until
+    /// they are.
     fn root_ended(&self, root: &[Key]);
 
     /// Keeps `halt` for [`Self::run_deferred`].
