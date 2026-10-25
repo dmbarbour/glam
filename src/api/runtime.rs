@@ -26,6 +26,7 @@ use crate::runtime::{
     RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
 };
 
+mod analysis;
 mod events;
 mod flags;
 #[cfg(test)]
@@ -36,6 +37,7 @@ mod readiness;
 mod shares;
 mod states;
 
+pub use analysis::*;
 pub use events::*;
 use events::{
     RuntimeDeliveryState, RuntimeEventState, RuntimeInputBuffer, runtime_delivery_failure_snapshot,

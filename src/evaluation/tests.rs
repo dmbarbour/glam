@@ -8428,6 +8428,86 @@ fn readiness_reports_runnable_and_unclaimed_spark_work_as_busy() {
 }
 
 #[test]
+fn an_analysis_follows_a_wait_to_work_in_progress() {
+    // `quiescence-is-analyzed`: a wait on work that still runs, or is about
+    // to, owes nothing yet, and the runtime is not quiescent, though the
+    // work it waits on is only reserved.
+    let fixture = SameRuntimeFixture::new();
+    let context = fixture.context();
+    let coordinator = context.coordinator().expect("coordinator should be live");
+    let producer = context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("the producer should schedule");
+    let waiter = context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("the waiter should schedule");
+    let Some(ClaimedTaskWork::Reflection(running)) = coordinator.claim_work(producer.work) else {
+        panic!("the producer should be claimable")
+    };
+    let Some(ClaimedTaskWork::Reflection(claimed)) = coordinator.claim_work(waiter.work) else {
+        panic!("the waiter should be claimable")
+    };
+    assert!(
+        coordinator
+            .release_reflection(claimed, block_on(producer.wait.clone()))
+            .remains_blocked
+    );
+    let analysis = fixture
+        .runtime
+        .analysis()
+        .expect("the runtime is not poisoned");
+    assert!(!analysis.quiescent());
+    assert_eq!(
+        analysis
+            .waits()
+            .iter()
+            .find(|wait| wait.work().work_id() == waiter.work.get())
+            .map(crate::api::RuntimeWait::family),
+        Some(crate::api::RuntimeWaitFamily::InProgress)
+    );
+    assert!(analysis.issues().is_empty());
+    coordinator.release_reflection(running, ReflectionWorkPoll::Runnable);
+    fixture.runtime.pump_until_stable();
+    assert!(fixture.runtime.analysis().unwrap().waits().is_empty());
+
+    let task = allocate_task_id(context.values()).expect("task ID should allocate");
+    let wait = allocate_wait_token(&context.session, task).expect("wait ID should allocate");
+    coordinator
+        .reserve_reflection(&context.session, task, wait.clone())
+        .expect("reserved reflection work should register");
+    let waiter = context
+        .schedule_task(|_| Ok(Box::new(Complete)))
+        .expect("the waiter should schedule");
+    let Some(ClaimedTaskWork::Reflection(claimed)) = coordinator.claim_work(waiter.work) else {
+        panic!("the waiter should be claimable")
+    };
+    coordinator.release_reflection(claimed, block_on(wait));
+    let analysis = fixture
+        .runtime
+        .analysis()
+        .expect("the runtime is not poisoned");
+    assert!(
+        !analysis.quiescent(),
+        "the reserved task is about to launch"
+    );
+    assert_eq!(
+        analysis
+            .waits()
+            .iter()
+            .find(|wait| wait.work().work_id() == waiter.work.get())
+            .map(crate::api::RuntimeWait::family),
+        Some(crate::api::RuntimeWaitFamily::InProgress)
+    );
+    let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
+        panic!("the reserved task never launches")
+    };
+    snapshot
+        .kill(crate::api::RuntimeKillReason::Deadlock)
+        .settle()
+        .expect("the orphaned reservation should settle");
+}
+
+#[test]
 fn readiness_reports_terminalizing_work_as_busy_without_mutating_it() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();

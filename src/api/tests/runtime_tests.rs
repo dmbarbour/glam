@@ -1180,6 +1180,35 @@ fn abandoned_output_intents_burn_ids_without_publishing_work() {
 }
 
 #[test]
+fn an_analysis_counts_a_pending_delivery_as_work() {
+    // `quiescence-is-analyzed`: output committed for a Rust endpoint and
+    // not yet delivered is work in progress.
+    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
+    let endpoint = runtime
+        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
+        .expect("output endpoint should register");
+    assert!(runtime.analysis().unwrap().quiescent());
+    let (store, mut events) = input_transaction(&runtime);
+    events
+        .write(&endpoint.writer(), runtime.values().integer(1))
+        .expect("the intent should reserve an ID");
+    assert_eq!(
+        runtime.try_commit_transaction(&store, &events),
+        crate::reflection::StoreCommitResult::Committed
+    );
+    assert!(
+        !runtime.analysis().unwrap().quiescent(),
+        "a delivery is pending"
+    );
+    endpoint
+        .delivery()
+        .deliver_next()
+        .expect("the delivery should run")
+        .expect("one delivery is pending");
+    assert!(runtime.analysis().unwrap().quiescent());
+}
+
+#[test]
 fn runtime_pump_waits_for_running_output_delivery() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let activity = runtime.state.shared_resources.mutation_admission.activity();
@@ -2544,4 +2573,135 @@ import 'std
 undone = anno refl:(.child.task 'u (.heap.set ['u_started] () =>> .cut (.heap.try_get ['u_gate]) =>> .r "finished") >>= (\p -> .cut (.heap.try_get ['u_started]) =>> .alt (.cut (.child.interrupt 'u "never" =>> .fail)) (.r ()) =>> .child.status 'u >>= (\s -> .heap.set ['u_gate] () =>> seq p (.heap.set ['undone] (if s == 'busy then p else "interrupted"))))) ()
 "#;
     assert_eq!(run_reflection_texts(source, &["undone"]), ["finished"]);
+}
+
+#[test]
+fn an_analysis_tells_idle_waits_from_what_is_owed() {
+    // `quiescence-is-analyzed`: an analysis observes the runtime at any
+    // time, changing nothing. Queued work is not quiescent. At quiescence a
+    // wait on observed state is idle; a wait on a promise no one resolves,
+    // or on a task that waits on state, is owed, once at its chain's head,
+    // naming where the chain ends; a cut waiting after an error is an erred
+    // wait; and a failed child is a machine in error, as is the anonymous
+    // root of a failed annotation task.
+    let source = r#"language g0
+import 'std
+inner = anno refl:(.cut (.heap.try_get ['gate])) "inner"
+idle = anno refl:(.child.task 'i (.cut (.heap.try_get ['never])) >>= (\_ -> .heap.set ['idle] "queued")) ()
+owed = anno refl:(.promise.new >>= (\pr -> .heap.set ['kept] pr.resolver =>> .child.task 'o (seq pr.promise (.r ())) >>= (\_ -> .heap.set ['owed] "queued"))) ()
+erred = anno refl:(.child.task 'e (.cut (.heap.get ['missing])) >>= (\_ -> .heap.set ['erred] "queued")) ()
+failed = anno refl:(.child.task 'f (1 / 0) >>= (\_ -> .heap.set ['failed] "queued")) ()
+chained = anno refl:(.child.task 'c (seq inner (.r ())) >>= (\_ -> .heap.set ['chained] "queued")) ()
+broken = anno refl:(1 / 0) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["analyzed"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    for name in ["idle", "owed", "erred", "failed", "chained"] {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    assert!(
+        assembler
+            .get(module.value(), "broken")
+            .and_then(|broken| assembler.evaluate(&broken))
+            .is_err(),
+        "the annotation task fails"
+    );
+    let runtime = assembler.evaluation_runtime();
+    assert!(
+        !runtime.analysis().unwrap().quiescent(),
+        "the children's tasks are queued"
+    );
+    let _ = assembler.drain_reasoning();
+    let analysis = runtime.analysis().unwrap();
+    assert!(analysis.quiescent());
+    let families: Vec<_> = analysis.issues().iter().map(RuntimeIssue::family).collect();
+    assert_eq!(
+        families,
+        [
+            RuntimeIssueFamily::PromiseWait,
+            RuntimeIssueFamily::ErredWait,
+            RuntimeIssueFamily::PromiseWait,
+            RuntimeIssueFamily::MachineInError,
+            RuntimeIssueFamily::MachineInError,
+        ]
+    );
+    let family_of = |work: u64| {
+        analysis
+            .waits()
+            .iter()
+            .find(|wait| wait.work().work_id() == work)
+            .map(RuntimeWait::family)
+    };
+    let causes: Vec<_> = analysis
+        .issues()
+        .iter()
+        .filter_map(|issue| match issue {
+            RuntimeIssue::Wait(wait) if wait.family() == RuntimeWaitFamily::PromiseWait => {
+                Some(wait.cause_work_id().and_then(family_of))
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        causes,
+        [
+            Some(RuntimeWaitFamily::PromiseWait),
+            Some(RuntimeWaitFamily::Idle),
+        ],
+        "one chain ends at a wait on a promise, the other at an idle task"
+    );
+    assert_eq!(
+        analysis
+            .waits()
+            .iter()
+            .filter(|wait| wait.family() == RuntimeWaitFamily::Idle)
+            .count(),
+        2,
+        "the idle child and the task the chain ends at"
+    );
+    let erred = analysis
+        .waits()
+        .iter()
+        .find(|wait| wait.family() == RuntimeWaitFamily::ErredWait)
+        .and_then(|wait| wait.work().blocked_diagnostic())
+        .expect("the erred wait keeps its error")
+        .rendered_text_for_test(&assembler.values());
+    assert!(erred.contains("missing"), "{erred}");
+    let failed: Vec<_> = analysis
+        .failed_machines()
+        .iter()
+        .map(|machine| machine.path().keys().to_vec())
+        .collect();
+    assert!(
+        failed
+            .iter()
+            .any(|path| path.last() == Some(&Key::atom_from_text("f"))),
+        "{failed:?}"
+    );
+    assert!(
+        failed
+            .iter()
+            .any(|path| path.len() == 2 && crate::reflection::is_anonymous_key(&path[1])),
+        "the failed annotation task's root: {failed:?}"
+    );
+    let again = runtime.analysis().unwrap();
+    assert_eq!(
+        again
+            .issues()
+            .iter()
+            .map(RuntimeIssue::family)
+            .collect::<Vec<_>>(),
+        families,
+        "an analysis changes nothing"
+    );
+    assert!(matches!(
+        assembler.drain_reasoning(),
+        RuntimeReadiness::Deadlocked(_)
+    ));
 }

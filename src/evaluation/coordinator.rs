@@ -29,6 +29,7 @@ use crate::runtime::{
 use super::EvaluationSession;
 use super::{EvaluationDemandState, RuntimeObservationEpoch, RuntimeObservationState};
 
+mod analysis;
 mod client_demand;
 mod completion;
 mod deferred;
@@ -40,6 +41,7 @@ mod registry_inventory;
 mod settlement;
 mod spark;
 mod task;
+pub(crate) use analysis::RuntimeWaitFamilySnapshot;
 pub(crate) use client_demand::{
     ClaimedClientDemand, ClientDemandHandle, ClientDemandOperation, ClientDemandPoll,
     ClientDemandResult, ClientDemandSink, ClientDemandSnapshot,
@@ -1822,6 +1824,16 @@ impl EvaluationWorkCoordinator {
     /// The failed anonymous roots, every one, and those no earlier
     /// settlement reported, whose reporting moves to the current settlement,
     /// so a presentation layer need not remember what it rendered.
+    /// The anonymous roots their annotation tasks' failures flagged, as they
+    /// stand, for an analysis, which changes nothing.
+    pub(crate) fn failed_roots(&self) -> FailedRoots {
+        self.state
+            .lock()
+            .expect("evaluation work coordinator was poisoned")
+            .failed_roots
+            .clone()
+    }
+
     pub(crate) fn failed_roots_for_settlement(&self) -> (FailedRoots, FailedRoots) {
         let mut state = self
             .state

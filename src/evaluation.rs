@@ -43,9 +43,9 @@ pub(crate) use coordinator::{
     EvaluationWaitToken, EvaluationWorkCoordinator, ExactDemandRoute, ExitIntent, FailedRoots,
     PreparedEvaluationTask, PromiseProducerObligation, PromiseProducerPublication,
     ReflectionTaskResultPolicy, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
-    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeWorkKindSnapshot,
-    RuntimeWorkStateSnapshot, TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan,
-    WakeRegistration, WorkDependency,
+    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeWaitFamilySnapshot,
+    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, TaskStatusPublisher, TaskStatusWake,
+    ValidatedRuntimeSettlementPlan, WakeRegistration, WorkDependency,
 };
 #[cfg(test)]
 use coordinator::{ReflectionWorkSnapshot, test_wake_registration};

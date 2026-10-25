@@ -1061,8 +1061,9 @@ handle API goes.
     bridge it killed every task waiting without a vote. A halted runtime
     is analyzed instead, at any time, by whoever asks, who decides what
     follows; [Quiescence](Quiescence_2026-10-25.md) holds the end state
-    and the transition. The text below is the step as first planned
-    (maintainer, 2026-10-19), in place of exit votes. It follows
+    and the transition, whose first step, `quiescence-analysis`, was built
+    2026-10-25. The text below is the step as first planned (maintainer,
+    2026-10-19), in place of exit votes. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
     tasks as machines and no exit votes, rather than building on both. The runtime is
     quiescent when every machine waits on input or a heap change, retrying

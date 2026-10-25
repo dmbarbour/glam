@@ -18,6 +18,18 @@ outside this subsystem by `api/runtime.rs` and
 promises, work records, scheduling, and settlement validation; it does not own
 the embedding report shapes or transactional host-event transport.
 
+`EvaluationRuntime::analysis` (`api/runtime/analysis.rs`,
+`quiescence-is-analyzed`) observes the runtime at any time, changing nothing:
+whether it is quiescent, each unfinished work with the family of its wait, and
+the machines in error. The coordinator classifies each wait under its lock
+(`evaluation/coordinator/analysis.rs`), following a wait from producer to
+producer as demand routing does (`dependency_edge_locked`): a wait on
+observed state is idle; one on work queued, running, reserved or dormant but
+demanded is in progress, which is not quiescent; one on a value nothing in
+progress will produce is a promise wait, naming the work its chain ends at;
+and a cut waiting after an error is an erred wait. Issues count a promise wait
+once, at the head of its chain, leaving out the links another work awaits.
+
 ## Module Ownership
 
 `evaluation.rs` is the shared-contract facade. It owns the deliberately common

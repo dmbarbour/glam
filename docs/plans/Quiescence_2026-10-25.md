@@ -96,6 +96,19 @@ the CLI moves onto it.
 
    Tests build each family and check the analysis says so, at quiescence
    and while work still runs. Settlement stays as it is.
+   Built 2026-10-25: `EvaluationRuntime::analysis`, with `RuntimeWait`
+   (its family, the work its chain ends at, and whether another work
+   awaits it) and `RuntimeIssue` by `RuntimeIssueFamily`: promise waits,
+   erred waits, machines in error. A promise wait counts once, at its
+   chain's head, since the lazy routes forced on the way are its links. A
+   wait on work queued, running, reserved, or dormant but demanded is in
+   progress, and the runtime then is not quiescent; so is a delivery to a
+   Rust endpoint still pending. No cycle family: the runtime already fails
+   a cycle among evaluations, as two annotation gates forcing each other
+   showed, so a chain never returns to itself, and the analysis only
+   guards against it. Mutation-checked: each family, chain following, the
+   links' omission, quiescence by records, by waits in progress and by
+   deliveries, and failed roots.
 2. `api-refl-obligations`: accepted promises, which the analysis lists as
    *pending obligations*.
 3. `quiescence-batch`: the CLI waits for quiescence, takes the analysis,

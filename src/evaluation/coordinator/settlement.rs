@@ -225,34 +225,7 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
             continue;
         }
 
-        let state_snapshot = match record.state {
-            WorkState::Dormant => RuntimeWorkStateSnapshot::Dormant,
-            WorkState::Reserved => RuntimeWorkStateSnapshot::Reserved,
-            WorkState::Blocked => RuntimeWorkStateSnapshot::Blocked,
-            WorkState::Queued
-            | WorkState::Running
-            | WorkState::InlineForced
-            | WorkState::ExitWaiting
-            | WorkState::Terminalizing => unreachable!("handled above"),
-        };
-        unfinished.push(RuntimeDeadlockWorkSnapshot {
-            work: record.id,
-            session: (!matches!(record.kind, WorkKind::LazyRoute(_)))
-                .then_some(record.demand_session),
-            task: task_for_record(record),
-            lazy: match &record.kind {
-                WorkKind::LazyRoute(route) => Some(route.lazy.id()),
-                _ => None,
-            },
-            kind: runtime_work_kind(record),
-            state: state_snapshot,
-            dependency: work_dependency(record)
-                .map(|dependency| runtime_dependency_snapshot(state, dependency)),
-            observed_epoch: task_observation_epoch(record),
-            blocked_error: task_block(record)
-                .and_then(|block| block.error.as_ref())
-                .cloned(),
-        });
+        unfinished.push(unfinished_work_snapshot_locked(state, record).expect("handled above"));
     }
 
     exits.sort_by_key(|exit| exit.work.get());
@@ -269,6 +242,41 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
             unfinished,
         }
     }
+}
+
+/// `record`'s snapshot as unfinished work, waiting or not yet started, or
+/// `None` where it runs, exits or ends.
+pub(super) fn unfinished_work_snapshot_locked(
+    state: &WorkCoordinatorState,
+    record: &WorkRecord,
+) -> Option<RuntimeDeadlockWorkSnapshot> {
+    let state_snapshot = match record.state {
+        WorkState::Dormant => RuntimeWorkStateSnapshot::Dormant,
+        WorkState::Reserved => RuntimeWorkStateSnapshot::Reserved,
+        WorkState::Blocked => RuntimeWorkStateSnapshot::Blocked,
+        WorkState::Queued
+        | WorkState::Running
+        | WorkState::InlineForced
+        | WorkState::ExitWaiting
+        | WorkState::Terminalizing => return None,
+    };
+    Some(RuntimeDeadlockWorkSnapshot {
+        work: record.id,
+        session: (!matches!(record.kind, WorkKind::LazyRoute(_))).then_some(record.demand_session),
+        task: task_for_record(record),
+        lazy: match &record.kind {
+            WorkKind::LazyRoute(route) => Some(route.lazy.id()),
+            _ => None,
+        },
+        kind: runtime_work_kind(record),
+        state: state_snapshot,
+        dependency: work_dependency(record)
+            .map(|dependency| runtime_dependency_snapshot(state, dependency)),
+        observed_epoch: task_observation_epoch(record),
+        blocked_error: task_block(record)
+            .and_then(|block| block.error.as_ref())
+            .cloned(),
+    })
 }
 
 fn settlement_dispositions_match_locked(
