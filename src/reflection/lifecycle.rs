@@ -23,8 +23,8 @@ use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 #[derive(Clone)]
 pub struct EffectLifecycle {
     inner: Arc<EffectLifecycleState>,
-    /// Whether the root's end closes its demand session, abandoning the
-    /// tasks it started and left unjoined.
+    /// Whether the root's end closes its demand session, abandoning the work
+    /// it left there.
     closes_session: bool,
 }
 
@@ -72,8 +72,8 @@ impl EffectLifecycle {
     }
 
     /// Constructs a lifecycle whose root's end closes its demand session,
-    /// abandoning the tasks the root started and left unjoined: for a host's
-    /// long-lived root, such as the CLI's configured logger.
+    /// abandoning the work the root left there: for a host's long-lived
+    /// root, such as the CLI's configured logger.
     #[doc(hidden)]
     pub fn new_closing_session(runtime: &EvaluationRuntime) -> Self {
         Self {
@@ -279,9 +279,10 @@ impl ScheduledEffectRun {
 
 /// Configures and synchronously runs one effect task.
 ///
-/// `.task.new` children inherit this task's complete specialization and host
-/// profile. All scheduled children are drained before the run returns; a
-/// child failure or stable deadlock fails the composed run.
+/// Tasks it queues on child machines inherit this task's complete
+/// specialization and host profile. All scheduled work is drained before the
+/// run returns; a stable deadlock fails the composed run, while a child's
+/// failure is its machine's (`reflection-tasks-are-machine-tasks`).
 pub struct EffectRun<S: TaskSpecialization> {
     effect: PublicValue,
     specialization: S,
@@ -396,9 +397,9 @@ impl<S: TaskSpecialization> EffectRun<S> {
     }
 
     /// Installs this effect as coordinator work in a fresh demand session.
-    /// The returned handle retains the hidden task and session lease; child
-    /// `.task.new` operations inherit the same complete, exit-capable task
-    /// profile.
+    /// The returned handle retains the hidden task and session lease; tasks
+    /// it queues on child machines inherit the same complete, exit-capable
+    /// task profile.
     #[doc(hidden)]
     pub fn schedule(self, lifecycle: &EffectLifecycle) -> Result<ScheduledEffectRun, TaskHalt> {
         let Self {
@@ -540,30 +541,21 @@ fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskHalt> {
             (true, report)
         }
     };
-    if report.failures.is_empty() && !quiescent {
+    // A child's failure is its machine's, which settlement reports
+    // (`reflection-tasks-are-machine-tasks`); a composed run reports only a
+    // deadlock among the work it left.
+    if !quiescent {
         return None;
     }
-
-    let mut details = Vec::new();
-    for (task, error) in report.failures.iter() {
-        details.push(format!(
-            "task {} failed: {}",
-            task.get(),
-            error.as_failure()
-        ));
-    }
-    if quiescent {
-        details.push(format!(
-            "scheduler deadlocked with {} unfinished task{}",
-            report.unfinished.len(),
-            if report.unfinished.len() == 1 {
-                ""
-            } else {
-                "s"
-            }
-        ));
-    }
-    Some(TaskHalt::new(details.join("; ")))
+    Some(TaskHalt::new(format!(
+        "scheduler deadlocked with {} unfinished task{}",
+        report.unfinished.len(),
+        if report.unfinished.len() == 1 {
+            ""
+        } else {
+            "s"
+        }
+    )))
 }
 
 /// Builds a type-erased launcher for annotation and joinable reflection tasks.

@@ -3,7 +3,7 @@
 //! The runtime supplies task and wait identity, value provenance, and the
 //! authoritative reflection-task lifecycle. The runtime coordinator owns
 //! opaque reflection and deferred machines with their lifecycle records and
-//! task-failure ledger. This facade retains only the demand/profile bridge and
+//! the failed anonymous roots. This facade retains only the demand/profile bridge and
 //! crate-private re-exports: sessions own admission policy, the pump
 //! orchestrates detached claims, and coordinator children own lifecycle-local
 //! state transitions. Reflection specializations remain outside this module
@@ -31,19 +31,21 @@ mod session;
 mod task_machine;
 mod whnf;
 pub(crate) use access::{EvaluationPollContext, EvaluationValueAccess, EvaluatorStepContext};
+#[cfg(test)]
+pub(crate) use coordinator::EvaluationTaskCancellation;
 pub(crate) use coordinator::EvaluationWorkId;
 #[cfg(test)]
 pub(crate) use coordinator::{ClientDemandHandle, ClientDemandResult};
 pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationExitBlock,
-    EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskCancellation,
-    EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
-    EvaluationWaitPoll, EvaluationWaitToken, EvaluationWorkCoordinator, ExactDemandRoute,
-    ExitIntent, PendingTaskPolicy, PreparedEvaluationTask, PromiseProducerObligation,
-    PromiseProducerPublication, ReflectionTaskResultPolicy, RuntimeCoordinatorReadiness,
-    RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot, RuntimeExitSnapshot,
-    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, TaskFailureLedger, TaskStatusPublisher,
-    TaskStatusWake, ValidatedRuntimeSettlementPlan, WakeRegistration, WorkDependency,
+    EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskHandle,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll,
+    EvaluationWaitToken, EvaluationWorkCoordinator, ExactDemandRoute, ExitIntent, FailedRoots,
+    PreparedEvaluationTask, PromiseProducerObligation, PromiseProducerPublication,
+    ReflectionTaskResultPolicy, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
+    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeWorkKindSnapshot,
+    RuntimeWorkStateSnapshot, TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan,
+    WakeRegistration, WorkDependency,
 };
 #[cfg(test)]
 use coordinator::{ReflectionWorkSnapshot, test_wake_registration};
@@ -54,7 +56,7 @@ pub(crate) use observation::{RuntimeObservationEpoch, RuntimeObservationState};
 pub(crate) use pump::{EvaluationPumpOutcome, assert_spent_when_exhausted};
 pub(crate) use session::{
     EvalContext, EvaluationSession, EvaluationSessionReport, EvaluationSessionRun,
-    PendingReflectionTask, ReflectionTaskReservation,
+    ReflectionTaskReservation,
 };
 #[cfg(test)]
 pub(crate) use session::{EvaluationTaskRegistryCounts, OwnedEvalContext};
@@ -288,13 +290,7 @@ impl EvaluationDemandState {
     }
 
     fn closed_run_report(&self) -> EvaluationSessionRun {
-        let failures = self
-            .coordinator()
-            .map_or_else(TaskFailureLedger::new_sync, |coordinator| {
-                coordinator.failure_snapshot(self.id)
-            });
         EvaluationSessionRun::Complete(EvaluationSessionReport {
-            failures,
             unfinished: Vec::new(),
         })
     }

@@ -3,10 +3,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, Weak};
 
 use crate::core::{Key, OpaqueValue, Value as CoreValue};
-use crate::evaluation::{
-    EvalContext, EvaluationMachinePoll, EvaluationSession, EvaluationTaskMachine,
-    EvaluationWaitPoll, ReflectionTaskProfile,
-};
+use crate::evaluation::{EvalContext, EvaluationSession, ReflectionTaskProfile};
 use crate::number::Number;
 use crate::reflection::RuntimeInputSequence;
 
@@ -814,7 +811,7 @@ fn runtime_activity_cannot_lose_a_wake_before_parking() {
 }
 
 #[test]
-fn readiness_stamp_tracks_heap_query_and_event_observations() {
+fn readiness_stamp_tracks_heap_and_event_observations() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let RuntimeReadiness::Ready(initial) = runtime.readiness() else {
         panic!("new runtime should be ready")
@@ -854,29 +851,6 @@ fn readiness_stamp_tracks_heap_query_and_event_observations() {
         &after_heap.reflection().root()
     ));
 
-    let (_, query_snapshot) = runtime.reflection_snapshot();
-    let mut query_reservation = crate::reflection::StoreJournal::new(query_snapshot);
-    let query = query_reservation
-        .reserve_query()
-        .expect("query should reserve");
-    assert_eq!(
-        runtime.commit_reflection(&query_reservation),
-        crate::reflection::StoreCommitResult::Committed
-    );
-    let RuntimeReadiness::Ready(before_query_update) = runtime.readiness() else {
-        panic!("pending protected query is state rather than scheduler work")
-    };
-    runtime
-        .update_query(&query, runtime.values().integer(0))
-        .expect("protected query should update");
-    let RuntimeReadiness::Ready(after_query_update) = runtime.readiness() else {
-        panic!("completed protected query without work should remain ready")
-    };
-    assert!(
-        after_query_update.stamp().observation_epoch()
-            > before_query_update.stamp().observation_epoch()
-    );
-
     assert_eq!(
         initial.stamp().work_generation(),
         after_heap.stamp().work_generation()
@@ -884,10 +858,6 @@ fn readiness_stamp_tracks_heap_query_and_event_observations() {
     assert_eq!(
         after_heap.stamp().work_generation(),
         after_input.stamp().work_generation()
-    );
-    assert_eq!(
-        after_input.stamp().work_generation(),
-        after_query_update.stamp().work_generation()
     );
 }
 
@@ -1092,147 +1062,6 @@ fn quiescence_validation_rejects_observation_and_delivery_changes() {
     ));
     assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
     assert!(endpoint.delivery().deliver_next().unwrap().is_some());
-}
-
-#[test]
-fn quiescence_report_snapshots_failures_independently_of_acknowledgement() {
-    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let assembler = Assembler::builder()
-        .evaluation_runtime(runtime.clone())
-        .build()
-        .expect("assembler should seal the runtime profile");
-    let context = assembler.eval_context();
-    let acknowledged_task = context
-        .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
-        .expect("acknowledged failure task should schedule");
-    let retained_task = context
-        .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
-        .expect("retained failure task should schedule");
-    runtime.pump_until_stable();
-    acknowledged_task.acknowledge_failure();
-
-    let acknowledged_delivery = runtime
-        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| {
-            Err(Error::new("acknowledged delivery failure"))
-        })
-        .expect("acknowledged delivery endpoint should register");
-    let retained_delivery = runtime
-        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| {
-            Err(Error::new("retained delivery failure"))
-        })
-        .expect("retained delivery endpoint should register");
-    let (store, mut events) = input_transaction(&runtime);
-    let acknowledged_delivery_id = events
-        .write(&acknowledged_delivery.writer(), runtime.values().integer(1))
-        .expect("acknowledged delivery should reserve");
-    let retained_delivery_id = events
-        .write(&retained_delivery.writer(), runtime.values().integer(2))
-        .expect("retained delivery should reserve");
-    assert_eq!(
-        runtime.try_commit_transaction(&store, &events),
-        crate::reflection::StoreCommitResult::Committed
-    );
-    assert!(matches!(
-        acknowledged_delivery.delivery().deliver_next().unwrap(),
-        Some(RuntimeDeliveryOutcome::Failed(_))
-    ));
-    assert!(matches!(
-        retained_delivery.delivery().deliver_next().unwrap(),
-        Some(RuntimeDeliveryOutcome::Failed(_))
-    ));
-    assert!(runtime.acknowledge_delivery_failure(acknowledged_delivery_id));
-
-    let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
-        panic!("retained failures are state rather than activity")
-    };
-    let report = snapshot.settle().expect("stable runtime should settle");
-    assert_eq!(report.task_failures().len(), 1);
-    assert_eq!(report.pending_task_failure_reports().len(), 1);
-    assert_eq!(
-        report.task_failures()[0].task_id(),
-        retained_task.id().get()
-    );
-    assert_eq!(
-        report.task_failures()[0].session_id(),
-        context.session_id().get()
-    );
-    assert_eq!(
-        report.task_failures()[0]
-            .diagnostic()
-            .rendered_text_for_test(&assembler.values()),
-        "public reasoning failure"
-    );
-    assert!(
-        report
-            .delivery_failures()
-            .get(acknowledged_delivery_id)
-            .is_none()
-    );
-    assert!(
-        report
-            .delivery_failures()
-            .get(retained_delivery_id)
-            .is_some()
-    );
-    assert!(
-        report
-            .pending_delivery_failure_reports()
-            .get(acknowledged_delivery_id)
-            .is_none()
-    );
-    assert!(
-        report
-            .pending_delivery_failure_reports()
-            .get(retained_delivery_id)
-            .is_some()
-    );
-
-    let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
-        panic!("retained failures should remain stable reporting state")
-    };
-    let repeated = snapshot
-        .settle()
-        .expect("repeated stable runtime should settle");
-    assert_eq!(repeated.task_failures().len(), 1);
-    assert!(repeated.pending_task_failure_reports().is_empty());
-    assert!(
-        repeated
-            .delivery_failures()
-            .get(retained_delivery_id)
-            .is_some(),
-        "settlement must not acknowledge the persistent failure"
-    );
-    assert!(repeated.pending_delivery_failure_reports().is_empty());
-
-    retained_task.acknowledge_failure();
-    assert!(runtime.acknowledge_delivery_failure(retained_delivery_id));
-    assert_eq!(report.task_failures().len(), 1);
-    assert!(
-        report
-            .delivery_failures()
-            .get(retained_delivery_id)
-            .is_some(),
-        "a retained report must not track later acknowledgements"
-    );
-
-    context
-        .schedule_task(|_| {
-            struct CompleteTask;
-            impl EvaluationTaskMachine for CompleteTask {
-                fn poll(
-                    &mut self,
-                    _context: &mut crate::evaluation::EvaluationPollContext,
-                    _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-                ) -> EvaluationMachinePoll {
-                    EvaluationMachinePoll::Complete(_context.root_unit())
-                }
-            }
-            Ok(Box::new(CompleteTask))
-        })
-        .expect("later work should remain admissible");
-    runtime.pump_until_stable();
-    assert_eq!(report.task_failures().len(), 1);
-    assert_eq!(report.runtime_id(), runtime.id());
 }
 
 pub(super) fn decode_test_integer(
@@ -2236,27 +2065,6 @@ fn empty_reflection_commit_preserves_epoch_and_does_not_wake_broad_observers() {
 }
 
 #[test]
-fn empty_reflection_commit_publishes_queued_query_retirement() {
-    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let (_, store) = runtime.reflection_snapshot();
-    let mut reservation = crate::reflection::StoreJournal::new(store);
-    let query = reservation.reserve_query().expect("query should reserve");
-    assert_eq!(
-        runtime.commit_reflection(&reservation),
-        crate::reflection::StoreCommitResult::Committed
-    );
-    drop(query);
-
-    let (before_retirement, store) = runtime.reflection_snapshot();
-    let maintenance = crate::reflection::StoreJournal::new(store);
-    assert_eq!(
-        runtime.commit_reflection(&maintenance),
-        crate::reflection::StoreCommitResult::Committed
-    );
-    assert!(runtime.reflection_snapshot().0 > before_retirement);
-}
-
-#[test]
 fn coordinator_transitions_do_not_advance_the_semantic_observation_epoch() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let (before, _) = runtime.reflection_snapshot();
@@ -2311,81 +2119,6 @@ fn diagnostic_callbacks_run_after_runtime_mutation_admission_is_released() {
         .expect("reflection gate should complete");
 
     assert!(callback_observed.load(Ordering::Relaxed));
-}
-
-#[test]
-fn reasoning_failure_acknowledgement_is_idempotent_and_runtime_bound() {
-    let runtime = EvaluationRuntime::new(0).expect("dormant runtime should build");
-    let assembler = Assembler::builder()
-        .evaluation_runtime(runtime.clone())
-        .build()
-        .expect("assembler should build");
-    let peer = Assembler::builder()
-        .evaluation_runtime(runtime)
-        .build()
-        .expect("same-runtime peer assembler should build");
-    let foreign = Assembler::builder()
-        .evaluation_runtime(EvaluationRuntime::new(0).expect("foreign runtime should build"))
-        .build()
-        .expect("foreign-runtime assembler should build");
-    let task = assembler
-        .eval_context()
-        .schedule_task(|_| Ok(Box::new(FailedReasoningTask)))
-        .expect("failing task should schedule");
-
-    let settle = || match assembler.drain_reasoning() {
-        RuntimeReadiness::Ready(snapshot) => snapshot
-            .settle()
-            .expect("unchanged runtime readiness should settle"),
-        RuntimeReadiness::Busy => panic!("draining should reach a stable instant"),
-        RuntimeReadiness::MaintenanceRequired(maintenance)
-        | RuntimeReadiness::MaintenanceFailed(maintenance) => panic!(
-            "failing-task fixture unexpectedly required {:?} managed maintenance",
-            maintenance.state()
-        ),
-        RuntimeReadiness::Deadlocked(deadlock) => panic!(
-            "failing task unexpectedly deadlocked with {} unfinished work items",
-            deadlock.unfinished().len()
-        ),
-        RuntimeReadiness::Poisoned => {
-            panic!("failing-task fixture unexpectedly poisoned its runtime")
-        }
-    };
-    let report = settle();
-    let [failure] = report.task_failures() else {
-        panic!("drain should report exactly one task failure")
-    };
-    assert_eq!(failure.task_id(), task.id().get());
-    assert_eq!(
-        failure
-            .diagnostic()
-            .rendered_text_for_test(&assembler.values()),
-        "public reasoning failure"
-    );
-    let failure = failure.clone();
-
-    let error = foreign
-        .acknowledge_reasoning_failure(&failure)
-        .expect_err("a foreign runtime must reject the acknowledgement capability");
-    assert!(error.to_string().contains("different evaluation runtime"));
-    let retained_failures = settle();
-    let [retained_failure] = retained_failures.task_failures() else {
-        panic!("foreign-runtime acknowledgement must retain one originating failure")
-    };
-    assert_eq!(retained_failure.task_id(), failure.task_id());
-    assert_eq!(retained_failure.message(), failure.message());
-
-    peer.acknowledge_reasoning_failure(&failure)
-        .expect("a same-runtime assembler should route to the producer ledger");
-    assembler
-        .acknowledge_reasoning_failure(&failure)
-        .expect("repeated acknowledgement should be harmless");
-    assert!(settle().task_failures().is_empty());
-    assert!(matches!(
-        assembler.eval_context().poll_reflection_task(&task),
-        EvaluationWaitPoll::Failed(error)
-            if error.to_string() == "public reasoning failure"
-    ));
 }
 
 /// Runs each of `names`, annotation tasks that write text to the heap under
@@ -2557,6 +2290,44 @@ stopped = anno refl:(.child.task 's (.heap.set ['s_started] () =>> .cut (.heap.t
         "reflection task failed permanently".to_owned()
     )));
     assert!(failed.contains(&(Key::atom_from_text("s"), "stopped by its parent".to_owned())));
+}
+
+#[test]
+fn an_annotation_task_s_failure_flags_its_anonymous_root() {
+    // `reflection-tasks-are-machine-tasks`: an annotation task's failure
+    // flags its anonymous root, which no parent recovers, so settlement
+    // reports it even though the failure reached the demander.
+    let source = r#"language g0
+import 'std
+observed = anno refl:(.fail) "never"
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["failed_annotation"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    let observed = assembler
+        .get(module.value(), "observed")
+        .and_then(|value| assembler.evaluate(&value));
+    assert!(observed.is_err(), "the demander observes the failure");
+    let RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+        panic!("the failed annotation should leave the runtime ready")
+    };
+    let report = snapshot.settle().expect("the runtime should settle");
+    let [failed] = report.failed_machines() else {
+        panic!("one root should fail: {:?}", report.failed_machines())
+    };
+    let path = failed.path().keys();
+    assert_eq!(path.len(), 2, "{path:?}");
+    assert_eq!(path[0], Key::atom_from_text("refl"));
+    assert!(crate::reflection::is_anonymous_key(&path[1]));
+    assert_eq!(
+        failed
+            .diagnostic()
+            .rendered_text_for_test(&assembler.values()),
+        "reflection task failed permanently"
+    );
 }
 
 #[test]

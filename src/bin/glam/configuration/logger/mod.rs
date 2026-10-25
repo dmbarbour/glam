@@ -186,12 +186,12 @@ fn run_configured_logger(
                 .expect("configuration context is local"),
             );
         }
+        // A failure is the logger's own, which its caller reports; an exit
+        // or a kill settlement reports.
         Err(error) => {
             if !matches!(
                 lifecycle.status(),
-                EffectLifecycleStatus::Failed(_)
-                    | EffectLifecycleStatus::Exited
-                    | EffectLifecycleStatus::Killed(_)
+                EffectLifecycleStatus::Exited | EffectLifecycleStatus::Killed(_)
             ) {
                 diagnostics.publish_local(error.diagnostic(values));
             }

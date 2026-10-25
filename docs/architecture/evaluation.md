@@ -146,11 +146,9 @@ selected task profile, and current task provenance. The demand state holds the
 value factory, session policy, and explicit closed flag; its coordinator route
 is weak. The coordinator retains one weak demand-session registration solely
 for guarded admission and removes it when the owner closes. Opaque reflection
-and deferred machines, task/wait indexes, failure-acknowledgement policy,
-protected status publication, and the persistent failure ledger reside
-directly in coordinator state. The ledger is a persistent map from
-owner session to that owner's task/failure map, so owner closure does not erase
-an unacknowledged failure and a session report cheaply clones only its bucket.
+and deferred machines, task/wait indexes, status publication, and the failed
+anonymous roots reside directly in coordinator state. The failed roots are a
+persistent map from task to failure, which owner closure does not erase.
 Dropping the final owner marks their shared closed flag, then performs one
 guarded coordinator closure transition across every record indexed by that
 demand ID.
@@ -221,7 +219,7 @@ session-wide running-machine scan, exclude competing evaluation of the same
 work.
 
 Foreground demand claims its exact producer chain first. When an effect task
-has launched a child before publishing a join, the coordinator's activation
+has launched a child before waiting on its result, the coordinator's activation
 index also lets that demand help the parent's still-live causal descendants,
 including children in another demand session. It never substitutes arbitrary
 same-session work. A claimed causal descendant is a `Busy` wait on the work
@@ -253,7 +251,7 @@ interrupted release falls back to the complete guarded traversal from the
 original wait. No descendant index or
 back-pointer is needed: a one-shot completion queues only registrations that
 still match its exact subscription epoch and dependency key, so completing the
-claimed tip can expose only its immediate parent. Causal `.task.new`
+claimed tip can expose only its immediate parent. Causal child-task
 descendants are a separate helping route and never become zipper frames.
 
 A driver (a worker's busy run, a client demand, a session drain, the
@@ -265,7 +263,7 @@ the many short value accesses inside a quantum borrow the mutator rather than
 enter the heap. Each quantum boundary releases the polled work under the
 driver's mutator (`boundary-release-under-mutator`): coordinator transitions,
 terminal publication and route-lease release take the coordinator lock and
-the runtime gate under it, and a failed task's status diagnostic is built by
+the runtime gate under it, and a failed task's failure diagnostic is built by
 drivers that borrow it. The boundary suspends the mutator only to run the
 poll's deferred work, to join a requested collection, to publish to a status
 observer, which runs client code (a task with one settles wholly
@@ -546,9 +544,9 @@ net per edit.
 Terminal wait records likewise retain `RuntimeValueRoot`. A general
 `EvaluationWaitPoll::Complete` observation receives that owned root; only
 `EvaluatorStepContext::project_root` may clone its semantic value back into a
-bounded evaluator region. Non-evaluator consumers, including scheduled effect
-lifecycle and `.task.join`, transfer the root directly into the public value
-facade. `RuntimeValueRoot` now holds the compact private inline-or-managed-root
+bounded evaluator region. Non-evaluator consumers, such as the scheduled
+effect lifecycle, transfer the root directly into the public value facade.
+`RuntimeValueRoot` now holds the compact private inline-or-managed-root
 representation. The poll variant remains boxed and compile-time limited to two
 machine words so recursive evaluator frames do not regress; the authoritative
 terminal record remains inline.
@@ -613,9 +611,10 @@ an upgraded owner lease. Its fast closed-flag check is advisory; reflection
 and deferred reservation repeat the decisive check against registered open
 demand state under the coordinator transition. If closure wins, admission
 returns a closed-demand error. If reservation wins, the subsequent closure
-sees and terminalizes that new record. `.task.new` descendants are ordinary
-members of the same flat demand set: parent completion does not close them,
-while final owner drop reaches every unfinished descendant.
+sees and terminalizes that new record. Tasks queued on child machines are
+ordinary members of the launching task's flat demand set: parent completion
+does not close them, while final owner drop reaches every unfinished
+descendant.
 
 Coordinator mutations participate in the runtime settlement-admission gate
 and advance the coordinator's work generation before external wakes. They do
@@ -652,11 +651,12 @@ retryable wait, core operators never wait, and only permanent failures become
 stuck pairs. See [`interaction_nets.md`](interaction_nets.md) "Semantic
 Handoffs".
 
-`EvalContext` separately carries the complete profile inherited by
-`.task.new`. A type-erased launcher closes over the specialization, immutable
-environment, diagnostic destination, and shared host resources. This keeps
-child-task inheritance distinct from annotation policy: annotations select the
-runtime default, while their own children inherit that selected default.
+`EvalContext` separately carries the complete profile inherited by tasks
+queued on child machines (`.child.task`). A type-erased launcher closes over
+the specialization, immutable environment, diagnostic destination, and shared
+host resources. This keeps child-task inheritance distinct from annotation
+policy: annotations select the runtime default, while the tasks they queue
+inherit that selected default.
 
 ### Runtime-owned constructed values
 
@@ -787,10 +787,11 @@ discovering session. A task terminal before activation skips the launcher.
 Dropping an unconsumed permit cancels the reservation, which assigns a
 cancellation failure to the promise. Cancellation or owner closure racing an
 entered launcher retains the terminal result and makes machine installation
-discard the unused machine outside coordinator locks. When WHNF propagates a
-failed completion promise, the producer obligation acknowledges the task's
-failure-ledger entry; an unobserved failure stays in the runtime ledger and
-appears in settled reports.
+discard the unused machine outside coordinator locks. The task has no machine
+of its own: it is an anonymous root, `refl/<abstract task id>`. Activation
+marks its record (`flag_root_on_failure`), so its failure flags that root for
+good, since no parent can recover it, even when WHNF propagates the failed
+completion promise to a demander.
 
 Every scheduler wait token is one shared cell containing runtime-local
 identity, scalar producer/owner provenance, an optional terminal result, and
@@ -809,24 +810,17 @@ Blocked reflection tasks, deferred producers, and sparks register their stable
 work ID and subscription epoch directly with this cell. Only terminal
 publication of that exact wait can requeue them; unrelated session task
 progress does not.
-Every clone of a public reflection task handle shares one opaque
-`TaskHandleCell`. It owns the shared terminal wait and protected-query lease,
-plus scalar runtime/task/owner identity and a weak coordinator reporting
-route; it retains neither demand state nor the external owner lease.
-Completion, failure, cancellation, and abandonment therefore remain
-observable after the active record and task-ID index are retired. Final cell
-drop queues protected-query retirement through ordinary store maintenance.
-An unacknowledged failure also leaves one minimal entry in its producer
-owner's runtime-ledger bucket until `.task.ack_error` removes it. Propagated
-failure acknowledgement follows the handle's reporting identity directly to
-that bucket instead of upgrading the former owner session. Rust clients receive
-the corresponding opaque, runtime-bound `ReasoningFailure` from a settled
-`QuiescenceReport` and may remove the same entry with
-`Assembler::acknowledge_reasoning_failure`. Acknowledgement through either
-surface leaves the terminal result unchanged. A task on a child machine,
-as the compiler's reflection boundaries queue, never reaches the ledger: its
-failure flags its machine, and the report lists the flagged machines as
-`failed_machines` (`reflection-tasks-are-machine-tasks`).
+A failed annotation task's terminal transition records its failure in the
+coordinator's failed roots (`FailedRoots`, by task) before publishing the
+wait terminal under the same runtime mutation admission;
+`failed_roots_for_settlement` hands settlement every failed root and those no
+earlier settlement reported. A task on a child machine, as the compiler's
+reflection boundaries queue, flags its machine instead, in the transactional
+flag record (`api/runtime/flags.rs`). A Rust-scheduled root's failure
+(`EffectRun`, `schedule_task`) goes only to its Rust caller and is not
+recorded. `QuiescenceReport::failed_machines()` lists flagged machines and
+failed roots alike as `FailedMachine`s, in path order
+(`reflection-tasks-are-machine-tasks`).
 
 ### Scheduler State Ownership
 
@@ -841,12 +835,12 @@ state:
 | reserved, dormant, queued, running, blocked, or terminalizing reflection/deferred work | runtime work coordinator |
 | queued, worker-owned, or dependency-blocked spark | runtime work coordinator |
 | opaque live reflection/deferred machines | runtime work coordinator or its exclusive claim |
-| task failure acknowledgement policy | runtime work coordinator task record |
-| unacknowledged task failures, partitioned by owner session | runtime work coordinator ledger |
-| task wait, current published status, and optional protected-query publisher | coordinator `TaskTerminalPublisher` obligation |
+| whether a task's failure flags its anonymous root | runtime work coordinator task record |
+| failed anonymous roots, and those not yet reported | runtime work coordinator `FailedRoots` |
+| task wait, current published status, optional host lifecycle publisher, and test-only status observer | coordinator `TaskTerminalPublisher` obligation |
 | task/wait lookup and retirement indexes | runtime work coordinator |
 | completed, failed, cancelled, abandoned, exited, killed, or panicked outcome | shared `EvaluationWaitToken` cell |
-| transactional `.task.status`, `.task.value`, or `.task.error` view | reasoning-store query |
+| a child machine's error flag | transactional flag record (`api/runtime/flags.rs`) |
 
 Terminal publication precedes coordinator record removal. `poll_wait` checks
 the shared cell before and after coordinator lookup; after the second check,
@@ -856,9 +850,10 @@ observed during producer installation is canonicalized into the same wait
 cell and retired by the polling path.
 
 Abandonment describes loss of a session-local producer, not a universal
-failure of the value being awaited. Reflection-task handles retain it as a
-terminal task outcome. Ordinary lazy demand and host-promise followers may
-discard the abandoned producer and install fresh same-runtime work instead.
+failure of the value being awaited. A reflection task's wait and lifecycle
+status keep it as a terminal task outcome. Ordinary lazy demand and
+host-promise followers may discard the abandoned producer and install fresh
+same-runtime work instead.
 An unresolved task-owned promise is different: the closing producer session
 fulfills it with a structured producer-abandoned failure because that promise
 has lost its sole responsible producer. Host promises remain controlled only
@@ -1051,44 +1046,21 @@ value before evaluation. Reports retain the producing session and task IDs;
 terminal results and explicit abandonment remain observable after the active
 work record retires.
 
-## Reflection Task Handles
+## Reflection Task Settlement
 
-An opaque reflection task value retains its `EvaluationTaskHandle`: runtime,
-task, producer-owner, work, and wait identity form one lifetime-bearing
-capability. Join polls that wait directly. Cancellation routes to the work
-record named by the handle, and acknowledgement routes to the immutable
-producer-owner failure-ledger bucket. Transactional status, value, and error
-observations remain query-backed and therefore keep their existing snapshot
-semantics. Any session in the same runtime may observe, join, cancel, or
-acknowledge the task; none of those operations changes its captured profile,
-demand scope, or reporting owner. Runtime provenance is the capability
-boundary.
-
-Task creation reserves a non-runnable record. At transaction commit, all
-modifiers for tasks created by that same journal are folded into one
-pre-launch policy before any launcher is called. A same-transaction
-cancellation publishes terminal cancellation and updates the status query
-without constructing a machine, entering the ready queue, or notifying a
-worker. Same-transaction error acknowledgement is installed before launch and
-therefore suppresses reporting even if the child fails immediately; it does
-not alter the wait result or status query. Modifiers for older tasks are
-applied after pending launches have committed. Status-query callbacks run
-after both the reasoning-store lock and scheduler lock have been released.
-
-Only a committed public `.task.new` attaches a protected-query publisher to
-its coordinator record. Internal reflection tasks use the same lifecycle with
-no status query. The publisher retains the query handle, value factory, and a
-narrow writer backed by `RuntimeSharedResources`; it does not retain the role
-host, reflection environment, diagnostic bus, launcher, demand state, or
-external owner lease. `TaskTerminalPublisher` keeps that optional publisher,
-current status, and the shared wait together in the coordinator's settlement
-inventory.
+A task queued on a child machine reaches it when the queueing transaction
+commits: the commit-time wake reserves the task's record and launches it on
+the child (`PendingReflectionTask::launch_on`), and a finishing task launches
+the next itself. A host lifecycle (`EffectLifecycle`) attaches a status
+publisher to a Rust-scheduled root, and a test may attach a status observer;
+`TaskTerminalPublisher` keeps those, the current status, and the shared wait
+together in the coordinator's settlement inventory.
 
 Active reflection records retain machines. Every terminal transition takes
 its `TaskTerminalPublisher` exactly once. Under one runtime mutation admission,
-it records any unacknowledged failure, publishes the shared wait terminal, and
-updates the protected status query while acquiring coordinator, completion,
-and transaction-state mutexes only in separate component steps. Exact wakes,
+it records a failed root's failure, publishes the shared wait terminal, and
+updates the task's status publishers while acquiring each component's mutex
+only in a separate step. Exact wakes,
 runtime-observation notifications, cancellation hooks, value release, and
 machine destruction happen only after all component locks and mutation
 admission have been released. A work record cannot retire until its terminal

@@ -352,12 +352,6 @@ impl DefaultLogger {
             return self.conf_context_summary(payload);
         }
         if reflection
-            .same_representation(tag, &values.atom_from_text("task"))
-            .unwrap_or(false)
-        {
-            return self.task_context_summary(payload);
-        }
-        if reflection
             .same_representation(tag, &values.atom_from_text("runtime"))
             .unwrap_or(false)
         {
@@ -413,17 +407,6 @@ impl DefaultLogger {
             || "conf".to_owned(),
             |entry| format!("conf: entry `{entry}`"),
         )
-    }
-
-    fn task_context_summary(&self, payload: &HandleValue) -> String {
-        let operation = self.context_field_tag_text(payload, &["operation"]);
-        let id = self.context_field_text(payload, &["id"]);
-        match (operation, id) {
-            (Some(operation), Some(id)) => format!("task: {operation} task {id}"),
-            (Some(operation), None) => format!("task: {operation}"),
-            (None, Some(id)) => format!("task: task {id}"),
-            (None, None) => "task".to_owned(),
-        }
     }
 
     fn runtime_context_summary(&self, payload: &HandleValue) -> String {
@@ -984,22 +967,6 @@ mod tests {
                                         record(
                                             &values,
                                             [(
-                                                "task",
-                                                record(
-                                                    &values,
-                                                    [
-                                                        (
-                                                            "operation",
-                                                            values.atom_from_text("join"),
-                                                        ),
-                                                        ("id", values.integer(12)),
-                                                    ],
-                                                ),
-                                            )],
-                                        ),
-                                        record(
-                                            &values,
-                                            [(
                                                 "runtime",
                                                 record(
                                                     &values,
@@ -1054,7 +1021,7 @@ mod tests {
         assert_eq!(
             rendered,
             Bytes::from_static(
-                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    import: request `child.g`\n    asm: result `asm.result`\n    eval: path lookup `conf.env`\n    conf: entry `log`\n    task: join task 12\n    runtime: delivery failure (delivery 13, endpoint 4, adapter)\n"
+                b"error: broken\n    more detail\n  context:\n    eval: binary extraction\n    g: definition `result` on line 7\n    import: request `child.g`\n    asm: result `asm.result`\n    eval: path lookup `conf.env`\n    conf: entry `log`\n    runtime: delivery failure (delivery 13, endpoint 4, adapter)\n"
             )
         );
     }

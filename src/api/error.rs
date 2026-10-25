@@ -4,9 +4,7 @@ use std::sync::Arc;
 use super::{Diagnostic, Value, Values};
 use crate::core::{CoreValueFactory, EvaluationHalt, EvaluationPanic};
 use crate::diagnostic::Severity;
-use crate::evaluation::{EvaluationSessionId, EvaluationTaskId};
 use crate::interaction_net::NetBuildError;
-use crate::runtime::EvaluationRuntimeId;
 
 #[derive(Debug, Clone)]
 pub struct Error {
@@ -257,46 +255,4 @@ impl std::error::Error for Error {}
 
 pub(super) fn net_build_error(error: NetBuildError) -> Error {
     Error::new(format!("invalid interaction net: {error}"))
-}
-
-#[derive(Clone)]
-pub struct ReasoningFailure {
-    pub(super) runtime: EvaluationRuntimeId,
-    pub(super) task: EvaluationTaskId,
-    pub(super) diagnostic: Diagnostic,
-    pub(super) session: EvaluationSessionId,
-}
-
-impl fmt::Debug for ReasoningFailure {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("ReasoningFailure")
-            .field("task_id", &self.task_id())
-            .field("diagnostic", &self.diagnostic)
-            .finish_non_exhaustive()
-    }
-}
-
-impl ReasoningFailure {
-    pub fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.runtime
-    }
-
-    pub fn session_id(&self) -> u64 {
-        self.session.get()
-    }
-
-    pub fn task_id(&self) -> u64 {
-        self.task.get()
-    }
-
-    pub fn message(&self) -> &str {
-        self.diagnostic.message()
-    }
-
-    /// Returns the structured terminal failure retained by the reasoning
-    /// session.
-    pub fn diagnostic(&self) -> &Diagnostic {
-        &self.diagnostic
-    }
 }

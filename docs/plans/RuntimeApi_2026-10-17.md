@@ -1011,7 +1011,8 @@ handle API goes.
         child machines' queues, persistent local state and flags,
         `.child.interrupt`, `.child.recover` and `.child.clear`, and the
         compiler's reflection boundaries on child tasks, failed machines
-        reported at settlement (2026-10-25).
+        reported at settlement, and the retirement of `.task.*`, task
+        handles, status queries and the failure ledger (2026-10-25).
       - `api-refl-call`: `.child.call`, with a child's machine state where
         a caller's transaction stages it.
       - `api-refl-annotations`: annotation tasks on anonymous machines

@@ -544,7 +544,6 @@ impl EvaluationDemandState {
             return self.closed_run_report();
         }
         let snapshots = coordinator.reflection_snapshots(self.id);
-        let failures = coordinator.failure_snapshot(self.id);
         let mut unfinished = Vec::new();
         let mut has_live_cross_session_dependency = false;
         for snapshot in snapshots {
@@ -583,10 +582,7 @@ impl EvaluationDemandState {
                 error: block.and_then(|block| block.error.clone()),
             });
         }
-        let report = EvaluationSessionReport {
-            failures,
-            unfinished,
-        };
+        let report = EvaluationSessionReport { unfinished };
         if self.is_closed() {
             return self.closed_run_report();
         }

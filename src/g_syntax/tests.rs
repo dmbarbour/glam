@@ -4328,7 +4328,7 @@ ordinary = "ordinary"
     let report = snapshot
         .settle()
         .expect("unchanged runtime readiness should settle");
-    assert!(report.task_failures().is_empty());
+    assert!(report.failed_machines().is_empty());
     assert!(report.killed_work().is_empty());
     assert!(
         take_reflection_diagnostics(&diagnostics).is_empty(),
@@ -4364,7 +4364,6 @@ ordinary = "ordinary"
             .expect("unchanged runtime readiness should settle")
     };
     let report = settle();
-    assert!(report.task_failures().is_empty());
     let [failed] = report.failed_machines() else {
         panic!("one machine should fail: {:?}", report.failed_machines())
     };

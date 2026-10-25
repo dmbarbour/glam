@@ -14,8 +14,8 @@ use super::runtime::RuntimeSharedResources;
 use super::turn::environment::{REFL, committed_environment};
 use super::{
     Diagnostic, DiagnosticBus, DiagnosticEvent, DiagnosticSubscriber, DiagnosticSubscription,
-    Error, EvaluationRuntime, NetBuilder, NetPort, PromiseResolver, ReasoningFailure,
-    ReflectionInspector, RuntimeReadiness, Value, ValueEvaluator, Values,
+    Error, EvaluationRuntime, NetBuilder, NetPort, PromiseResolver, ReflectionInspector,
+    RuntimeReadiness, Value, ValueEvaluator, Values,
 };
 use crate::compiler::{
     BinaryFileLoader, BinaryLoadArgs, CompileContext, CompileDiagnosticEmitter, ImportSite,
@@ -31,8 +31,8 @@ use crate::evaluation::{EvalContext, EvaluationSession, ReflectionTaskProfile};
 use crate::g_syntax::compile_source;
 use crate::reflection::{
     CommitResult, ConflictAnalysisStrategy, HostSnapshot, ReasoningSessionId, ReflectionEffects,
-    ReflectionQueryMutation, ReflectionQueryWriter, ReflectionServices, TaskCommit,
-    TaskEnvironment, TaskHost, VolumeId, coordinator_task_launcher, volume_effects,
+    ReflectionServices, TaskCommit, TaskEnvironment, TaskHost, VolumeId, coordinator_task_launcher,
+    volume_effects,
 };
 use crate::runtime::RuntimeValueRoot;
 use crate::source::{FileSourceSystem, SourceArtifact, SourceIdentity, SourceSystem};
@@ -226,56 +226,6 @@ impl ReflectionServices for AssemblerReflectionHost {
 
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.diagnostics.publish_local(diagnostic);
-    }
-
-    fn query_writer(&self) -> Option<Arc<dyn ReflectionQueryWriter>> {
-        Some(self.resources.clone())
-    }
-}
-
-impl ReflectionQueryWriter for RuntimeSharedResources {
-    fn update_query_guarded(
-        &self,
-        mutation: ReflectionQueryMutation<'_>,
-        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
-        result: Value,
-    ) -> Box<dyn FnOnce() + Send> {
-        result
-            .require_runtime(self.id)
-            .expect("reflection query results belong to the runtime");
-        let updated = {
-            let mut state = self
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            // The client's conflict analysis runs here, under the transaction
-            // lock, which is runtime core. A panic in it skips this status
-            // publication rather than tearing the transaction state.
-            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                state.reflection.update_query(handle, result)
-            }))
-        };
-        let Ok(updated) = updated else {
-            return Box::new(|| {});
-        };
-        assert!(
-            updated,
-            "task status query must remain in its runtime domain"
-        );
-
-        let epoch = self.observations.advance();
-        let work = self.work.upgrade();
-        let scheduler_changed = work
-            .as_ref()
-            .map(|work| work.publish_runtime_observation_guarded(mutation.guard(), epoch));
-        let observations = self.observations.clone();
-        Box::new(move || {
-            observations.notify_all();
-            if let (Some(work), Some(changed)) = (work, scheduler_changed) {
-                work.notify_runtime_observation(changed);
-            }
-        })
     }
 }
 
@@ -1095,25 +1045,6 @@ impl Assembler {
         runtime.pump_until_stable();
         self.publish_unrecognized_annotation_warnings();
         runtime.readiness()
-    }
-
-    /// Acknowledges a failed task retained by a settled
-    /// [`QuiescenceReport`].
-    ///
-    /// Acknowledgement removes the failure from later reasoning reports but
-    /// does not change the task's terminal result. Repeated acknowledgement is
-    /// harmless. Any assembler view of the same evaluation runtime may
-    /// acknowledge the producer's failure; a report from another runtime is
-    /// rejected.
-    pub fn acknowledge_reasoning_failure(&self, failure: &ReasoningFailure) -> Result<(), Error> {
-        let context = self.eval_context();
-        if context.values().runtime_id() != failure.runtime {
-            return Err(Error::new(
-                "reasoning failure belongs to a different evaluation runtime",
-            ));
-        }
-        context.acknowledge_task_failure(failure.session, failure.task);
-        Ok(())
     }
 
     /// Installs another retained diagnostic subscription

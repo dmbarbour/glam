@@ -28,20 +28,20 @@ and control flow.
   host data. Reusable request families map their request enum into a host
   specialization rather than depending on it directly.
 - A specialization callback advances non-cloneable request work before asking
-  the reflection machine to demand a value or wait on shared completion.
-  Dependency resumption returns to that advanced owner; it must not reconstruct
-  or replay host observation or mutation. `RequestContext` deliberately has no
-  semantic evaluation methods.
+  the reflection machine to demand a value. Dependency resumption returns to
+  that advanced owner; it must not reconstruct or replay host observation or
+  mutation. `RequestContext` deliberately has no semantic evaluation methods.
 - Concrete protocol results, outcomes, environments, snapshots, commits, and
   transactions retain public/runtime roots across interpreter phases. A
   specialization is responsible for the same root contract inside its generic
   request, snapshot, and journal types; those types may not hide a durable bare
   core value. `RequestContext` and `TransactionContext` are borrowed,
   callback-bounded views and must not escape the dispatch that created them.
-- Spawned `.task.new` children inherit their parent's complete task profile,
-  including specialization requests, immutable environment, diagnostic
-  destination, and host resources. Annotation tasks begin with the runtime
-  default profile, so their children inherit that default.
+- Tasks queued on child machines with `.child.task` inherit their parent's
+  complete task profile, including specialization requests, immutable
+  environment, diagnostic destination, and host resources. Annotation tasks
+  begin with the runtime default profile, so the tasks they queue inherit
+  that default.
 - `.env Path` reads the active task host's immutable reasoning environment
   using `.get` path and missing-as-`{}` conventions. There is no reflection
   write. The assembler reserves and replaces the complete `glam` subtree and
@@ -52,11 +52,10 @@ and control flow.
 - `.dict_items` is the narrow privileged dictionary-iteration boundary. It
   returns immediate entries in key order. The compiler's `eff.map` sequences
   effects left-to-right and preserves list order.
-- Reusable reflection journals store diagnostics as public roots. Decoded task
-  states and query reads store public values, while deferred launch/cancel/
-  acknowledgement records delegate to the inventoried task lifecycle. An
-  opaque task handle stores only scalar runtime provenance and task/query
-  handles; query mutation authority is borrowed for one guarded callback.
+- Reusable reflection journals store diagnostics as public roots and the
+  machines' port actions as handle values. Their commit-time machine updates
+  (`ReflectionUpdate::Wake`, `Interrupt`, `Clear`) name a host and a machine
+  path, plus the launching context for a wake, and store no semantic value.
 
 ## State, Choice, and Control
 
@@ -185,42 +184,22 @@ and control flow.
   state a task still winding down there leaves. Every way a task on a machine ends, teardown cancellation
   included, ends its run (`MachineRunEnd`); a panic, or a task its session
   abandons as it closes, does not yet.
-
-- `.task.new` reserves an opaque handle and a private transactional status
-  query, but journals launch inside a transaction. Losing branches discard
-  both. The query stores atoms `'launched` or `'blocked`, terminal tagged values
-  `ok:Value`, `err:Diagnostic`, or `killed:Diagnostic`, or the atom
-  `'canceled`, `'abandoned`, `'exited`, or `'panicked`; the handle keeps the
-  terminal observation alive. A kill carries the client's kill reason, which
-  is also what `.task.join` fails with and what `.task.error` returns. Abandonment is owner-session loss, not
-  a failed task, and therefore creates no failure-ledger entry.
-- `.task.join` waits directly on every nonterminal child state and propagates
-  terminal errors. A joined dependency becoming terminal reruns the join
-  operation; it does not select another `.alt` branch. An error with prior
-  state observations remains blocked until those observations can retry its
-  checkpoint. Propagation prepends
-  `{task:{operation:'join, id:TaskId}}`. `.task.status` returns the stored
-  status value unchanged.
-  `.task.value` and `.task.error` project its matching terminal payload, fail
-  transactionally while it is nonterminal, and fail permanently for the other
-  terminal outcome; an abandoned task has neither payload. Observation through
-  those operations never adds the join frame.
-- `.task.cancel` is an unconditional best-effort, commit-ordered request. Any
-  session in the same runtime may invoke it; a foreign-runtime handle is
-  rejected at the value boundary. Late cancellation is a harmless no-op and
-  losing branches discard the request.
-- `.task.ack_error` is a timing-independent, commit-ordered modifier for a
-  same-runtime handle. It suppresses the task's present or future failure from
-  reasoning reports but never mutates `.task.status`, `.task.error`, or
-  `.task.join`. Same-transaction acknowledgement is installed before launch;
-  losing branches discard it. Repeated acknowledgement and acknowledgement of
-  success or cancellation are harmless.
+- An annotation task (`anno refl:` or `anno meta_refl:`) has no machine of
+  its own: it is an anonymous root, `refl/<abstract task id>`, and its
+  failure flags that root for good, since no parent can recover it, even
+  when a demander observed the failure through the gate
+  (`reflection-tasks-are-machine-tasks`). A Rust-scheduled root's failure
+  (`EffectRun`, `schedule_task`) goes only to its Rust caller and is not
+  recorded. A composed effect run drains the work it scheduled and fails on
+  its own result or a stable deadlock, not on a child's failure, which is
+  its machine's.
 - `.eval` demands WHNF and returns `ok:WHNF` or `err:Diagnostic`. A raw
   opaque `Value::Net` is already WHNF and is returned unchanged; only an
   explicit net-arity bridge observes its interface. A pending evaluator
   dependency suspends the request. `.eval` does not isolate or roll back
   reflection tasks activated by evaluation.
-- Task failure is never implicitly acknowledged or cleared by inspection.
+- Observing a failure never clears a flag; a parent recovers or clears its
+  child explicitly.
 
 ## Machine and Scheduler
 
@@ -245,12 +224,10 @@ and control flow.
   `RuntimeReadiness` snapshot. Ready exit votes require explicit settlement;
   deadlock snapshots retain known dependencies and structured retryable
   failures until the client chooses whether to kill them. A settled
-  `ReasoningFailure` is an opaque capability bound to its originating
-  evaluation runtime:
-  `Assembler::acknowledge_reasoning_failure` is idempotent, accepts any
-  assembler view of that runtime, rejects other runtimes, and removes only the
-  producer-owner reporting-ledger entry. It does not alter the task's terminal
-  result.
+  `QuiescenceReport::failed_machines()` lists every machine in error as a
+  `FailedMachine` (path and diagnostic): flagged child machines and failed
+  anonymous roots, in path order; `pending_failed_machine_reports()` lists
+  each once for rendering.
 
 ## Front-End and Logger Integration
 
@@ -275,8 +252,7 @@ and control flow.
   (`runtime: machine failure (machine refl/<abstract>/scanner/<key>)`) and
   fails the batch on.
 - The CLI logger's assembler-bus input and its session-local diagnostic bus are
-  separate. Logger output cannot feed its own input stream, and logger children
-  inherit `read_log`, `write_stderr`, and coordinated exit operations.
+  separate. Logger output cannot feed its own input stream.
 - Logger input claims and heap edits share one atomic runtime commit without
   sharing conflict addresses. See
   [`diagnostics.md`](diagnostics.md) for ingress, output, and rendering

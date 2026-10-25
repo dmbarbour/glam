@@ -32,7 +32,7 @@ pub use diagnostics::{
     Diagnostic, DiagnosticBus, DiagnosticCounts, DiagnosticEvent, DiagnosticIngress,
     DiagnosticSubscriber, DiagnosticSubscription,
 };
-pub use error::{Error, ErrorKind, ReasoningFailure};
+pub use error::{Error, ErrorKind};
 pub use evaluator::{ReflectionInspector, ValueEvaluator};
 #[cfg(test)]
 use runtime::publish_runtime_observation;

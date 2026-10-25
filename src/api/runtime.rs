@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use super::diagnostics::DiagnosticIngressInner;
-use super::{Error, ReasoningFailure, Value, Values};
+use super::{Error, Value, Values};
 use crate::core::CoreValueFactory;
 use crate::evaluation::{
     EvaluationExecutor, EvaluationSession, EvaluationWorkCoordinator, ReflectionTaskProfile,
@@ -16,9 +16,8 @@ use crate::evaluation::{
     ValidatedRuntimeSettlementPlan,
 };
 use crate::reflection::{
-    ConflictAnalysisStrategy, ExactConflictAnalysis, ReasoningSessionId, ReflectionQueryMutation,
-    ReflectionQueryWriter, ReflectionStore, Resolution, RuntimeInputEndpointId, StoreCommitResult,
-    VolumeId,
+    ConflictAnalysisStrategy, ExactConflictAnalysis, ReasoningSessionId, ReflectionStore,
+    Resolution, RuntimeInputEndpointId, StoreCommitResult, VolumeId,
 };
 use crate::runtime::{
     EvaluationRuntimeId, RuntimeCoreState, RuntimeGcLeaseOutcome, RuntimeGcMaintenanceDisposition,
@@ -50,7 +49,7 @@ pub(crate) use machines::{
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire, WireEnd};
 pub use readiness::*;
 use readiness::{
-    RuntimeSettlementSnapshot, reasoning_diagnostic, runtime_deadlock_work_from_snapshot,
+    RuntimeSettlementSnapshot, runtime_deadlock_work_from_snapshot,
     runtime_disposition_from_snapshot, runtime_killed_failure,
 };
 pub(in crate::api) use shares::ShareJournal;
@@ -616,35 +615,6 @@ impl RuntimeSharedResources {
         Ok(value)
     }
 
-    #[cfg(test)]
-    pub(in crate::api) fn update_query(
-        &self,
-        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
-        result: Value,
-    ) -> Result<(), Error> {
-        result.require_runtime(self.id)?;
-        let mutation = self.mutation_guard();
-        let updated = {
-            let mut state = self
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            contain_client_conflict_analysis(|| state.reflection.update_query(handle, result))
-        };
-        let updated = match updated {
-            Ok(updated) => updated,
-            Err(payload) => {
-                drop(mutation);
-                std::panic::resume_unwind(payload)
-            }
-        };
-        if updated {
-            self.publish_observation(mutation);
-        }
-        Ok(())
-    }
-
     pub(super) fn wait_for_change(&self, observed_generation: u64) -> bool {
         self.observations
             .wait_for_change(RuntimeObservationEpoch::from_raw(observed_generation));
@@ -727,22 +697,6 @@ impl RuntimeTaskCapability {
     #[doc(hidden)]
     pub fn wait_for_change(&self, observed_generation: u64) -> bool {
         self.resources.wait_for_change(observed_generation)
-    }
-}
-
-impl ReflectionQueryWriter for RuntimeTaskCapability {
-    fn update_query_guarded(
-        &self,
-        mutation: ReflectionQueryMutation<'_>,
-        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
-        result: Value,
-    ) -> Box<dyn FnOnce() + Send> {
-        <RuntimeSharedResources as ReflectionQueryWriter>::update_query_guarded(
-            self.resources.as_ref(),
-            mutation,
-            handle,
-            result,
-        )
     }
 }
 
@@ -1641,7 +1595,7 @@ impl EvaluationRuntime {
             remaining_exits.is_empty(),
             "settlement must consume every validated exit disposition"
         );
-        let (task_ledger, pending_task_reports) = self.state.work.failure_ledgers_for_settlement();
+        let (failed_roots, pending_failed_roots) = self.state.work.failed_roots_for_settlement();
         let (maintenance_failures, pending_maintenance_reports, gc_maintenance_revision) = self
             .state
             .shared_resources
@@ -1686,32 +1640,25 @@ impl EvaluationRuntime {
         drop(settlement);
         release.finish();
 
-        let task_failures = task_ledger
-            .iter()
-            .flat_map(|(session, failures)| {
-                failures
-                    .iter()
-                    .map(move |(task, failure)| ReasoningFailure {
-                        runtime: self.id(),
-                        task: *task,
-                        diagnostic: reasoning_diagnostic(self.values().core(), failure),
-                        session: *session,
-                    })
-            })
-            .collect();
-        let pending_task_failure_reports = pending_task_reports
-            .iter()
-            .flat_map(|(session, failures)| {
-                failures
-                    .iter()
-                    .map(move |(task, failure)| ReasoningFailure {
-                        runtime: self.id(),
-                        task: *task,
-                        diagnostic: reasoning_diagnostic(self.values().core(), failure),
-                        session: *session,
-                    })
-            })
-            .collect();
+        // An annotation task's failure flags its anonymous root, which no
+        // parent recovers (`reflection-tasks-are-machine-tasks`).
+        let roots = |roots: crate::evaluation::FailedRoots| {
+            roots
+                .iter()
+                .map(|(task, failure)| {
+                    (
+                        crate::reflection::anonymous_root(*task),
+                        failure.diagnostic(self.values().core()),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let with_roots = |mut flags: Vec<(Vec<crate::core::Key>, RuntimeValueRoot)>,
+                          failed: crate::evaluation::FailedRoots| {
+            flags.extend(roots(failed));
+            flags.sort_by(|left, right| left.0.cmp(&right.0));
+            flags
+        };
         let pending_exit_error_reports = snapshot
             .dispositions
             .iter()
@@ -1728,8 +1675,7 @@ impl EvaluationRuntime {
                 gc_maintenance_revision,
             },
             dispositions: snapshot.dispositions.clone(),
-            task_failures,
-            failed_machines: failed_machines(flags),
+            failed_machines: failed_machines(with_roots(flags, failed_roots)),
             delivery_failures,
             reflection,
             killed_work: snapshot.killed_work.clone(),
@@ -1737,8 +1683,10 @@ impl EvaluationRuntime {
                 .into_iter()
                 .map(maintenance_failure)
                 .collect(),
-            pending_task_failure_reports,
-            pending_failed_machine_reports: failed_machines(pending_flags),
+            pending_failed_machine_reports: failed_machines(with_roots(
+                pending_flags,
+                pending_failed_roots,
+            )),
             pending_delivery_failure_reports: pending_delivery_reports,
             pending_exit_error_reports,
             pending_killed_work_reports: snapshot.killed_work.clone(),
@@ -1865,15 +1813,6 @@ impl EvaluationRuntime {
         journal: &crate::reflection::StoreJournal,
     ) -> crate::reflection::StoreCommitResult {
         self.state.shared_resources.commit_reflection(journal)
-    }
-
-    #[cfg(test)]
-    pub(in crate::api) fn update_query(
-        &self,
-        handle: &Arc<crate::reflection::EvaluationQueryHandle>,
-        result: Value,
-    ) -> Result<(), Error> {
-        self.state.shared_resources.update_query(handle, result)
     }
 
     #[cfg(test)]

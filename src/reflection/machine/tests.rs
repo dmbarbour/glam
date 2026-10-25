@@ -5,22 +5,20 @@ use bytes::Bytes;
 
 use super::reset_stack::{DecodedResetStack, ResetStackMachine, ResetStackPoll};
 use super::*;
-use crate::Severity;
 use crate::api::{
-    Assembler, Diagnostic, EffectTokenDomain, Error as ApiError, EvaluatedValue, EvaluationRuntime,
-    PromiseResolver, TestValueFacade, Values,
+    Assembler, Diagnostic, EffectTokenDomain, Error as ApiError, EvaluatedValue, PromiseResolver,
+    TestValueFacade, Values,
 };
 use crate::core::{EvaluationHalt, ManagedPromiseRoot};
 use crate::evaluation::{
-    EvaluationSessionRun, EvaluationTaskCancellation, EvaluationTaskHandle, ReflectionTaskLauncher,
-    ReflectionTaskProfile, ReflectionTaskResultPolicy,
+    EvaluationTaskCancellation, EvaluationTaskHandle, ReflectionTaskLauncher,
+    ReflectionTaskResultPolicy,
 };
 use crate::reflection::lifecycle::{run_composed_effect_task, task_launcher};
 use crate::reflection::{
     CoarseConflictAnalysis, ConflictAnalysisStrategy, EffectLifecycle, EffectLifecycleStatus,
-    EffectRun, EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis,
-    IsolatedEffectSearch, IsolatedSearchPoll, ReasoningSessionId, ReflectionEffects,
-    ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
+    EffectRun, ExactConflictAnalysis, FingerprintConflictAnalysis, IsolatedEffectSearch,
+    IsolatedSearchPoll, ReasoningSessionId, ReflectionEffects, ReflectionHost, ReflectionJournal,
     ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionStore,
     ReflectionTransaction, StandardEffects, StoreCommitResult, TaskEnvironment, TaskValidation,
     ValidationResult, publish_settled, reflection_request_specs,
@@ -163,33 +161,6 @@ impl ReflectionTaskLauncher for CountingLauncher {
     ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
         self.builds.fetch_add(1, Ordering::AcqRel);
         self.inner.build(context, effect, result_policy)
-    }
-}
-
-struct ExitCapableLauncher {
-    host: Arc<TestHost>,
-}
-
-impl ReflectionTaskLauncher for ExitCapableLauncher {
-    fn build(
-        &self,
-        context: EvalContext,
-        effect: RuntimeValueRoot,
-        result_policy: ReflectionTaskResultPolicy,
-    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
-        let task = EffectTask::new_exit_in_context(
-            effect.clone_core_for_test(),
-            TestEffects,
-            self.host.clone(),
-            context,
-        )
-        .map_err(TaskHalt::into_failure)?;
-        Ok(match result_policy {
-            ReflectionTaskResultPolicy::RequireUnit => Box::new(UnitEffectTask(
-                task.asserting_unit_result(Arc::from("reflection annotation result")),
-            )),
-            ReflectionTaskResultPolicy::ReturnValue => Box::new(ValueEffectTask(task)),
-        })
     }
 }
 
@@ -466,10 +437,6 @@ fn read_test_log(context: &mut RequestContext<'_, TestEffects>) -> Result<Reques
 #[derive(Default)]
 struct TestHost {
     reasoning_session: Option<ReasoningSessionId>,
-    state: Arc<Mutex<TestHostState>>,
-}
-
-struct TestQueryWriter {
     state: Arc<Mutex<TestHostState>>,
 }
 
@@ -823,38 +790,6 @@ impl TaskEnvironment for TestHost {
 impl ReflectionServices for TestHost {
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         TestHost::emit_diagnostic(self, diagnostic);
-    }
-
-    fn query_writer(&self) -> Option<Arc<dyn ReflectionQueryWriter>> {
-        Some(Arc::new(TestQueryWriter {
-            state: self.state.clone(),
-        }))
-    }
-}
-
-impl ReflectionQueryWriter for TestQueryWriter {
-    fn update_query_guarded(
-        &self,
-        _mutation: ReflectionQueryMutation<'_>,
-        handle: &Arc<EvaluationQueryHandle>,
-        result: PublicValue,
-    ) -> Box<dyn FnOnce() + Send> {
-        let updated = {
-            let mut state = self.state.lock().unwrap();
-            let updated = state.store.update_query(handle, result);
-            if updated {
-                state.generation += 1;
-            }
-            updated
-        };
-        let coordinator = updated
-            .then(|| self.state.lock().unwrap().store.values().work_coordinator())
-            .flatten();
-        Box::new(move || {
-            if let Some(coordinator) = coordinator {
-                coordinator.publish_runtime_observation();
-            }
-        })
     }
 }
 
@@ -5128,7 +5063,7 @@ fn internal_exit_error_message_failure_is_an_ordinary_task_failure() {
 #[test]
 fn permanent_exit_discards_every_speculative_cut_resource() {
     let (assembler, effect) = compile_effect(
-        ".cut ((.heap.set ['discarded] 1) =>> (.write_stderr \"discarded\") =>> (.log 'error {msg:{text:\"discarded\"}}) =>> .task.new (.r \"child\") >>= (\\_child -> .alt (.fail) ((.exit.success) =>> .write_stderr \"after exit\")))",
+        ".cut ((.heap.set ['discarded] 1) =>> (.write_stderr \"discarded\") =>> (.log 'error {msg:{text:\"discarded\"}}) =>> .alt (.fail) ((.exit.success) =>> .write_stderr \"after exit\"))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let owned = EvalContext::private_closed(assembler.core_values());
@@ -5158,11 +5093,7 @@ fn permanent_exit_discards_every_speculative_cut_resource() {
     assert!(host.diagnostics().is_empty());
     assert!(host.stderr().is_empty());
     assert_eq!(builds.load(Ordering::Acquire), 0);
-    assert_eq!(
-        observer.reflection_task_count(),
-        0,
-        "dropping every journal clone must retire its reserved child task"
-    );
+    assert_eq!(observer.reflection_task_count(), 0);
     drop(owner);
 }
 
@@ -5440,25 +5371,6 @@ fn schedule_composed_test_task_with_private_annotations(
     (context, task)
 }
 
-fn schedule_exit_child_test_task(
-    assembler: &Assembler,
-    effect: &PublicValue,
-    host: Arc<TestHost>,
-) -> (OwnedEvalContext, EvaluationTaskHandle) {
-    let context = EvalContext::isolated(assembler.core_values())
-        .with_test_task_launcher(Arc::new(ExitCapableLauncher { host: host.clone() }));
-    let effect = effect.clone_core_for_test();
-    let task = context
-        .schedule_task(move |task_context| {
-            let effect = root_value(&task_context, effect);
-            EffectTask::new_in_context(effect, TestEffects, host, task_context)
-                .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
-                .map_err(|error| Arc::from(error.to_string()))
-        })
-        .expect("test task should schedule");
-    (context, task)
-}
-
 fn pump_composed_test_task(
     context: &EvalContext,
     task: &EvaluationTaskHandle,
@@ -5471,9 +5383,8 @@ fn pump_composed_test_task(
 }
 
 #[test]
-fn effect_run_composes_runtime_children_and_unit_policy() {
-    let (assembler, effect) =
-        compile_effect(".task.new (.log 'warn { msg:{ text:\"child\" } }) >>= (\\_task -> .r ())");
+fn effect_run_composes_its_runtime_and_unit_policy() {
+    let (assembler, effect) = compile_effect(".log 'warn { msg:{ text:\"root\" } }");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
 
     assert!(matches!(
@@ -5492,9 +5403,8 @@ fn effect_run_composes_runtime_children_and_unit_policy() {
 }
 
 #[test]
-fn scheduled_effect_root_completes_with_children_and_publishes_lifecycle() {
-    let (assembler, effect) =
-        compile_effect(".task.new (.log 'warn { msg:{ text:\"child\" } }) >>= (\\_task -> .r ())");
+fn scheduled_effect_root_completes_and_publishes_lifecycle() {
+    let (assembler, effect) = compile_effect(".log 'warn { msg:{ text:\"root\" } }");
     let runtime = assembler.evaluation_runtime();
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let lifecycle = EffectLifecycle::new(&runtime);
@@ -5563,95 +5473,6 @@ fn scheduled_effect_root_publishes_failure_and_cancellation() {
         cancel_lifecycle.status(),
         EffectLifecycleStatus::Cancelled
     ));
-}
-
-#[test]
-fn a_closing_lifecycle_abandons_root_descendants_when_its_root_returns() {
-    let (assembler, effect) = compile_effect(".task.new (.read_log) >>= (\\_child -> .r ())");
-    let runtime = assembler.evaluation_runtime();
-    let lifecycle = EffectLifecycle::new_closing_session(&runtime);
-    let task = EffectRun::new(
-        &runtime,
-        &effect,
-        TestEffects,
-        Arc::new(TestHost::with_values(assembler.core_values())),
-    )
-    .schedule(&lifecycle)
-    .expect("root with a blocked child should schedule");
-
-    assert!(matches!(task.run().unwrap(), TaskOutcome::Complete(_)));
-    assert!(matches!(
-        lifecycle.status(),
-        EffectLifecycleStatus::Complete(_)
-    ));
-    runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
-        panic!("closing the root's demand session should abandon its blocked child")
-    };
-    assert!(snapshot.dispositions().is_empty());
-}
-
-#[test]
-fn a_closing_lifecycle_preserves_a_descendant_failure_before_root_return() {
-    for workers in [0, 4] {
-        let runtime = EvaluationRuntime::new(workers).expect("test runtime should build");
-        let (assembler, effect) = compile_effect_with_runtime(
-            &runtime,
-            ".task.new (.fail) >>= (\\_child -> .read_log >>= (\\_message -> .r ()))",
-        );
-        let lifecycle = EffectLifecycle::new_closing_session(&runtime);
-        let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let task = EffectRun::new(&runtime, &effect, TestEffects, host.clone())
-            .schedule(&lifecycle)
-            .expect("root with a failing child should schedule");
-
-        runtime.pump_until_stable();
-        let status = lifecycle.status();
-        assert!(
-            matches!(&status, EffectLifecycleStatus::Blocked),
-            "a stable held root must already publish its blocked lifecycle state: {status:?}"
-        );
-        runtime.pump_until_stable();
-        host.emit_diagnostic(Diagnostic::new(
-            &assembler.values(),
-            Severity::Info,
-            "release logger root",
-        ));
-
-        let failure = task.run().expect_err_without_debug(
-            "a child failure which precedes root return remains authoritative",
-        );
-        assert!(
-            failure
-                .to_string()
-                .contains("reflection task failed permanently")
-        );
-        assert!(matches!(
-            lifecycle.status(),
-            EffectLifecycleStatus::Complete(_)
-        ));
-        let snapshot = loop {
-            runtime.pump_until_stable();
-            match runtime.readiness() {
-                crate::api::RuntimeReadiness::Busy => continue,
-                crate::api::RuntimeReadiness::MaintenanceRequired(maintenance)
-                | crate::api::RuntimeReadiness::MaintenanceFailed(maintenance) => panic!(
-                    "logger fixture unexpectedly required {:?} managed maintenance",
-                    maintenance.state()
-                ),
-                crate::api::RuntimeReadiness::Ready(snapshot) => break snapshot,
-                readiness @ (crate::api::RuntimeReadiness::Deadlocked(_)
-                | crate::api::RuntimeReadiness::Poisoned) => panic!(
-                    "a terminal logger root and retained child failure should be ready, got {readiness:?}"
-                ),
-            }
-        };
-        assert!(snapshot.dispositions().is_empty());
-        let report = snapshot
-            .settle()
-            .expect("terminal logger closure should settle without disturbance");
-        assert_eq!(report.task_failures().len(), 1);
-    }
 }
 
 #[test]
@@ -5779,23 +5600,6 @@ fn effect_run_separates_provider_assertions_from_its_generic_unit_policy() {
     assert_eq!(
         contextual.to_string(),
         "test task result: unit expected, received Number"
-    );
-}
-
-#[test]
-fn reflection_task_returns_a_joinable_result() {
-    let (assembler, effect) =
-        compile_effect(".task.new (.r \"child\") >>= (\\task -> .task.join task)");
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("joined task should complete")
-    };
-    assert_eq!(
-        assembler
-            .to_binary(&PublicValue::from_runtime_root(*value))
-            .unwrap(),
-        b"child".as_slice()
     );
 }
 
@@ -6824,25 +6628,6 @@ fn reflection_environment_is_available_as_plain_data() {
         ],
     );
 
-    let (_, child_environment) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".task.new (.env ['process,'args]) >>= (\\task -> .task.join task)",
-    );
-    let (context, task) = schedule_composed_test_task(&assembler, &child_environment, host.clone());
-    let EvaluationWaitPoll::Complete(arguments) = pump_composed_test_task(&context, &task) else {
-        panic!("child reflection task should inherit its parent profile environment")
-    };
-    let Value::List(arguments) = arguments.clone_core_for_test() else {
-        panic!("child reflection task should inherit a list environment")
-    };
-    context.values().assert_same_representation_for_test(
-        &eval::list_to_value_items(&context, &arguments).unwrap(),
-        &[
-            Value::binary_from_text("glam"),
-            Value::binary_from_text("--test"),
-        ],
-    );
-
     let (_, missing) = compile_effect_with_runtime(
         &assembler.evaluation_runtime(),
         ".env ['process,'env] >>= (\\environment -> not (dict.defines [\"GLAM_TEST_MISSING\"] environment) =>> .r \"missing\")",
@@ -6869,730 +6654,6 @@ fn reflection_environment_resumes_each_lazy_key_path_segment() {
             .to_binary(&PublicValue::from_runtime_root(*version))
             .unwrap(),
         env!("CARGO_PKG_VERSION").as_bytes()
-    );
-}
-
-#[test]
-fn task_value_is_symmetric_with_task_error() {
-    let (assembler, effect) = compile_effect(
-        ".task.new (.r \"result\") >>= (\\task -> .task.join task >>= (\\_value -> .task.value task))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("task.value should return a completed task result")
-    };
-    assert_eq!(
-        assembler
-            .to_binary(&PublicValue::from_runtime_root(*value))
-            .unwrap(),
-        b"result".as_slice()
-    );
-}
-
-#[test]
-fn task_join_remains_available_after_the_child_is_terminal() {
-    let (assembler, effect) = compile_effect(
-        ".task.new (.r \"result\") >>= (\\task -> .task.join task >>= (\\_ -> .task.join task))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("a late join should retain the completed child result")
-    };
-    assert_eq!(
-        assembler
-            .to_binary(&PublicValue::from_runtime_root(*value))
-            .unwrap(),
-        b"result".as_slice()
-    );
-}
-
-#[test]
-fn task_status_reports_launched_and_terminal_states() {
-    for source in [
-        ".task.new (.r ()) >>= (\\task -> .task.status task >>= (\\status -> (status == 'launched) =>> .r ()))",
-        ".task.new (.r ()) >>= (\\task -> .task.join task >>= (\\_ -> .task.status task >>= (\\status -> .r status.ok)))",
-        ".task.new (.fail) >>= (\\task -> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> .r status.err)))",
-        ".task.new (.r ()) >>= (\\task -> .task.cancel task =>> .task.error task >>= (\\_ -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ())))",
-        ".task.new (.r ()) >>= (\\task -> .task.join task >>= (\\_ -> .task.ack_error task =>> .task.status task >>= (\\status -> .r status.ok)))",
-        ".task.new (.r ()) >>= (\\task -> .task.cancel task =>> .task.ack_error task =>> .task.ack_error task =>> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
-    ] {
-        let (assembler, effect) = compile_effect(source);
-        let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
-        let poll = pump_composed_test_task(&context, &task);
-        assert!(
-            matches!(poll, EvaluationWaitPoll::Complete(_)),
-            "task status should match for {source}, got {poll:?}"
-        );
-    }
-}
-
-#[test]
-fn task_observers_accept_handles_from_another_same_runtime_session() {
-    let (assembler, publish) = compile_effect(
-        ".task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\blocked -> .task.new (.r \"done\") >>= (\\complete -> .task.new (.fail) >>= (\\failed -> .task.new (.r ()) >>= (\\canceled -> .task.cancel canceled =>> .heap.set ['observed_tasks] { blocked:blocked, complete:complete, failed:failed, canceled:canceled }))))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (owner, publish_task) = schedule_composed_test_task(&assembler, &publish, host.clone());
-    assert!(matches!(
-        pump_composed_test_task(&owner, &publish_task),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    let (_, inspect_launched) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".heap.get ['observed_tasks] >>= (\\tasks -> .task.status tasks.complete)",
-    );
-    let (launched_observer, inspect_launched_task) =
-        schedule_composed_test_task(&assembler, &inspect_launched, host.clone());
-    let EvaluationWaitPoll::Complete(launched) =
-        pump_composed_test_task(&launched_observer, &inspect_launched_task)
-    else {
-        panic!("a same-runtime observer should read the pre-pump task status")
-    };
-    assembler.core_values().with_boundary_access(|access| {
-        launched
-            .with_core(&access, |launched| {
-                access.assert_same_representation_for_test(
-                    launched,
-                    &access.key_value(&keys::LAUNCHED),
-                );
-            })
-            .expect("launched status must belong to the test runtime");
-    });
-    drop(launched_observer);
-
-    let EvaluationSessionRun::Deadlocked(before_observation) = owner.run_until_quiescent() else {
-        panic!("the blocked child should leave its owner session deadlocked")
-    };
-    assert_eq!(before_observation.failures.size(), 1);
-    assert_eq!(before_observation.unfinished.len(), 1);
-
-    let (_, inspect) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".heap.get ['observed_tasks] >>= (\\tasks -> .task.status tasks.blocked >>= (\\blocked_status -> .task.status tasks.complete >>= (\\complete_status -> .task.value tasks.complete >>= (\\complete_value -> .task.status tasks.failed >>= (\\failed_status -> .task.error tasks.failed >>= (\\failed_error -> .task.status tasks.canceled >>= (\\canceled_status -> .r { blocked_status:blocked_status, complete_status:complete_status, complete_value:complete_value, failed_status:failed_status, failed_error:failed_error, canceled_status:canceled_status })))))))",
-    );
-    let (observer, inspect_task) = schedule_composed_test_task(&assembler, &inspect, host.clone());
-    let EvaluationWaitPoll::Complete(observed) = pump_composed_test_task(&observer, &inspect_task)
-    else {
-        panic!("same-runtime task observations should complete")
-    };
-    let observed = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-        &observer,
-        &observed.clone_core_for_test(),
-    )
-    .expect("task observation result should evaluate");
-    let Value::Dict(observed) = observed else {
-        panic!("task observation fixture should return a dictionary")
-    };
-    let field = |name: &str| {
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &observer,
-            observed
-                .get(&Key::atom_from_text(name))
-                .unwrap_or_else(|| panic!("task observation should define {name}")),
-        )
-        .unwrap_or_else(|error| panic!("task observation {name} should evaluate: {error}"))
-    };
-    let blocked_status = field("blocked_status");
-    assembler.core_values().with_boundary_access(|access| {
-        access.assert_same_representation_for_test(
-            &blocked_status,
-            &access.key_value(&keys::BLOCKED),
-        );
-    });
-    let Value::Dict(complete_status) = field("complete_status") else {
-        panic!("complete task status should be tagged data")
-    };
-    assembler.core_values().assert_same_representation_for_test(
-        &crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &observer,
-            complete_status
-                .get(&*keys::OK)
-                .expect("complete status should contain ok"),
-        )
-        .expect("complete status payload should evaluate"),
-        &Value::binary_from_text("done"),
-    );
-    assembler.core_values().assert_same_representation_for_test(
-        &field("complete_value"),
-        &Value::binary_from_text("done"),
-    );
-    let Value::Dict(failed_status) = field("failed_status") else {
-        panic!("failed task status should be tagged data")
-    };
-    assert!(failed_status.get(&*keys::ERR).is_some());
-    assert!(matches!(field("failed_error"), Value::Dict(_)));
-    let canceled_status = field("canceled_status");
-    assembler.core_values().with_boundary_access(|access| {
-        access.assert_same_representation_for_test(
-            &canceled_status,
-            &access.key_value(&keys::CANCELED),
-        );
-    });
-
-    let EvaluationSessionRun::Deadlocked(after_observation) = owner.run_until_quiescent() else {
-        panic!("observation must not disturb the blocked owner task")
-    };
-    assert_eq!(after_observation.failures, before_observation.failures);
-    assert_eq!(after_observation.unfinished.len(), 1);
-
-    drop(owner);
-    let (_, inspect_abandoned) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".heap.get ['observed_tasks] >>= (\\tasks -> .task.status tasks.blocked)",
-    );
-    let (late_observer, inspect_abandoned_task) =
-        schedule_composed_test_task(&assembler, &inspect_abandoned, host.clone());
-    let EvaluationWaitPoll::Complete(abandoned) =
-        pump_composed_test_task(&late_observer, &inspect_abandoned_task)
-    else {
-        panic!("a retained same-runtime handle should remain observable after owner closure")
-    };
-    assembler.core_values().with_boundary_access(|access| {
-        abandoned
-            .with_core(&access, |abandoned| {
-                assert!(
-                    access.same_representation(abandoned, &access.key_value(&keys::ABANDONED)),
-                    "observer-held task handles must not keep their producer demand open"
-                );
-            })
-            .expect("abandoned status must belong to the test runtime");
-    });
-}
-
-#[test]
-fn task_acknowledgement_routes_across_sessions_to_the_producer_ledger() {
-    let (assembler, spawn) = compile_effect(".task.new (.fail)");
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (owner, first_task) = schedule_composed_test_task(&assembler, &spawn, host.clone());
-    let EvaluationWaitPoll::Complete(handle) = pump_composed_test_task(&owner, &first_task) else {
-        panic!("first session should return a task handle")
-    };
-    let EvaluationSessionRun::Complete(report) = owner.run_until_quiescent() else {
-        panic!("the producer should drain its failed child")
-    };
-    assert_eq!(report.failures.size(), 1);
-
-    let (_, acknowledge) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        "\\task -> .cut (.task.ack_error task)",
-    );
-    let acknowledge = assembler
-        .apply(&acknowledge, [PublicValue::from_runtime_root(*handle)])
-        .expect("non-owner task acknowledgement should apply");
-    let (second_context, second_task) = schedule_composed_test_task(&assembler, &acknowledge, host);
-    assert!(matches!(
-        pump_composed_test_task(&second_context, &second_task),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    assert_eq!(
-        owner.task_registry_counts().unacknowledged_failures,
-        0,
-        "cross-session acknowledgement must remove the producer's failure entry"
-    );
-    assert_eq!(
-        second_context
-            .task_registry_counts()
-            .unacknowledged_failures,
-        0,
-        "acknowledgement must not create or remove an observer-ledger entry"
-    );
-}
-
-#[test]
-fn task_join_accepts_same_runtime_handles_across_all_terminal_states() {
-    let (assembler, publish) = compile_effect(
-        ".task.new (.cut (.alt (.heap.try_get ['join_ready]) (.r ()) >>= (\\ready -> (ready == \"ready\") =>> .r \"pending result\"))) >>= (\\pending -> .task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\abandoned -> .task.new (.r \"complete result\") >>= (\\complete -> .task.new (.fail) >>= (\\failed -> .task.new (.r ()) >>= (\\canceled -> .task.cancel canceled =>> .heap.set ['join_tasks] { pending:pending, abandoned:abandoned, complete:complete, failed:failed, canceled:canceled })))))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (owner, publish_task) = schedule_composed_test_task(&assembler, &publish, host.clone());
-    assert!(matches!(
-        pump_composed_test_task(&owner, &publish_task),
-        EvaluationWaitPoll::Complete(_)
-    ));
-
-    let EvaluationSessionRun::Deadlocked(initial_owner_report) = owner.run_until_quiescent() else {
-        panic!("the two blocked children should leave their owner session deadlocked")
-    };
-    assert_eq!(initial_owner_report.failures.size(), 1);
-    assert_eq!(initial_owner_report.unfinished.len(), 2);
-
-    let (_, read_handles) =
-        compile_effect_with_runtime(&assembler.evaluation_runtime(), ".heap.get ['join_tasks]");
-    let (handle_reader, read_handles_task) =
-        schedule_composed_test_task(&assembler, &read_handles, host.clone());
-    let EvaluationWaitPoll::Complete(handles) =
-        pump_composed_test_task(&handle_reader, &read_handles_task)
-    else {
-        panic!("a same-runtime observer should read the published task handles")
-    };
-    let Value::Dict(handles) = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-        &handle_reader,
-        &handles.clone_core_for_test(),
-    )
-    .expect("the published task-handle dictionary should evaluate") else {
-        panic!("the task-handle fixture should publish a dictionary")
-    };
-    let handle = |name: &str| {
-        crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &handle_reader,
-            handles
-                .get(&Key::atom_from_text(name))
-                .unwrap_or_else(|| panic!("task-handle fixture should define {name}")),
-        )
-        .unwrap_or_else(|error| panic!("task handle {name} should evaluate: {error}"))
-    };
-    let (_, join) =
-        compile_effect_with_runtime(&assembler.evaluation_runtime(), "\\task -> .task.join task");
-    let join = |task: Value| {
-        assembler
-            .apply(&join, [public_value(&assembler.core_values(), task)])
-            .expect("task.join should apply to a task handle")
-    };
-
-    let join_complete = join(handle("complete"));
-    let (complete_observer, complete_join) =
-        schedule_composed_test_task(&assembler, &join_complete, host.clone());
-    let EvaluationWaitPoll::Complete(complete_result) =
-        pump_composed_test_task(&complete_observer, &complete_join)
-    else {
-        panic!("a same-runtime observer should join a completed task")
-    };
-    complete_result.assert_same_representation_for_test(
-        &assembler.core_values(),
-        &Value::binary_from_text("complete result"),
-    );
-
-    let join_failed = join(handle("failed"));
-    let (failed_observer, failed_join) =
-        schedule_composed_test_task(&assembler, &join_failed, host.clone());
-    assert!(matches!(
-        pump_composed_test_task(&failed_observer, &failed_join),
-        EvaluationWaitPoll::Failed(error)
-            if error.to_string().contains("failed permanently")
-    ));
-    assert_eq!(
-        owner.task_registry_counts().unacknowledged_failures,
-        0,
-        "propagating the child failure must acknowledge its producer-owner ledger"
-    );
-    assert_eq!(
-        failed_observer
-            .task_registry_counts()
-            .unacknowledged_failures,
-        1,
-        "the failed joining task must enter only the observer's ledger"
-    );
-
-    let join_canceled = join(handle("canceled"));
-    let (canceled_observer, canceled_join) =
-        schedule_composed_test_task(&assembler, &join_canceled, host.clone());
-    assert!(matches!(
-        pump_composed_test_task(&canceled_observer, &canceled_join),
-        EvaluationWaitPoll::Failed(error)
-            if error.to_string() == "joined reflection task was cancelled"
-    ));
-
-    let join_pending = join(handle("pending"));
-    let (pending_observer, pending_join) =
-        schedule_composed_test_task(&assembler, &join_pending, host.clone());
-    assert_eq!(
-        pending_observer.pump_wait(pending_join.wait(), 16_384),
-        crate::evaluation::EvaluationPumpOutcome::NoProgress,
-        "a same-runtime join must remain blocked while its exact child wait is pending"
-    );
-    assert!(matches!(
-        pending_observer.poll_reflection_task(&pending_join),
-        EvaluationWaitPoll::Pending(_)
-    ));
-
-    let (_, release_pending) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".heap.set ['join_ready] \"ready\"",
-    );
-    let (release_context, release_task) =
-        schedule_composed_test_task(&assembler, &release_pending, host.clone());
-    assert!(matches!(
-        pump_composed_test_task(&release_context, &release_task),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    let EvaluationWaitPoll::Complete(pending_result) =
-        pump_composed_test_task(&pending_observer, &pending_join)
-    else {
-        panic!("the same-runtime join should resume when its child completes")
-    };
-    pending_result.assert_same_representation_for_test(
-        &assembler.core_values(),
-        &Value::binary_from_text("pending result"),
-    );
-
-    let join_abandoned = join(handle("abandoned"));
-    let (abandoned_observer, abandoned_join) =
-        schedule_composed_test_task(&assembler, &join_abandoned, host);
-    assert_eq!(
-        abandoned_observer.pump_wait(abandoned_join.wait(), 16_384),
-        crate::evaluation::EvaluationPumpOutcome::NoProgress
-    );
-    drop(owner);
-    assert!(matches!(
-        pump_composed_test_task(&abandoned_observer, &abandoned_join),
-        EvaluationWaitPoll::Failed(error)
-            if error.to_string()
-                == "joined reflection task was abandoned when its evaluation session closed"
-    ));
-}
-
-#[test]
-fn join_does_not_advance_an_alternative_while_the_child_is_nonterminal() {
-    let (assembler, effect) = compile_effect(
-        ".task.new (.cut (.heap.get ['never] >>= (\\_ -> .fail))) >>= (\\task -> .cut (.alt (.task.join task) (.r \"fallback\")))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    assert_eq!(
-        context.pump_wait(task.wait(), 16_384),
-        crate::evaluation::EvaluationPumpOutcome::NoProgress
-    );
-    assert!(matches!(
-        context.poll_reflection_task(&task),
-        EvaluationWaitPoll::Pending(_)
-    ));
-}
-
-#[test]
-fn join_does_not_advance_an_alternative_while_the_child_waits_to_exit() {
-    let (assembler, effect) = compile_effect(
-        ".task.new (.exit.success) >>= (\\task -> .cut (.alt (.task.join task) (.r \"fallback\")))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_exit_child_test_task(&assembler, &effect, host);
-
-    assert_eq!(
-        context.pump_wait(task.wait(), 16_384),
-        crate::evaluation::EvaluationPumpOutcome::NoProgress
-    );
-    assert!(matches!(
-        context.poll_reflection_task(&task),
-        EvaluationWaitPoll::Pending(_)
-    ));
-    let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
-        panic!("the parent and exit-waiting child should remain unfinished")
-    };
-    assert!(report.failures.is_empty());
-    assert_eq!(report.unfinished.len(), 2);
-}
-
-#[test]
-fn cancellation_is_transactional_and_late_cancellation_is_harmless() {
-    let (assembler, rolled_back) = compile_effect(
-        ".task.new (.r \"alive\") >>= (\\task -> (.cut (.alt ((.task.cancel task) =>> .fail) (.r ()))) =>> .task.join task)",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &rolled_back, host.clone());
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("rolled-back cancellation should not cancel the child")
-    };
-    assert_eq!(
-        assembler
-            .to_binary(&PublicValue::from_runtime_root(*value))
-            .unwrap(),
-        b"alive".as_slice()
-    );
-
-    let (_, committed) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
-    );
-    let (context, task) = schedule_composed_test_task(&assembler, &committed, host.clone());
-    assert!(matches!(
-        pump_composed_test_task(&context, &task),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    assert!(
-        host.diagnostics().is_empty(),
-        "serial commit should cancel a same-transaction task before polling it"
-    );
-
-    let (_, spawn_non_owner) =
-        compile_effect_with_runtime(&assembler.evaluation_runtime(), ".task.new (.read_log)");
-    let (source_context, source_task) =
-        schedule_composed_test_task(&assembler, &spawn_non_owner, host.clone());
-    let EvaluationWaitPoll::Complete(non_owner_handle) =
-        pump_composed_test_task(&source_context, &source_task)
-    else {
-        panic!("source session should produce a task handle for the non-owner test")
-    };
-    let (_, cancel_non_owner) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        "\\task -> .cut (.task.cancel task) =>> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ())",
-    );
-    let cancel_non_owner = assembler
-        .apply(
-            &cancel_non_owner,
-            [PublicValue::from_runtime_root(*non_owner_handle)],
-        )
-        .expect("non-owner cancellation should apply");
-    let (non_owner_context, non_owner_task) =
-        schedule_composed_test_task(&assembler, &cancel_non_owner, host.clone());
-    let non_owner_poll = pump_composed_test_task(&non_owner_context, &non_owner_task);
-    assert!(
-        matches!(non_owner_poll, EvaluationWaitPoll::Complete(_)),
-        "non-owner cancellation should complete, received {non_owner_poll:?}"
-    );
-
-    let (_, late) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".task.new (.r \"done\") >>= (\\task -> .task.join task >>= (\\value -> (.task.cancel task) =>> .r value))",
-    );
-    let (context, task) = schedule_composed_test_task(&assembler, &late, host);
-    assert!(matches!(
-        pump_composed_test_task(&context, &task),
-        EvaluationWaitPoll::Complete(_)
-    ));
-}
-
-#[test]
-fn same_transaction_cancellation_prevents_worker_launch_and_machine_construction() {
-    let (assembler, effect) = compile_effect(
-        ".cut (.task.new (.log 'error { msg:{ text:\"cancelled task ran\" } }) >>= (\\task -> (.task.cancel task) =>> .r task)) >>= (\\task -> .task.status task >>= (\\status -> (status == 'canceled) =>> .r ()))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let coordinator = assembler
-        .core_values()
-        .work_coordinator()
-        .expect("assembler runtime coordinator should remain live");
-    let session = EvaluationSession::shared_with_values(&coordinator, assembler.core_values());
-    let builds = Arc::new(AtomicUsize::new(0));
-    let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
-        inner: task_launcher(TestEffects, host.clone()),
-        builds: builds.clone(),
-    });
-    let context =
-        EvalContext::with_task_profile(&session, Arc::new(ReflectionTaskProfile::sealed(launcher)));
-    let effect = effect.clone_core_for_test();
-    let task = context
-        .schedule_task(move |task_context| {
-            let effect = root_value(&task_context, effect);
-            EffectTask::new_in_context(effect, TestEffects, host.clone(), task_context)
-                .map(|task| Box::new(ValueEffectTask(task)) as Box<dyn EvaluationTaskMachine>)
-                .map_err(|error| Arc::from(error.to_string()))
-        })
-        .expect("parent task should schedule");
-
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("atomically cancelled child should leave no unfinished work")
-    };
-    assert!(
-        report.failures.is_empty(),
-        "atomically cancelled child left failures: {:?}",
-        report.failures
-    );
-    assert!(matches!(
-        context.poll_reflection_task(&task),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    assert_eq!(
-        builds.load(Ordering::Acquire),
-        0,
-        "same-transaction cancellation must bypass child machine construction"
-    );
-}
-
-#[test]
-fn reflection_task_launch_is_buffered_until_cut_commit() {
-    let (assembler, effect) =
-        compile_effect(".cut (.task.new (.r \"committed\")) >>= (\\task -> .task.join task)");
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("committed child task should complete")
-    };
-    assert_eq!(
-        assembler
-            .to_binary(&PublicValue::from_runtime_root(*value))
-            .unwrap(),
-        b"committed".as_slice()
-    );
-}
-
-#[test]
-fn failed_transaction_discards_its_reflection_task_launch_and_cancellation() {
-    let (assembler, effect) = compile_effect(
-        ".cut (.alt (.task.new (.log 'error { msg:{ text:\"discarded\" } }) >>= (\\task -> (.task.cancel task) =>> .fail)) (.r \"kept\"))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
-    let poll = pump_composed_test_task(&context, &task);
-    assert!(
-        matches!(poll, EvaluationWaitPoll::Complete(_)),
-        "winning alternative should complete, got {poll:?}"
-    );
-    assert!(host.diagnostics().is_empty());
-    assert_eq!(context.reflection_task_count(), 0);
-}
-
-#[test]
-fn join_propagates_task_error_and_task_error_extracts_it() {
-    let (assembler, join) = compile_effect(".task.new (.fail) >>= (\\task -> .task.join task)");
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &join, host.clone());
-    let EvaluationWaitPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
-        panic!("join should propagate its child task error")
-    };
-    assert!(error.to_string().contains("failed permanently"));
-    let [frame] = error.as_failure().contexts() else {
-        panic!("join should prepend exactly one propagation frame")
-    };
-    let Value::Dict(frame) = frame else {
-        panic!("join propagation context should be a tagged dictionary")
-    };
-    let Value::Dict(task_context) = frame
-        .get(&Key::atom_from_text("task"))
-        .expect("join propagation context should be tagged task")
-    else {
-        panic!("task context payload should be a dictionary")
-    };
-    assembler.core_values().assert_same_representation_for_test(
-        &task_context.get(&Key::atom_from_text("operation")),
-        &Some(&Value::Atom(Atom::from_key(&Key::binary_from_text("join")))),
-    );
-    let Some(Value::Number(id)) = task_context.get(&Key::atom_from_text("id")) else {
-        panic!("join propagation context should identify the child task")
-    };
-    assert!(id.to_u64_if_integer().is_some_and(|id| id > 0));
-
-    let (_, extract) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".task.new (.fail) >>= (\\task -> .task.error task)",
-    );
-    let (context, task) = schedule_composed_test_task(&assembler, &extract, host);
-    let poll = pump_composed_test_task(&context, &task);
-    let EvaluationWaitPoll::Complete(value) = poll else {
-        panic!("task_error should return the child task error, got {poll:?}")
-    };
-    let value = PublicValue::from_runtime_root(*value);
-    let text = assembler
-        .to_binary(
-            &assembler
-                .get(&value, "msg.text")
-                .expect("task error should have a diagnostic text view"),
-        )
-        .expect("task error diagnostic text should be binary");
-    assert!(String::from_utf8_lossy(&text).contains("failed permanently"));
-}
-
-#[test]
-fn acknowledged_task_failure_remains_observable_but_is_not_reported() {
-    let (assembler, inspect) = compile_effect(
-        ".cut (.task.new (.fail) >>= (\\task -> .task.ack_error task =>> .r task)) >>= (\\task -> .task.error task >>= (\\error -> .task.status task >>= (\\status -> .r {error:error, status:status})))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, parent) = schedule_composed_test_task(&assembler, &inspect, host.clone());
-    let EvaluationWaitPoll::Complete(observation) = pump_composed_test_task(&context, &parent)
-    else {
-        panic!("acknowledged failure should remain observable as data")
-    };
-    let observation = PublicValue::from_runtime_root(*observation);
-    let error = assembler
-        .evaluate(
-            &assembler
-                .get(&observation, "error")
-                .expect("task.error should retain the failure"),
-        )
-        .expect("task.error result should evaluate");
-    let status_error = assembler
-        .evaluate(
-            &assembler
-                .get(&observation, "status.err")
-                .expect("task.status should retain the failure"),
-        )
-        .expect("task.status error should evaluate");
-    assert_same_value!(assembler, error, status_error);
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("acknowledged child should leave no unfinished work")
-    };
-    assert!(report.failures.is_empty());
-
-    let (_, join) = compile_effect_with_runtime(
-        &assembler.evaluation_runtime(),
-        ".cut (.task.new (.fail) >>= (\\task -> .task.ack_error task =>> .r task)) >>= (\\task -> .task.join task)",
-    );
-    let (context, parent) = schedule_composed_test_task(&assembler, &join, host);
-    assert!(matches!(
-        pump_composed_test_task(&context, &parent),
-        EvaluationWaitPoll::Failed(_)
-    ));
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("failed join should be terminal")
-    };
-    assert_eq!(
-        report
-            .failures
-            .iter()
-            .map(|(task, _)| *task)
-            .collect::<Vec<_>>(),
-        [parent.id()],
-        "join must propagate the error while the acknowledged child stays out of reports"
-    );
-}
-
-#[test]
-fn abandoned_task_error_acknowledgement_does_not_suppress_reporting() {
-    let (assembler, effect) = compile_effect(
-        ".task.new (.fail) >>= (\\task -> (.cut (.alt ((.task.ack_error task) =>> .fail) (.r ()))) =>> .task.error task)",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, parent) = schedule_composed_test_task(&assembler, &effect, host);
-    assert!(matches!(
-        pump_composed_test_task(&context, &parent),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("child failure should be terminal")
-    };
-    assert_eq!(
-        report.failures.size(),
-        1,
-        "rolled-back acknowledgement must leave the child failure unacknowledged"
-    );
-    assert!(!report.failures.contains_key(&parent.id()));
-}
-
-#[test]
-fn task_errors_preserve_structured_emissions_and_contexts() {
-    let (assembler, effect) = compile_effect(
-        ".task.new (anno context:\"child dispatch\" (anno 'error { msg:{ text:\"handler failed\" }, operation:'emit })) >>= (\\task -> .task.error task)",
-    );
-    let (context, task) = schedule_composed_test_task(
-        &assembler,
-        &effect,
-        Arc::new(TestHost::with_values(assembler.core_values())),
-    );
-    let EvaluationWaitPoll::Complete(error) = pump_composed_test_task(&context, &task) else {
-        panic!("task.error should return the child's structured failure");
-    };
-    let error = PublicValue::from_runtime_root(*error);
-    assert_eq!(
-        assembler
-            .to_binary(&assembler.get(&error, "msg.text").unwrap())
-            .unwrap(),
-        b"handler failed".as_slice()
-    );
-    assert_same_value!(
-        assembler,
-        assembler.get(&error, "operation").unwrap(),
-        assembler.values().atom_from_text("emit")
-    );
-    let contexts = assembler.get(&error, "msg.context").unwrap();
-    let contexts = contexts.clone_core_for_test();
-    let Value::List(contexts) = &contexts else {
-        panic!("task error contexts should be a list")
-    };
-    assembler.core_values().assert_same_representation_for_test(
-        &eval::list_to_value_items(&assembler.eval_context(), contexts).unwrap(),
-        &[Value::binary_from_text("child dispatch")],
     );
 }
 
@@ -7762,42 +6823,6 @@ fn effect_dispatch_preserves_application_and_request_stage_contexts() {
 }
 
 #[test]
-fn failed_and_cancelled_joins_retain_retryable_errors() {
-    for (source, expected) in [
-        (
-            ".task.new (.fail) >>= (\\task -> .cut (.heap.get [] >>= (\\_ -> .task.join task)))",
-            "failed permanently",
-        ),
-        (
-            ".task.new (.read_log) >>= (\\task -> (.task.cancel task) =>> .cut (.heap.get [] >>= (\\_ -> .task.join task)))",
-            "was cancelled",
-        ),
-    ] {
-        let (assembler, effect) = compile_effect(source);
-        let host = Arc::new(TestHost::with_values(assembler.core_values()));
-        let (context, parent) = schedule_composed_test_task(&assembler, &effect, host.clone());
-        let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
-            panic!("retryable joined task error should remain unfinished for {source}")
-        };
-        let blocked = report
-            .unfinished
-            .iter()
-            .find(|task| task.task == parent.id())
-            .expect("parent task should retain its joined error");
-        assert!(blocked.wait.is_none());
-        assert!(blocked.observed_epoch.is_some());
-        assert!(
-            blocked
-                .error
-                .as_ref()
-                .is_some_and(|error| error.to_string().contains(expected)),
-            "unexpected retained error for {source}: {:?}",
-            blocked.error
-        );
-    }
-}
-
-#[test]
 fn observed_evaluation_error_restarts_without_advancing_alternatives() {
     let (assembler, effect) = compile_effect(".cut (.alt (.read_log) (1 2))");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
@@ -7898,54 +6923,6 @@ fn unobserved_evaluation_error_remains_terminal_inside_cut() {
     let error = run_standard_test(&assembler, &effect)
         .expect_err_without_debug("unobserved error should be terminal");
     assert!(error.to_string().contains("requires a function value"));
-}
-
-#[test]
-fn task_error_fails_for_a_successful_task() {
-    let (assembler, effect) = compile_effect(".task.new (.r ()) >>= (\\task -> .task.error task)");
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    let EvaluationWaitPoll::Failed(error) = pump_composed_test_task(&context, &task) else {
-        panic!("task_error should fail for a successful task")
-    };
-    assert!(error.to_string().contains("failed permanently"));
-}
-
-#[test]
-fn pending_task_error_is_an_effect_failure_before_it_is_a_wait() {
-    let (assembler, effect) = compile_effect(
-        ".task.new (.r \"child\") >>= (\\task -> .cut (.alt (.task.error task) (.r \"fallback\")))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("task_error alternative should fall through")
-    };
-    assert_eq!(
-        assembler
-            .to_binary(&PublicValue::from_runtime_root(*value))
-            .unwrap(),
-        b"fallback".as_slice()
-    );
-}
-
-#[test]
-fn spawned_tasks_inherit_the_parent_task_profile() {
-    let (assembler, effect) = compile_effect(
-        ".task.new ((.write_stderr \"child\") =>> .r \"done\") >>= (\\task -> .task.join task)",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("child should inherit the parent's extended effect vocabulary")
-    };
-    assert_eq!(
-        assembler
-            .to_binary(&PublicValue::from_runtime_root(*value))
-            .unwrap(),
-        b"done".as_slice()
-    );
-    assert_eq!(host.stderr(), [Bytes::from_static(b"child")]);
 }
 
 #[test]
@@ -9042,84 +8019,6 @@ fn root_local_state_replacement_does_not_replace_shared_heap() {
     assert_same_value!(assembler, value, assembler.values().empty_dict());
     assert_same_value!(assembler, host.heap(), assembler.values().empty_dict());
     assert!(assembler.get(&value, "answer").is_err());
-}
-
-#[test]
-fn child_tasks_start_with_fresh_local_state_and_share_heap() {
-    let (assembler, effect) = compile_effect(
-        ".heap.set ['shared] \"visible\" =>> .set ['local] \"private\" =>> .task.new (.alt (.try_get ['local] =>> .r \"inherited\") (.r \"fresh\") >>= (\\local -> .heap.get ['shared] >>= (\\shared -> .r { local:local, shared:shared }))) >>= (\\task -> .task.join task)",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, task) = schedule_composed_test_task(&assembler, &effect, host);
-    let EvaluationWaitPoll::Complete(value) = pump_composed_test_task(&context, &task) else {
-        panic!("child task should complete")
-    };
-    let value = PublicValue::from_runtime_root(*value);
-    assert_eq!(
-        assembler
-            .to_binary(&assembler.get(&value, "local").unwrap())
-            .unwrap(),
-        b"fresh".as_slice(),
-        "a child's fresh local state defines nothing"
-    );
-    assert_eq!(
-        assembler
-            .to_binary(&assembler.get(&value, "shared").unwrap())
-            .unwrap(),
-        b"visible".as_slice()
-    );
-}
-
-#[test]
-fn child_tasks_inherit_same_session_volume_capabilities() {
-    let assembler = Assembler::default();
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let volume = host
-        .state
-        .lock()
-        .unwrap()
-        .store
-        .create_volume(assembler.values().text("initial"))
-        .unwrap();
-    let module = assembler
-            .module(["reflection_volume_child"])
-            .script(
-                "g",
-                "language g0\nimport 'std\nlaunch = \\cap -> .task.new (cap.set [] \"child\") >>= (\\task -> .task.join task)\n",
-            )
-            .build()
-            .expect("volume child fixture should compile");
-    let launch = assembler
-        .get(module.value(), "launch")
-        .expect("volume child fixture should define launch");
-    let effect = assembler
-        .apply(&launch, [volume_effects(&assembler.core_values(), volume)])
-        .expect("volume capability should apply to the child launcher");
-    let reflection_host: Arc<dyn ReflectionHost<ReflectionEffects>> = host.clone();
-
-    assert!(matches!(
-        EffectRun::new(
-            &assembler.evaluation_runtime(),
-            &effect,
-            ReflectionEffects,
-            reflection_host.clone(),
-        )
-        .run()
-        .unwrap(),
-        TaskOutcome::Complete(_)
-    ));
-    let final_value = host
-        .state
-        .lock()
-        .unwrap()
-        .store
-        .snapshot()
-        .committed_for_test(volume)
-        .expect("child write must not remove the volume");
-    assert_eq!(
-        assembler.to_binary(&final_value).unwrap(),
-        b"child".as_slice()
-    );
 }
 
 #[test]

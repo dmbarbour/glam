@@ -30,9 +30,8 @@ pub(crate) use machine::HostControl;
 pub use protocol::{
     CommitResult, EffectRequestSpec, HostSnapshot, ReasoningSessionId, ReflectionEffects,
     RequestContext, RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
-    SpecializationRequestWait, SpecializationRequestWork, StandardEffects, TaskCommit,
-    TaskEnvironment, TaskHalt, TaskHost, TaskOutcome, TaskSpecialization, TaskValidation,
-    TransactionContext, ValidationResult,
+    SpecializationRequestWork, StandardEffects, TaskCommit, TaskEnvironment, TaskHalt, TaskHost,
+    TaskOutcome, TaskSpecialization, TaskValidation, TransactionContext, ValidationResult,
 };
 pub(crate) use search::{HostedEffectRun, HostedPoll};
 pub use search::{
@@ -41,22 +40,17 @@ pub use search::{
 };
 pub use token_parse::{TokenCandidate, TokenExpectation, TokenRun, run_token_parser};
 
-#[cfg(test)]
 pub(crate) use requests::anonymous_root;
-#[cfg(test)]
-pub(crate) use requests::assert_task_handle_family_shape;
 pub(crate) use requests::is_anonymous_key;
-#[cfg(test)]
-pub(crate) use requests::task_status_public_value_for_test;
 pub(crate) use requests::{KeyListRequestWork, PreparationPoll, parse_evaluated_severity};
 pub use requests::{
-    Machines, ReflectionHost, ReflectionJournal, ReflectionQueryMutation, ReflectionQueryWriter,
-    ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionTransaction,
-    environment_diagnostic_request_specs, reflection_request_specs,
+    Machines, ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionRequestWork,
+    ReflectionServices, ReflectionTransaction, environment_diagnostic_request_specs,
+    reflection_request_specs,
 };
 pub use store::{
     CoarseConflictAnalysis, ConflictAddress, ConflictAnalysisStrategy, ConflictObservationIndex,
-    ConflictPath, EvaluationQueryHandle, ExactConflictAnalysis, FingerprintConflictAnalysis,
-    ReflectionStore, RuntimeInputEndpointId, RuntimeInputSequence, StoreCommitResult, StoreJournal,
-    StoreSnapshot, VolumeId,
+    ConflictPath, ExactConflictAnalysis, FingerprintConflictAnalysis, ReflectionStore,
+    RuntimeInputEndpointId, RuntimeInputSequence, StoreCommitResult, StoreJournal, StoreSnapshot,
+    VolumeId,
 };

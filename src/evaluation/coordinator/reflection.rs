@@ -6,7 +6,7 @@ use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 
 use crate::core::{EvaluationPanic, RuntimeValueMutator};
-use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority};
+use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
 use super::deferred::terminalize_lazy_cycle;
@@ -15,32 +15,13 @@ use super::{
     EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken,
     EvaluationWorkCoordinator, EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker,
     ExitIntent, ObservationRegistration, ProducerSettlementObligation, RouteHazard,
-    RuntimeFailureLedger, SettlementObligations, TaskFailureLedger, TaskStatusPublisher,
-    TaskStatusUpdate, TaskStatusWake, WakeRegistration, WorkCloseReason, WorkControl,
-    WorkCoordinatorState, WorkKind, WorkRecord, WorkState, demand_session_is_closed,
-    prune_closed_session_registration, publish_task_block_locked, queue_task,
-    register_background_root, remove_ready_task, unregister_background_root,
+    SettlementObligations, TaskStatusPublisher, TaskStatusUpdate, TaskStatusWake, WakeRegistration,
+    WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord, WorkState,
+    demand_session_is_closed, prune_closed_session_registration, publish_task_block_locked,
+    queue_task, register_background_root, remove_ready_task, unregister_background_root,
 };
 
 impl EvaluationWorkCoordinator {
-    #[cfg(test)]
-    pub(in crate::evaluation) fn task_failure_is_acknowledged(
-        &self,
-        task: EvaluationTaskId,
-    ) -> bool {
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        let Some(work) = state.reflection.by_task.get(&task) else {
-            return false;
-        };
-        state
-            .work
-            .get(work)
-            .is_some_and(|record| reflection_work(record).failure_reporting.acknowledged)
-    }
-
     #[cfg(test)]
     pub(in crate::evaluation) fn task_has_status_publisher(&self, task: EvaluationTaskId) -> bool {
         let state = self
@@ -65,55 +46,24 @@ impl EvaluationWorkCoordinator {
         })
     }
 
-    /// Acknowledges a task failure in its immutable producer-owner bucket.
-    ///
-    /// If the task is still active, this also records the timing-independent
-    /// policy which prevents a later failure from entering the ledger. If it
-    /// has already failed and retired, removing the persistent entry is
-    /// sufficient. Both paths share the coordinator transition with terminal
-    /// failure publication, so acknowledgement cannot race between the policy
-    /// check and ledger insertion.
-    pub(in crate::evaluation) fn acknowledge_task_failure(
-        &self,
-        owner: EvaluationSessionId,
-        task: EvaluationTaskId,
-    ) {
-        let mutation = self.admission.mutation_guard();
-        let changed = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let mut changed = false;
-            if let Some(work) = state.reflection.by_task.get(&task).copied()
-                && let Some(record) = state.work.get_mut(&work)
-            {
-                let reflection = reflection_work_mut(record);
-                if reflection.failure_reporting.owner_session == owner
-                    && !reflection.failure_reporting.acknowledged
-                {
-                    reflection.failure_reporting.acknowledged = true;
-                    changed = true;
-                }
-            }
-            changed |= remove_task_failure(&mut state.failures, owner, task);
-            remove_task_failure(&mut state.pending_failure_reports, owner, task);
-            if changed {
-                state.advance_work_generation(
-                    CoordinatorMutationKind::FailureLedger,
-                    RouteHazard::None,
-                );
-            }
-            changed
-        };
-        drop(mutation);
-        if changed {
-            self.notify_all(CoordinatorMutationKind::FailureLedger);
+    /// Makes the failure of the reflection work at `work`, a task with no
+    /// machine of its own, flag its anonymous root, which settlement reports
+    /// (`reflection-tasks-are-machine-tasks`). Annotation tasks set it as
+    /// they activate; a child task's failure flags its machine instead, and a
+    /// Rust-scheduled root's goes to its caller.
+    pub(in crate::evaluation) fn flag_root_on_failure(&self, work: EvaluationWorkId) {
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        if let Some(record) = state.work.get_mut(&work) {
+            reflection_work_mut(record).flags_root = true;
         }
     }
 
-    /// Attaches the one protected-query publisher created by a committed
-    /// public `.task.new` operation.
+    /// Attaches a test's status observer, which records each status the
+    /// task publishes.
+    #[cfg(test)]
     pub(in crate::evaluation) fn attach_reflection_status_publisher(
         &self,
         work: EvaluationWorkId,
@@ -135,8 +85,8 @@ impl EvaluationWorkCoordinator {
         true
     }
 
-    /// Attaches one host-owned lifecycle publisher without consuming the
-    /// protected `.task.status` publication slot.
+    /// Attaches one host-owned lifecycle publisher, beside a test's status
+    /// observer.
     pub(in crate::evaluation) fn attach_reflection_lifecycle_publisher(
         &self,
         work: EvaluationWorkId,
@@ -205,10 +155,7 @@ impl EvaluationWorkCoordinator {
                 kind: WorkKind::Reflection(ReflectionWork {
                     task,
                     launch_parent: None,
-                    failure_reporting: TaskFailureReporting {
-                        owner_session: session.id,
-                        acknowledged: false,
-                    },
+                    flags_root: false,
                     wait: wait.clone(),
                     machine: None,
                     block: None,
@@ -820,30 +767,13 @@ impl EvaluationWorkCoordinator {
             })
             .collect()
     }
-
-    #[cfg(test)]
-    pub(in crate::evaluation) fn reflection_launch_parent(
-        &self,
-        task: EvaluationTaskId,
-    ) -> Option<Option<EvaluationTaskId>> {
-        let state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        let work = state.reflection.by_task.get(&task)?;
-        Some(reflection_work(state.work.get(work)?).launch_parent)
-    }
-}
-
-pub(super) struct TaskFailureReporting {
-    pub(super) owner_session: EvaluationSessionId,
-    pub(super) acknowledged: bool,
 }
 
 pub(super) struct ReflectionWork {
     pub(super) task: EvaluationTaskId,
     pub(super) launch_parent: Option<EvaluationTaskId>,
-    pub(super) failure_reporting: TaskFailureReporting,
+    /// Whether the task's failure flags its anonymous root.
+    pub(super) flags_root: bool,
     pub(super) wait: EvaluationWaitToken,
     pub(super) machine: Option<Box<dyn EvaluationTaskMachine>>,
     pub(super) block: Option<EvaluationTaskBlock>,
@@ -1095,43 +1025,6 @@ pub(super) fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
         ),
         WorkState::Terminalizing => ReflectionWorkState::Terminalizing,
     }
-}
-
-pub(super) fn insert_task_failure(
-    ledger: &mut RuntimeFailureLedger,
-    owner: EvaluationSessionId,
-    task: EvaluationTaskId,
-    failure: RuntimeFailureRoot,
-) {
-    let mut failures = ledger
-        .get(&owner)
-        .cloned()
-        .unwrap_or_else(TaskFailureLedger::new_sync);
-    assert!(
-        !failures.contains_key(&task),
-        "a task failure may enter its owner ledger only once"
-    );
-    failures.insert_mut(task, failure);
-    ledger.insert_mut(owner, failures);
-}
-
-pub(super) fn remove_task_failure(
-    ledger: &mut RuntimeFailureLedger,
-    owner: EvaluationSessionId,
-    task: EvaluationTaskId,
-) -> bool {
-    let Some(mut failures) = ledger.get(&owner).cloned() else {
-        return false;
-    };
-    if !failures.remove_mut(&task) {
-        return false;
-    }
-    if failures.is_empty() {
-        ledger.remove_mut(&owner);
-    } else {
-        ledger.insert_mut(owner, failures);
-    }
-    true
 }
 
 /// Removes reflection work from the coordinator, returning its machine and

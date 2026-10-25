@@ -36,22 +36,21 @@ request and transaction contexts remain bounded to one interpreter callback.
 The reusable `ReflectionEffects` family adds environment lookup, diagnostic
 emission, dictionary iteration, lazy-shell value observation, and child-task
 operations. `main` defines a broader logger specialization with diagnostic
-stream reads and stderr output. Children launched through `.task.new` inherit
-their parent's complete profile, so logger children retain those additional
-operations, its role environment, and its diagnostic destination.
+stream reads and stderr output. Tasks queued on child machines through
+`.child.task` inherit their parent's complete profile, including its
+additional operations, role environment, and diagnostic destination.
 
 `refl` and `meta_refl` annotations instead use the runtime's immutable default
 reflection profile. Their behavior therefore does not depend on whether an
 assembler, macro, logger, or other demand session happened to claim the lazy
-annotation first. Children launched by an annotation inherit that default
-profile from the annotation task.
+annotation first. Tasks an annotation queues inherit that default profile
+from the annotation task.
 
 Reusable reflection request journals retain diagnostics as public roots and
-defer only inventoried pending-task, cancellation, and acknowledgement
-capabilities. Decoded task states and query reads retain public values. Opaque
-task handles contain scalar runtime provenance plus already inventoried task
-and query handles; they contain no hidden semantic value. The mutation token
-used by query writers is borrowed for one guarded callback and cannot escape.
+the machines' port actions as handle values. Their commit-time machine
+updates (`ReflectionUpdate::Wake`, `Interrupt`, `Clear`) name a host and a
+machine path, plus the launching context for a wake; they contain no hidden
+semantic value.
 
 Each annotation lazy's managed reflection computation owns and traces the
 immutable effect, the optional gate target, and a managed completion promise.
@@ -67,7 +66,7 @@ A pre-activation terminal state suppresses launcher construction;
 cancellation or demand closure racing an already-entered launcher keeps the
 terminal state and discards the unused machine. The task's terminal outcome
 is mapped onto the promise; [`evaluation.md`](evaluation.md) describes the
-mapper and failure acknowledgement.
+mapper and the anonymous root that the task's failure flags.
 
 Core operators merely construct tagged request values. Host operations occur
 when the effect task dispatches those requests.
@@ -153,13 +152,13 @@ Each machine step alternates a bounded, callback-free evaluator phase with an
 interpreter phase. Request payloads and evaluator results are rooted before the
 evaluator phase ends; host snapshots, commits, and specialization callbacks run
 only afterward. A specialization constructs non-cloneable request work, whose
-short callback may advance locally, request one semantic demand, wait on an
-explicit shared completion source, or finish. The reflection machine owns that
-demand and later returns an `EvaluatedValue` or structured failure to the
-already-advanced request work. `RequestContext` exposes host/transaction state
-and value construction but no evaluator authority, so suspension cannot replay
-prior callback activity. Poll and evaluator authorities are thread-bound and
-cannot be retained by the `Send` effect machine.
+short callback may advance locally, request one semantic demand, or finish.
+The reflection machine owns that demand and later returns an `EvaluatedValue`
+or structured failure to the already-advanced request work. `RequestContext`
+exposes host/transaction state and value construction but no evaluator
+authority, so suspension cannot replay prior callback activity. Poll and
+evaluator authorities are thread-bound and cannot be retained by the `Send`
+effect machine.
 
 ### Hosted WHNF Request Decoding
 
@@ -195,8 +194,8 @@ boundaries because they publish control, transaction, promise, or host
 obligations. Tests can force the general path, but it shares the decoder, so
 it is not an independent oracle.
 
-`reflection/store.rs` owns the volumes' committed versions, query lifetime,
-transaction snapshots, ordered edit overlays, rebasing, and commit. Its private
+`reflection/store.rs` owns the volumes' committed versions, transaction
+snapshots, ordered edit overlays, rebasing, and commit. Its private
 `reflection/store/conflict.rs` child owns volume-qualified hierarchical conflict
 paths and the pluggable observation strategy/index contract. The store retains
 exact changed addresses independently of host wake state. Blind sets and
@@ -295,12 +294,12 @@ create runtime-owned protected volumes and embed their capabilities. `build()`
 then seals the environment. The first assembler attached to a dormant runtime
 also seals its default annotation-task profile; later assemblers reuse that
 profile and cannot replace it. Each assembler still owns its complete task
-profile for `.task.new`. Runtime resources and the default profile are held as
-siblings: the retained host may keep the resources alive, but has only a weak
-link back to the profile. This avoids a runtime/profile ownership cycle while
-allowing cached evaluation contexts to keep their resources usable. Selecting
-another runtime or conflict strategy after runtime-bound builder state exists
-makes construction fail.
+profile, which its evaluation contexts carry. Runtime resources and the
+default profile are held as siblings: the retained host may keep the
+resources alive, but has only a weak link back to the profile. This avoids a
+runtime/profile ownership cycle while allowing cached evaluation contexts to
+keep their resources usable. Selecting another runtime or conflict strategy
+after runtime-bound builder state exists makes construction fail.
 
 `Assembler::create_volume` installs an explicitly initialized volume and
 returns a Rust owner handle. The handle exposes one closed Glam
@@ -358,32 +357,6 @@ volume to retry. Dropping the Rust owner does not revoke it.
   Recovering a busy child, or clearing a subtree with a busy machine,
   fails having observed it (`ChildBusy`), so it waits as `.child.call`
   does.
-- `.task.new Effect` reserves an opaque child handle plus a private status
-  query; launch is commit-ordered inside a transaction. The status query is
-  updated only when the projected state changes between atoms `'launched` and
-  `'blocked`, terminal tagged values `ok:Value`, `err:Diagnostic`, and
-  `killed:Diagnostic`, and the atoms `'canceled`, `'abandoned`, `'exited`,
-  and `'panicked`. Abandonment means the task's owning demand
-  session closed before it published another terminal result; it is not an
-  ordinary task failure and creates no failure-ledger entry.
-- `.task.join` waits directly and propagates non-success terminal states,
-  adding `{task:{operation:'join, id:TaskId}}` when it forwards a child
-  failure.
-  `.task.status` returns that stored status value unchanged, while
-  `.task.value` and `.task.error` project and transactionally wait for their
-  matching terminal payload. An abandoned task has neither payload;
-  `.task.join` propagates a structured task-abandoned halt. `.task.ack_error`
-  transactionally acknowledges
-  present or future failure reporting without changing any of those
-  observations; it is valid before launch, while running, and after
-  termination. A terminal failure otherwise remains in the coordinator ledger
-  bucket for its producer owner even though its active scheduler record has
-  retired.
-  `.task.cancel` journals a best-effort cancellation request.
-  Same-transaction modifiers are folded into the reserved task before launch,
-  so cancellation can bypass machine construction and acknowledgement can
-  precede an arbitrarily fast failure. Task inspection creates no secondary
-  scheduler work.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,
@@ -397,9 +370,9 @@ reflection API.
 `EvaluationSession` is the external demand-owner lease; it does not store a
 task registry. The runtime coordinator owns reflection work records, their
 machines while not exclusively claimed, task/wait indexes, terminal
-publication, acknowledgement, dependencies, and failure ledgers. Claims take a
-machine from one record, poll outside the coordinator lock, and restore or
-terminalize it before the record becomes claimable again.
+publication, dependencies, and failed anonymous roots. Claims take a machine
+from one record, poll outside the coordinator lock, and restore or terminalize
+it before the record becomes claimable again.
 
 Foreground demand follows exact producer chains. Workers may opportunistically
 claim ready work, and explicit runtime drain includes newly spawned tasks
@@ -411,7 +384,15 @@ decide whether an optimistic transaction conflicts.
 ## Sources of Tasks
 
 `anno refl:Effect Target` creates a lazy gate. Demand launches `Effect`; unit
-success reveals `Target` without forcing it.
+success reveals `Target` without forcing it. An annotation task, `refl` or
+`meta_refl`, has no machine of its own: it is an anonymous root,
+`refl/<abstract task id>`, whose failure flags that root for good, since no
+parent can recover it, even when a demander observed the failure through the
+gate (`reflection-tasks-are-machine-tasks`). A Rust-scheduled root
+(`EffectRun`, `schedule_task`) reports its failure only to its Rust caller,
+and the runtime does not record it. A composed effect run drains the work it
+scheduled and fails on its own result or a stable deadlock, not on a child's
+failure, which is its machine's.
 
 The built-in g front end also decorates ordinary module definitions and named
 declared-object members with one-shot boundaries. Demand queues one scanner on
@@ -420,8 +401,7 @@ queues each named task, in deterministic order, on its own child keyed by its
 name (`.child.task`). Guards are stored with explicit shared-heap effects under
 identities derived from module paths or final object `spec.name`, holding the
 tasks' promises. A failed task's machine stays flagged, and settlement reports
-it (`QuiescenceReport::failed_machines`), which fails a CLI batch as a task
-failure does.
+it (`QuiescenceReport::failed_machines`), which fails a CLI batch.
 
 ## CLI Logger Session
 
@@ -431,10 +411,9 @@ vote retires with `quiescence-reports-unresolved-state`.
 Configured `conf.log` is a reflection task with a broader specialization.
 Main-only requests read the diagnostics waiting at the CLI's `logger`
 machine, buffer stderr or diagnostic output, and coordinate
-`.exit.success`/`.exit.error`. Children inherit those capabilities. The input
-stream has no close request and logger output uses a separate bus, so it
-cannot feed its own input. The root's end closes its demand session,
-abandoning the children it left unjoined.
+`.exit.success`/`.exit.error`. The input stream has no close request and
+logger output uses a separate bus, so it cannot feed its own input. The
+root's end closes its demand session.
 
 See [`diagnostics.md`](diagnostics.md) for the logger's wiring, transactional
 transport, its hand-over to the fallback, and rendering, and

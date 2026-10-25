@@ -16,7 +16,7 @@ use crate::core::{
 };
 use crate::diagnostic::Severity;
 use crate::eval;
-use crate::evaluation::{EvalContext, EvaluationWaitToken};
+use crate::evaluation::EvalContext;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
 /// One additional effect constructor contributed by a task specialization.
@@ -219,9 +219,9 @@ pub trait TaskSpecialization: Clone + Sized + Send + Sync + 'static {
 /// One specialization-owned request machine.
 ///
 /// `poll` is invoked only when no semantic demand from this request is still
-/// active. Before returning [`SpecializationRequestPoll::Demand`] or
-/// [`SpecializationRequestPoll::Wait`], an implementation must advance its
-/// own phase so that resumption cannot repeat host observation or mutation.
+/// active. Before returning [`SpecializationRequestPoll::Demand`], an
+/// implementation must advance its own phase so that resumption cannot repeat
+/// host observation or mutation.
 pub trait SpecializationRequestWork<S: TaskSpecialization>: Send + 'static {
     fn poll(
         &mut self,
@@ -237,28 +237,11 @@ pub enum SpecializationRequestInput {
     Failed(TaskHalt),
 }
 
-/// Explicit shared-completion dependency for specialized request work.
-///
-/// Construction remains private until a public host-completion capability is
-/// designed. Reusable reflection requests use this for task joins.
-pub struct SpecializationRequestWait(EvaluationWaitToken);
-
-impl SpecializationRequestWait {
-    pub(super) fn new(wait: EvaluationWaitToken) -> Self {
-        Self(wait)
-    }
-
-    pub(super) fn into_inner(self) -> EvaluationWaitToken {
-        self.0
-    }
-}
-
 /// One bounded transition from specialization-owned request work.
 #[non_exhaustive]
 pub enum SpecializationRequestPoll {
     Continue,
     Demand(PublicValue),
-    Wait(SpecializationRequestWait),
     Complete(RequestResult),
 }
 
@@ -975,10 +958,6 @@ mod root_inventory_tests {
             SpecializationRequestPoll::Continue => {}
             SpecializationRequestPoll::Demand(value) => {
                 let _: &PublicValue = value;
-            }
-            SpecializationRequestPoll::Wait(wait) => {
-                let SpecializationRequestWait(wait) = wait;
-                let _: &EvaluationWaitToken = wait;
             }
             SpecializationRequestPoll::Complete(result) => {
                 let _: &RequestResult = result;

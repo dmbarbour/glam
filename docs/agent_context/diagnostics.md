@@ -32,9 +32,9 @@ client-owned rendering. Current flow lives in
 - Rendering a composed diagnostic evaluates under
   `{diagnostic:{from:Frames}}`, the frames its sender composed onto it, so
   an error raised by the diagnostic itself says where it came from.
-- `.task.join` adds `{task:{operation:'join, id:Number}}` only when propagating
-  a child failure. Status and error inspection observe the failure as data and
-  add no frame.
+- A child task's failure breaks its reply with the failure's own diagnostic
+  and adds no frame. The CLI's settled report of a failed machine adds
+  `runtime:{op:'machine_failure, args:{machine:Path}}`.
 - Explicit net computation adds `eval:{op:'net_computation}`. Raw `Value::Net`
   is already WHNF and receives none.
 - Public interaction-net construction adds one `eval:{op:'net_construction}`
@@ -124,9 +124,9 @@ client-owned rendering. Current flow lives in
   policy. It is not another semantic severity.
 - The cached Glam formatter arranges client-supplied viewer data. It must not
   gain privileged origin inspection or presentation-policy inference.
-- Retained task, delivery, exit, and killed-work failures make batch execution
-  fail independently of successful diagnostic rendering. Rendering cannot
-  turn a failed batch into success.
+- Failed machines and retained delivery, exit, and killed-work failures make
+  batch execution fail independently of successful diagnostic rendering.
+  Rendering cannot turn a failed batch into success.
 - Settled report obligations are one-shot. Do not retain growing identity sets
   to suppress repeated rendering.
 

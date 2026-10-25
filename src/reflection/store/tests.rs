@@ -1,4 +1,6 @@
 use super::*;
+use std::sync::Weak;
+
 use crate::api::{Assembler, TestValueFacade};
 
 fn same_representation(store: &ReflectionStore, left: &PublicValue, right: &PublicValue) -> bool {
@@ -57,13 +59,6 @@ fn assert_list_values(assembler: &Assembler, actual: &PublicValue, expected: &Pu
     );
 }
 
-fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<EvaluationQueryState> {
-    let value = assembler.evaluator().eval(&value).unwrap();
-    value
-        .with_core_access(|value, access| decode_query_state(access, value))
-        .expect("query state belongs to the fixture runtime")
-}
-
 /// Compile-exhaustive ownership latch for the durable reflection-store
 /// state. Public values are compatibility roots; committed versions are
 /// rooted ephemerons, which keep their values only while their volumes'
@@ -71,8 +66,7 @@ fn evaluate_query_state(assembler: &Assembler, value: PublicValue) -> Option<Eva
 /// volumes (`api-volume-cells`); the promises hold each pending promise's
 /// rooted owner until it resolves or its resolver dies, and the settled
 /// resolutions hold them until their committer publishes; death notices,
-/// query identity, conflict metadata, and revision state are edge-free
-/// companions.
+/// conflict metadata, and revision state are edge-free companions.
 fn assert_store_root_boundary_inventory(
     snapshot: &StoreSnapshot,
     edit: &StoreEdit,
@@ -88,7 +82,6 @@ fn assert_store_root_boundary_inventory(
         next_volume,
         promises,
         kept,
-        query_domain,
         versions,
         strategy,
         values,
@@ -101,7 +94,6 @@ fn assert_store_root_boundary_inventory(
     let _: &Arc<AtomicU64> = next_volume;
     let _: &Arc<Promises> = promises;
     let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeRoot> = kept;
-    let _: &Arc<QueryDomain> = query_domain;
     let _: &RedBlackTreeMapSync<VolumeId, ManagedVolumeVersion> = versions;
     let _: &Arc<dyn ConflictAnalysisStrategy> = strategy;
     let _: &CoreValueFactory = values;
@@ -163,8 +155,6 @@ fn assert_store_root_boundary_inventory(
         heap_volume,
         runtime_volume,
         environment_volume,
-        query_domain,
-        query_retirements,
         next_volume,
         promises,
         lost_resolvers,
@@ -182,8 +172,6 @@ fn assert_store_root_boundary_inventory(
     let _: &VolumeId = heap_volume;
     let _: &VolumeId = runtime_volume;
     let _: &VolumeId = environment_volume;
-    let _: &Arc<QueryDomain> = query_domain;
-    let _: &Receiver<EvaluationQueryId> = query_retirements;
     let _: &Arc<AtomicU64> = next_volume;
     let _: &Arc<Promises> = promises;
     let _: &Receiver<PromiseId> = lost_resolvers;
@@ -198,44 +186,10 @@ fn assert_store_root_boundary_inventory(
     let _: &CoreValueFactory = values;
 }
 
-fn assert_query_root_boundary_inventory(
-    query_poll: &EvaluationQueryPoll,
-    query_state: &EvaluationQueryState,
-    handle: &EvaluationQueryHandle,
-    domain: &QueryDomain,
-) {
-    match query_poll {
-        EvaluationQueryPoll::State { value, observed } => {
-            let _: &PublicValue = value;
-            let _: &bool = observed;
-        }
-        EvaluationQueryPoll::ForeignQueryDomain => {}
-    }
-
-    match query_state {
-        EvaluationQueryState::Pending => {}
-        EvaluationQueryState::Complete(value) => {
-            let _: &PublicValue = value;
-        }
-    }
-
-    let EvaluationQueryHandle {
-        id,
-        domain: handle_domain,
-    } = handle;
-    let _: &EvaluationQueryId = id;
-    let _: &Weak<QueryDomain> = handle_domain;
-    let QueryDomain { next_id, retired } = domain;
-    let _: &AtomicU64 = next_id;
-    let _: &Sender<EvaluationQueryId> = retired;
-}
-
 #[test]
 fn store_root_boundary_inventory_is_complete() {
     let _: fn(&StoreSnapshot, &StoreEdit, &StoreJournal, &ReflectionStore) =
         assert_store_root_boundary_inventory;
-    let _: fn(&EvaluationQueryPoll, &EvaluationQueryState, &EvaluationQueryHandle, &QueryDomain) =
-        assert_query_root_boundary_inventory;
 }
 
 fn unforced_store_value(
@@ -315,106 +269,6 @@ fn snapshot_journal_edits_and_protected_volumes_retain_roots_without_forcing() {
     collector.collect_and_drain_external_owners_for_test();
     assert!(heap_retained.upgrade().is_none());
     assert!(volume_retained.upgrade().is_none());
-}
-
-#[test]
-fn query_result_remains_rooted_after_store_and_handle_retirement() {
-    let assembler = Assembler::default();
-    let mut store = store_with(assembler.core_values());
-    let (result, retained, forced) = unforced_store_value(&store.values);
-    let mut reservation = StoreJournal::new(store.snapshot());
-    let handle = reservation
-        .reserve_query_with(result)
-        .expect("the query should reserve");
-    assert_eq!(store.try_commit(&reservation), StoreCommitResult::Committed);
-    let EvaluationQueryPoll::State { value, observed } = store.snapshot().poll_query(&handle)
-    else {
-        panic!("the committed query should remain in its query domain")
-    };
-    assert!(observed);
-    let EvaluationQueryState::Complete(result) =
-        evaluate_query_state(&assembler, value).expect("the query state should decode")
-    else {
-        panic!("the query should be complete")
-    };
-
-    drop(handle);
-    drop(reservation);
-    drop(store);
-    assembler
-        .core_values()
-        .collect_and_drain_external_owners_for_test();
-    assert!(retained.upgrade().is_some());
-    assert!(!forced.load(Ordering::Acquire));
-    assert_eq!(result.runtime_id(), assembler.values().runtime_id());
-
-    drop(result);
-    assembler
-        .core_values()
-        .collect_and_drain_external_owners_for_test();
-    assert!(retained.upgrade().is_none());
-}
-
-#[test]
-fn query_state_is_transactional_and_retired_after_the_last_handle() {
-    let assembler = Assembler::default();
-    let mut store = store_with(assembler.core_values());
-    let mut reservation = StoreJournal::new(store.snapshot());
-    let handle = reservation.reserve_query().unwrap();
-    assert!(matches!(
-        reservation.poll_query(&handle),
-        EvaluationQueryPoll::State {
-            observed: false,
-            ..
-        }
-    ));
-    assert_eq!(store.try_commit(&reservation), StoreCommitResult::Committed);
-
-    let EvaluationQueryPoll::State { value, observed } = store.snapshot().poll_query(&handle)
-    else {
-        panic!("committed query should belong to its store")
-    };
-    assert!(observed);
-    assert!(matches!(
-        evaluate_query_state(&assembler, value),
-        Some(EvaluationQueryState::Pending)
-    ));
-
-    assert!(store.update_query(&handle, text(&store, "snapshot")));
-    let EvaluationQueryPoll::State { value, .. } = store.snapshot().poll_query(&handle) else {
-        panic!("completed query should remain available")
-    };
-    assert!(matches!(
-        evaluate_query_state(&assembler, value),
-        Some(EvaluationQueryState::Complete(value))
-            if assembler.evaluator().eval(&value).unwrap().as_bytes().unwrap().as_deref()
-                == Some(b"snapshot".as_slice())
-    ));
-
-    assert!(store.update_query(&handle, text(&store, "updated")));
-    let EvaluationQueryPoll::State { value, .. } = store.snapshot().poll_query(&handle) else {
-        panic!("updated query should remain available")
-    };
-    assert!(matches!(
-        evaluate_query_state(&assembler, value),
-        Some(EvaluationQueryState::Complete(value))
-            if assembler.evaluator().eval(&value).unwrap().as_bytes().unwrap().as_deref()
-                == Some(b"updated".as_slice())
-    ));
-
-    let id = handle.id;
-    drop(handle);
-    let maintenance = StoreJournal::new(store.snapshot());
-    assert_eq!(store.try_commit(&maintenance), StoreCommitResult::Committed);
-    let root = store.volume_root(store.runtime_volume).unwrap();
-    let retired =
-        crate::api::Value::from_runtime_root(store.values.construct_runtime_value_root(|access| {
-            lazy_core_value_path(access, root.clone_core_in(access), &query_path(id))
-        }));
-    assert!(
-        assembler.evaluate(&retired).is_err(),
-        "a retired query's state is removed, so reading it is an error"
-    );
 }
 
 #[test]

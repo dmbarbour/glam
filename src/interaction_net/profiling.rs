@@ -108,7 +108,7 @@ pub struct CoordinatorMutationCounts {
     pub session_closure: u64,
     pub terminal_settlement: u64,
     pub work_retirement: u64,
-    pub failure_ledger: u64,
+    pub failed_root: u64,
     pub stage_settlement: u64,
 }
 
@@ -132,7 +132,7 @@ impl CoordinatorMutationCounts {
             + self.session_closure
             + self.terminal_settlement
             + self.work_retirement
-            + self.failure_ledger
+            + self.failed_root
             + self.stage_settlement
     }
 }

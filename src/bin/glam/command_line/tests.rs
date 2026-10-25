@@ -811,7 +811,7 @@ fn token_parser_rejects_outer_cli_and_host_effects() {
         ".read.text \"nested argument\"",
         ".write.script \"g\" \"not emitted\"",
         ".heap.get []",
-        ".task.status 0",
+        ".child.status 'k",
     ];
     for effect in effects {
         let source = format!(
@@ -1033,7 +1033,7 @@ fn invalid_alternative_does_not_veto_a_valid_configured_plan() {
 
 #[test]
 fn configured_cli_api_omits_shared_heap_and_task_capabilities() {
-    for effect in [".heap.get []", ".task.status 1"] {
+    for effect in [".heap.get []", ".child.status 'k"] {
         let source = format!(
             "language g0\nimport 'std\nconf.cli = {effect} =>> .write.script \"g\" \"asm.result = 1\"\n"
         );

@@ -611,7 +611,7 @@ mod tests {
             panic!("the recursive logger should drain prequeued input and vote to exit")
         };
         let report = snapshot.settle().expect("logger exit should settle");
-        assert!(report.task_failures().is_empty());
+        assert!(report.failed_machines().is_empty());
         assert!(report.killed_work().is_empty());
         assert!(
             task.run_with(|| host.deliver()).is_err(),
@@ -649,7 +649,7 @@ mod tests {
     }
 
     #[test]
-    fn settled_report_renders_task_and_delivery_failures_once() {
+    fn settled_report_renders_machine_and_delivery_failures_once() {
         let assembler = Assembler::default();
         let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
@@ -659,7 +659,7 @@ mod tests {
                 concat!(
                     "language g0\n",
                     "import 'std\n",
-                    "refl.effect = .task.new (.fail) >>= (\\_task -> .r ())\n",
+                    "refl.effect = .r () >>= (\\_ -> seq (anno refl:(.fail) ()) (.r ()))\n",
                 ),
             )
             .build()
@@ -686,7 +686,7 @@ mod tests {
             panic!("terminal failures should be retained state, not active work")
         };
         let mut report = snapshot.settle().expect("failure report should settle");
-        assert_eq!(report.task_failures().len(), 1);
+        assert_eq!(report.failed_machines().len(), 1);
         assert_eq!(report.delivery_failures().failures().len(), 1);
 
         let values = assembler.values();
@@ -833,7 +833,7 @@ mod tests {
                 concat!(
                     "language g0\n",
                     "import 'std\n",
-                    "refl.effect = .task.new (.fail) >>= (\\_task -> .r ())\n",
+                    "refl.effect = .r () >>= (\\_ -> seq (anno refl:(.fail) ()) (.r ()))\n",
                 ),
             )
             .build()
@@ -874,7 +874,7 @@ mod tests {
             Ok(())
         });
 
-        assert!(failed, "the task failure fails the batch");
+        assert!(failed, "the failed machine fails the batch");
         assert_eq!(
             *rendered.borrow(),
             [

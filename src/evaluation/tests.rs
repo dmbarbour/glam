@@ -187,11 +187,7 @@ fn client_demand_boundary_inventory_is_complete() {
 /// storage is private to `session`; the durable source inventory latches those
 /// `RuntimeValueRoot` fields directly.
 fn assert_evaluation_session_report_boundary(report: &EvaluationSessionReport) {
-    let EvaluationSessionReport {
-        failures,
-        unfinished,
-    } = report;
-    let _: &coordinator::TaskFailureLedger = failures;
+    let EvaluationSessionReport { unfinished } = report;
     let _: &Vec<EvaluationUnfinishedTask> = unfinished;
     for task in unfinished {
         let EvaluationUnfinishedTask {
@@ -1829,134 +1825,6 @@ fn blocked_machine_context_does_not_retain_its_owner_lease() {
 }
 
 #[test]
-fn task_handle_acknowledges_terminal_failure_after_owner_lease_closes() {
-    let (coordinator, _executor) =
-        test_execution_resources(0).expect("test execution resources should build");
-    let owner = EvaluationSession::shared(&coordinator);
-    let owner_weak = Arc::downgrade(&owner);
-    let owner_id = owner.demand.id;
-    let context = EvalContext::new(&owner);
-    let demand_weak = Arc::downgrade(&context.session);
-    let task = context
-        .schedule_task(|_| Ok(Box::new(Fail)))
-        .expect("failed task should schedule");
-
-    assert!(matches!(
-        context.run_until_quiescent(),
-        EvaluationSessionRun::Complete(_)
-    ));
-    assert!(
-        coordinator
-            .failure_snapshot(owner_id)
-            .contains_key(&task.id())
-    );
-    assert!(matches!(
-        task.wait.terminal_poll(),
-        Some(EvaluationWaitPoll::Failed(_))
-    ));
-
-    drop(context);
-    drop(owner);
-    assert!(owner_weak.upgrade().is_none());
-    assert!(
-        demand_weak.upgrade().is_none(),
-        "a terminal task handle must not retain its former demand state"
-    );
-    assert_eq!(task.runtime_id(), coordinator.runtime_id());
-    assert_eq!(task.session_id(), owner_id);
-
-    task.acknowledge_propagated_failure();
-    assert!(
-        !coordinator
-            .failure_snapshot(owner_id)
-            .contains_key(&task.id()),
-        "the handle reporting identity must route acknowledgement without recovering its owner"
-    );
-    assert!(matches!(
-        task.wait.terminal_poll(),
-        Some(EvaluationWaitPoll::Failed(_))
-    ));
-}
-
-#[test]
-fn failure_ledger_root_survives_collection_after_report_and_handle_drop() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let coordinator = context.coordinator().expect("coordinator should be live");
-    let owner = context.session_id();
-    let failure = structured_failure(&context, "ledger-owned failure");
-    let task = context
-        .schedule_task({
-            let failure = failure.clone();
-            move |_| Ok(Box::new(FailWith(failure)))
-        })
-        .expect("the ledger fixture should schedule");
-    let task_id = task.id();
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("the terminal failure should leave a complete session report")
-    };
-    assert!(report.failures.contains_key(&task_id));
-
-    drop(report);
-    drop(task);
-    let ledger_live = context
-        .values()
-        .collect_managed_for_test()
-        .expect("the coordinator failure ledger should retain its managed root");
-    let ledger_roots = ledger_live.root_entries();
-    assert!(coordinator.failure_snapshot(owner).contains_key(&task_id));
-
-    coordinator.acknowledge_task_failure(owner, task_id);
-    let reclaimed = context
-        .values()
-        .collect_managed_for_test()
-        .expect("acknowledging the failure ledger should release its managed root");
-    assert_eq!(reclaimed.root_entries() + 1, ledger_roots);
-    assert_eq!(reclaimed.finalized_slots(), 1);
-}
-
-#[test]
-fn evaluation_session_report_root_survives_after_ledger_acknowledgement() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let failure = structured_failure(&context, "session-report failure");
-    let task = context
-        .schedule_task({
-            let failure = failure.clone();
-            move |_| Ok(Box::new(FailWith(failure)))
-        })
-        .expect("the report fixture should schedule");
-    let task_id = task.id();
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("the terminal failure should leave a complete session report")
-    };
-    task.acknowledge_failure();
-    drop(task);
-
-    let report_live = context
-        .values()
-        .collect_managed_for_test()
-        .expect("the detached session report should retain its managed failure root");
-    let report_roots = report_live.root_entries();
-    let retained = report
-        .failures
-        .get(&task_id)
-        .expect("the report should preserve its persistent failure snapshot");
-    retained.direct_value_roots()[0].assert_same_representation_for_test(
-        context.values(),
-        &Value::binary_from_text("session-report failure"),
-    );
-
-    drop(report);
-    let reclaimed = context
-        .values()
-        .collect_managed_for_test()
-        .expect("dropping the session report should release its managed failure root");
-    assert_eq!(reclaimed.root_entries() + 1, report_roots);
-    assert_eq!(reclaimed.finalized_slots(), 1);
-}
-
-#[test]
 fn task_handle_cancellation_is_harmless_after_owner_closure() {
     let (coordinator, _executor) =
         test_execution_resources(0).expect("test execution resources should build");
@@ -2308,7 +2176,6 @@ fn exit_wait_does_not_publish_task_status_or_failure() {
     let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
         panic!("a permanent exit vote should remain unfinished")
     };
-    assert!(report.failures.is_empty());
     assert_eq!(report.unfinished.len(), 1);
     assert_eq!(
         report.unfinished[0].state,
@@ -2320,10 +2187,6 @@ fn exit_wait_does_not_publish_task_status_or_failure() {
         context.poll_reflection_task(&task),
         EvaluationWaitPoll::Pending(_)
     ));
-    assert!(coordinator.failure_snapshot(context.session.id).is_empty());
-
-    task.acknowledge_failure();
-    assert!(coordinator.failure_snapshot(context.session.id).is_empty());
     assert!(matches!(
         coordinator
             .reflection_snapshots(context.session.id)
@@ -2372,7 +2235,6 @@ fn retryable_exit_wake_skips_intermediate_task_statuses() {
     let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
         panic!("observation wake should resume and complete the exit voter")
     };
-    assert!(report.failures.is_empty());
     assert!(report.unfinished.is_empty());
     assert!(matches!(
         statuses.0.lock().unwrap().as_slice(),
@@ -2405,7 +2267,6 @@ fn task_join_dependency_remains_pending_for_exit_waiting_child() {
     let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
         panic!("a join on an exit-waiting child must remain pending")
     };
-    assert!(report.failures.is_empty());
     assert_eq!(report.unfinished.len(), 2);
     assert!(matches!(
         context.poll_reflection_task(&child),
@@ -2916,18 +2777,6 @@ impl EvaluationTaskMachine for Fail {
     }
 }
 
-struct FailWith(Arc<EvaluationFailure>);
-
-impl EvaluationTaskMachine for FailWith {
-    fn poll(
-        &mut self,
-        context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Failed(context.root_failure(self.0.clone()))
-    }
-}
-
 struct Signal(Option<mpsc::Sender<()>>);
 
 impl EvaluationTaskMachine for Signal {
@@ -3135,34 +2984,6 @@ impl EvaluationTaskMachine for AssignPromiseAfterRelease {
             published.expect_without_debug("worker should resolve the host promise once");
         published.notify();
         EvaluationMachinePoll::Complete(context.root_unit())
-    }
-}
-
-struct FailAfterRelease {
-    started: Option<mpsc::Sender<()>>,
-    release: mpsc::Receiver<()>,
-}
-
-impl EvaluationTaskMachine for FailAfterRelease {
-    fn poll(
-        &mut self,
-        context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
-        if let Some(started) = self.started.take() {
-            started
-                .send(())
-                .expect("test start receiver should remain open");
-        }
-        // Waiting on the test is host work, so it suspends the mutator.
-        context.suspend(|| {
-            self.release
-                .recv_timeout(Duration::from_secs(2))
-                .expect("test should release the task")
-        });
-        EvaluationMachinePoll::Failed(
-            context.root_failure(evaluation_failure("acknowledged task failure")),
-        )
     }
 }
 
@@ -4132,7 +3953,6 @@ fn completed_deferred_tasks_release_their_machines() {
             reflection_active: 0,
             reflection_terminal: 0,
             reflection_by_id: 0,
-            unacknowledged_failures: 0,
             deferred_active: 0,
             deferred_terminal: 0,
             deferred_by_wait: 0,
@@ -4256,15 +4076,9 @@ fn terminal_reflection_handles_preserve_late_polling_without_records() {
     assert_eq!(cancelled.cancel(), EvaluationTaskCancellation::Requested);
     assert_eq!(cancelled.wait().exact_subscription_count(), 0);
 
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+    let EvaluationSessionRun::Complete(_) = context.run_until_quiescent() else {
         panic!("terminal tasks should leave no unfinished work");
     };
-    assert_eq!(report.failures.size(), 1);
-    assert!(report.failures.contains_key(&failed.id()));
-    let ledger_failure = report
-        .failures
-        .get(&failed.id())
-        .expect("the failure ledger should retain the failed task");
     let EvaluationWaitPoll::Failed(wait_failure) = context.poll_reflection_task(&failed) else {
         panic!("the task wait should publish the failed terminal")
     };
@@ -4276,11 +4090,7 @@ fn terminal_reflection_handles_preserve_late_polling_without_records() {
         panic!("the task status should publish the failed terminal")
     };
     assert!(Arc::ptr_eq(
-        ledger_failure.as_failure(),
-        wait_failure.as_failure()
-    ));
-    assert!(Arc::ptr_eq(
-        ledger_failure.as_failure(),
+        wait_failure.as_failure(),
         status_failure.as_failure()
     ));
     assert_eq!(complete.wait().exact_subscription_count(), 0);
@@ -4314,7 +4124,6 @@ fn terminal_reflection_handles_preserve_late_polling_without_records() {
             reflection_active: 0,
             reflection_terminal: 0,
             reflection_by_id: 0,
-            unacknowledged_failures: 1,
             deferred_active: 0,
             deferred_terminal: 0,
             deferred_by_wait: 0,
@@ -4764,7 +4573,6 @@ fn terminal_reflection_machines_drop_after_releasing_runtime_locks() {
             reflection_active: 0,
             reflection_terminal: 0,
             reflection_by_id: 0,
-            unacknowledged_failures: 0,
             deferred_active: 0,
             deferred_terminal: 0,
             deferred_by_wait: 0,
@@ -4775,70 +4583,6 @@ fn terminal_reflection_machines_drop_after_releasing_runtime_locks() {
         },
         "the terminal record must be retired after its machine is dropped"
     );
-}
-
-/// Publishing a failed reflection task's `.task.status` publishes its
-/// failure's diagnostic. Publication holds the runtime mutation gate for
-/// reading, and Linux's `RwLock` refuses further readers once a writer
-/// queues, so the status value must not take the gate again, as evaluating
-/// the diagnostic would; it is composed without evaluation
-/// (`senders-never-evaluate-diagnostics`). The publisher queues a settlement
-/// before building the status value.
-#[cfg(target_os = "linux")]
-#[test]
-fn failed_status_publication_never_retakes_the_gate_behind_a_queued_settlement() {
-    let (finished, finish) = mpsc::channel();
-    let scenario = thread::spawn(move || {
-        let fixture = SameRuntimeFixture::new();
-        let context = fixture.context();
-        let coordinator = context
-            .coordinator()
-            .expect("test task must retain its coordinator");
-        let task = context
-            .schedule_task(|_| Ok(Box::new(ProbePollOutcomeMachine(ProbePollOutcome::Failed))))
-            .expect("reflection task should schedule");
-        let settlement = Arc::new(Mutex::new(None));
-        let publisher = TaskStatusPublisher::new({
-            let coordinator = Arc::downgrade(&coordinator);
-            let values = crate::api::Values::from_core_factory(context.values().clone());
-            let settlement = settlement.clone();
-            move |_mutation, status| {
-                if matches!(status, EvaluationTaskStatus::Failed(_)) {
-                    let coordinator = coordinator
-                        .upgrade()
-                        .expect("publication must retain its coordinator");
-                    *settlement.lock().expect("settlement slot") =
-                        Some(coordinator.queue_settlement_for_test());
-                    drop(crate::reflection::task_status_public_value_for_test(
-                        &values, status,
-                    ));
-                }
-                TaskStatusWake::new(|| {})
-            }
-        });
-        assert!(coordinator.attach_reflection_status_publisher(task.work, publisher));
-        assert_eq!(
-            context.pump_wait(task.wait(), 256),
-            EvaluationPumpOutcome::TargetReady
-        );
-        settlement
-            .lock()
-            .expect("settlement slot")
-            .take()
-            .expect("the failed status must publish")
-            .join()
-            .expect("the queued settlement must complete");
-        let _ = finished.send(());
-    });
-    match finish.recv_timeout(Duration::from_secs(30)) {
-        Ok(()) => scenario.join().expect("the scenario completed"),
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            panic!("publishing a failed task status deadlocked behind a queued settlement")
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            std::panic::resume_unwind(scenario.join().expect_err("the scenario panicked"))
-        }
-    }
 }
 
 /// A lazy route whose only demand lease is `wait`: finished, or blocked on a
@@ -5229,10 +4973,13 @@ fn owner_session_drop_exactly_wakes_a_cross_session_task_waiter() {
             .ready_task_count(),
         1
     );
-    let EvaluationSessionRun::Complete(report) = observer.run_until_quiescent() else {
+    let EvaluationSessionRun::Complete(_) = observer.run_until_quiescent() else {
         panic!("owner abandonment should wake and terminalize the follower")
     };
-    assert!(report.failures.contains_key(&follower.id()));
+    assert!(matches!(
+        observer.poll_reflection_task(&follower),
+        EvaluationWaitPoll::Failed(_)
+    ));
 }
 
 #[test]
@@ -5998,136 +5745,6 @@ fn assigned_task_promise_is_removed_before_later_task_terminalization() {
     };
     value.assert_same_representation_for_test(context.values(), &unit(&context));
     assert_eq!(context.task_registry_counts().promises_active, 0);
-}
-
-#[test]
-fn long_lived_session_retains_only_unacknowledged_terminal_failures() {
-    const ITERATIONS: usize = 64;
-
-    let context = EvalContext::standalone();
-    let mut completed = Vec::with_capacity(ITERATIONS);
-    let mut failed = Vec::with_capacity(ITERATIONS);
-    let mut cancelled = Vec::with_capacity(ITERATIONS);
-    let mut promises = Vec::with_capacity(ITERATIONS);
-
-    for index in 0..ITERATIONS {
-        let complete = context
-            .schedule_task(|_| Ok(Box::new(Complete)))
-            .expect("successful reflection task should schedule");
-        assert_eq!(
-            context.pump_wait(complete.wait(), 256),
-            EvaluationPumpOutcome::TargetReady
-        );
-        completed.push(complete);
-
-        let failure = context
-            .schedule_task(|_| Ok(Box::new(Fail)))
-            .expect("failing reflection task should schedule");
-        assert_eq!(
-            context.pump_wait(failure.wait(), 256),
-            EvaluationPumpOutcome::TargetReady
-        );
-        failed.push(failure);
-
-        let cancellation = context
-            .schedule_task(|_| Ok(Box::new(Complete)))
-            .expect("cancelled reflection task should schedule");
-        assert_eq!(cancellation.cancel(), EvaluationTaskCancellation::Requested);
-        cancelled.push(cancellation);
-
-        let (lazy, _lazy_root) =
-            rooted_semantic_lazy_value(&crate::core::test_value_factory(), |evaluator| {
-                Ok(evaluator.with_value_access(|access| access.values().unit()))
-            });
-        let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-            &context,
-            &Value::Lazy(lazy),
-        )
-        .expect("successful lazy should evaluate");
-        context.values().with_boundary_access(|access| {
-            access.assert_same_representation_for_test(&actual, &access.unit());
-        });
-
-        let (lazy, _lazy_root) =
-            rooted_semantic_lazy_value(&crate::core::test_value_factory(), |_| {
-                Err(crate::core::EvaluationHalt::new("long-lived lazy failure"))
-            });
-        assert!(
-            crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-                &context,
-                &Value::Lazy(lazy)
-            )
-            .is_err(),
-            "failed lazy should terminate without retaining its task record"
-        );
-
-        let (promise, owner_task, _owner_context) = context
-            .task_owned_promise()
-            .expect("task-owned promise should register");
-        let wait = promise
-            .task(context.values())
-            .expect("task-owned promise should expose its wait")
-            .wait()
-            .clone();
-        if index % 2 == 0 {
-            set_promise(&context, &promise, unit(&context))
-                .expect_without_debug("successful promise should complete once");
-        } else {
-            fail_promise_message(&context, &promise, "long-lived promise failure")
-                .expect_without_debug("failed promise should complete once");
-        }
-        context.complete_wait(owner_task.wait());
-        promises.push(wait);
-    }
-
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("terminal stress fixtures should leave no unfinished work")
-    };
-    assert_eq!(report.failures.size(), ITERATIONS);
-    assert!(report.unfinished.is_empty());
-
-    let counts = context.task_registry_counts();
-    assert_eq!(counts.reflection_active, 0);
-    assert_eq!(counts.reflection_terminal, 0);
-    assert_eq!(counts.reflection_by_id, 0);
-    assert_eq!(counts.unacknowledged_failures, ITERATIONS);
-    assert_eq!(counts.deferred_active, 0);
-    assert_eq!(counts.deferred_terminal, 0);
-    assert_eq!(counts.deferred_by_wait, 0);
-    assert_eq!(counts.deferred_by_task, 0);
-    assert_eq!(counts.promises_active, 0);
-    assert_eq!(counts.promises_terminal, 0);
-    assert_eq!(counts.owned_promise_waits, 0);
-
-    assert!(matches!(
-        context.poll_reflection_task(&completed[0]),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    assert!(matches!(
-        context.poll_reflection_task(&failed[0]),
-        EvaluationWaitPoll::Failed(_)
-    ));
-    assert_eq!(
-        context.poll_reflection_task(&cancelled[0]),
-        EvaluationWaitPoll::Cancelled
-    );
-    assert!(matches!(
-        context.poll_wait(&promises[0]),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    assert!(matches!(
-        context.poll_wait(&promises[1]),
-        EvaluationWaitPoll::Failed(_)
-    ));
-
-    for task in &failed {
-        task.acknowledge_failure();
-    }
-    assert_eq!(
-        context.task_registry_counts().unacknowledged_failures,
-        0,
-        "acknowledgement should release the only retained terminal session state"
-    );
 }
 
 #[test]
@@ -7119,13 +6736,9 @@ fn running_cancellation_waits_for_release_then_wins_over_the_poll_result() {
             "the cancellation result must remain readable after record retirement"
         );
     }
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+    let EvaluationSessionRun::Complete(_) = context.run_until_quiescent() else {
         panic!("cancelled running work should leave no unfinished task")
     };
-    assert!(
-        report.failures.is_empty(),
-        "the machine's discarded failure must not enter the reporting ledger"
-    );
 }
 
 #[test]
@@ -7240,10 +6853,9 @@ fn session_drain_completes_owned_roots_without_promising_fifo_order() {
     coordinator.executor_started(1);
     first.spark(unit(&first));
 
-    let EvaluationSessionRun::Complete(report) = first.run_until_quiescent() else {
+    let EvaluationSessionRun::Complete(_) = first.run_until_quiescent() else {
         panic!("the first session's owned roots should complete")
     };
-    assert!(report.failures.is_empty());
     let mut first_polls = polls.lock().unwrap().clone();
     first_polls.sort_unstable();
     assert_eq!(first_polls, [1, 1, 2, 3]);
@@ -7252,10 +6864,9 @@ fn session_drain_completes_owned_roots_without_promising_fifo_order() {
         EvaluationWaitPoll::Pending(_)
     ));
 
-    let EvaluationSessionRun::Complete(report) = other.run_until_quiescent() else {
+    let EvaluationSessionRun::Complete(_) = other.run_until_quiescent() else {
         panic!("the unrelated session's task should remain independently runnable")
     };
-    assert!(report.failures.is_empty());
     let mut all_polls = polls.lock().unwrap().clone();
     all_polls.sort_unstable();
     assert_eq!(all_polls, [1, 1, 2, 3, 9]);
@@ -7263,221 +6874,6 @@ fn session_drain_completes_owned_roots_without_promising_fifo_order() {
     fixture.runtime.pump_until_stable();
     coordinator.executor_stopped();
     assert_eq!(coordinator.retained_spark_count(), 0);
-}
-
-#[test]
-fn error_acknowledgement_is_timing_independent_and_preserves_task_results() {
-    let context = EvalContext::standalone();
-
-    let reserved = context.reserve_task().expect("task should reserve");
-    reserved.acknowledge_failure();
-    assert!(
-        context
-            .coordinator()
-            .expect("reserved task must retain its coordinator")
-            .task_failure_is_acknowledged(reserved.id())
-    );
-    context.cancel_reserved_task(&reserved);
-
-    let blocked = context
-        .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
-        .expect("blocked task should schedule");
-    assert_eq!(
-        context.pump_wait(blocked.wait(), 256),
-        EvaluationPumpOutcome::NoProgress
-    );
-    blocked.acknowledge_failure();
-    assert!(
-        context
-            .coordinator()
-            .expect("blocked task must retain its coordinator")
-            .task_failure_is_acknowledged(blocked.id())
-    );
-    assert_eq!(blocked.cancel(), EvaluationTaskCancellation::Requested);
-
-    let (started_sender, started_receiver) = mpsc::channel();
-    let (release_sender, release_receiver) = mpsc::channel();
-    let running = context
-        .schedule_task(move |_| {
-            Ok(Box::new(FailAfterRelease {
-                started: Some(started_sender),
-                release: release_receiver,
-            }))
-        })
-        .expect("running task should schedule");
-    let worker = {
-        let context = context.clone();
-        let wait = running.wait().clone();
-        std::thread::spawn(move || context.pump_wait(&wait, 256))
-    };
-    started_receiver
-        .recv_timeout(Duration::from_secs(2))
-        .expect("worker should claim the running task");
-    running.acknowledge_failure();
-    release_sender
-        .send(())
-        .expect("running task should still be waiting");
-    assert_eq!(
-        worker.join().expect("worker should not panic"),
-        EvaluationPumpOutcome::TargetReady
-    );
-    assert!(matches!(
-        context.poll_reflection_task(&running),
-        EvaluationWaitPoll::Failed(error)
-            if error.to_string() == "acknowledged task failure"
-    ));
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("only terminal tasks should remain")
-    };
-    assert!(report.failures.is_empty());
-
-    let failed = context
-        .schedule_task(|_| Ok(Box::new(Fail)))
-        .expect("failing task should schedule");
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("failing task should terminate")
-    };
-    assert_eq!(report.failures.size(), 1);
-    assert!(report.failures.contains_key(&failed.id()));
-    failed.acknowledge_failure();
-    failed.acknowledge_failure();
-    for _ in 0..2 {
-        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-            panic!("acknowledged task should remain terminal")
-        };
-        assert!(
-            report.failures.is_empty(),
-            "acknowledged failure must stay absent from repeated reports"
-        );
-    }
-    assert!(matches!(
-        context.poll_reflection_task(&failed),
-        EvaluationWaitPoll::Failed(error) if error.to_string() == "reasoning failed"
-    ));
-
-    let successful = context
-        .schedule_task(|_| Ok(Box::new(Complete)))
-        .expect("successful task should schedule");
-    assert_eq!(
-        context.pump_wait(successful.wait(), 256),
-        EvaluationPumpOutcome::TargetReady
-    );
-    successful.acknowledge_failure();
-    assert!(matches!(
-        context.poll_reflection_task(&successful),
-        EvaluationWaitPoll::Complete(_)
-    ));
-
-    let cancelled = context
-        .schedule_task(|_| Ok(Box::new(Complete)))
-        .expect("cancelled task should schedule");
-    assert_eq!(cancelled.cancel(), EvaluationTaskCancellation::Requested);
-    cancelled.acknowledge_failure();
-    assert_eq!(
-        context.poll_reflection_task(&cancelled),
-        EvaluationWaitPoll::Cancelled
-    );
-    let counts = context.task_registry_counts();
-    assert_eq!(counts.reflection_active, 0);
-    assert_eq!(counts.reflection_terminal, 0);
-    assert_eq!(counts.reflection_by_id, 0);
-    assert_eq!(
-        counts.unacknowledged_failures, 0,
-        "acknowledging before or after failure must leave no reporting entry"
-    );
-}
-
-#[test]
-fn runtime_failure_ledger_preserves_owner_buckets_and_persistent_snapshots() {
-    let (coordinator, _executor) = test_execution_resources(0).expect("test runtime should build");
-    let first_owner = EvaluationSession::shared(&coordinator);
-    let second_owner = EvaluationSession::shared(&coordinator);
-    let first_context = EvalContext::new(&first_owner);
-    let second_context = EvalContext::new(&second_owner);
-
-    let first_emission = Value::Dict(crate::core::Dict::new_sync().insert(
-        crate::core::Key::atom_from_text("owner"),
-        Value::Number(1.into()),
-    ));
-    let first_failure =
-        Arc::new(first_context.values().with_boundary_access(|access| {
-            EvaluationFailure::emission_in(&access, first_emission)
-        }));
-    let first_task = first_context
-        .schedule_task({
-            let first_failure = first_failure.clone();
-            move |_| Ok(Box::new(FailWith(first_failure)))
-        })
-        .expect("first failing task should schedule");
-    let second_task = second_context
-        .schedule_task(|_| Ok(Box::new(Fail)))
-        .expect("second failing task should schedule");
-    assert_eq!(
-        second_task.id().get(),
-        first_task.id().get() + 1,
-        "task identities should be adjacent in the shared runtime domain"
-    );
-
-    let EvaluationSessionRun::Complete(first_report) = first_context.run_until_quiescent() else {
-        panic!("the first owner should drain its failing task")
-    };
-    let EvaluationSessionRun::Complete(second_report) = second_context.run_until_quiescent() else {
-        panic!("the second owner should drain its failing task")
-    };
-    assert!(first_report.failures.contains_key(&first_task.id()));
-    assert!(!first_report.failures.contains_key(&second_task.id()));
-    assert!(second_report.failures.contains_key(&second_task.id()));
-    assert!(!second_report.failures.contains_key(&first_task.id()));
-
-    let first_snapshot = first_report.failures.clone();
-    let first_owner_id = first_context.session_id();
-    let second_owner_id = second_context.session_id();
-    let first_task_id = first_task.id();
-    let second_task_id = second_task.id();
-    drop(first_task);
-    drop(first_owner);
-
-    let ledger = coordinator.failure_ledger_snapshot();
-    assert_eq!(ledger.size(), 2);
-    assert!(
-        ledger
-            .get(&first_owner_id)
-            .is_some_and(|failures| failures.contains_key(&first_task_id)),
-        "owner closure and final task-handle drop must not erase its failure bucket"
-    );
-    assert!(
-        ledger
-            .get(&second_owner_id)
-            .is_some_and(|failures| failures.contains_key(&second_task_id))
-    );
-
-    first_context.acknowledge_task_failure(first_owner_id, first_task_id);
-    assert!(
-        first_snapshot.contains_key(&first_task_id),
-        "persistent report snapshots must remain valid after later acknowledgement"
-    );
-    let ledger = coordinator.failure_ledger_snapshot();
-    assert!(
-        !ledger.contains_key(&first_owner_id),
-        "acknowledging the last owner failure should remove its empty bucket"
-    );
-    assert!(
-        ledger
-            .get(&second_owner_id)
-            .is_some_and(|failures| failures.contains_key(&second_task_id)),
-        "acknowledgement must not disturb another owner bucket"
-    );
-    drop(first_context);
-    let retained_failure = first_snapshot
-        .get(&first_task_id)
-        .expect("the persistent report should retain the acknowledged failure");
-    assert!(Arc::ptr_eq(retained_failure.as_failure(), &first_failure));
-    assert_eq!(retained_failure.direct_value_roots().len(), 1);
-
-    drop(second_task);
-    drop(second_owner);
-    second_context.acknowledge_task_failure(second_owner_id, second_task_id);
-    assert!(coordinator.failure_ledger_snapshot().is_empty());
 }
 
 #[test]
@@ -7495,7 +6891,6 @@ fn run_until_quiescent_drains_tasks_spawned_during_the_run() {
     let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
         panic!("finite parent and child tasks should drain");
     };
-    assert!(report.failures.is_empty());
     assert!(report.unfinished.is_empty());
     assert_eq!(context.reflection_task_count(), 0);
 }
@@ -7525,7 +6920,6 @@ fn a_session_drain_claims_a_task_yielded_after_its_claim_missed() {
     let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
         panic!("a task yielded back during the drain should still drain");
     };
-    assert!(report.failures.is_empty());
     assert!(report.unfinished.is_empty());
 }
 
@@ -7587,31 +6981,7 @@ fn a_session_drain_waits_for_a_task_claimed_before_it_decides() {
     let EvaluationSessionRun::Complete(report) = run else {
         panic!("a task claimed before the drain decides should still drain");
     };
-    assert!(report.failures.is_empty());
     assert!(report.unfinished.is_empty());
-}
-
-#[test]
-fn run_until_quiescent_collects_failures_without_short_circuiting() {
-    let context = isolated_standalone_context();
-    let failed = context.schedule_task(|_| Ok(Box::new(Fail))).unwrap();
-    context.schedule_task(|_| Ok(Box::new(Complete))).unwrap();
-
-    for _ in 0..2 {
-        let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-            panic!("terminal failures do not leave unfinished work");
-        };
-        assert_eq!(report.failures.size(), 1);
-        assert_eq!(
-            report
-                .failures
-                .get(&failed.id())
-                .expect("failed task should remain in the reporting ledger")
-                .to_string(),
-            "reasoning failed"
-        );
-        assert!(report.unfinished.is_empty());
-    }
 }
 
 #[test]
@@ -7624,7 +6994,6 @@ fn run_until_quiescent_reports_stable_blocked_tasks() {
     let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
         panic!("an unchanged local blockage should be diagnosed as deadlock");
     };
-    assert!(report.failures.is_empty());
     assert_eq!(report.unfinished.len(), 1);
     assert_eq!(report.unfinished[0].task, task.id());
     assert_eq!(
@@ -7824,10 +7193,13 @@ fn resolver_owned_promise_dependency_reports_no_synthetic_producer() {
     fail_promise_message(&context, &promise, "resolver promise failed")
         .expect_without_debug("the resolver promise should fail once");
     assert_eq!(promise.exact_subscription_count(context.values()), 0);
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
+    let EvaluationSessionRun::Complete(_) = context.run_until_quiescent() else {
         panic!("the exact promise wake should terminalize its follower")
     };
-    assert!(report.failures.contains_key(&follower.id()));
+    assert!(matches!(
+        context.poll_reflection_task(&follower),
+        EvaluationWaitPoll::Failed(_)
+    ));
 }
 
 #[test]
@@ -7956,10 +7328,9 @@ fn a_strict_follower_turns_task_abandonment_into_a_failure() {
     let EvaluationSessionRun::Complete(report) = observer.run_until_quiescent() else {
         panic!("a closed producer session cannot leave retryable work")
     };
-    let failure = report
-        .failures
-        .get(&follower.id())
-        .expect("the cross-session follower should fail");
+    let EvaluationWaitPoll::Failed(failure) = observer.poll_reflection_task(&follower) else {
+        panic!("the cross-session follower should fail")
+    };
     assert!(
         failure.to_string().contains("was abandoned"),
         "strict waiting should turn abandonment into its own reportable failure"
@@ -8215,7 +7586,6 @@ fn killed_work_report_diagnostic_survives_after_settlement_owners_retire() {
         .settle()
         .expect("the unchanged deadlock should settle");
     drop(forced);
-    task.acknowledge_failure();
     drop(task);
     drop(failure);
 
@@ -8510,7 +7880,7 @@ fn ready_settlement_publishes_exited_once_and_retains_exit_errors() {
                 && left.session_id() == right.session_id()
                 && left.task_id() == right.task_id())
     );
-    assert!(report.task_failures().is_empty());
+    assert!(report.failed_machines().is_empty());
     assert!(report.dispositions().iter().any(|disposition| {
         matches!(
             disposition.kind(),
@@ -8606,7 +7976,7 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
                 && left.session_id() == right.session_id()
                 && left.task_id() == right.task_id())
     );
-    assert!(report.task_failures().is_empty());
+    assert!(report.failed_machines().is_empty());
     assert_eq!(
         context.poll_reflection_task(&child),
         EvaluationWaitPoll::Exited
@@ -9317,223 +8687,6 @@ fn pending_reflection_activation_roots_retire_with_their_reservations() {
         activation_reclaimed.finalized_slots() >= 1,
         "the temporary activation root must retire after task ownership is installed"
     );
-}
-
-#[derive(Clone, Copy)]
-enum LaunchedChildOutcome {
-    Complete,
-    Fail,
-    Cancel,
-    Abandon,
-}
-
-struct LaunchedChildFixture(LaunchedChildOutcome);
-
-impl ReflectionTaskLauncher for LaunchedChildFixture {
-    fn build(
-        &self,
-        _context: EvalContext,
-        _effect: RuntimeValueRoot,
-        _result_policy: ReflectionTaskResultPolicy,
-    ) -> Result<Box<dyn EvaluationTaskMachine>, Arc<EvaluationFailure>> {
-        Ok(match self.0 {
-            LaunchedChildOutcome::Complete => Box::new(Complete),
-            LaunchedChildOutcome::Fail => Box::new(Fail),
-            LaunchedChildOutcome::Cancel | LaunchedChildOutcome::Abandon => Box::new(AlwaysBlocked),
-        })
-    }
-}
-
-#[test]
-fn direct_effect_child_launch_publishes_causal_parent_only_on_commit() {
-    let fixture = SameRuntimeFixture::new();
-    let session = fixture
-        .runtime
-        .new_evaluation_session()
-        .expect("direct effect session should build");
-    let profile = Arc::new(ReflectionTaskProfile::sealed(Arc::new(
-        LaunchedChildFixture(LaunchedChildOutcome::Complete),
-    )));
-    let context = EvalContext::with_task_profile(&session, profile);
-    let coordinator = context.coordinator().expect("runtime has a coordinator");
-    let parent = context
-        .task_id()
-        .expect("direct effect has a task identity");
-
-    let discarded = context
-        .reserve_reflection_task(
-            context
-                .values()
-                .construct_runtime_value_root(|_| Value::binary_from_text("discarded")),
-        )
-        .expect("child reservation should succeed");
-    let discarded_id = discarded.handle().id();
-    assert_eq!(
-        coordinator.reflection_launch_parent(discarded_id),
-        Some(None)
-    );
-    drop(discarded);
-    assert_eq!(coordinator.reflection_launch_parent(discarded_id), None);
-
-    let pending = context
-        .reserve_reflection_task(
-            context
-                .values()
-                .construct_runtime_value_root(|_| Value::binary_from_text("committed")),
-        )
-        .expect("child reservation should succeed");
-    let child = pending.handle().clone();
-    assert_eq!(coordinator.reflection_launch_parent(child.id()), Some(None));
-    let statuses = Arc::new(RecordedStatuses::default());
-    pending.commit(
-        RecordedStatuses::publisher(&statuses),
-        PendingTaskPolicy::default(),
-    );
-    assert_eq!(
-        coordinator.reflection_launch_parent(child.id()),
-        Some(Some(parent))
-    );
-    assert!(poll_one_runtime_work(&coordinator));
-    assert!(matches!(
-        child.wait().terminal_poll(),
-        Some(EvaluationWaitPoll::Complete(_))
-    ));
-    assert_eq!(coordinator.reflection_launch_parent(child.id()), None);
-}
-
-#[test]
-fn scheduled_effect_children_keep_causal_parent_without_implicit_join() {
-    for outcome in [
-        LaunchedChildOutcome::Complete,
-        LaunchedChildOutcome::Fail,
-        LaunchedChildOutcome::Cancel,
-        LaunchedChildOutcome::Abandon,
-    ] {
-        let fixture = SameRuntimeFixture::new();
-        let session = fixture
-            .runtime
-            .new_evaluation_session()
-            .expect("scheduled effect session should build");
-        let profile = Arc::new(ReflectionTaskProfile::sealed(Arc::new(
-            LaunchedChildFixture(outcome),
-        )));
-        let context = EvalContext::with_task_profile(&session, profile);
-        let coordinator = context.coordinator().expect("runtime has a coordinator");
-        let reserved = Arc::new(Mutex::new(None));
-        let launched = reserved.clone();
-        let parent = context
-            .schedule_task(move |parent_context| {
-                let effect = parent_context
-                    .values()
-                    .construct_runtime_value_root(|_| Value::binary_from_text("child"));
-                let pending = parent_context.reserve_reflection_task(effect)?;
-                *launched
-                    .lock()
-                    .expect("child reservation lock was poisoned") = Some(pending);
-                Ok(Box::new(Complete))
-            })
-            .expect("parent should schedule");
-        let pending = reserved
-            .lock()
-            .expect("child reservation lock was poisoned")
-            .take()
-            .expect("parent construction reserved a child");
-        let child = pending.handle().clone();
-        let statuses = Arc::new(RecordedStatuses::default());
-        pending.commit(
-            RecordedStatuses::publisher(&statuses),
-            PendingTaskPolicy::default(),
-        );
-        assert_eq!(
-            coordinator.reflection_launch_parent(child.id()),
-            Some(Some(parent.id()))
-        );
-
-        // The parent completes without joining the child. The child retains
-        // its causal identity after the parent record retires.
-        assert!(poll_one_runtime_work(&coordinator));
-        assert!(matches!(
-            parent.wait().terminal_poll(),
-            Some(EvaluationWaitPoll::Complete(_))
-        ));
-        assert_eq!(
-            coordinator.reflection_launch_parent(child.id()),
-            Some(Some(parent.id()))
-        );
-
-        match outcome {
-            LaunchedChildOutcome::Complete => {
-                assert!(poll_one_runtime_work(&coordinator));
-                assert!(matches!(
-                    child.wait().terminal_poll(),
-                    Some(EvaluationWaitPoll::Complete(_))
-                ));
-            }
-            LaunchedChildOutcome::Fail => {
-                assert!(poll_one_runtime_work(&coordinator));
-                assert!(matches!(
-                    child.wait().terminal_poll(),
-                    Some(EvaluationWaitPoll::Failed(_))
-                ));
-            }
-            LaunchedChildOutcome::Cancel | LaunchedChildOutcome::Abandon => {
-                assert!(poll_one_runtime_work(&coordinator));
-                assert_eq!(
-                    coordinator.reflection_launch_parent(child.id()),
-                    Some(Some(parent.id()))
-                );
-                match outcome {
-                    LaunchedChildOutcome::Cancel => {
-                        assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);
-                        assert!(matches!(
-                            child.wait().terminal_poll(),
-                            Some(EvaluationWaitPoll::Cancelled)
-                        ));
-                    }
-                    LaunchedChildOutcome::Abandon => {
-                        drop(session);
-                        assert!(matches!(
-                            child.wait().terminal_poll(),
-                            Some(EvaluationWaitPoll::Abandoned)
-                        ));
-                    }
-                    _ => unreachable!(),
-                }
-            }
-        }
-        assert_eq!(coordinator.reflection_launch_parent(child.id()), None);
-    }
-}
-
-#[test]
-fn cancelled_effect_child_never_publishes_a_launch_parent() {
-    let fixture = SameRuntimeFixture::new();
-    let session = fixture
-        .runtime
-        .new_evaluation_session()
-        .expect("effect session should build");
-    let profile = Arc::new(ReflectionTaskProfile::sealed(Arc::new(
-        LaunchedChildFixture(LaunchedChildOutcome::Complete),
-    )));
-    let context = EvalContext::with_task_profile(&session, profile);
-    let coordinator = context.coordinator().expect("runtime has a coordinator");
-    let pending = context
-        .reserve_reflection_task(
-            context
-                .values()
-                .construct_runtime_value_root(|_| Value::binary_from_text("cancelled")),
-        )
-        .expect("child reservation should succeed");
-    let child = pending.handle().clone();
-    let mut policy = PendingTaskPolicy::default();
-    policy.cancel();
-    let statuses = Arc::new(RecordedStatuses::default());
-    pending.commit(RecordedStatuses::publisher(&statuses), policy);
-    assert!(matches!(
-        child.wait().terminal_poll(),
-        Some(EvaluationWaitPoll::Cancelled)
-    ));
-    assert_eq!(coordinator.reflection_launch_parent(child.id()), None);
 }
 
 #[test]

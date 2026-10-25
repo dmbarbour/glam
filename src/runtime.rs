@@ -181,18 +181,6 @@ impl RuntimeMutationAdmission {
         });
     }
 
-    /// Whether a settlement waits on the gate, asked while the caller holds a
-    /// mutation guard: no writer can hold the gate then, so a refused read
-    /// means one is queued. Linux's `RwLock` refuses readers behind a queued
-    /// writer.
-    #[cfg(test)]
-    pub(crate) fn settlement_waits_for_test(&self) -> bool {
-        matches!(
-            self.gate.try_read(),
-            Err(std::sync::TryLockError::WouldBlock)
-        )
-    }
-
     /// Runs `probe` once, at the next attempt to take the settlement guard
     /// without waiting.
     #[cfg(test)]

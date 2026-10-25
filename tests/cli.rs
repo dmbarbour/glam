@@ -798,36 +798,6 @@ fn configured_logger_abandons_diagnostics_and_stderr_from_failed_choices() {
 }
 
 #[test]
-fn configured_logger_can_join_a_restricted_reflection_task() {
-    let dir = unique_temp_dir("glam-conf-log-task");
-    fs::create_dir_all(&dir)
-        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
-    let config = dir.join("conf.g");
-    let invalid = dir.join("invalid.g");
-    fs::write(
-        &config,
-        "language g0\nobject conf.env\nconf.log = .task.new (.r \"SPAWNED\") >>= (\\task -> .task.join task >>= (\\text -> .write_stderr (text ++ [10])))\n",
-    )
-    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
-    fs::write(&invalid, b"language g0\nvalue = \xff\n")
-        .unwrap_or_else(|err| panic!("failed to write {}: {err}", invalid.display()));
-
-    let output = glam_command()
-        .env("GLAM_CONF", &config)
-        .arg("--file")
-        .arg(&invalid)
-        .output()
-        .expect("failed to run glam");
-
-    assert!(!output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("SPAWNED\n"),
-        "configured logger did not join its child reflection task:\n{stderr}"
-    );
-}
-
-#[test]
 fn configured_logger_can_read_the_process_reflection_environment() {
     let dir = unique_temp_dir("glam-conf-log-env");
     fs::create_dir_all(&dir)
@@ -1170,70 +1140,6 @@ fn configured_logger_error_diagnostic_fails_the_batch() {
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
     assert!(String::from_utf8_lossy(&output.stderr).contains("error: LOGGER ERROR"));
-}
-
-#[test]
-fn configured_logger_abandons_unjoined_child_tasks_when_its_root_returns() {
-    let dir = unique_temp_dir("glam-conf-log-child-drain");
-    fs::create_dir_all(&dir)
-        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
-    let config = dir.join("conf.g");
-    fs::write(
-        &config,
-        "language g0\nobject conf.env\nconf.log = .task.new (.read_log >>= (\\_message -> (.log 'warn { msg:{ text:\"DETACHED CHILD\" } }) =>> .r ())) >>= (\\_task -> .r ())\n",
-    )
-    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
-
-    let output = glam_command()
-        .env("GLAM_CONF", &config)
-        .arg("--script.g")
-        .arg("language g0\nasm.result = \"ok\"\n")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "stdout: {}\nstderr: {}",
-        String::from_utf8_lossy(&output.stdout),
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"ok");
-    assert!(
-        !String::from_utf8_lossy(&output.stderr).contains("warning: DETACHED CHILD"),
-        "a logger root return must close rather than drain detached descendants"
-    );
-}
-
-#[test]
-fn configured_logger_abandons_an_unjoined_child_before_it_can_fail_when_its_root_returns() {
-    let dir = unique_temp_dir("glam-conf-log-child-failure");
-    fs::create_dir_all(&dir)
-        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
-    let config = dir.join("conf.g");
-    fs::write(
-        &config,
-        "language g0\nobject conf.env\nconf.log = .task.new (.read_log >>= (\\_message -> .fail)) >>= (\\_task -> .r ())\n",
-    )
-    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
-
-    let output = glam_command()
-        .env("GLAM_CONF", &config)
-        .arg("--script.g")
-        .arg("language g0\nasm.result = \"ok\"\n")
-        .output()
-        .expect("failed to run glam");
-
-    assert!(
-        output.status.success(),
-        "an unjoined child is abandoned when the logger root returns: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
-    assert_eq!(output.stdout, b"ok");
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        !stderr.contains("reflection task failed permanently"),
-        "an abandoned child must not publish a task failure:\n{stderr}"
-    );
 }
 
 #[test]

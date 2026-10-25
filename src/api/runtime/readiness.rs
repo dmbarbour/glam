@@ -4,7 +4,7 @@ use std::sync::Arc;
 use rpds::RedBlackTreeMapSync;
 
 use super::{EvaluationRuntime, RuntimeDeliveryFailureSnapshot};
-use crate::api::{Diagnostic, MachinePath, ReasoningFailure, Value, Values};
+use crate::api::{Diagnostic, MachinePath, Value, Values};
 use crate::core::{CoreValueFactory, Dict, EvaluationFailure, Key, Value as CoreValue};
 use crate::diagnostic::Severity;
 #[cfg(test)]
@@ -33,11 +33,11 @@ pub(super) fn reasoning_diagnostic(
     )
 }
 
-/// A child machine in error: a task on it failed or was interrupted, which
-/// flagged it until its parent recovers or clears it
-/// (`reflection-tasks-are-machine-tasks`). Until settlement reports
-/// machines' errors in general, a flagged child fails a batch as a failed
-/// task did.
+/// A reflection machine in error (`reflection-tasks-are-machine-tasks`): a
+/// child a task on which failed or was interrupted, flagged until its parent
+/// recovers or clears it, or an annotation task's anonymous root, which its
+/// failure flagged for good. Until settlement reports machines' errors in
+/// general, a failed machine fails a batch.
 #[derive(Clone)]
 pub struct FailedMachine {
     runtime: EvaluationRuntimeId,
@@ -500,13 +500,11 @@ pub struct QuiescenceReport {
     pub(super) runtime: EvaluationRuntime,
     pub(super) stamp: RuntimeReadinessStamp,
     pub(super) dispositions: Vec<RuntimeDisposition>,
-    pub(super) task_failures: Vec<ReasoningFailure>,
     pub(super) failed_machines: Vec<FailedMachine>,
     pub(super) delivery_failures: RuntimeDeliveryFailureSnapshot,
     pub(super) reflection: crate::reflection::StoreSnapshot,
     pub(super) killed_work: Vec<RuntimeDeadlockWork>,
     pub(super) maintenance_failures: Vec<RuntimeMaintenanceFailure>,
-    pub(super) pending_task_failure_reports: Vec<ReasoningFailure>,
     pub(super) pending_failed_machine_reports: Vec<FailedMachine>,
     pub(super) pending_delivery_failure_reports: RuntimeDeliveryFailureSnapshot,
     pub(super) pending_exit_error_reports: Vec<RuntimeDisposition>,
@@ -521,7 +519,6 @@ impl fmt::Debug for QuiescenceReport {
             .field("runtime", &self.runtime.id())
             .field("stamp", &self.stamp)
             .field("dispositions", &self.dispositions)
-            .field("task_failures", &self.task_failures)
             .field("failed_machines", &self.failed_machines)
             .field("killed_work", &self.killed_work.len())
             .field("maintenance_failures", &self.maintenance_failures)
@@ -546,10 +543,6 @@ impl QuiescenceReport {
         &self.dispositions
     }
 
-    pub fn task_failures(&self) -> &[ReasoningFailure] {
-        &self.task_failures
-    }
-
     /// The child machines in error as the runtime settled, in path order.
     pub fn failed_machines(&self) -> &[FailedMachine] {
         &self.failed_machines
@@ -570,13 +563,6 @@ impl QuiescenceReport {
 
     pub fn maintenance_failures(&self) -> &[RuntimeMaintenanceFailure] {
         &self.maintenance_failures
-    }
-
-    /// Task failures whose reporting responsibility was committed to this
-    /// settlement rather than an earlier one.
-    #[doc(hidden)]
-    pub fn pending_task_failure_reports(&self) -> &[ReasoningFailure] {
-        &self.pending_task_failure_reports
     }
 
     /// Failed machines whose reporting responsibility was committed to this
@@ -613,10 +599,9 @@ impl QuiescenceReport {
     }
 
     /// Records that every pending report entry was accepted by the selected
-    /// transport. Persistent failure ledgers are unaffected.
+    /// transport. What persists, failed machines among it, is unaffected.
     #[doc(hidden)]
     pub fn mark_reports_enqueued(&mut self) {
-        self.pending_task_failure_reports.clear();
         self.pending_failed_machine_reports.clear();
         self.pending_delivery_failure_reports.failures = RedBlackTreeMapSync::new_sync();
         self.pending_exit_error_reports.clear();

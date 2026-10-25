@@ -7740,13 +7740,6 @@ fn metadata_reflection_update_propagates_task_failure_and_cancellation() {
     let error = evaluated_metadata(&failed_context, &failed[0])
         .expect_err_without_debug("demanding failed effectful metadata must propagate its failure");
     assert_eq!(error.to_string(), "metadata reflection task failed");
-    assert_eq!(
-        failed_context
-            .task_registry_counts()
-            .unacknowledged_failures,
-        0,
-        "the demanding metadata projection owns reporting responsibility"
-    );
 
     let cancelled_context = annotation_test_context();
     cancelled_context
@@ -8440,69 +8433,6 @@ fn reflection_completion_activation_and_first_session_close_have_both_orders() {
 }
 
 #[test]
-fn unobserved_reflection_failure_remains_reportable_until_promise_propagation() {
-    let (owner, observer, _executor) = same_runtime_contexts();
-    let failure = Arc::new(EvaluationFailure::message(
-        "unobserved autonomous reflection failure",
-    ));
-    owner
-        .install_reflection_launcher(Arc::new(FixtureTaskLauncher {
-            terminal: FixtureTaskTerminal::Failed(failure),
-            builds: Arc::new(AtomicUsize::new(0)),
-            result_policies: Arc::new(Mutex::new(Vec::new())),
-        }))
-        .expect("fresh runtime should accept its reflection launcher");
-    let background = owner
-        .for_runtime_background()
-        .expect("the runtime should retain its background demand");
-    let (promise, completion, effect) = owner.values().with_boundary_access(|access| {
-        let completion = access
-            .construct_rooted_managed_promise()
-            .expect("the completion promise must fit its reviewed slot");
-        let promise = PromisedValue::from_root(&completion, &access);
-        let effect = access.root_runtime_value(n(0));
-        (promise, completion, effect)
-    });
-    background
-        .evaluate_test_step(|step| {
-            background.reserve_reflection_completion_activation(
-                step,
-                effect,
-                None,
-                completion,
-                ReflectionTaskResultPolicy::ReturnValue,
-            )
-        })
-        .expect("the autonomous reflection task should reserve")
-        .activate();
-
-    assert!(matches!(
-        background.run_until_quiescent(),
-        crate::evaluation::EvaluationSessionRun::Complete(_)
-    ));
-    assert_eq!(
-        background.task_registry_counts().unacknowledged_failures,
-        1,
-        "an unobserved autonomous failure remains reportable"
-    );
-
-    let propagated = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-        &observer,
-        &Value::Promised(promise),
-    )
-    .expect_err_without_debug("observing the completion promise should propagate the task failure");
-    assert_eq!(
-        propagated.to_string(),
-        "unobserved autonomous reflection failure"
-    );
-    assert_eq!(
-        background.task_registry_counts().unacknowledged_failures,
-        0,
-        "promise propagation transfers reporting responsibility exactly once"
-    );
-}
-
-#[test]
 fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibility() {
     let context = annotation_test_context();
     let producer_frame = evaluation_context_frame("reflection_result_producer");
@@ -8527,11 +8457,6 @@ fn reflection_task_result_preserves_failure_and_transfers_reporting_responsibili
     context.values().assert_same_representation_for_test(
         &failure_context_items(&error),
         &[evaluation_context_frame("reflection_task"), producer_frame],
-    );
-    assert_eq!(
-        context.task_registry_counts().unacknowledged_failures,
-        0,
-        "propagating the failure must remove detached-task reporting responsibility"
     );
 }
 
@@ -8741,11 +8666,6 @@ fn assert_structured_reflection_gate_failure(stage: GateFailureStage) {
     context
         .values()
         .assert_same_representation_for_test(&diagnostic.get(&detail), &Some(&n(7)));
-    assert_eq!(
-        context.task_registry_counts().unacknowledged_failures,
-        0,
-        "a propagated gate failure must not remain a detached task failure"
-    );
     drop(gate_root);
 }
 

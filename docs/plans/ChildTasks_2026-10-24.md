@@ -163,6 +163,28 @@ Each with tests, the full gate, and a commit.
    queries, `acknowledge_reasoning_failure` and the failure ledger retire,
    with their docs, and the remaining `.task.*` tests and the CLI logger's
    `.task.new` children move to `.child.*` or retire with what they test.
+   Built 2026-10-25. Retired: the seven `.task.*` requests, task handles,
+   the reflection store's protected query domain and its writer, pending
+   launch policies, the request-level wait poll (only joins used it), the
+   acknowledgement ledger with `ReasoningFailure`,
+   `QuiescenceReport::task_failures` and propagated acknowledgement, and
+   the CLI logger's children (maintainer, the same day: they return as
+   `.child.task` once the logger is a turn). An annotation task's failure
+   flags its anonymous root, for good, even where a demander saw it
+   (maintainer: "flag its root"): the coordinator keeps these failed roots,
+   which settlement reports beside flagged children as failed machines. A
+   Rust-scheduled root's failure (`EffectRun`, `schedule_task`) goes only
+   to its caller, so the CLI now reports a failed configured logger itself,
+   and a composed run fails on its own result or a deadlock, not on a
+   child's failure. The coordinator's status publication stays for
+   host lifecycles, its former query slot a test-only observer. Tests of
+   `.task.*` itself and of acknowledgement retired; the macro test's child
+   moved to `.child.task`; the CLI rendering tests fail through an
+   annotation; tests that read the session ledger read the task's wait;
+   new: an annotation's failure flags its root though observed, its policy
+   mutation-checked. Noted: `EffectLifecycle`'s descendant tracking now
+   serves only child tasks a hosted root queues, on hosts with machines; its
+   tests of `.task.new` descendants and abandonment retired with them.
 
 ## Defaults, open to the maintainer
 
@@ -186,3 +208,6 @@ Taken unless the maintainer says otherwise (2026-10-24):
    Model says; recovery and clearing break with a diagnostic, "the task's
    machine was recovered from an error before the task ran" or "... was
    cleared before the task ran".
+6. `child-task-retirement`: only annotation tasks flag anonymous roots; a
+   root Rust schedules reports its failure to its caller, so settlement
+   never reports it twice.

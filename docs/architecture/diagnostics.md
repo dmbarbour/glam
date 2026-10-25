@@ -14,7 +14,8 @@ failure from retryable waits and unassigned promises, which remain scheduler
 control states rather than diagnostic values.
 
 The structured failure survives lazy-result caching, task terminal
-publication, `.task.status`, public `Error`, and runtime readiness reports.
+publication, broken replies and machine error flags, public `Error`, and
+runtime readiness reports.
 Only an explicit client projection chooses a human-readable summary. A public
 `Error` keeps one primary structured diagnostic separately from additional
 diagnostics emitted while attempting the operation; its Rust `Display` is an
@@ -35,10 +36,10 @@ summarize one built from a value statically.
 
 Evaluator-owned context describes why a value was demanded rather than which
 Rust function happened to fail. Conventional frames use tagged dictionaries
-such as `eval`, `task`, `conf`, `import`, `asm`, and `g`. The built-in front end
-also places its opaque source-origin token in shallow definition-initialization
-frames. User `anno context:Frame Expr` values join the same ordered context
-without becoming diagnostic bus events themselves.
+such as `eval`, `runtime`, `conf`, `import`, `asm`, and `g`. The built-in
+front end also places its opaque source-origin token in shallow
+definition-initialization frames. User `anno context:Frame Expr` values join
+the same ordered context without becoming diagnostic bus events themselves.
 
 ## Diagnostic Bus
 
@@ -118,8 +119,7 @@ atomically.
 
 Since diagnostics wait at the logger from the start, installing `conf.log`
 switches no route: its root is scheduled and reads what has gathered. Its
-lifecycle closes the root's demand session when the root ends, abandoning
-the tasks the root started and left unjoined.
+lifecycle closes the root's demand session when the root ends.
 
 ## Transactional Logger Output
 
@@ -154,11 +154,10 @@ make batch execution fail independently of whether rendering succeeds.
 Abandoned alternatives cannot leak diagnostics or bytes because their event
 journals never commit.
 
-Logger children created with `.task.new` inherit the complete logger profile,
-including `.read_log`, `.write_stderr`, its environment, diagnostic
-destination, and coordinated exit effects. Annotation-created reflection tasks
-instead use the runtime's immutable default reflection profile and shared
-reflection bus policy.
+The logger's profile includes `.read_log`, `.write_stderr`, its environment,
+diagnostic destination, and coordinated exit effects. Annotation-created
+reflection tasks instead use the runtime's immutable default reflection
+profile and shared reflection bus policy.
 
 ## Formatting Policy
 
@@ -203,8 +202,8 @@ configured formatter can make its own layout and color decisions without
 privileged inspection.
 
 Formatting failure uses a minimal Rust renderer. That fallback is a last-mile
-presentation path; it does not replace or acknowledge the authoritative task,
-delivery, exit, or killed-work failure which caused the message.
+presentation path; it does not replace or acknowledge the authoritative
+machine, delivery, exit, or killed-work failure which caused the message.
 Both Glam formatting and fallback rendering finish into owned bytes before the
 terminal writer is invoked, so a writer is another mutator-free host callback
 rather than an extension of evaluation.
@@ -239,11 +238,18 @@ runs; the CLI's logger thread delivers them between pumps
 hand-over runs on that thread too, as the configured logger ends, and the
 fallback renders on the thread of the turn that reads it.
 
-A stable deadlock may be explicitly killed and settled. Task failures, output
-delivery failures, exit errors, killed work, and collector maintenance
+A stable deadlock may be explicitly killed and settled. Failed machines,
+output delivery failures, exit errors, killed work, and collector maintenance
 failures make the batch unsuccessful directly, even if their diagnostic
 presentation also fails. Valid assembly bytes may therefore be written to
 stdout before reasoning produces a nonzero exit status.
+
+A failed machine, a flagged child machine or a failed anonymous root
+(`QuiescenceReport::failed_machines`), renders with its own diagnostic under
+context `runtime:{op:'machine_failure, args:{machine:Path}}`, which the
+terminal viewer summarizes as
+`runtime: machine failure (machine refl/<abstract>/scanner/k)`, where
+`<abstract>` stands for a key with no text, such as an anonymous root's.
 
 A maintenance failure from a usable heap renders as an error diagnostic with
 context `runtime:{op:'maintenance_failure, args:{failure:Id, kind:Kind}}`.

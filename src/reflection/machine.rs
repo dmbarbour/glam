@@ -1278,9 +1278,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 specializing.demand = Some(WhnfComputation::from_root(value.into_runtime_root()));
                 SpecializationStep::Continue(specializing)
             }
-            SpecializationRequestPoll::Wait(wait) => {
-                SpecializationStep::Blocked(specializing, WorkDependency::Wait(wait.into_inner()))
-            }
             SpecializationRequestPoll::Complete(result) => {
                 if let Err(error) = self.validate_specialization_result(&result) {
                     return SpecializationStep::Failed(specializing, error);

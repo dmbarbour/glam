@@ -1124,7 +1124,6 @@ fn opaque_payload_requires_matching_runtime_and_retires_during_registry_drain() 
 #[test]
 fn opaque_external_capabilities_retain_only_reviewed_routes() {
     crate::api::assert_effect_token_family_shape();
-    crate::reflection::assert_task_handle_family_shape();
 }
 
 #[test]

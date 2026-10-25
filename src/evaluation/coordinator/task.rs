@@ -87,42 +87,11 @@ pub(crate) enum EvaluationTaskCancellation {
     Late,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) enum InitialTaskDisposition {
-    #[default]
-    Launch,
-    Cancel,
-}
-
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
-pub(crate) struct PendingTaskPolicy {
-    disposition: InitialTaskDisposition,
-    acknowledge_error: bool,
-}
-
-impl PendingTaskPolicy {
-    pub(crate) fn cancel(&mut self) {
-        self.disposition = InitialTaskDisposition::Cancel;
-    }
-
-    pub(crate) fn acknowledge_error(&mut self) {
-        self.acknowledge_error = true;
-    }
-
-    pub(crate) fn disposition(self) -> InitialTaskDisposition {
-        self.disposition
-    }
-
-    pub(crate) fn acknowledges_error(self) -> bool {
-        self.acknowledge_error
-    }
-}
-
 /// A coordinator-facing request to terminalize one effect machine when the
 /// runtime client accepts a stable readiness snapshot.
 ///
 /// Exit is deliberately distinct from ordinary completion or failure. Until
-/// settlement, it produces neither a task result nor a failure-ledger entry.
+/// settlement, it produces neither a task result nor a failed root.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ExitIntent {
     Success,
@@ -185,6 +154,7 @@ pub(super) struct TaskTerminalPublisher {
     pub(super) wait: EvaluationWaitToken,
     published_status: EvaluationTaskStatus,
     status_order: u64,
+    /// A test's status observer.
     pub(super) protected_status: Option<TaskStatusPublisher>,
     lifecycle_status: Option<TaskStatusPublisher>,
 }
@@ -206,7 +176,7 @@ impl TaskTerminalPublisher {
         }
     }
 
-    /// Whether a status query or a host lifecycle observes this task.
+    /// Whether a test's observer or a host lifecycle observes this task.
     pub(super) fn publishes_status(&self) -> bool {
         self.protected_status.is_some() || self.lifecycle_status.is_some()
     }
@@ -216,10 +186,11 @@ impl TaskTerminalPublisher {
         self.publishes_status() && self.published_status != *status
     }
 
+    #[cfg(test)]
     pub(super) fn attach_status(&mut self, publisher: TaskStatusPublisher) {
         assert!(
             self.protected_status.replace(publisher).is_none(),
-            "a reflection task may expose only one status query"
+            "a reflection task takes one test status observer"
         );
     }
 
@@ -310,20 +281,6 @@ impl TaskStatusPublisher {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn publish_guarded(
-        &self,
-        mutation: &dyn RuntimeMutationAuthority,
-        status: EvaluationTaskStatus,
-    ) -> TaskStatusWake {
-        let _publication = self
-            .inner
-            .published_order
-            .lock()
-            .unwrap_or_else(PoisonError::into_inner);
-        (self.inner.publish)(mutation, status)
-    }
-
     pub(super) fn publish_update_guarded(
         &self,
         mutation: &dyn RuntimeMutationAuthority,
@@ -371,8 +328,11 @@ pub(crate) enum ReflectionTaskResultPolicy {
     ReturnValue,
 }
 
-pub(crate) type TaskFailureLedger = RedBlackTreeMapSync<EvaluationTaskId, RuntimeFailureRoot>;
-pub(crate) type RuntimeFailureLedger = RedBlackTreeMapSync<EvaluationSessionId, TaskFailureLedger>;
+/// The failures of the reflection tasks whose failure flags their anonymous
+/// roots, annotation tasks, by task (`reflection-tasks-are-machine-tasks`).
+/// An anonymous root is unrecoverable, so its failure stands, and
+/// settlement reports each as a failed machine.
+pub(crate) type FailedRoots = RedBlackTreeMapSync<EvaluationTaskId, RuntimeFailureRoot>;
 
 struct EvaluationWaitState {
     id: NonZeroU64,
@@ -649,7 +609,6 @@ impl Hash for EvaluationWaitToken {
 /// strong wait until assignment publication removes that external owner.
 pub(crate) struct PromiseProducerObligation {
     owner: EvaluationTaskId,
-    owner_session: EvaluationSessionId,
     wait: Weak<EvaluationWaitState>,
     source: PromiseProducerSource,
     /// The panic that interrupted the producer. A panicked producer leaves
@@ -821,7 +780,6 @@ impl PromiseProducerPublication {
 impl PromiseProducerObligation {
     pub(crate) fn coordinator_owned(
         owner: EvaluationTaskId,
-        owner_session: EvaluationSessionId,
         wait: &EvaluationWaitToken,
         work: EvaluationWorkId,
         promise: PromiseId,
@@ -829,7 +787,6 @@ impl PromiseProducerObligation {
     ) -> Self {
         Self {
             owner,
-            owner_session,
             wait: Arc::downgrade(&wait.0.state),
             source: PromiseProducerSource::Coordinator {
                 work,
@@ -842,14 +799,12 @@ impl PromiseProducerObligation {
 
     pub(crate) fn local_owned(
         owner: EvaluationTaskId,
-        owner_session: EvaluationSessionId,
         wait: &EvaluationWaitToken,
         promise: PromiseId,
         local_owner: &Arc<LocalPromiseOwner>,
     ) -> Self {
         Self {
             owner,
-            owner_session,
             wait: Arc::downgrade(&wait.0.state),
             source: PromiseProducerSource::Local {
                 promise,
@@ -869,21 +824,6 @@ impl PromiseProducerObligation {
 
     pub(crate) fn owner(&self) -> EvaluationTaskId {
         self.owner
-    }
-
-    /// Transfers reporting responsibility when an evaluator actually
-    /// propagates a failed task-owned promise.
-    ///
-    /// This operation is deliberately timing-independent: propagation may
-    /// race task terminalization, and an early acknowledgement prevents a
-    /// later failure-ledger insertion just as `.task.ack_error` does.
-    pub(crate) fn acknowledge_propagated_failure(&self) {
-        let PromiseProducerSource::Coordinator { coordinator, .. } = &self.source else {
-            return;
-        };
-        if let Some(coordinator) = coordinator.upgrade() {
-            coordinator.acknowledge_task_failure(self.owner_session, self.owner);
-        }
     }
 
     pub(crate) fn try_wait(&self) -> Option<EvaluationWaitToken> {
@@ -1023,6 +963,7 @@ impl EvaluationTaskHandle {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn wait(&self) -> &EvaluationWaitToken {
         &self.wait
     }
@@ -1037,17 +978,6 @@ impl EvaluationTaskHandle {
 
     pub(crate) fn runtime_id(&self) -> EvaluationRuntimeId {
         self.wait.runtime_id()
-    }
-
-    pub(crate) fn acknowledge_propagated_failure(&self) {
-        self.acknowledge_failure();
-    }
-
-    pub(crate) fn acknowledge_failure(&self) {
-        if let Some(coordinator) = self.coordinator.upgrade() {
-            debug_assert_eq!(coordinator.runtime_id(), self.runtime_id());
-            coordinator.acknowledge_task_failure(self.owner_session, self.id);
-        }
     }
 
     pub(crate) fn cancel(&self) -> EvaluationTaskCancellation {

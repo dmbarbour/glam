@@ -530,11 +530,6 @@ impl EvaluationPollContext<'_, '_> {
         self.with_runtime_access(|access| access.root_runtime_value(access.unit()))
     }
 
-    #[cfg(test)]
-    pub(crate) fn duplicate_and_root_value(&self, value: &Value) -> RuntimeValueRoot {
-        self.with_runtime_access(|access| access.root_runtime_value(access.duplicate_value(value)))
-    }
-
     /// Roots a machine failure before it crosses the poll boundary.
     pub(crate) fn root_failure(&self, failure: Arc<EvaluationFailure>) -> RuntimeFailureRoot {
         self.with_runtime_access(|access| access.root_runtime_failure(failure))

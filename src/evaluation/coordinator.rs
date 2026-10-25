@@ -67,7 +67,7 @@ pub(super) use reflection::ReflectionWorkSnapshot;
 use reflection::reflection_work;
 use reflection::{
     AbandonedReflectionWork, ReflectionIndexes, ReflectionWork, claim_reflection,
-    insert_task_failure, reflection_work_mut, remove_ready_reflection,
+    reflection_work_mut, remove_ready_reflection,
 };
 pub(super) use reflection::{
     ClaimedReflectionWork, ReflectionCancellation, ReflectionWorkPoll, ReflectionWorkState,
@@ -81,14 +81,14 @@ pub(crate) use settlement::{
 use spark::spark_work_mut;
 pub(crate) use spark::{ClaimedSparkWork, SparkWork, SparkWorkPoll};
 use spark::{SparkRetirement, claim_spark, detach_spark};
+#[cfg(test)]
+pub(crate) use task::EvaluationTaskCancellation;
 pub(crate) use task::{
     EvaluationExitBlock, EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock,
-    EvaluationTaskCancellation, EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine,
-    EvaluationTaskStatus, EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken,
-    ExitIntent, InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy,
-    PreparedEvaluationTask, PromiseProducerObligation, PromiseProducerPublication,
-    ReflectionTaskResultPolicy, RuntimeFailureLedger, TaskFailureLedger, TaskStatusPublisher,
-    TaskStatusWake,
+    EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
+    EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, ExitIntent, FailedRoots,
+    LocalPromiseOwner, PreparedEvaluationTask, PromiseProducerObligation,
+    PromiseProducerPublication, ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake,
 };
 use task::{TaskStatusUpdate, TaskTerminalPublisher, terminal_task_status};
 
@@ -662,8 +662,9 @@ impl ClaimedClientDemand {
 #[derive(Default)]
 struct WorkCoordinatorState {
     demand_sessions: TrustedHashMap<EvaluationSessionId, Weak<EvaluationDemandState>>,
-    failures: RuntimeFailureLedger,
-    pending_failure_reports: RuntimeFailureLedger,
+    /// The failed anonymous roots, and those no settlement has reported.
+    failed_roots: FailedRoots,
+    pending_failed_root_reports: FailedRoots,
     work: TrustedHashMap<EvaluationWorkId, WorkRecord>,
     work_by_session: TrustedHashMap<EvaluationSessionId, TrustedHashSet<EvaluationWorkId>>,
     client_demands: TrustedHashMap<EvaluationWorkId, ClientDemandRecord>,
@@ -719,7 +720,7 @@ enum CoordinatorMutationKind {
     SessionClosure,
     TerminalSettlement,
     WorkRetirement,
-    FailureLedger,
+    FailedRoot,
     StageSettlement,
     /// A panic tore runtime-core state; parked waiters must observe it.
     RuntimePoison,
@@ -758,7 +759,7 @@ impl CoordinatorMutationKind {
                 | Self::TaskPromiseIndexAdmission
                 | Self::TaskPromiseIndexRetirement
                 | Self::WorkClaim
-                | Self::FailureLedger
+                | Self::FailedRoot
         )
     }
 }
@@ -1023,7 +1024,7 @@ fn mutation_counts_from_array(
         session_closure: counts[CoordinatorMutationKind::SessionClosure as usize],
         terminal_settlement: counts[CoordinatorMutationKind::TerminalSettlement as usize],
         work_retirement: counts[CoordinatorMutationKind::WorkRetirement as usize],
-        failure_ledger: counts[CoordinatorMutationKind::FailureLedger as usize],
+        failed_root: counts[CoordinatorMutationKind::FailedRoot as usize],
         stage_settlement: counts[CoordinatorMutationKind::StageSettlement as usize],
     }
 }
@@ -1744,23 +1745,6 @@ impl EvaluationWorkCoordinator {
             .expect("exact selection probe was poisoned") = Some(Box::new(probe));
     }
 
-    /// Starts a settlement on another thread and returns once it is queued on
-    /// the mutation gate behind the caller's mutation guard.
-    #[cfg(test)]
-    pub(super) fn queue_settlement_for_test(&self) -> std::thread::JoinHandle<()> {
-        let admission = self.admission.clone();
-        let settlement = std::thread::spawn(move || drop(admission.settlement_guard()));
-        let deadline = std::time::Instant::now() + Duration::from_secs(10);
-        while !self.admission.settlement_waits_for_test() {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "the settlement never queued on the mutation gate"
-            );
-            std::thread::yield_now();
-        }
-        settlement
-    }
-
     #[cfg(test)]
     pub(super) fn settlement_admission_is_free(&self) -> bool {
         self.admission.try_settlement_guard().is_some()
@@ -1835,45 +1819,19 @@ impl EvaluationWorkCoordinator {
         self.observations.current()
     }
 
-    /// Returns one persistent owner bucket from the runtime failure ledger.
-    pub(super) fn failure_snapshot(&self, session: EvaluationSessionId) -> TaskFailureLedger {
-        self.state
-            .lock()
-            .expect("evaluation work coordinator was poisoned")
-            .failures
-            .get(&session)
-            .cloned()
-            .unwrap_or_else(TaskFailureLedger::new_sync)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn failure_ledger_snapshot(&self) -> RuntimeFailureLedger {
-        self.state
-            .lock()
-            .expect("evaluation work coordinator was poisoned")
-            .failures
-            .clone()
-    }
-
-    /// Captures the persistent failure ledger and commits every not-yet-
-    /// reported failure to the current settlement report.
-    ///
-    /// The persistent ledger remains authoritative until explicit
-    /// acknowledgement. Only the separate reporting obligations move into the
-    /// report, so later settlements do not ask a presentation layer to
-    /// remember which failures it has already rendered.
-    pub(crate) fn failure_ledgers_for_settlement(
-        &self,
-    ) -> (RuntimeFailureLedger, RuntimeFailureLedger) {
+    /// The failed anonymous roots, every one, and those no earlier
+    /// settlement reported, whose reporting moves to the current settlement,
+    /// so a presentation layer need not remember what it rendered.
+    pub(crate) fn failed_roots_for_settlement(&self) -> (FailedRoots, FailedRoots) {
         let mut state = self
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
         let pending = std::mem::replace(
-            &mut state.pending_failure_reports,
-            RuntimeFailureLedger::new_sync(),
+            &mut state.pending_failed_root_reports,
+            FailedRoots::new_sync(),
         );
-        (state.failures.clone(), pending)
+        (state.failed_roots.clone(), pending)
     }
 
     #[cfg(test)]
@@ -2762,12 +2720,7 @@ impl EvaluationWorkCoordinator {
                 ));
             }
             let producer = Arc::new(PromiseProducerObligation::coordinator_owned(
-                task,
-                record.demand_session,
-                &wait,
-                work,
-                promise,
-                self,
+                task, &wait, work, promise, self,
             ));
             record
                 .obligations
@@ -2826,9 +2779,9 @@ impl EvaluationWorkCoordinator {
     }
 
     /// Consumes one terminalizing work record's producer obligation and
-    /// publishes its failure-ledger decision, wait terminal, and protected
-    /// status query under one runtime mutation admission before the record may
-    /// retire.
+    /// publishes whether its failure flags its anonymous root, its wait
+    /// terminal, and its status under one runtime mutation admission before
+    /// the record may retire.
     ///
     /// The caller holds no mutator; settlement opens a boundary when it
     /// publishes values.
@@ -2934,8 +2887,8 @@ impl EvaluationWorkCoordinator {
             .with_boundary_access(|access| publish(Some(&access)))
     }
 
-    /// Whether `work` publishes its status: a `.task.status` query or a
-    /// host lifecycle observes it.
+    /// Whether `work` publishes its status: a test's observer or a host
+    /// lifecycle observes it.
     fn publishes_status(state: &mut WorkCoordinatorState, work: EvaluationWorkId) -> bool {
         state
             .work
@@ -2975,13 +2928,9 @@ impl EvaluationWorkCoordinator {
                 assert!(matches!(record.state, WorkState::Terminalizing));
                 let failure = match (&record.kind, &terminal) {
                     (WorkKind::Reflection(reflection), EvaluationWaitTerminal::Failed(error))
-                        if !reflection.failure_reporting.acknowledged =>
+                        if reflection.flags_root =>
                     {
-                        Some((
-                            reflection.failure_reporting.owner_session,
-                            reflection.task,
-                            error.clone(),
-                        ))
+                        Some((reflection.task, error.clone()))
                     }
                     _ => None,
                 };
@@ -2998,11 +2947,15 @@ impl EvaluationWorkCoordinator {
                 let promises = record.obligations.owned_promises.clone();
                 (producer, failure, status_update, promises)
             };
-            if let Some((owner, task, failure)) = failure {
-                insert_task_failure(&mut state.failures, owner, task, failure.clone());
-                insert_task_failure(&mut state.pending_failure_reports, owner, task, failure);
+            if let Some((task, failure)) = failure {
+                assert!(
+                    !state.failed_roots.contains_key(&task),
+                    "a task's root may fail only once"
+                );
+                state.failed_roots.insert_mut(task, failure.clone());
+                state.pending_failed_root_reports.insert_mut(task, failure);
                 state.advance_work_generation(
-                    CoordinatorMutationKind::FailureLedger,
+                    CoordinatorMutationKind::FailedRoot,
                     RouteHazard::None,
                 );
             }

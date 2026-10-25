@@ -3,9 +3,9 @@ use std::sync::{Arc, Mutex, PoisonError};
 
 use bytes::Bytes;
 use glam::reflection::{
-    CommitResult, EffectRequestSpec, HostSnapshot, ReflectionJournal, ReflectionQueryWriter,
-    ReflectionRequest, ReflectionRequestWork, ReflectionServices, ReflectionTransaction,
-    RequestContext, RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
+    CommitResult, EffectRequestSpec, HostSnapshot, ReflectionJournal, ReflectionRequest,
+    ReflectionRequestWork, ReflectionServices, ReflectionTransaction, RequestContext,
+    RequestResult, SpecializationRequestInput, SpecializationRequestPoll,
     SpecializationRequestWork, TaskCommit, TaskEnvironment, TaskHalt, TaskHost, TaskSpecialization,
     TaskValidation, ValidationResult, reflection_request_specs,
 };
@@ -405,10 +405,6 @@ impl ReflectionServices for LoggerTaskHost {
         if let Err(error) = self.write_diagnostic(diagnostic) {
             self.record_failure(error);
         }
-    }
-
-    fn query_writer(&self) -> Option<Arc<dyn ReflectionQueryWriter>> {
-        Some(self.resources.clone())
     }
 }
 

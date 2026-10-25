@@ -195,7 +195,7 @@ control-flow overview.
   `Arc<EvaluationFailure>`, a scheduler wait, or an unassigned promise.
   Pollable computations may propagate all three cases. Only the permanent
   variant may enter a lazy cache, promise failure, terminal wait cell, or
-  failure ledger. Diagnostic projection belongs to `eval`, not the core halt
+  failed root. Diagnostic projection belongs to `eval`, not the core halt
   representation. Diagnostic compositions and object/viewer mixins also
   retain this halt until the public `Error` boundary; they must not stringify
   a failure merely because they operate on diagnostics.
@@ -270,10 +270,10 @@ control-flow overview.
   hold a lazy route's last demand lease, and releasing that lease takes the
   mutation gate and the coordinator lock. Detaching work returns its block
   for the caller to drop. The
-  coordinator work record retains task/wait lookup, failure policy, and a
-  `TaskTerminalPublisher` containing the wait, current status, and optional
-  protected-query publisher. The latter retains a narrow runtime query writer,
-  not its role host or owner lease. There is no session-side reporting store.
+  coordinator work record retains task/wait lookup, whether its failure flags
+  its anonymous root, and a `TaskTerminalPublisher` containing the wait,
+  current status, and optional host lifecycle publisher (`EffectLifecycle`)
+  and test-only status observer. There is no session-side reporting store.
   A raced source snapshot may register one redundant producer; it must observe
   the canonical cache and retire harmlessly. Every
   scheduler wait token shares a lock-free terminal cell plus a weak exact-work
@@ -289,12 +289,9 @@ control-flow overview.
   reflection records and their task-ID indexes are retired immediately. A
   wait-blocked spark subscribes its stable work ID and epoch directly to this
   source; unrelated task progress must not wake it.
-  Unacknowledged reflection failures remain only in the coordinator's
-  persistent runtime ledger, partitioned by producer-owner session;
-  `.task.ack_error` updates the active coordinator policy or removes that
-  owner's terminal entry without changing the handle's observation. Terminal
-  wait publication occurs only after that ledger decision under the same
-  runtime mutation admission. Task-owned promise waits follow the same
+  A failed annotation task's failure remains in the coordinator's failed
+  roots (`FailedRoots`), recorded before terminal wait publication under the
+  same runtime mutation admission. Task-owned promise waits follow the same
   ownership boundary: terminal assignment is copied into the shared wait cell
   before the promise record and owner index are retired.
 - Final demand-owner drop is one guarded coordinator transition. It records
@@ -309,7 +306,7 @@ control-flow overview.
 - Owner-session closure publishes `Abandoned`; it is never inferred from a
   failed weak-owner upgrade. Interpret abandonment according to the producer
   obligation:
-  reflection task handles retain a terminal abandoned status; reusable lazy
+  a reflection task's wait and lifecycle status end abandoned; reusable lazy
   claims and host-promise followers may be replaced without poisoning their
   value; unresolved task-owned promises fail because their sole responsible
   producer is gone. Explicit cancellation wins only when it was committed
@@ -398,11 +395,11 @@ control-flow overview.
   task assigns the target only after its result is canonical unit; the same
   demand then continues to the target. Waits are not cached as lazy failures.
 - `refl` and `meta_refl` select the runtime's once-sealed default task profile,
-  never the profile of the session which claims the lazy annotation. A
-  `.task.new` child instead inherits its parent's whole profile, including
-  effect vocabulary, environment, diagnostic routing, and shared host
-  resources. An annotation child therefore inherits the runtime default which
-  its parent received.
+  never the profile of the session which claims the lazy annotation. A task
+  queued on a child machine (`.child.task`) instead inherits its parent's
+  whole profile, including effect vocabulary, environment, diagnostic
+  routing, and shared host resources. A task an annotation queues therefore
+  inherits the runtime default which its parent received.
 - A reflection lazy traces its immutable effect, optional gate target, and one
   managed completion promise; it has no external-owner record or task
   observation. The first producing poll registers the reserved task as the
@@ -417,14 +414,17 @@ control-flow overview.
   result. Either reaches the consumer through the ordinary WHNF demand on the
   promise. A panicked task leaves the promise unassigned. Keep this
   distinction at the launcher boundary rather than inferring policy from
-  whether a task happens to be public or joinable. `meta_refl` is the
-  evaluator production use of the result-producing form; its result remains
-  hidden behind metadata carriers.
-- When WHNF propagates a failed completion promise, the promise's producer
-  obligation acknowledges the task's failure-ledger entry through its scalar
-  task/session identity and weak coordinator route, whichever same-runtime
-  session's demand propagates it. If nobody propagates the failure, it remains
-  unacknowledged in the runtime ledger and appears in settled reports.
+  how a task happens to be launched. `meta_refl` is the evaluator production
+  use of the result-producing form; its result remains hidden behind
+  metadata carriers.
+- An annotation task has no machine of its own: it is an anonymous root,
+  `refl/<abstract task id>`. Activation marks its record
+  (`flag_root_on_failure`), so its failure flags that root for good, since no
+  parent can recover it, even when WHNF propagates the failed completion
+  promise to a demander (`reflection-tasks-are-machine-tasks`). Settlement
+  takes the failed roots (`failed_roots_for_settlement`) and reports each
+  among `failed_machines`. A Rust-scheduled root's failure (`EffectRun`,
+  `schedule_task`) goes only to its Rust caller and is not recorded.
 - An annotation task belongs to the runtime's background demand domain and
   uses the runtime-default profile, whichever session observes the gate
   first, and it outlives that session. Same-runtime observers follow the
@@ -435,26 +435,14 @@ control-flow overview.
   coordinator registration and exhaustive closure publication make
   unavailable or dropped producers explicit without caching a retryable
   condition as a permanent lazy failure.
-- Opaque reflection task values retain `EvaluationTaskHandle`, not a bare task
-  ID. `.task.status`, `.task.value`, and `.task.error` may inspect the
-  protected query from any session in the same runtime without changing
-  ownership or reporting state. Join, cancellation, and acknowledgement
-  validate runtime provenance and route to the producer's coordinator records;
-  exact internal followers operate on wait tokens.
-- A transaction folds modifiers for its newly reserved tasks before launch.
-  In particular, same-transaction cancellation must publish `'canceled`
-  without constructing a task machine or exposing runnable work to the shared
-  executor, while same-transaction error acknowledgement must be installed
-  before an immediate failure can be reported. Older-task modifiers remain
-  ordinary committed updates.
 - Never notify task-status observers, invoke task cancellation hooks, or
   destroy machines while holding a coordinator/component mutex, runtime
-  mutation admission, or a mutator. Protected status itself is published under the guard;
-  notifications and destruction happen after it is released.
+  mutation admission, or a mutator. Task status itself is published under the
+  guard; notifications and destruction happen after it is released.
 - Never evaluate or start a driver while holding runtime mutation admission:
   a second read of the gate on one thread waits behind any queued
   settlement, which waits for the first. Debug builds panic when a thread
-  takes the gate twice. Settlement never evaluates: a failed task's status
+  takes the gate twice. Settlement never evaluates: a failed machine's
   diagnostic is composed, not evaluated
   (`senders-never-evaluate-diagnostics`).
 
@@ -476,10 +464,9 @@ control-flow overview.
   their quanta in flight and must not run under a heap mutator. Nothing a
   worker runs may own the runtime, and shutdown asserts it is not running on
   one of its workers. Active reflection/deferred records and their
-  claimable machines, reporting policy, and failure ledgers are
-  coordinator-owned. Machine contexts retain only `EvaluationDemandState`;
-  serial pumping and reporting use its weak coordinator route and never
-  recover the external owner lease.
+  claimable machines, and the failed roots, are coordinator-owned. Machine
+  contexts retain only `EvaluationDemandState`; serial pumping and reporting
+  use its weak coordinator route and never recover the external owner lease.
 - Every published spark blockage advances a checked, non-wrapping subscription
   epoch. Parked indexes and one-shot subscriber cells retain only the work ID
   and that epoch. A coordinator wake must still match `Blocked`, the epoch, and

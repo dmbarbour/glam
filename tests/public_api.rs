@@ -360,7 +360,7 @@ fn public_api_reports_an_empty_reasoning_session_as_complete() {
     let assembler = Assembler::default();
     let report = settle_ready_reasoning(&assembler);
 
-    assert!(report.task_failures().is_empty());
+    assert!(report.failed_machines().is_empty());
     assert!(report.killed_work().is_empty());
 }
 
@@ -390,7 +390,7 @@ fn public_runtime_profile_exposes_exit_to_scheduled_reflection() {
     let report = snapshot
         .settle()
         .expect("unchanged exit readiness should settle");
-    assert!(report.task_failures().is_empty());
+    assert!(report.failed_machines().is_empty());
     assert!(report.killed_work().is_empty());
 }
 
@@ -555,7 +555,7 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
         .resolve(values.text("ready"))
         .expect("host completion should succeed");
     let resumed = settle_ready_reasoning(&assembler);
-    assert!(resumed.task_failures().is_empty());
+    assert!(resumed.failed_machines().is_empty());
     assert!(resumed.killed_work().is_empty());
 
     let diagnostics = take_diagnostics(&diagnostics);
@@ -1296,7 +1296,7 @@ fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
     assert!(take_diagnostics(&diagnostics).is_empty());
 
     let report = settle_ready_reasoning(&assembler);
-    assert!(report.task_failures().is_empty());
+    assert!(report.failed_machines().is_empty());
 
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
@@ -1370,7 +1370,7 @@ fn replacing_retained_diagnostic_subscriber_preserves_scheduled_reasoning() {
     });
     assert!(
         settle_ready_reasoning(&assembler)
-            .task_failures()
+            .failed_machines()
             .is_empty()
     );
 

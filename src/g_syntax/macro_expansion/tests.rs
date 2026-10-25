@@ -310,7 +310,7 @@ fn macro_failure_keeps_only_furthest_active_cases() {
 
 #[test]
 fn macro_api_omits_heap_tasks_and_full_reflection_requests() {
-    for source in [".heap.get []", ".task.status {}", ".dict_items {}"] {
+    for source in [".heap.get []", ".child.status 'k", ".dict_items {}"] {
         let (assembler, effect) = compile_effects(source);
         let execution = assembler.test_compilation_execution();
         run(&execution, &effect, Value::Dict(Dict::new_sync()))
@@ -433,7 +433,7 @@ fn committed_reflection_log_survives_failed_macro_alternative() {
 #[test]
 fn committed_reflection_heap_and_children_outlive_macro_alternatives() {
     let (assembler, effects) = compile_effects(
-        "{ write:(.alt ((anno refl:(.heap.set '.saved \"yes\") (.r ())) =>> .fail) (.r ())), read:(anno refl:(.heap.get '.saved >>= (\\saved -> .log 'info { msg:{ text:saved } })) (.r ())), child:(.alt ((anno refl:(.task.new (.log 'warn { msg:{ text:\"child survived\" } }) >>= (\\_ -> .r ())) (.r ())) =>> .fail) (.r ())) }",
+        "{ write:(.alt ((anno refl:(.heap.set '.saved \"yes\") (.r ())) =>> .fail) (.r ())), read:(anno refl:(.heap.get '.saved >>= (\\saved -> .log 'info { msg:{ text:saved } })) (.r ())), child:(.alt ((anno refl:(.child.task 'survivor (.log 'warn { msg:{ text:\"child survived\" } }) >>= (\\_ -> .r ())) (.r ())) =>> .fail) (.r ())) }",
     );
     assembler.record_diagnostic(Diagnostic::new(
         &assembler.values(),

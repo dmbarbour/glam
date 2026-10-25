@@ -2783,7 +2783,7 @@ fn permanent_exit_wait_retains_only_its_summary_and_obligations() {
     let (coordinator, _executor) =
         super::super::test_execution_resources(0).expect("test execution resources should build");
     let session = TestDemand::new(&coordinator);
-    let (task, work) = reserve_ready_test_reflection(&coordinator, &session);
+    let (_task, work) = reserve_ready_test_reflection(&coordinator, &session);
     let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
     let message = rooted_unit(&session.demand.values);
 
@@ -2820,12 +2820,9 @@ fn permanent_exit_wait_retains_only_its_summary_and_obligations() {
         );
         assert!(record.obligations.producer.is_some());
         assert!(!state.observation_waiters.contains_key(&work));
-        assert!(state.failures.is_empty());
     }
     drop(release.machine.take());
 
-    coordinator.acknowledge_task_failure(session.demand.id, task);
-    assert!(coordinator.failure_ledger_snapshot().is_empty());
     assert!(matches!(
         coordinator
             .reflection_snapshots(session.demand.id)
@@ -3164,7 +3161,7 @@ fn every_suppressed_publication_preserves_the_shared_wait_protocol() {
         CoordinatorMutationKind::TaskPromiseIndexAdmission,
         CoordinatorMutationKind::TaskPromiseIndexRetirement,
         CoordinatorMutationKind::WorkClaim,
-        CoordinatorMutationKind::FailureLedger,
+        CoordinatorMutationKind::FailedRoot,
     ] {
         let (coordinator, _executor) = super::super::test_execution_resources(0)
             .expect("test execution resources should build");

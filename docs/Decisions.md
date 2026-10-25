@@ -2746,6 +2746,14 @@ maps the short names used here to file names.
     stop. Reasons: work stops only where someone chose to stop it; and
     recovering and clearing replace what machines keep between their
     tasks, so, like a call, they act between tasks.)
+  - (Decided by the maintainer, 2026-10-25, at `child-task-retirement`: an
+    annotation task's failure flags its anonymous root, which settlement
+    reports among failed machines; an anonymous root is unrecoverable, so
+    the failure stands even where a demander observed it. Reasons: a
+    machine in error is unresolved whoever saw the error, and observing an
+    error never clears a flag. The CLI logger's `.task.new` children retire
+    with `.task.*`, to return as `.child.task` once the logger runs as a
+    turn.)
   - `.child.call Key Op` is the one synchronous operation: within a
     transaction, a transactional remote procedure call, which awaits what
     was committed to the child before the caller's transaction, then runs

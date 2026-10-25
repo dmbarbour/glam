@@ -26,9 +26,8 @@ use super::coordinator::{
     DeferredProducer, DeferredWorkReservation, EvaluationSessionId, EvaluationTaskHandle,
     EvaluationTaskId, EvaluationTaskMachine, EvaluationWaitPoll, EvaluationWaitTerminal,
     EvaluationWaitToken, EvaluationWorkCoordinator, ExactDemandRoute, ExactTargetStatus,
-    InitialTaskDisposition, LocalPromiseOwner, PendingTaskPolicy, PreparedEvaluationTask,
-    PromiseProducerObligation, ReflectionCancellation, ReflectionTaskResultPolicy,
-    TaskFailureLedger, TaskPromiseTerminalMapper, TaskStatusPublisher, WorkDependency,
+    LocalPromiseOwner, PreparedEvaluationTask, PromiseProducerObligation,
+    ReflectionTaskResultPolicy, TaskPromiseTerminalMapper, TaskStatusPublisher, WorkDependency,
 };
 #[cfg(test)]
 use super::pump::test_reflection_dependency;
@@ -51,7 +50,6 @@ pub(crate) enum EvaluationSessionRun {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct EvaluationSessionReport {
-    pub(crate) failures: TaskFailureLedger,
     pub(crate) unfinished: Vec<EvaluationUnfinishedTask>,
 }
 
@@ -61,7 +59,6 @@ pub(crate) struct EvaluationTaskRegistryCounts {
     pub(crate) reflection_active: usize,
     pub(crate) reflection_terminal: usize,
     pub(crate) reflection_by_id: usize,
-    pub(crate) unacknowledged_failures: usize,
     pub(crate) deferred_active: usize,
     pub(crate) deferred_terminal: usize,
     pub(crate) deferred_by_wait: usize,
@@ -179,8 +176,7 @@ impl ReflectionTaskActivationPermit {
             activation.task_profile.clone(),
             ReflectionLaunchPolicy {
                 launch_parent: None,
-                status_publisher: None,
-                error_acknowledged: false,
+                flags_root: true,
                 machine: None,
             },
         );
@@ -215,8 +211,9 @@ struct PendingReflectionTaskInner {
 
 struct ReflectionLaunchPolicy {
     launch_parent: Option<EvaluationTaskId>,
-    status_publisher: Option<TaskStatusPublisher>,
-    error_acknowledged: bool,
+    /// Whether the task's failure flags its anonymous root: an annotation
+    /// task's does (`reflection-tasks-are-machine-tasks`).
+    flags_root: bool,
     /// The child machine the task runs on, where a queue started it.
     machine: Option<Arc<TaskMachine>>,
 }
@@ -228,7 +225,7 @@ impl PendingReflectionTask {
 
     /// Launches the task on `machine`, a child whose queue started it
     /// (`reflection-tasks-are-machine-tasks`). Its failure flags the machine
-    /// and breaks its reply, so it never joins the failure ledger.
+    /// and breaks its reply.
     pub(crate) fn launch_on(&self, machine: Arc<TaskMachine>) {
         if self.inner.activated.swap(true, Ordering::AcqRel) {
             return;
@@ -240,37 +237,10 @@ impl PendingReflectionTask {
             self.inner.context.task_profile.clone(),
             ReflectionLaunchPolicy {
                 launch_parent: Some(self.inner.launch_parent),
-                status_publisher: None,
-                error_acknowledged: true,
+                flags_root: false,
                 machine: Some(machine),
             },
         );
-    }
-
-    pub(crate) fn commit(&self, publisher: TaskStatusPublisher, policy: PendingTaskPolicy) {
-        if self.inner.activated.swap(true, Ordering::AcqRel) {
-            return;
-        }
-        match policy.disposition() {
-            InitialTaskDisposition::Launch => {
-                self.inner.context.activate_reflection_task(
-                    &self.inner.handle,
-                    &self.inner.effect,
-                    ReflectionTaskResultPolicy::ReturnValue,
-                    self.inner.context.task_profile.clone(),
-                    ReflectionLaunchPolicy {
-                        launch_parent: Some(self.inner.launch_parent),
-                        status_publisher: Some(publisher),
-                        error_acknowledged: policy.acknowledges_error(),
-                        machine: None,
-                    },
-                );
-            }
-            InitialTaskDisposition::Cancel => self
-                .inner
-                .context
-                .cancel_pending_reflection_task(&self.inner.handle, publisher),
-        }
     }
 }
 
@@ -466,21 +436,6 @@ impl EvaluationSession {
         session
     }
 
-    #[cfg(test)]
-    pub(crate) fn shared_with_values(
-        coordinator: &Arc<EvaluationWorkCoordinator>,
-        values: CoreValueFactory,
-    ) -> Arc<Self> {
-        assert_eq!(
-            coordinator.runtime_id(),
-            values.runtime_id(),
-            "test session values must belong to the coordinator runtime"
-        );
-        let session = Self::with_execution_resources(coordinator.clone(), values);
-        coordinator.register_demand(&session.demand);
-        session
-    }
-
     pub(crate) fn shared_with_default_profile(
         coordinator: &Arc<EvaluationWorkCoordinator>,
         values: CoreValueFactory,
@@ -569,8 +524,9 @@ impl OwnedEvalContext {
         mut self,
         launcher: Arc<dyn ReflectionTaskLauncher>,
     ) -> Self {
-        // Test effects may specialize `.task.new` without replacing the
-        // runtime-wide default used by `refl` and `meta_refl` annotations.
+        // Test effects may specialize the tasks a test task launches without
+        // replacing the runtime-wide default used by `refl` and `meta_refl`
+        // annotations.
         self.context.task_profile = Arc::new(ReflectionTaskProfile::sealed(launcher));
         self
     }
@@ -1835,7 +1791,6 @@ impl EvalContext {
             let promise_id = promise.id();
             let producer = Arc::new(PromiseProducerObligation::local_owned(
                 owner,
-                self.session.id,
                 &wait,
                 promise_id,
                 local_owner,
@@ -1896,9 +1851,7 @@ impl EvalContext {
             Ok(machine) => machine,
             Err(error) => {
                 // This helper reports construction failure directly to its
-                // Rust caller; it never returns a launched task handle whose
-                // failure would need runtime reporting.
-                coordinator.acknowledge_task_failure(self.session.id, id);
+                // Rust caller; it never returns a launched task handle.
                 assert!(
                     coordinator.terminalize_reserved_reflection(work),
                     "failed test task construction must terminalize its reservation"
@@ -1967,13 +1920,8 @@ impl EvalContext {
         let Ok(coordinator) = self.coordinator_for_admission() else {
             return;
         };
-        if activation.error_acknowledged {
-            coordinator.acknowledge_task_failure(handle.session_id(), handle.id());
-        }
-        if let Some(status_publisher) = activation.status_publisher
-            && !coordinator.attach_reflection_status_publisher(handle.work, status_publisher)
-        {
-            return;
+        if activation.flags_root {
+            coordinator.flag_root_on_failure(handle.work);
         }
         let launcher = task_profile.launcher().ok_or_else(|| {
             Arc::new(EvaluationFailure::message(
@@ -2050,32 +1998,6 @@ impl EvalContext {
         let _ = coordinator.discard_reserved_reflection(handle.work);
     }
 
-    fn cancel_pending_reflection_task(
-        &self,
-        handle: &EvaluationTaskHandle,
-        status_publisher: TaskStatusPublisher,
-    ) {
-        let Some(coordinator) = self.coordinator() else {
-            return;
-        };
-        assert!(
-            coordinator.attach_reflection_status_publisher(handle.work, status_publisher),
-            "a committed pending task must remain reserved"
-        );
-        let cancellation = coordinator.request_reflection_cancellation(handle.work);
-        assert_eq!(
-            cancellation,
-            ReflectionCancellation::Terminalize,
-            "a committed pre-launch cancellation must own its reservation"
-        );
-        coordinator.settle_terminal_work(
-            handle.work,
-            EvaluationWaitTerminal::Cancelled,
-            evaluation_failure("reflection fixpoint producer was cancelled"),
-        );
-        drop(coordinator.retire_reflection(handle.work));
-    }
-
     fn cancel_pending_reflection_completion(&self, handle: &EvaluationTaskHandle) {
         let Some(coordinator) = self.coordinator() else {
             return;
@@ -2134,7 +2056,6 @@ impl EvalContext {
         let coordinator = self.coordinator_for_admission()?;
         // The background annotation context carries its demand domain's
         // default profile, not the role-specific profile of its first caller.
-        // Ordinary `.task.new` uses the caller's profile in `prepare_machine`.
         let task_profile = self.task_profile.clone();
         if !task_profile.is_sealed() && self.session.require_default_reflection_profile {
             return Err(Arc::from(
@@ -2262,16 +2183,6 @@ impl EvalContext {
         self.coordinator().is_some_and(|coordinator| {
             coordinator.attach_reflection_status_publisher(task.work, publisher)
         })
-    }
-
-    pub(crate) fn acknowledge_task_failure(
-        &self,
-        owner: EvaluationSessionId,
-        task: EvaluationTaskId,
-    ) {
-        if let Some(coordinator) = self.coordinator() {
-            coordinator.acknowledge_task_failure(owner, task);
-        }
     }
 
     pub(crate) fn poll_wait(&self, wait: &EvaluationWaitToken) -> EvaluationWaitPoll {
@@ -2551,7 +2462,6 @@ impl EvalContext {
             reflection_active,
             reflection_terminal: 0,
             reflection_by_id,
-            unacknowledged_failures: coordinator.failure_snapshot(self.session.id).size(),
             deferred_active: deferred_counts.0,
             deferred_terminal: 0,
             deferred_by_wait: deferred_counts.1,
