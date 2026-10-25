@@ -187,6 +187,37 @@ impl PortState {
             .and_then(|buffer| buffer.items.front().map(|item| (buffer.head, item.clone())))
     }
 
+    /// Whether a buffer of `port` at the machine at `root` or a descendant
+    /// holds an item, at a machine that `counts`.
+    pub(in crate::api) fn holds_items_below(
+        &self,
+        root: &[Key],
+        port: &Key,
+        counts: impl Fn(&[Key]) -> bool,
+    ) -> bool {
+        self.buffers.iter().any(|(address, buffer)| {
+            address.port == *port
+                && address.machine.starts_with(root)
+                && !buffer.items.is_empty()
+                && counts(&address.machine)
+        })
+    }
+
+    /// Drops the buffers of the machine at `root` and its descendants,
+    /// those of machines that `keep` aside: nothing reaches them. A
+    /// transaction that read one conflicts, as with a consumed buffer.
+    pub(in crate::api) fn remove_below(&mut self, root: &[Key], keep: impl Fn(&[Key]) -> bool) {
+        let dropped: Vec<PortAddress> = self
+            .buffers
+            .keys()
+            .filter(|address| address.machine.starts_with(root) && !keep(&address.machine))
+            .cloned()
+            .collect();
+        for address in dropped {
+            self.buffers.remove_mut(&address);
+        }
+    }
+
     /// Applies a validated journal, returning whether anything changed.
     pub(in crate::api) fn commit(&mut self, journal: &PortJournal) -> bool {
         let mut changed = false;

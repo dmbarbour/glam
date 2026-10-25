@@ -524,6 +524,9 @@ where
         .machines()
         .ok_or_else(|| TaskHalt::new("`.child.task` needs a host with machines"))?;
     let path = child_machine(key, context)?;
+    if context.eval_context().machine().is_none() {
+        context.note_anonymous_children(host.clone());
+    }
     let machine: Arc<[Key]> = Arc::from(path.clone());
     let values = context.values();
     let promises = match context.transaction() {

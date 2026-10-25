@@ -1215,6 +1215,7 @@ fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
         terminal,
         machine_state,
         _run_guard,
+        root_guard,
         exact_demand_route,
         hosted,
         phase_probe,
@@ -1223,6 +1224,7 @@ fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
     let _: &Option<RuntimeValueRoot> = machine_state;
     // The run's machine, its host and halt action hold no task value.
     let _: &Option<crate::evaluation::MachineRunGuard> = _run_guard;
+    let _: &Option<crate::evaluation::AnonymousRootGuard> = root_guard;
     let _: &Option<HostedCuts<TestEffects>> = hosted;
     let _: &RuntimeValueRoot = api;
     let _ = (

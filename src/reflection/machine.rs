@@ -165,6 +165,9 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     /// Halts the task's run on its child machine where the task stops
     /// without finishing, as a panic stops it.
     _run_guard: Option<crate::evaluation::MachineRunGuard>,
+    /// Reports the end of the task's anonymous root, once the task, a root,
+    /// tasks a child, so the host can reclaim the root's subtree.
+    root_guard: Option<crate::evaluation::AnonymousRootGuard>,
     exact_demand_route: ExactDemandRoute,
     /// Where the task's host runs its cuts, what it tells the host.
     hosted: Option<HostedCuts<S>>,
@@ -472,6 +475,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             terminal: None,
             machine_state: None,
             _run_guard: run_guard,
+            root_guard: None,
             exact_demand_route: ExactDemandRoute::default(),
             hosted: None,
             #[cfg(test)]
@@ -1267,6 +1271,15 @@ impl<S: TaskSpecialization> EffectTask<S> {
         }
         if activity.committed {
             specializing.branch.retry = None;
+        }
+        if let Some(host) = activity.anonymous_children
+            && self.root_guard.is_none()
+            && let Ok(task) = self.eval_context.task_id()
+        {
+            self.root_guard = Some(crate::evaluation::AnonymousRootGuard::new(
+                host,
+                super::requests::anonymous_root(task),
+            ));
         }
         let result = match result {
             Ok(result) => result,

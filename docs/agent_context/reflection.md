@@ -189,6 +189,12 @@ and control flow.
   it finished" and the machine is flagged. A halt where the thread holds a
   mutator, or unwinds, waits on the host for its next safe point
   (`run_deferred`, also run with the death notices).
+- An anonymous root's subtree is unreachable once the root's task ends: its
+  keys name a task id never reused. The root's task, once it tasks a child,
+  holds an `AnonymousRootGuard` reporting its end, and the host reclaims
+  the subtree, its cells and port buffers, when the last of the root and
+  its runs ends with no task waiting in an unflagged queue. Failed machines
+  stay whole for settlement.
 - An annotation task (`anno refl:` or `anno meta_refl:`) has no machine of
   its own: it is an anonymous root, `refl/<abstract task id>`, and its
   failure flags that root for good, since no parent can recover it, even

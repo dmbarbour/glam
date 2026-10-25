@@ -2367,6 +2367,48 @@ launch = \bomb -> anno refl:(.child.task 'p (seq bomb (.r ())) >>= (\p -> .cut (
 }
 
 #[test]
+fn an_anonymous_root_s_subtree_is_reclaimed_once_nothing_runs_there() {
+    // `anonymous-root-reclamation`: once an anonymous root's task has ended
+    // and no task runs or waits in its subtree, nothing reaches the subtree,
+    // and the runtime drops its machines, whichever ends last: the root,
+    // after the children it awaited, or a child, after its root. A failed
+    // machine stays whole for settlement.
+    let source = r#"language g0
+import 'std
+awaited = anno refl:(.child.task 'a (.set ['n] 1 =>> .r 1) >>= (\p -> seq p (.child.task 'a (.r 2) >>= (\q -> seq q (.heap.set ['awaited] "done"))))) ()
+detached = anno refl:(.child.task 'd (.cut (.heap.try_get ['d_gate]) =>> .r ()) >>= (\_ -> .heap.set ['detached] "done")) ()
+opener = anno refl:(.cut (.heap.try_get ['detached] >>= (\_ -> .r ())) =>> .heap.set ['d_gate] () =>> .heap.set ['opener] "done") ()
+failed = anno refl:(.child.task 'f (.fail) >>= (\_ -> .child.task 'g (.r ()) >>= (\q -> seq q (.heap.set ['failed] "done")))) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["reclaimed_roots"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    for name in ["awaited", "detached", "opener", "failed"] {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    let _ = assembler.drain_reasoning();
+    let heap = assembler.test_reflection_heap();
+    for name in ["awaited", "detached", "opener", "failed"] {
+        assert!(assembler.get(&heap, name).is_ok(), "{name} finished");
+    }
+    let left = assembler
+        .evaluation_runtime()
+        .state
+        .shared_resources
+        .anonymous_machines_for_test();
+    let failed = Key::atom_from_text("f");
+    assert!(
+        !left.is_empty() && left.iter().all(|path| path.last() == Some(&failed)),
+        "only the failed machine stays: {left:?}"
+    );
+}
+
+#[test]
 fn an_interrupt_within_a_failed_cut_stops_nothing() {
     // An interrupt is a write like any other: a cut that fails undoes it,
     // and the task runs on to its end.

@@ -7,11 +7,11 @@
 //! the cut commits. Its local state, and whether a task runs on it, live
 //! here: only its own tasks read or write them, one at a time.
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::sync::{Mutex, PoisonError};
 
 use super::RuntimeSharedResources;
-use super::events::{RuntimeEventJournal, task_address};
+use super::events::{RuntimeEventJournal, TASKS, task_address};
 use crate::core::{EvaluationFailure, Key, ManagedResolverRoot, RuntimeValueAccess, Value};
 use crate::evaluation::{
     DeferredHalt, EvaluationTaskHandle, MachineHost, MachineTaskOutcome, QueuedTask,
@@ -33,6 +33,11 @@ pub(super) struct MachineCells {
     ///
     /// Leaf lock: critical sections make only whole updates, so poison is recovered.
     deferred: Mutex<Vec<DeferredHalt>>,
+    /// The anonymous roots whose tasks ended and whose subtrees wait to be
+    /// reclaimed.
+    ///
+    /// Leaf lock: critical sections make only whole updates, so poison is recovered.
+    ended_roots: Mutex<BTreeSet<Vec<Key>>>,
 }
 
 #[derive(Default)]
@@ -71,12 +76,83 @@ impl RuntimeSharedResources {
         Some(QueuedTask { sequence, record })
     }
 
+    /// Reclaims the subtree of the anonymous root at `root` where the root
+    /// ended and no task runs or waits there: drops its machines' cells and
+    /// port state, those of flagged machines aside, which stay whole for
+    /// settlement to report (`reflection-tasks-are-machine-tasks`).
+    fn reclaim_if_idle(&self, root: &[Key]) {
+        let ended = || {
+            self.machines
+                .ended_roots
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+        };
+        if !ended().contains(root) {
+            return;
+        }
+        let mut cells = self.cells();
+        if cells
+            .iter()
+            .any(|(path, cell)| path.starts_with(root) && cell.run.is_some())
+        {
+            return;
+        }
+        let mut state = self
+            .transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned");
+        let flags = state.events.flags.clone();
+        if state
+            .events
+            .ports
+            .holds_items_below(root, &TASKS, |machine| !flags.is_set(machine))
+        {
+            return;
+        }
+        state
+            .events
+            .ports
+            .remove_below(root, |machine| flags.is_set(machine));
+        drop(state);
+        cells.retain(|path, _| !path.starts_with(root) || flags.is_set(path));
+        drop(cells);
+        ended().remove(root);
+    }
+
+    /// The machines below anonymous roots that hold a cell or port state.
+    #[cfg(test)]
+    pub(in crate::api) fn anonymous_machines_for_test(&self) -> BTreeSet<Vec<Key>> {
+        let mut machines: BTreeSet<Vec<Key>> = self
+            .cells()
+            .keys()
+            .filter(|path| anonymous_root_of(path).is_some())
+            .cloned()
+            .collect();
+        let (_, _, events) = self.transaction_snapshot();
+        machines.extend(
+            RuntimeEventJournal::new(events)
+                .present_below_for_test(&[Key::atom_from_text("refl")])
+                .into_iter()
+                .filter(|path| anonymous_root_of(path).is_some()),
+        );
+        machines
+    }
+
     fn cells(&self) -> std::sync::MutexGuard<'_, HashMap<Vec<Key>, MachineCell>> {
         self.machines
             .cells
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
     }
+}
+
+/// The anonymous root `machine` lies below, where it lies below one.
+fn anonymous_root_of(machine: &[Key]) -> Option<&[Key]> {
+    (machine.len() >= 2
+        && machine[0] == Key::atom_from_text("refl")
+        && crate::reflection::is_anonymous_key(&machine[1]))
+    .then(|| &machine[..2])
 }
 
 /// The resolver of the reply `task`, a queued task's record, holds.
@@ -259,6 +335,13 @@ impl MachineHost for RuntimeSharedResources {
                 discard: false,
             });
         }
+        drop(cells);
+        // The last run in an ended root's subtree may leave it idle.
+        if next.is_none()
+            && let Some(root) = anonymous_root_of(machine)
+        {
+            self.reclaim_if_idle(root);
+        }
         next
     }
 
@@ -278,6 +361,15 @@ impl MachineHost for RuntimeSharedResources {
         if let Some(task) = task {
             task.cancel();
         }
+    }
+
+    fn root_ended(&self, root: &[Key]) {
+        self.machines
+            .ended_roots
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .insert(root.to_vec());
+        self.reclaim_if_idle(root);
     }
 
     fn defer(&self, halt: DeferredHalt) {

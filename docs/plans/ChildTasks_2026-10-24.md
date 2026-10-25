@@ -156,9 +156,8 @@ Each with tests, the full gate, and a commit.
    the recorded promises. The other `.task.*` uses, the tests of `.task.*`
    itself and the CLI logger's children, wait for
    `child-task-retirement`, each migrated or retired by its purpose. Noted:
-   the machines below anonymous roots stay, as the Reflection Model says
-   children do, so each boundary leaves a cell and empty queues per
-   machine; nothing reclaims them yet.
+   the machines below anonymous roots stayed, a cell and empty queues per
+   machine, until `anonymous-root-reclamation`.
 6. `child-task-retirement` — `.task.*`, `TaskHandleCell`, the status
    queries, `acknowledge_reasoning_failure` and the failure ledger retire,
    with their docs, and the remaining `.task.*` tests and the CLI logger's
@@ -223,6 +222,18 @@ Each with tests, the full gate, and a commit.
    cells and port state. Failed machines stay whole, flag and state, for
    settlement to decide when to clear them, as later inspection tools
    might at a finer grain (maintainer, 2026-10-25).
+   Built 2026-10-25, at whichever ends last: an anonymous root's task that
+   tasks a child holds an `AnonymousRootGuard` (the request reports the
+   host through `RequestActivity`), whose drop reports the root's end; a
+   run's end in an ended root's subtree checks again. Where no run is
+   active and no unflagged queue holds a task, the host drops the
+   subtree's cells and port buffers, flagged machines' aside; settlement
+   needs no sweep, so successful work leaves nothing behind (maintainer:
+   reclaiming only at settlement would be unbounded garbage). Test: roots
+   that end after their children, a child that ends after its root (as the
+   compiler's scanner does), and a failed child that stays whole; each
+   trigger, and the kept failure, mutation-checked. Wiring and shares below
+   anonymous roots, which tasks cannot own yet, wait for `api-refl-ports`.
 
 ## Defaults, open to the maintainer
 

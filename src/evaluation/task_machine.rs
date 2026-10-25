@@ -177,6 +177,11 @@ pub(crate) trait MachineHost: Send + Sync {
     /// its machines to be idle or flagged.
     fn clear(&self, machine: &[Key]);
 
+    /// Records that the anonymous root at `root` ended: its task did, so
+    /// nothing outside reaches its subtree, which the host reclaims once no
+    /// task runs or waits in it, failed machines aside.
+    fn root_ended(&self, root: &[Key]);
+
     /// Keeps `halt` for [`Self::run_deferred`].
     fn defer(&self, halt: DeferredHalt);
 
@@ -198,6 +203,30 @@ impl MachineRunGuard {
         Self {
             machine,
             exiting: false,
+        }
+    }
+}
+
+/// Reports its anonymous root's end when dropped: the root's task holds
+/// one once it tasks a child.
+pub(crate) struct AnonymousRootGuard {
+    host: Arc<dyn MachineHost>,
+    root: Vec<Key>,
+}
+
+impl AnonymousRootGuard {
+    pub(crate) fn new(host: Arc<dyn MachineHost>, root: Vec<Key>) -> Self {
+        Self { host, root }
+    }
+}
+
+impl Drop for AnonymousRootGuard {
+    fn drop(&mut self) {
+        let (host, root) = (self.host.clone(), std::mem::take(&mut self.root));
+        if std::thread::panicking() || glam_gc::Heap::thread_holds_mutator() {
+            self.host.defer(Box::new(move || host.root_ended(&root)));
+        } else {
+            host.root_ended(&root);
         }
     }
 }

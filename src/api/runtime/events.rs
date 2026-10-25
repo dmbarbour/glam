@@ -478,6 +478,13 @@ impl RuntimeEventJournal {
         cleared
     }
 
+    /// The machines below `machine` that hold port state, anonymous roots
+    /// included.
+    #[cfg(test)]
+    pub(in crate::api) fn present_below_for_test(&self, machine: &[Key]) -> BTreeSet<Vec<Key>> {
+        self.ports.present_below(machine)
+    }
+
     /// The machines below `machine` that hold state here: port state, or a
     /// share of their environment. Anonymous roots, and the child machines
     /// below them, are left out: they are unnamed in listings

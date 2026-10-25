@@ -151,6 +151,10 @@ impl ReasoningSessionId {
 pub(super) struct RequestActivity {
     pub(super) observed_generation: Option<u64>,
     pub(super) committed: bool,
+    /// The machines of an anonymous root that tasked a child, so its task
+    /// holds a guard reporting the root's end
+    /// (`reflection-tasks-are-machine-tasks`).
+    pub(super) anonymous_children: Option<Arc<dyn crate::evaluation::MachineHost>>,
 }
 
 /// Extra effects and transactional resources available to one task kind.
@@ -833,6 +837,15 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
         }
     }
 
+    /// Notes that the current task, an anonymous root, tasked a child on
+    /// `host`'s machines.
+    pub(crate) fn note_anonymous_children(
+        &mut self,
+        host: Arc<dyn crate::evaluation::MachineHost>,
+    ) {
+        self.activity.anonymous_children.get_or_insert(host);
+    }
+
     /// Marks a successful immediate host mutation as a retry barrier.
     pub fn committed(&mut self) {
         assert!(
@@ -975,9 +988,12 @@ mod root_inventory_tests {
         let RequestActivity {
             observed_generation,
             committed,
+            anonymous_children,
         } = activity;
         let _: &Option<u64> = observed_generation;
         let _: &bool = committed;
+        // The host keeps the machines, no task value.
+        let _: &Option<Arc<dyn crate::evaluation::MachineHost>> = anonymous_children;
         match result {
             CommitResult::Committed | CommitResult::Conflict | CommitResult::Closed => {}
             CommitResult::MissingVolume(volume) => {
