@@ -12,7 +12,7 @@ use super::{
 use crate::api::{Diagnostic, Error, MachinePath, Value, Values};
 use crate::core::Key;
 use crate::diagnostic::Severity;
-use crate::evaluation::RuntimeWaitFamilySnapshot;
+use crate::evaluation::{RuntimeWaitFamilySnapshot, WaitMachineSnapshot};
 use crate::runtime::EvaluationRuntimeId;
 
 /// What a waiting work waits on.
@@ -31,13 +31,15 @@ pub enum RuntimeWaitFamily {
     ErredWait,
 }
 
-/// One unfinished work, with its family and the work its wait ends at.
+/// One unfinished work, with its family, the work its wait ends at, and
+/// the machine it runs on.
 #[derive(Clone, Debug)]
 pub struct RuntimeWait {
     work: RuntimeDeadlockWork,
     family: RuntimeWaitFamily,
     cause: Option<u64>,
     awaited: bool,
+    machine: Option<MachinePath>,
 }
 
 impl RuntimeWait {
@@ -59,6 +61,14 @@ impl RuntimeWait {
     /// link in that work's wait, such as a lazy value forced on the way.
     pub fn awaited(&self) -> bool {
         self.awaited
+    }
+
+    /// The machine the waiting task runs on, which a host's options name
+    /// (`quiescence-is-analyzed`): the child whose queue started it, or its
+    /// own anonymous root, reachable only through the analysis. Work that
+    /// is not a reflection task runs on no machine.
+    pub fn machine(&self) -> Option<&MachinePath> {
+        self.machine.as_ref()
     }
 }
 
@@ -303,6 +313,12 @@ impl EvaluationRuntime {
                     },
                     cause: wait.cause.map(|work| work.get()),
                     awaited: wait.awaited,
+                    machine: wait.machine.map(|machine| match machine {
+                        WaitMachineSnapshot::Child(child) => MachinePath::from(child.to_vec()),
+                        WaitMachineSnapshot::AnonymousRoot(task) => {
+                            MachinePath::from(crate::reflection::anonymous_root(task))
+                        }
+                    }),
                 })
                 .collect(),
             backlogs: backlogs

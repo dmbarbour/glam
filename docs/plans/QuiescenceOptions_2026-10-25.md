@@ -114,6 +114,12 @@ Embedders and tests use the API.
 2. `quiescence-waits-name-machines` — `RuntimeWait::machine()`. Test: the
    analysis's waits name a child's path and an annotation task's root,
    and no machine for an evaluation.
+   Built 2026-10-25: the coordinator's reflection work records the child
+   a task runs on as it launches, beside whether its failure flags its
+   root (`record_launch`, which replaces `flag_root_on_failure`); a
+   reflection task without one names its anonymous root, by its task.
+   Mutation-checked: the child's recording and its naming, the root's
+   naming, no machine for other work, and the root flag's recording.
 3. `quiescence-interrupts` — `EvaluationRuntime::interrupt`, with the
    frames on a task's block and the callee rule for both interrupts.
    Tests: interrupting a child waiting idle flags it with the reason and

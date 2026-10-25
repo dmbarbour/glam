@@ -276,7 +276,9 @@ and control flow.
   launched work from every demand session and returns a stable
   `RuntimeReadiness` snapshot. `EvaluationRuntime::analysis()`, at any time,
   says what the runtime holds (`quiescence-is-analyzed`) and changes
-  nothing: its waits by family, its backlogs, and its issues, unresolved by
+  nothing: its waits by family, each task's naming the machine it runs on,
+  a child or its anonymous root (`ReflectionWork::child`, recorded as the
+  task launches), its backlogs, and its issues, unresolved by
   default, among them every machine in error as a `FailedMachine` (path and
   diagnostic), flagged child machines and failed anonymous roots, in path
   order. Until `settlement-retires`, a deadlock snapshot still retains known

@@ -3,11 +3,15 @@
 //! time, changing nothing.
 
 use std::collections::HashSet;
+use std::sync::Arc;
+
+use crate::core::Key;
 
 use super::settlement::unfinished_work_snapshot_locked;
 use super::{
-    DependencyEdge, EvaluationWorkCoordinator, EvaluationWorkId, RuntimeDeadlockWorkSnapshot,
-    WorkCoordinatorState, WorkKind, WorkState, dependency_edge_locked, task_block, work_dependency,
+    DependencyEdge, EvaluationTaskId, EvaluationWorkCoordinator, EvaluationWorkId,
+    RuntimeDeadlockWorkSnapshot, WorkCoordinatorState, WorkKind, WorkState, dependency_edge_locked,
+    task_block, work_dependency,
 };
 
 /// What a waiting work waits on, as the analysis classifies it.
@@ -26,15 +30,26 @@ pub(crate) enum RuntimeWaitFamilySnapshot {
     ErredWait,
 }
 
+/// The machine a waiting task runs on.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum WaitMachineSnapshot {
+    /// The child machine whose queue started it.
+    Child(Arc<[Key]>),
+    /// Its own anonymous root, by its task.
+    AnonymousRoot(EvaluationTaskId),
+}
+
 /// One unfinished work, its family, the work its wait ends at, where that
-/// is another's, and whether another unfinished work awaits it, so that it
-/// is a link in that work's wait.
+/// is another's, whether another unfinished work awaits it, so that it is a
+/// link in that work's wait, and the machine it runs on, where it is a
+/// reflection task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeWaitSnapshot {
     pub(crate) work: RuntimeDeadlockWorkSnapshot,
     pub(crate) family: RuntimeWaitFamilySnapshot,
     pub(crate) cause: Option<EvaluationWorkId>,
     pub(crate) awaited: bool,
+    pub(crate) machine: Option<WaitMachineSnapshot>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -78,11 +93,19 @@ impl EvaluationWorkCoordinator {
             };
             let (family, cause) = classify_wait_locked(&state, record.id);
             quiescent &= family != RuntimeWaitFamilySnapshot::InProgress;
+            let machine = match &record.kind {
+                WorkKind::Reflection(reflection) => Some(match &reflection.child {
+                    Some(child) => WaitMachineSnapshot::Child(child.clone()),
+                    None => WaitMachineSnapshot::AnonymousRoot(reflection.task),
+                }),
+                _ => None,
+            };
             waits.push(RuntimeWaitSnapshot {
                 work,
                 family,
                 cause,
                 awaited: awaited.contains(&record.id),
+                machine,
             });
         }
         waits.sort_by_key(|wait| wait.work.work.get());

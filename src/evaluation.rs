@@ -46,8 +46,8 @@ pub(crate) use coordinator::{
     PromiseProducerObligation, PromiseProducerPublication, ReflectionTaskResultPolicy,
     RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
     RuntimeWaitFamilySnapshot, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
-    TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan, WakeRegistration,
-    WorkDependency,
+    TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan, WaitMachineSnapshot,
+    WakeRegistration, WorkDependency,
 };
 pub(crate) use executor::EvaluationExecutor;
 #[cfg(test)]

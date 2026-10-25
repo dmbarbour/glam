@@ -2719,6 +2719,83 @@ broken = anno refl:(1 / 0) ()
     ));
 }
 
+#[test]
+fn an_analysis_names_the_machine_each_waiting_task_runs_on() {
+    // `quiescence-is-analyzed`: the analysis's entries carry what a host's
+    // options need. A waiting task names the machine it runs on: a child,
+    // by the path its queue has, or an annotation task's own anonymous
+    // root, reachable only so; a lazy value forced on the way, which is no
+    // task, names none.
+    let source = r#"language g0
+import 'std
+inner = anno refl:(.cut (.heap.try_get ['gate])) "inner"
+waits = anno refl:(.child.task 'w (.cut (.heap.try_get ['never])) >>= (\_ -> .child.task 'v (seq inner (.r ())) >>= (\_ -> .heap.set ['waits] "queued"))) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["named"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    assembler
+        .evaluate(&assembler.get(module.value(), "waits").unwrap())
+        .expect("the root queues its children");
+    let _ = assembler.drain_reasoning();
+    let analysis = assembler.evaluation_runtime().analysis().unwrap();
+    assert!(analysis.quiescent());
+    let mut children = Vec::new();
+    let mut roots = Vec::new();
+    for wait in analysis.waits() {
+        let work = wait.work();
+        assert_eq!(
+            wait.machine().is_some(),
+            work.kind() == RuntimeWorkKind::ReflectionTask,
+            "{work:?}"
+        );
+        let Some(machine) = wait.machine() else {
+            continue;
+        };
+        let keys = machine.keys();
+        assert!(crate::reflection::is_anonymous_key(&keys[1]), "{keys:?}");
+        match keys.len() {
+            2 => roots.push((keys.to_vec(), work.task_id())),
+            3 => children.push((keys[..2].to_vec(), keys[2].clone())),
+            _ => panic!("an unexpected machine: {keys:?}"),
+        }
+    }
+    assert!(
+        analysis.waits().iter().any(|wait| wait.machine().is_none()),
+        "the forced lazy value is no task"
+    );
+    let [(root, task)] = roots.as_slice() else {
+        panic!("one waiting annotation task: {roots:?}")
+    };
+    let task = task.expect("an annotation task has a task id");
+    assert_eq!(
+        root,
+        &crate::reflection::anonymous_root(crate::evaluation::EvaluationTaskId::from_nonzero(
+            std::num::NonZeroU64::new(task).expect("task ids are nonzero")
+        )),
+        "an annotation task runs on its own root"
+    );
+    children.sort_by(|left, right| left.1.cmp(&right.1));
+    assert_eq!(
+        children
+            .iter()
+            .map(|(_, key)| key.clone())
+            .collect::<Vec<_>>(),
+        [Key::atom_from_text("v"), Key::atom_from_text("w")]
+    );
+    assert_eq!(
+        children[0].0, children[1].0,
+        "both under the root that queued them"
+    );
+    assert_ne!(
+        &children[0].0, root,
+        "a root apart from the annotation task's"
+    );
+}
+
 /// The anonymous root `path` lies under, and the keys below it.
 fn below_root(path: &[Key]) -> usize {
     path.len().saturating_sub(2)

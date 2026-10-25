@@ -41,7 +41,7 @@ mod registry_inventory;
 mod settlement;
 mod spark;
 mod task;
-pub(crate) use analysis::RuntimeWaitFamilySnapshot;
+pub(crate) use analysis::{RuntimeWaitFamilySnapshot, WaitMachineSnapshot};
 pub(crate) use client_demand::{
     ClaimedClientDemand, ClientDemandHandle, ClientDemandOperation, ClientDemandPoll,
     ClientDemandResult, ClientDemandSink, ClientDemandSnapshot,

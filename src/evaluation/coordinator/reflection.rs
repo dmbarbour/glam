@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 
-use crate::core::{EvaluationPanic, RuntimeValueMutator};
+use crate::core::{EvaluationPanic, Key, RuntimeValueMutator};
 use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
 
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
@@ -45,18 +45,25 @@ impl EvaluationWorkCoordinator {
         })
     }
 
-    /// Makes the failure of the reflection work at `work`, a task with no
-    /// machine of its own, flag its anonymous root, which settlement reports
-    /// (`reflection-tasks-are-machine-tasks`). Annotation tasks set it as
-    /// they activate; a child task's failure flags its machine instead, and a
-    /// Rust-scheduled root's goes to its caller.
-    pub(in crate::evaluation) fn flag_root_on_failure(&self, work: EvaluationWorkId) {
+    /// Records how the reflection work at `work` launches, as it activates
+    /// (`reflection-tasks-are-machine-tasks`): the child machine it runs on,
+    /// where a queue started it, and whether its failure flags its anonymous
+    /// root, as an annotation task's does. A child task's failure flags its
+    /// machine instead, and a Rust-scheduled root's goes to its caller.
+    pub(in crate::evaluation) fn record_launch(
+        &self,
+        work: EvaluationWorkId,
+        flags_root: bool,
+        child: Option<Arc<[Key]>>,
+    ) {
         let mut state = self
             .state
             .lock()
             .expect("evaluation work coordinator was poisoned");
         if let Some(record) = state.work.get_mut(&work) {
-            reflection_work_mut(record).flags_root = true;
+            let reflection = reflection_work_mut(record);
+            reflection.flags_root = flags_root;
+            reflection.child = child;
         }
     }
 
@@ -155,6 +162,7 @@ impl EvaluationWorkCoordinator {
                     task,
                     launch_parent: None,
                     flags_root: false,
+                    child: None,
                     wait: wait.clone(),
                     machine: None,
                     block: None,
@@ -755,6 +763,9 @@ pub(super) struct ReflectionWork {
     pub(super) launch_parent: Option<EvaluationTaskId>,
     /// Whether the task's failure flags its anonymous root.
     pub(super) flags_root: bool,
+    /// The child machine the task runs on, where a queue started it; any
+    /// other task runs on its anonymous root.
+    pub(super) child: Option<Arc<[Key]>>,
     pub(super) wait: EvaluationWaitToken,
     pub(super) machine: Option<Box<dyn EvaluationTaskMachine>>,
     pub(super) block: Option<EvaluationTaskBlock>,

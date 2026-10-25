@@ -1920,9 +1920,14 @@ impl EvalContext {
         let Ok(coordinator) = self.coordinator_for_admission() else {
             return;
         };
-        if activation.flags_root {
-            coordinator.flag_root_on_failure(handle.work);
-        }
+        coordinator.record_launch(
+            handle.work,
+            activation.flags_root,
+            activation
+                .machine
+                .as_ref()
+                .map(|machine| machine.path().clone()),
+        );
         let launcher = task_profile.launcher().ok_or_else(|| {
             Arc::new(EvaluationFailure::message(
                 "reflection task profile is not sealed",
