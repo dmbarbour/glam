@@ -1014,7 +1014,11 @@ handle API goes.
         reported at settlement, and the retirement of `.task.*`, task
         handles, status queries and the failure ledger (2026-10-25).
       - `api-refl-call`: `.child.call`, with a child's machine state where
-        a caller's transaction stages it.
+        a caller's transaction stages it. Designed in
+        [Child Calls](ChildCalls_2026-10-25.md), drafted 2026-10-25 for
+        review: child state in the event state's transactional record, a
+        call frame with a per-branch machine, and the plain call as a
+        queued, awaited task.
       - `api-refl-annotations`: annotation tasks on anonymous machines
         under `refl`.
       - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`
@@ -1047,6 +1051,15 @@ handle API goes.
      classifies them (2026-10-21).
     - CLI slice: the CLI's two settlement loops become one, and the bridge
      behavior below that settlement retires goes.
+    - `settlement-clears-machines` (maintainer, 2026-10-25): machines in
+     error stay whole, with their state, until settlement clears them on
+     a decision its host or user makes from the report, such as a CLI
+     option or an IDE's command: failed child machines and failed
+     anonymous roots, and alike the work blocked permanently on
+     divergence, which settlement kills and an interrupt flags. Clearing
+     drops each machine with its subtree and its failure; inspection tools
+     may later clear at a finer grain. Until then they stay as long as the
+     runtime does.
     - Candidate (maintainer, 2026-10-20): recognize a self-wait from
      outside, for the report: a cut that waits on the value of a promise
      it resolves itself, which only its commit would settle. Inspecting a

@@ -234,6 +234,8 @@ Each with tests, the full gate, and a commit.
    compiler's scanner does), and a failed child that stays whole; each
    trigger, and the kept failure, mutation-checked. Wiring and shares below
    anonymous roots, which tasks cannot own yet, wait for `api-refl-ports`.
+   The failed machines kept here clear with `settlement-clears-machines`
+   in the runtime API plan's `api-settlement`.
 
 ## Defaults, open to the maintainer
 
