@@ -116,7 +116,12 @@ flags a step for discussion when work reaches it, not a decision.
   kill flags the machines it stops in its own report, with its reason, and
   a host clears orphaned failures, those under an anonymous root that has
   ended, through the report. Drafted 2026-10-25 for the maintainer's
-  review.
+  review; reframed the same day by `Quiescence_2026-10-25.md`.
+- [`Quiescence_2026-10-25.md`](Quiescence_2026-10-25.md): an end-state
+  review of the runtime API plan's `api-settlement`: quiescence as a
+  state, an analysis of what is owed when the runtime halts, and the
+  options a host takes after it, in place of settlement's staged exit
+  votes and kills. Drafted 2026-10-25 for the maintainer's review.
 - [`DictSemantics_2026-10-24.md`](DictSemantics_2026-10-24.md): `dict-`
   steps revising dicts: `{}` as the empty dict rather than undefined,
   shallow union, paths fused by prefix, reads of what is undefined

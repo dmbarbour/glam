@@ -5,7 +5,11 @@ in the [runtime API plan](RuntimeApi_2026-10-17.md): how the reflection
 machines left in error leave the runtime, and how settlement's kills flag
 them first. It builds on [Child Tasks](ChildTasks_2026-10-24.md) and
 [Child Calls](ChildCalls_2026-10-25.md). Drafted 2026-10-25 for the
-maintainer's review before building.
+maintainer's review before building. Reframed the same day, at the
+maintainer's request, by the end-state review in
+[Quiescence](Quiescence_2026-10-25.md): settlement as a staging step
+retires, and this note's slices become options a host takes after an
+analysis.
 
 ## The model
 

@@ -1048,7 +1048,10 @@ handle API goes.
         `compile-resumable` if that fits better (maintainer).
       - `api-refl-cli-log`: the CLI slice above.
 23. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
-    decides (maintainer, 2026-10-19), in place of exit votes. It follows
+    decides (maintainer, 2026-10-19), in place of exit votes. Under
+    review (2026-10-25): [Quiescence](Quiescence_2026-10-25.md) reframes
+    it as an analysis of a halted runtime and the host's options after
+    it, with no staging step. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
     tasks as machines and no exit votes, rather than building on both. The runtime is
     quiescent when every machine waits on input or a heap change, retrying
