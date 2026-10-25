@@ -1078,7 +1078,10 @@ handle API goes.
      (maintainer, 2026-10-25). Clearing
      drops each machine with its subtree and its failure; inspection tools
      may later clear at a finer grain. Until then they stay as long as the
-     runtime does.
+     runtime does. Designed in
+     [Settlement Clearing](SettlementClearing_2026-10-25.md), drafted
+     2026-10-25 for review: kills flag in their own report, and a host
+     clears orphaned failures through the report.
     - Candidate (maintainer, 2026-10-20): recognize a self-wait from
      outside, for the report: a cut that waits on the value of a promise
      it resolves itself, which only its commit would settle. Inspecting a

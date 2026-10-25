@@ -84,10 +84,12 @@ under a live root is its tasks' to recover or clear.
   subtree: the flags, states, ports and cells below it, and its queue,
   whose tasks never ran, breaking their replies as `.child.clear` does. A
   failed root's record goes too. It answers whether it cleared anything:
-  a failure already cleared, or recovered meanwhile, is left alone, and a
-  failure no longer orphaned is refused with an error.
-- Once a root's subtree holds nothing, the root leaves the host's ended
-  roots, as reclamation does for a subtree that ends clean.
+  a failure already cleared is left alone, and one that is not an orphan
+  is refused with an error.
+- Reclamation drops a root from the host's ended roots as it reclaims,
+  even where it keeps failures; a root that keeps some stays among them
+  instead, which is how a failure reads as orphaned, and leaves once the
+  last is cleared.
 
 The CLI gets no option for now, since a batch ends after settling; the
 interactive mode, or an IDE, takes the decision from the user when it

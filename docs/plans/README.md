@@ -109,7 +109,14 @@ flags a step for discussion when work reaches it, not a decision.
   the runtime API plan's `api-refl-call`: `.child.call` within a
   transaction as a call frame running on the child's state, which moves
   into the transactional event state, and outside one as a queued,
-  awaited task. Drafted 2026-10-25 for the maintainer's review.
+  awaited task. Drafted 2026-10-25 for the maintainer's review; built
+  2026-10-25, through `child-call-plain`.
+- [`SettlementClearing_2026-10-25.md`](SettlementClearing_2026-10-25.md): a
+  design note for the runtime API plan's `settlement-clears-machines`: a
+  kill flags the machines it stops in its own report, with its reason, and
+  a host clears orphaned failures, those under an anonymous root that has
+  ended, through the report. Drafted 2026-10-25 for the maintainer's
+  review.
 - [`DictSemantics_2026-10-24.md`](DictSemantics_2026-10-24.md): `dict-`
   steps revising dicts: `{}` as the empty dict rather than undefined,
   shallow union, paths fused by prefix, reads of what is undefined
