@@ -2931,6 +2931,14 @@ maps the short names used here to file names.
 - **Consequences:** amends `reflection-tasks-are-machine-tasks`.
   `api-reflection-machines` builds acceptance with the other effects, and
   `api-settlement` reports accepted promises in place of obligation sets.
+  (Amended by the maintainer, 2026-10-25, at `api-refl-obligations`: a
+  child does not accept its queued tasks' promises. Accepting an
+  obligation just for being tasked is implicit, and would count every
+  waiting task; a pending reply counts through the waits instead, the
+  waiting task by its own wait and an evaluation awaiting the reply as a
+  promise wait. And a machine not in a clear state, owing or in error,
+  stays visible through reclamation. Reasons: obligations are explicit,
+  and what is unresolved stays where an analysis can see it.)
 - **Recorded in:** reflection model plan, Obligations.
 
 ### A turn runs an effect; its provider says which host families pass through

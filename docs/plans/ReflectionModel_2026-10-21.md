@@ -228,6 +228,8 @@ maintainer, 2026-10-21), capabilities that discharge themselves:
 - Acceptance holds the resolver, so an accepted promise is never lost.
 - A machine in error keeps what it accepted, for its recovery; clearing a
   machine abandons it all. A child accepts its queued tasks' promises.
+  (Amended 2026-10-25: it does not; acceptance is explicit, and a pending
+  reply counts through the waits, `obligations-are-accepted-promises`.)
 - A to-do is a promise the machine makes and accepts: finishing is
   fulfilling it, which others may await.
 

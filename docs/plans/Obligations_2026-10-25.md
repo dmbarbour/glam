@@ -75,8 +75,10 @@ promise, for validation.
 - `m.accept_promise`, `m.abandon_promise`, `m.promise_is_accepted` on a
   resolver from the stack, through the cut's event journal or a
   transaction of their own.
-- A queued task's reply is accepted by the child it is queued on, with a
-  diagnostic naming the task's machine (see question 1).
+- A queued task's reply is not accepted implicitly (maintainer,
+  2026-10-25; see the decisions below). It counts as a wait: the waiting
+  task is listed with its own family, and an evaluation awaiting the reply
+  is a promise wait.
 
 ### The analysis
 
@@ -92,11 +94,24 @@ default unresolved.
    another's resolution; several acceptors; a cut's failure undoing an
    acceptance; clearing abandons, a flag keeps; an ended root owing is
    kept and reported.
-2. `obligations-task-replies` — children accept their queued tasks'
-   replies, as question 1 decides.
-3. `obligations-turns` — the turn operations.
+2. `obligations-turns` — the turn operations.
 
-## Questions for the maintainer
+A slice for children accepting their tasks' replies was dropped by
+decision 1.
+
+## Decisions (maintainer, 2026-10-25)
+
+1. **No implicit acceptance.** A child accepting an obligation just for
+   being tasked is implicit, and would count every waiting task; a task's
+   pending reply should count differently. So acceptance is explicit only,
+   and a reply counts through the waits. This amends
+   `obligations-are-accepted-promises`, which had a child accept its
+   queued tasks' promises.
+2. **What is not clear stays visible.** A machine that owes, as one in
+   error, keeps its machine through reclamation, for the analysis to
+   report and a host to clear.
+
+## Questions for the maintainer, as drafted
 
 1. **A waiting task owes its reply.** A child accepts its queued tasks'
    replies, and a forgotten promise is not a forgotten obligation, so a
