@@ -83,24 +83,41 @@ The cells keep only the runs.
 
 `.child.call Key Op`, inside a cut or a `.try`:
 
-1. **Busy is pushback.** Where the child is busy as the caller's snapshot
+1. **What the call may enter.** A child in error the call cannot enter: it
+   fails with an error, and recovery is the only way in (maintainer,
+   2026-10-25), as `run`, `give`, `take` and `fork` fail on a machine in
+   error (`machine-errors-mark-and-recover`): the flag records an early
+   exit that may have left the child's state half-done, so no work runs on
+   it until its parent recovers it, acknowledging that. A child the
+   caller's own transaction queued tasks on, which reach it only when the
+   transaction commits, the call cannot ignore either: it fails with an
+   error as a conflict (maintainer: the error, over running the pending
+   tasks within the caller's transaction, which would surprise the
+   caller). Both reads are observed.
+2. **Busy is pushback.** Where the child is busy as the caller's snapshot
    shows it, an unflagged queue holding a task, the call fails having
    observed it, as recovery and clearing do, so the cut waits for the
    child's queue to change.
-2. **A call frame.** The call enters a frame in the caller's effect task,
+3. **A call frame.** The call enters a frame in the caller's effect task,
    much as a cut does: it keeps the caller's branch state and machine, and
    runs `Op` in a branch whose state is the child's, read from the
    journal, and whose machine is the child. On success the frame writes
    the state `Op` left as the child's, restores the caller's, and answers
-   `Op`'s value; a failure restores the caller's state with the frame,
-   which a cut's alternatives or `.try` then handle, and stages nothing
-   for the child.
-3. **The machine per branch.** The branch carries the machine it runs on,
+   `Op`'s value. An explicit failure, `Op`'s `.fail`, restores the
+   caller's state with the frame, which a cut's alternatives or `.try`
+   then handle, and stages nothing for the child. An error that ends `Op`
+   stages the child's flag, with the state `Op` left, half-done, for its
+   recovery, and fails the call with the error (maintainer, 2026-10-25),
+   as an error that ends a turn flags its machine; the flag is the
+   child's state, staged in the caller's transaction, so it commits where
+   the caller handles the error, as `.try` does, and aborts with it
+   otherwise. Observing the error never clears the flag.
+4. **The machine per branch.** The branch carries the machine it runs on,
    replacing the task-level `EvalContext::machine` where requests read it,
    so `.child.*` within `Op` names the child's children and a call nests
    in a call. The task's own machine stays where its run's end and its
    guard need it.
-4. **What `Op` sees.** Local state: the child's. Children: the child's.
+5. **What `Op` sees.** Local state: the child's. Children: the child's.
    The heap, volumes, promises and `.log`: as the caller sees them, all
    transactional with the caller. `.env`: the caller's for now, since
    tasks bind no shares yet; the child's composed environment once
@@ -115,7 +132,9 @@ transaction commits, as any queueing in a cut does.
 `.child.call Key Op` with no transaction around it queues `Op` on the
 child, as `.child.task` does, and waits for its reply: the child runs it
 after what was queued before it, and the call answers its result, or
-fails with its failure (see Q1 on what that does to the child).
+fails with its failure, which flags the child as any task's failure does
+(maintainer, 2026-10-25). A child in error it cannot enter: it fails at
+once, as within a transaction, rather than queue behind a stopped queue.
 
 ### Slices
 
@@ -128,30 +147,32 @@ Each with tests, the full gate, and a commit.
    and a conflict between a run's end and a transaction that read the
    child's state.
 2. `child-call-frame` — the per-branch machine and the call frame within
-   a transaction: busy as pushback, the child's state in and out, nesting,
-   and conflicts with a task committed meanwhile. Tests: a call reads and
-   changes the child's state, which commits with the caller's cut and
-   aborts with a failed one; a call to a busy child waits until its task
-   ends; nested calls; a task queued on the child after the caller's
-   snapshot conflicts, and the cut runs again.
+   a transaction: the errors for a child in error and for tasks the
+   transaction queued on the child, busy as pushback, the child's state in
+   and out, an error's flag staged with the caller, nesting, and conflicts
+   with a task committed meanwhile. Tests: a call reads and changes the
+   child's state, which commits with the caller's cut and aborts with a
+   failed one; a call to a busy child waits until its task ends; a call
+   to a flagged child fails until a recovery; a call after the
+   transaction queued on the child fails; an error in `Op` flags the
+   child where `.try` handles it, and not where the cut aborts; nested
+   calls; a task queued on the child after the caller's snapshot
+   conflicts, and the cut runs again.
 3. `child-call-plain` — the call outside a transaction, queued and
-   awaited. Tests: order after earlier tasks, the result, and the
-   failure.
+   awaited. Tests: order after earlier tasks, the result, the failure and
+   the child's flag, and a flagged child.
 
-## Questions for the maintainer
+Turns get the same rule for what the transaction sent a child, in the
+runtime API plan's `turn-pending-input-conflicts`.
 
-1. **A plain call's failure.** Outside a transaction, a call runs as a
-   queued task. Its failure fails the caller; should it also flag the
-   child, as any queued task's failure does, or not, since the caller
-   observes it as it happens? Within a transaction a failure never flags
-   the child: it aborts with the caller.
-2. **A flagged child.** May a call run on a child in error? A Rust turn on
-   a flagged machine fails, and only `recover` enters one. A call that
-   failed at once would leave recovery as the only way in; one that ran
-   would let a parent inspect and repair a failed child within a
-   transaction, much as `m.recover` lets a turn.
-3. **Ordering against the parent's own queue.** Nothing orders a call
-   against tasks the caller queued on the same child within the same
-   transaction: those reach the child at commit, after the call ran. This
-   seems right, since the call's view is the caller's snapshot, but it is
-   a visible ordering.
+## Decisions (maintainer, 2026-10-25)
+
+1. An error that ends a call's `Op` flags the child, plain or within a
+   transaction, as an error that ends a turn flags its machine; within a
+   transaction the flag stages with the caller. Observation never clears
+   it, only recovery.
+2. A call cannot enter a child in error: recovery is the only way in, for
+   the reason machines have one (`machine-errors-mark-and-recover`).
+3. A call cannot ignore tasks its own transaction queued on the child; it
+   fails with a conflict error, rather than run them within the caller's
+   transaction. Machines get the same rule.

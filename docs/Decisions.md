@@ -2754,6 +2754,16 @@ maps the short names used here to file names.
     error never clears a flag. The CLI logger's `.task.new` children retire
     with `.task.*`, to return as `.child.task` once the logger runs as a
     turn.)
+  - (Decided by the maintainer, 2026-10-25, for `api-refl-call`: an
+    error that ends a call's `Op` flags the child, a plain call's as any
+    task's, a call within a transaction's staged with the caller; a call
+    cannot enter a child in error, recovery being the only way in; and a
+    call after tasks its own transaction queued on the child fails with a
+    conflict error, as a turn into a child the transaction sent input to
+    will. Reasons: as for machines, a flag marks state an early exit may
+    have left half-done, which only an explicit recovery acknowledges; and
+    a call that ignored its own transaction's tasks, or ran them within
+    it, would surprise its caller.)
   - (Decided by the maintainer, 2026-10-25, at `child-task-halts`: a
     child task that panics halts with its machine's error flag, its reply
     broken, so its parent can recover it. Reasons: a run that never ends

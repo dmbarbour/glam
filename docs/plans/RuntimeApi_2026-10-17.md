@@ -1018,7 +1018,19 @@ handle API goes.
         [Child Calls](ChildCalls_2026-10-25.md), drafted 2026-10-25 for
         review: child state in the event state's transactional record, a
         call frame with a per-branch machine, and the plain call as a
-        queued, awaited task.
+        queued, awaited task. The maintainer decided its questions the
+        same day: an error ending a call flags the child, a call cannot
+        enter a child in error, and one after tasks its own transaction
+        queued on the child fails with a conflict error.
+      - `turn-pending-input-conflicts` (maintainer, 2026-10-25: machines
+        get a call's rule): a turn that enters a child within a
+        transaction that has sent the child input, appended to the child's
+        buffers but not yet committed, fails with a conflict error rather
+        than run as if nothing were sent, which it does today, since reads
+        see committed input only. A machine reading what it wrote itself
+        stays pushback (`a_read_sees_committed_values_only`). Which entries
+        count, `run` and `recover` surely, `give` and `take` perhaps, is
+        for the build to settle with the maintainer.
       - `api-refl-annotations`: annotation tasks on anonymous machines
         under `refl`.
       - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`
