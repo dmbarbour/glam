@@ -73,23 +73,55 @@ Drafted 2026-10-25 for the maintainer's review. It reframes
 - **Two runtimes.** Settlement lives on `EvaluationRuntime`; turns, which
   quiescence must count, on `Runtime`, where `rt.settle()` was planned.
 
-## The transition, tentatively
+## The transition
 
-1. `quiescence-classifies-waits`: the coordinator tells idle waits from
-   unresolved ones. Readiness becomes busy or quiescent, with an
-   analysis; nothing is killed by default.
-2. `api-refl-obligations`: accepted promises, which the analysis reports.
-3. `quiescence-options`: interrupt and clear through the analysis's
+Revised after the decisions below: the analysis comes first, as an
+observation beside today's settlement, so nothing changes behavior until
+the CLI moves onto it.
+
+1. `quiescence-analysis`: `EvaluationRuntime::analysis()`, callable at any
+   time, observes without changing anything. It says whether the runtime
+   is quiescent, and lists each waiting work with what it waits on, and
+   each issue with its family:
+   - a wait on observed state (an observation epoch), on input or for
+     queued tasks is idle;
+   - a wait on a promise is a *promise wait*, naming the task that holds
+     its resolver where the coordinator knows one;
+   - a wait on other work, a task or a lazy value, takes the family of
+     what that work waits on, so a chain ends at its cause;
+   - a cut waiting for a change after an error, which the coordinator
+     keeps with the wait, is an *erred wait*, with the error (see
+     question 1);
+   - each flag and failed anonymous root is a *machine in error*.
+
+   Tests build each family and check the analysis says so, at quiescence
+   and while work still runs. Settlement stays as it is.
+2. `api-refl-obligations`: accepted promises, which the analysis lists as
+   *pending obligations*.
+3. `quiescence-batch`: the CLI waits for quiescence, takes the analysis,
+   renders it, and fails where an unmasked issue remains, by default any;
+   it kills nothing. The settlement loops, kills, pending lists and
+   automatic rendering retire, and exit votes with them, as
+   `api-refl-retirements` plans.
+4. `quiescence-options`: interrupt and clear through the analysis's
    entries, interrupts flagging what they halt early, with the call's
    callees. Recovery and acting go through turns as they do now.
-4. CLI: the batch on the analysis, rendering it itself, with masks for
-   families of issues; exit votes, settlement's publication, its pending
-   lists and the automatic rendering retire (`api-refl-retirements`).
-5. Later: the analysis as a reflection effect, for a logger's or an
-   IDE's status.
+   Settlement Clearing's slices fold in here.
+5. Later: turns counted in quiescence once settlement's runtime and the
+   turn runtime meet, as `rt.analysis()`; and the analysis as a
+   reflection effect, for a logger's or an IDE's status.
 
-Settlement Clearing's slices fold into step 3: its kill flags become the
-interrupt's, and its clearing the clear option.
+### Questions on the transition
+
+1. **An erred wait.** A cut that erred after observing state waits for a
+   change that might change the error (`dict-empty-is-a-value`). Is that
+   unresolved by default, as an error no change has cured, or idle, as a
+   wait on observed state? My lean: unresolved, its own family, so a
+   client may mask it.
+2. **Turns.** Settlement's runtime counts no Rust turn: a turn running
+   Rust code is invisible to its readiness. Defer counting turns to when
+   the runtimes meet (step 5), leaving the batch to its own turns as
+   now? My lean: yes.
 
 ## Decisions (maintainer, 2026-10-25)
 
