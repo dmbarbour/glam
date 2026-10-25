@@ -1211,7 +1211,6 @@ fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
         search,
         execution,
         blocked,
-        exit,
         terminal,
         machine_state,
         _run_guard,
@@ -1241,7 +1240,6 @@ fn assert_effect_task_shell_inventory(task: &EffectTask<TestEffects>) {
         search,
         execution,
         blocked,
-        exit,
         terminal,
         exact_demand_route,
         phase_probe,
@@ -1441,7 +1439,6 @@ fn assert_execution_root_inventory(
         ScalarDemandPurpose::RestoreScopedValue { scoped_value } => {
             let _: &RuntimeValueRoot = scoped_value;
         }
-        ScalarDemandPurpose::ExitError => {}
     }
     let _: &Branch<TestEffects> = branch;
     let _: &usize = scope_depth;
@@ -1789,8 +1786,6 @@ fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>)
         | RequestSelection::Reset
         | RequestSelection::Shift
         | RequestSelection::Resume
-        | RequestSelection::ExitSuccess
-        | RequestSelection::ExitError
         | RequestSelection::VolumeNew
         | RequestSelection::PromiseNew => {}
         RequestSelection::Volume(identity) => {
@@ -2550,7 +2545,6 @@ fn reset_control_work_does_not_publish_before_its_key_resolves() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("reset fixture voted to exit"),
         }
     };
     assert!(
@@ -2615,7 +2609,6 @@ fn shift_control_work_does_not_capture_before_its_key_resolves() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("shift fixture voted to exit"),
         }
     }
     assert_eq!(task.next_continuation, 1);
@@ -3244,7 +3237,6 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
         | Request::Del(value)
         | Request::HeapTryGet(value)
         | Request::HeapDel(value)
-        | Request::ExitError(value)
         | Request::VolumeNew(value) => assert_request_value(value),
         Request::VolumeTryGet(volume, value) | Request::VolumeDel(volume, value) => {
             assert_volume_target(volume, assert_request_value);
@@ -3285,7 +3277,7 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
             let _: &TestRequest = request;
             let _: &Vec<V> = values;
         }
-        Request::Fail | Request::HeapVolume | Request::PromiseNew | Request::ExitSuccess => {}
+        Request::Fail | Request::HeapVolume | Request::PromiseNew => {}
     }
 }
 
@@ -3343,9 +3335,6 @@ fn assert_protocol_handoff_inventory(
         }
         MachineStep::Blocked(blocked) => {
             let _: &BlockedExecution<TestEffects> = blocked;
-        }
-        MachineStep::Exit(intent) => {
-            let _: &ExitIntent = intent;
         }
         MachineStep::Terminal(terminal) => {
             let _: &TaskTerminal = terminal;
@@ -3410,19 +3399,6 @@ fn assert_task_block_inventory(blocked: &BlockedExecution<TestEffects>, poll: &T
     let _: &Option<crate::runtime::RuntimeFailureRoot> = error;
 }
 
-fn assert_task_exit_inventory(poll: &TaskExitBlock, state: &TaskExitState<TestEffects>) {
-    let TaskExitBlock {
-        intent,
-        observed_generation,
-    } = poll;
-    let _: &ExitIntent = intent;
-    let _: &Option<u64> = observed_generation;
-
-    let TaskExitState { poll, restart } = state;
-    let _: &TaskExitBlock = poll;
-    let _: &Option<RetryWake<TestEffects>> = restart;
-}
-
 fn assert_task_terminal_inventory(poll: &EffectTaskPoll, terminal: &TaskTerminal) {
     match poll {
         EffectTaskPoll::BudgetExhausted | EffectTaskPoll::Cancelled => {}
@@ -3430,9 +3406,6 @@ fn assert_task_terminal_inventory(poll: &EffectTaskPoll, terminal: &TaskTerminal
             let _: &TaskBlock = blocked;
         }
         EffectTaskPoll::Paused(_) => unreachable!("only a task whose host runs its cuts pauses"),
-        EffectTaskPoll::Exit(exit) => {
-            let _: &TaskExitBlock = exit;
-        }
         EffectTaskPoll::Complete(value) => {
             let _: &PublicValue = value;
         }
@@ -3469,7 +3442,6 @@ fn outer_machine_root_inventory_is_complete() {
         &ContextualValueEffectTask<TestEffects>,
     ) = assert_task_wrapper_inventory;
     let _: fn(&BlockedExecution<TestEffects>, &TaskBlock) = assert_task_block_inventory;
-    let _: fn(&TaskExitBlock, &TaskExitState<TestEffects>) = assert_task_exit_inventory;
     let _: fn(&EffectTaskPoll, &TaskTerminal) = assert_task_terminal_inventory;
     let _: fn(&Branch<TestEffects>, &RetryCheckpoint<TestEffects>) = assert_branch_root_inventory;
     let _: ExecutionRootInventoryFn = assert_execution_root_inventory;
@@ -4290,7 +4262,6 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
                 EffectTaskPoll::Paused(_) => {
                     unreachable!("only a task whose host runs its cuts pauses")
                 }
-                EffectTaskPoll::Exit(_) => panic!("{label} fixture unexpectedly voted to exit"),
             }
         };
         assert!(
@@ -4323,7 +4294,6 @@ fn standalone_heap_read_keeps_its_snapshot_across_later_publication() {
                 EffectTaskPoll::Paused(_) => {
                     unreachable!("only a task whose host runs its cuts pauses")
                 }
-                EffectTaskPoll::Exit(_) => panic!("{label} fixture unexpectedly voted to exit"),
             }
         };
         assert_eq!(assembler.to_binary(&value).unwrap(), b"old".as_slice());
@@ -4384,9 +4354,6 @@ fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => {
-                panic!("standalone-volume fixture unexpectedly voted to exit")
-            }
         }
     };
     assert!(
@@ -4410,9 +4377,6 @@ fn standalone_volume_read_keeps_its_snapshot_across_later_publication() {
             EffectTaskPoll::Cancelled => panic!("standalone-volume fixture was cancelled"),
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
-            }
-            EffectTaskPoll::Exit(_) => {
-                panic!("standalone-volume fixture unexpectedly voted to exit")
             }
         }
     };
@@ -4821,7 +4785,6 @@ fn effect_task_poll_yields_and_resumes_with_bounded_fuel() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("finite task unexpectedly voted to exit"),
         }
     };
     assert_eq!(assembler.to_binary(&value).unwrap(), b"AB".as_slice());
@@ -4890,343 +4853,6 @@ fn completed_effect_root_is_not_recreated_after_scope() {
         !source.contains("root_value(value.clone_core_for_test())"),
         "scheduled effect completion must not extract and recreate a root"
     );
-}
-
-/// Polls `machine` until it exits, each poll in a quantum of its own, and
-/// pumps a dependency it blocks on between polls, as a driver does.
-fn poll_machine_exit(
-    machine: &mut dyn EvaluationTaskMachine,
-    context: &EvalContext,
-) -> EvaluationExitBlock {
-    loop {
-        match EvaluationPollContext::quantum_for_context(context, |poll_context| {
-            machine.poll(
-                poll_context,
-                &mut crate::evaluation::EvaluationStepBudget::new(256),
-            )
-        }) {
-            EvaluationMachinePoll::BudgetExhausted => {}
-            EvaluationMachinePoll::Contended => {
-                panic!("exit fixture was unexpectedly contended")
-            }
-            EvaluationMachinePoll::Exit(exit) => return exit,
-            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                dependency: Some(WorkDependency::Wait(wait)),
-                ..
-            }) => match context.pump_wait(&wait, 4096) {
-                crate::evaluation::EvaluationPumpOutcome::TargetReady
-                | crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => {}
-                outcome => panic!("exit fixture dependency made no progress: {outcome:?}"),
-            },
-            EvaluationMachinePoll::Blocked(_) => {
-                panic!("exit fixture unexpectedly blocked without local work")
-            }
-            EvaluationMachinePoll::Complete(_) => {
-                panic!("exit fixture unexpectedly completed")
-            }
-            EvaluationMachinePoll::Failed(error) => {
-                panic!("exit fixture failed: {error}")
-            }
-            EvaluationMachinePoll::Cancelled | EvaluationMachinePoll::Panicked { .. } => {
-                panic!("exit fixture was cancelled")
-            }
-        }
-    }
-}
-
-#[test]
-fn internal_exit_success_projects_through_both_scheduled_effect_wrappers() {
-    let (assembler, effect) = compile_effect(".exit.success");
-
-    for require_unit in [false, true] {
-        let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-        let task = EffectTask::new_exit_in_context(
-            effect.clone_core_for_test(),
-            TestEffects,
-            Arc::new(TestHost::with_values(assembler.core_values())),
-            context.clone(),
-        )
-        .expect("internal exit task should initialize");
-        let mut machine: Box<dyn EvaluationTaskMachine> = if require_unit {
-            Box::new(UnitEffectTask(task))
-        } else {
-            Box::new(ValueEffectTask(task))
-        };
-
-        let exit = poll_machine_exit(machine.as_mut(), &context);
-        assert_eq!(exit.intent, ExitIntent::Success);
-        assert_eq!(exit.observed_epoch, None);
-        assert!(matches!(
-            crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
-                .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(1))),
-            EvaluationMachinePoll::Exit(EvaluationExitBlock {
-                intent: ExitIntent::Success,
-                observed_epoch: None,
-            })
-        ));
-        drop(owner);
-    }
-}
-
-#[test]
-fn internal_exit_error_forces_and_roots_its_message() {
-    let (assembler, effect) =
-        compile_effect(".exit.error ((\\message -> message) {msg:{text:\"stop\"}, detail:7})");
-    let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-    let task = EffectTask::new_exit_in_context(
-        effect.clone_core_for_test(),
-        TestEffects,
-        Arc::new(TestHost::with_values(assembler.core_values())),
-        context.clone(),
-    )
-    .expect("internal exit task should initialize");
-    let mut machine = ValueEffectTask(task);
-
-    let exit = poll_machine_exit(&mut machine, &context);
-    let ExitIntent::Error(message) = exit.intent else {
-        panic!("error exit should retain its message")
-    };
-    assert_eq!(message.runtime_id(), assembler.core_values().runtime_id());
-    assert!(matches!(message.clone_core_for_test(), Value::Dict(_)));
-    let message = public_value(&assembler.core_values(), message.clone_core_for_test());
-    assert_eq!(
-        assembler
-            .to_binary(&assembler.get(&message, "msg.text").unwrap())
-            .unwrap(),
-        b"stop".as_slice()
-    );
-    drop(owner);
-}
-
-#[test]
-fn internal_exit_error_message_resumes_without_replay() {
-    let (assembler, effect) =
-        compile_effect(".exit.error (anno { refl:(.r ()) } {msg:{text:\"stop\"}})");
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, owner) = EvalContext::private_closed(assembler.core_values()).into_parts();
-    let builds = Arc::new(AtomicUsize::new(0));
-    context
-        .install_reflection_launcher(Arc::new(CountingLauncher {
-            inner: task_launcher(TestEffects, host.clone()),
-            builds: builds.clone(),
-        }))
-        .expect("fresh exit fixture should accept a launcher");
-    let task = EffectTask::new_exit_in_context(
-        effect.clone_core_for_test(),
-        TestEffects,
-        host,
-        context.clone(),
-    )
-    .expect("internal exit task should initialize");
-    let mut machine = ValueEffectTask(task);
-
-    let exit = poll_machine_exit(&mut machine, &context);
-    assert!(matches!(exit.intent, ExitIntent::Error(_)));
-    assert_eq!(
-        builds.load(Ordering::Acquire),
-        1,
-        "exit-message demand must retain one nested reflection activation"
-    );
-    drop(owner);
-}
-
-#[test]
-fn internal_exit_error_message_failure_is_an_ordinary_task_failure() {
-    let (assembler, effect) =
-        compile_effect(".exit.error (anno 'error {msg:{text:\"exit message failed\"}})");
-    let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-    let mut task = EffectTask::new_exit_in_context(
-        effect.clone_core_for_test(),
-        TestEffects,
-        Arc::new(TestHost::with_values(assembler.core_values())),
-        context.clone(),
-    )
-    .expect("internal exit task should initialize");
-
-    loop {
-        match task.poll(256) {
-            EffectTaskPoll::BudgetExhausted => {}
-            EffectTaskPoll::Failed(_) => break,
-            EffectTaskPoll::Blocked(_) => {
-                panic!("failed exit message unexpectedly blocked")
-            }
-            EffectTaskPoll::Complete(_) => {
-                panic!("failed exit message unexpectedly completed")
-            }
-            EffectTaskPoll::Cancelled => {
-                panic!("failed exit message was cancelled")
-            }
-            EffectTaskPoll::Paused(_) => {
-                unreachable!("only a task whose host runs its cuts pauses")
-            }
-            EffectTaskPoll::Exit(_) => {
-                panic!("failed exit message produced an exit vote")
-            }
-        }
-    }
-    drop(owner);
-}
-
-#[test]
-fn permanent_exit_discards_every_speculative_cut_resource() {
-    let (assembler, effect) = compile_effect(
-        ".cut ((.heap.set ['discarded] 1) =>> (.write_stderr \"discarded\") =>> (.log 'error {msg:{text:\"discarded\"}}) =>> .alt (.fail) ((.exit.success) =>> .write_stderr \"after exit\"))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let owned = EvalContext::private_closed(assembler.core_values());
-    let builds = Arc::new(AtomicUsize::new(0));
-    let launcher: Arc<dyn ReflectionTaskLauncher> = Arc::new(CountingLauncher {
-        inner: task_launcher(TestEffects, host.clone()),
-        builds: builds.clone(),
-    });
-    owned
-        .install_reflection_launcher(launcher)
-        .expect("fresh exit fixture should accept its task profile");
-    let (context, owner) = owned.into_parts();
-    let observer = context.clone();
-    let task = EffectTask::new_exit_in_context(
-        effect.clone_core_for_test(),
-        TestEffects,
-        host.clone(),
-        context.clone(),
-    )
-    .expect("internal exit task should initialize");
-    let mut machine = ValueEffectTask(task);
-
-    let exit = poll_machine_exit(&mut machine, &context);
-    assert_eq!(exit.intent, ExitIntent::Success);
-    assert_eq!(exit.observed_epoch, None);
-    assert!(assembler.get(&host.heap(), "discarded").is_err());
-    assert!(host.diagnostics().is_empty());
-    assert!(host.stderr().is_empty());
-    assert_eq!(builds.load(Ordering::Acquire), 0);
-    assert_eq!(observer.reflection_task_count(), 0);
-    drop(owner);
-}
-
-#[test]
-fn retryable_exit_restarts_with_a_fresh_transaction_after_disturbance() {
-    let (assembler, effect) = compile_effect(
-        ".cut (.alt (.heap.try_get ['ready]) (.r ()) >>= (\\ready -> (.heap.set ['attempt] \"committed\") =>> (.write_stderr \"once\") =>> (.log 'warn {msg:{text:\"once\"}}) =>> .alt ((ready == 1) =>> .r \"done\") (.exit.success)))",
-    );
-    let host = Arc::new(TestHost::with_values(assembler.core_values()));
-    let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-    let task = EffectTask::new_exit_in_context(
-        effect.clone_core_for_test(),
-        TestEffects,
-        host.clone(),
-        context.clone(),
-    )
-    .expect("internal exit task should initialize");
-    let mut machine = ValueEffectTask(task);
-
-    let first = poll_machine_exit(&mut machine, &context);
-    assert_eq!(first.intent, ExitIntent::Success);
-    assert!(first.observed_epoch.is_some());
-    assert!(assembler.get(&host.heap(), "attempt").is_err());
-    assert!(host.stderr().is_empty());
-    assert!(host.diagnostics().is_empty());
-    assert!(matches!(
-        crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| machine
-            .poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(256))),
-        EvaluationMachinePoll::Exit(EvaluationExitBlock {
-            intent: ExitIntent::Success,
-            observed_epoch: Some(_),
-        })
-    ));
-
-    let (_, disturb) =
-        compile_effect_with_runtime(&assembler.evaluation_runtime(), ".heap.set ['ready] 1");
-    assert!(matches!(
-        run_log_test(&assembler, &disturb, host.clone()).unwrap(),
-        TaskOutcome::Complete(_)
-    ));
-
-    let value = loop {
-        match crate::evaluation::EvaluationPollContext::quantum_for_context(&context, |poll| {
-            machine.poll(poll, &mut crate::evaluation::EvaluationStepBudget::new(256))
-        }) {
-            EvaluationMachinePoll::BudgetExhausted => {}
-            EvaluationMachinePoll::Contended => {
-                panic!("disturbed exit retry was unexpectedly contended")
-            }
-            EvaluationMachinePoll::Complete(value) => break value,
-            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                dependency: Some(WorkDependency::Wait(wait)),
-                ..
-            }) => match context.pump_wait(&wait, 4096) {
-                crate::evaluation::EvaluationPumpOutcome::TargetReady
-                | crate::evaluation::EvaluationPumpOutcome::BudgetExhausted => {}
-                outcome => panic!("disturbed exit dependency made no progress: {outcome:?}"),
-            },
-            EvaluationMachinePoll::Blocked(_) => {
-                panic!("disturbed exit retry unexpectedly blocked without local work")
-            }
-            EvaluationMachinePoll::Exit(_) => {
-                panic!("disturbed exit did not restart its transaction")
-            }
-            EvaluationMachinePoll::Failed(error) => {
-                panic!("disturbed exit retry failed: {error}")
-            }
-            EvaluationMachinePoll::Cancelled | EvaluationMachinePoll::Panicked { .. } => {
-                panic!("disturbed exit retry was cancelled")
-            }
-        }
-    };
-    assert_eq!(
-        assembler
-            .to_binary(&PublicValue::from_runtime_root(value))
-            .unwrap(),
-        b"done".as_slice()
-    );
-    assert!(assembler.get(&host.heap(), "attempt").is_ok());
-    assert_eq!(host.stderr(), [Bytes::from_static(b"once")]);
-    assert_eq!(host.diagnostics().len(), 1);
-    drop(owner);
-}
-
-#[test]
-fn direct_effect_profiles_do_not_expose_exit() {
-    let (assembler, effect) = compile_effect(".exit.success");
-    let normal = EffectTask::new(
-        &assembler.core_values(),
-        effect.clone_core_for_test(),
-        TestEffects,
-        Arc::new(TestHost::with_values(assembler.core_values())),
-    )
-    .expect("ordinary effect task should initialize");
-    let normal_api = normal.api.clone_core_for_test();
-    let Value::Dict(normal_api) = &normal_api else {
-        panic!("effect API should be a dictionary")
-    };
-    assert!(normal_api.get(&Key::atom_from_text("exit")).is_none());
-
-    let (context, owner) = EvalContext::isolated(assembler.core_values()).into_parts();
-    let internal = EffectTask::new_exit_in_context(
-        effect.clone_core_for_test(),
-        TestEffects,
-        Arc::new(TestHost::with_values(assembler.core_values())),
-        context,
-    )
-    .expect("internal exit task should initialize");
-    let internal_api = internal.api.clone_core_for_test();
-    let Value::Dict(internal_api) = &internal_api else {
-        panic!("effect API should be a dictionary")
-    };
-    assert!(internal_api.get(&Key::atom_from_text("exit")).is_some());
-    assert!(run_standard_test(&assembler, &effect).is_err());
-    assert!(
-        EffectRun::new(
-            &assembler.evaluation_runtime(),
-            &effect,
-            TestEffects,
-            Arc::new(TestHost::with_values(assembler.core_values())),
-        )
-        .run()
-        .is_err(),
-        "direct synchronous EffectRun must not expose coordinator exit"
-    );
-    drop(owner);
 }
 
 #[test]
@@ -6337,7 +5963,6 @@ fn specialization_host_activity_is_not_reentered_after_owned_demand_suspends() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("the hostile request voted to exit"),
         }
     };
     assert_eq!(assembler.to_binary(&value).unwrap(), b"ready".as_slice());
@@ -6372,7 +5997,6 @@ fn specialization_request_completes_under_one_step_polling_without_replay() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("one-step request voted to exit"),
         }
     };
 
@@ -6857,7 +6481,6 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("retryable error voted to exit"),
         }
     };
     assert!(blocked.dependency.is_none());
@@ -6886,7 +6509,6 @@ fn observed_evaluation_error_restarts_without_advancing_alternatives() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("retryable task unexpectedly voted to exit"),
         }
     };
     assert_same_value!(
@@ -6999,7 +6621,6 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("annotation dependency unexpectedly voted to exit"),
         }
     };
     assert!(
@@ -7021,7 +6642,6 @@ fn lazy_suspension_preserves_cut_choice_and_does_not_repeat_prior_commit() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("resumed task unexpectedly voted to exit"),
         }
     };
     assert_eq!(assembler.to_binary(&value).unwrap(), b"done".as_slice());
@@ -7074,7 +6694,6 @@ fn changed_observation_restarts_a_cut_before_its_lazy_dependency() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("restarted cut unexpectedly voted to exit"),
         }
     };
     assert_eq!(
@@ -7144,7 +6763,6 @@ fn suspend_heap_transaction(
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("transaction gate unexpectedly voted to exit"),
         }
     }
     SuspendedHeapTransaction {
@@ -7166,7 +6784,6 @@ fn poll_suspended_transaction(task: &mut EffectTask<TestEffects>) -> TaskBlock {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("transaction unexpectedly voted to exit"),
         }
     }
 }
@@ -7235,7 +6852,6 @@ fn suspended_transaction_revalidation_uses_the_configured_store_policy() {
                 EffectTaskPoll::Paused(_) => {
                     unreachable!("only a task whose host runs its cuts pauses")
                 }
-                EffectTaskPoll::Exit(_) => panic!("{policy} unexpectedly voted to exit"),
             }
         };
         assert_eq!(
@@ -7335,7 +6951,6 @@ fn nonconflicting_store_publication_retains_a_specialization_dependency() {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => panic!("specialization task voted to exit"),
         }
     };
     assert_eq!(assembler.to_binary(&value).unwrap(), b"unused".as_slice());

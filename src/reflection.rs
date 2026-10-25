@@ -14,7 +14,7 @@ mod store;
 mod token_parse;
 mod volume_handle;
 
-pub(crate) use lifecycle::coordinator_task_launcher;
+pub(crate) use lifecycle::task_launcher;
 pub use lifecycle::{
     EffectLifecycle, EffectLifecycleStatus, EffectRun, EffectRunStop, ScheduledEffectRun, run,
     run_standard,

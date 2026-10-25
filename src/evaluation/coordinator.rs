@@ -76,8 +76,7 @@ pub(super) use reflection::{
 };
 pub(crate) use settlement::{
     RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
-    RuntimeExitSnapshot, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
-    ValidatedRuntimeSettlementPlan,
+    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, ValidatedRuntimeSettlementPlan,
 };
 #[cfg(test)]
 use spark::spark_work_mut;
@@ -86,11 +85,11 @@ use spark::{SparkRetirement, claim_spark, detach_spark};
 #[cfg(test)]
 pub(crate) use task::EvaluationTaskCancellation;
 pub(crate) use task::{
-    EvaluationExitBlock, EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock,
-    EvaluationTaskHandle, EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus,
-    EvaluationWaitPoll, EvaluationWaitTerminal, EvaluationWaitToken, ExitIntent, FailedRoots,
-    LocalPromiseOwner, PreparedEvaluationTask, PromiseProducerObligation,
-    PromiseProducerPublication, ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake,
+    EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskHandle,
+    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll,
+    EvaluationWaitTerminal, EvaluationWaitToken, FailedRoots, LocalPromiseOwner,
+    PreparedEvaluationTask, PromiseProducerObligation, PromiseProducerPublication,
+    ReflectionTaskResultPolicy, TaskStatusPublisher, TaskStatusWake,
 };
 use task::{TaskStatusUpdate, TaskTerminalPublisher, terminal_task_status};
 
@@ -234,11 +233,6 @@ impl TaskPromiseTerminalMapper {
                 operation,
                 "reflection task was abandoned when its evaluation session closed",
             )),
-            EvaluationWaitTerminal::Exited => Err(reflection_terminal_failure(
-                access,
-                operation,
-                "reflection task exited without producing a result",
-            )),
             EvaluationWaitTerminal::Panicked(_) => unreachable!("rejected above"),
         }
     }
@@ -356,7 +350,6 @@ enum WorkState {
     /// `EvaluationWorkCoordinator::release_inline_lazy`.
     InlineForced,
     Blocked,
-    ExitWaiting,
     Terminalizing,
 }
 
@@ -3454,7 +3447,6 @@ impl EvaluationWorkCoordinator {
                 WorkState::Dormant
                 | WorkState::Reserved
                 | WorkState::InlineForced
-                | WorkState::ExitWaiting
                 | WorkState::Terminalizing => {}
             }
         }
@@ -3494,9 +3486,6 @@ fn task_block(record: &WorkRecord) -> Option<&EvaluationTaskBlock> {
 fn task_observation_epoch(record: &WorkRecord) -> Option<RuntimeObservationEpoch> {
     match (&record.state, &record.kind) {
         (WorkState::Blocked, _) => task_block(record).and_then(|block| block.observed_epoch),
-        (WorkState::ExitWaiting, WorkKind::Reflection(work)) => {
-            work.exit.as_ref().and_then(|exit| exit.observed_epoch)
-        }
         _ => None,
     }
 }
@@ -3536,7 +3525,6 @@ fn exact_route_disposition_locked(
                 producer,
             }
         }
-        WorkState::ExitWaiting => ExactRouteDisposition::Parked,
         WorkState::Terminalizing => ExactRouteDisposition::Terminal,
     }
 }
@@ -3747,7 +3735,7 @@ fn rebuild_exact_route_locked(
                     depth,
                 };
             }
-            WorkState::Dormant | WorkState::ExitWaiting => {
+            WorkState::Dormant => {
                 return ExactProducerProbe {
                     selection: CausalBackgroundProbe::None,
                     depth,
@@ -3953,7 +3941,7 @@ fn continue_exact_route_locked(
                     handoffs,
                 );
             }
-            WorkState::Dormant | WorkState::ExitWaiting => {
+            WorkState::Dormant => {
                 return (
                     ExactProducerProbe {
                         selection: CausalBackgroundProbe::None,
@@ -4025,7 +4013,7 @@ fn exact_producer_probe_locked(
                     depth: seen.len(),
                 };
             }
-            WorkState::Dormant | WorkState::ExitWaiting => {
+            WorkState::Dormant => {
                 return ExactProducerProbe {
                     selection: CausalBackgroundProbe::None,
                     depth: seen.len(),
@@ -4158,7 +4146,7 @@ fn causal_child_probe_locked(
                             DependencyEdge::End => break,
                         }
                     }
-                    WorkState::Dormant | WorkState::Queued | WorkState::ExitWaiting => break,
+                    WorkState::Dormant | WorkState::Queued => break,
                 }
             }
         }
@@ -4290,7 +4278,7 @@ fn dependency_has_causal_progress_locked(
             | WorkState::Running
             | WorkState::InlineForced
             | WorkState::Terminalizing => return true,
-            WorkState::Blocked | WorkState::ExitWaiting => {
+            WorkState::Blocked => {
                 if task_observation_epoch(record).is_some_and(|epoch| epoch < current_epoch) {
                     return true;
                 }
@@ -4364,7 +4352,7 @@ fn queue_current_observation(
 ) -> bool {
     let id = registration.wake.work;
     let valid = state.work.get(&id).is_some_and(|record| {
-        matches!(record.state, WorkState::Blocked | WorkState::ExitWaiting)
+        matches!(record.state, WorkState::Blocked)
             && record.subscription_epoch == registration.wake.subscription_epoch
             && task_observation_epoch(record)
                 .is_some_and(|observed| observed == registration.observed_epoch)
@@ -4383,14 +4371,6 @@ fn queue_current_observation(
         .work
         .get_mut(&id)
         .expect("validated observation work must remain registered");
-    if matches!(record.state, WorkState::ExitWaiting) {
-        let reflection = reflection_work_mut(record);
-        assert!(
-            reflection.machine.is_some(),
-            "retryable exit work must retain its sanitized machine"
-        );
-        reflection.exit = None;
-    }
     record.state = WorkState::Queued;
     queue_task(state, id);
     true

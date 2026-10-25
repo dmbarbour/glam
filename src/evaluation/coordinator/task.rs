@@ -69,7 +69,6 @@ pub(crate) enum EvaluationWaitPoll {
     Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
-    Exited,
     Killed(RuntimeFailureRoot),
     /// The producer was interrupted by a panic. Waiters halt instead of
     /// reinstalling work, and never treat this as a semantic failure.
@@ -87,24 +86,6 @@ pub(crate) enum EvaluationTaskCancellation {
     Late,
 }
 
-/// A coordinator-facing request to terminalize one effect machine when the
-/// runtime client accepts a stable readiness snapshot.
-///
-/// Exit is deliberately distinct from ordinary completion or failure. Until
-/// settlement, it produces neither a task result nor a failed root.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) enum ExitIntent {
-    Success,
-    Error(RuntimeValueRoot),
-}
-
-/// The specialization-independent portion of one preterminal exit vote.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct EvaluationExitBlock {
-    pub(crate) intent: ExitIntent,
-    pub(crate) observed_epoch: Option<RuntimeObservationEpoch>,
-}
-
 pub(crate) enum EvaluationMachinePoll {
     /// The poll spent its whole budget; nothing else ends a poll with
     /// budget left unreported (`budget-exhausted-only`).
@@ -114,7 +95,6 @@ pub(crate) enum EvaluationMachinePoll {
     /// runs again (`budget-waits-block`).
     Contended,
     Blocked(EvaluationTaskBlock),
-    Exit(EvaluationExitBlock),
     Complete(RuntimeValueRoot),
     Failed(RuntimeFailureRoot),
     Cancelled,
@@ -145,7 +125,6 @@ pub(crate) enum EvaluationTaskStatus {
     Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
-    Exited,
     Killed(RuntimeFailureRoot),
     Panicked(EvaluationPanic),
 }
@@ -242,7 +221,6 @@ pub(super) fn terminal_task_status(terminal: &EvaluationWaitTerminal) -> Evaluat
         EvaluationWaitTerminal::Failed(error) => EvaluationTaskStatus::Failed(error.clone()),
         EvaluationWaitTerminal::Cancelled => EvaluationTaskStatus::Cancelled,
         EvaluationWaitTerminal::Abandoned => EvaluationTaskStatus::Abandoned,
-        EvaluationWaitTerminal::Exited => EvaluationTaskStatus::Exited,
         EvaluationWaitTerminal::Killed(error) => EvaluationTaskStatus::Killed(error.clone()),
         EvaluationWaitTerminal::Panicked(report) => EvaluationTaskStatus::Panicked(report.clone()),
     }
@@ -347,7 +325,6 @@ pub(crate) enum EvaluationWaitTerminal {
     Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
-    Exited,
     Killed(RuntimeFailureRoot),
     /// The producer was interrupted by a panic: task-layer state, never a
     /// semantic result.
@@ -453,7 +430,6 @@ impl EvaluationWaitToken {
             }
             EvaluationWaitTerminal::Cancelled
             | EvaluationWaitTerminal::Abandoned
-            | EvaluationWaitTerminal::Exited
             | EvaluationWaitTerminal::Panicked(_) => {}
         }
         if let Err(candidate) = self.0.state.terminal.set(terminal) {
@@ -570,7 +546,6 @@ impl EvaluationWaitTerminal {
             Self::Failed(error) => EvaluationWaitPoll::Failed(error.clone()),
             Self::Cancelled => EvaluationWaitPoll::Cancelled,
             Self::Abandoned => EvaluationWaitPoll::Abandoned,
-            Self::Exited => EvaluationWaitPoll::Exited,
             Self::Killed(error) => EvaluationWaitPoll::Killed(error.clone()),
             Self::Panicked(report) => EvaluationWaitPoll::Panicked(report.clone()),
         }

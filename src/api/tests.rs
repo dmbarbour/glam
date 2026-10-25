@@ -12,7 +12,7 @@ use crate::diagnostic::{CompilationInvocationId, CompilationTrace, Severity};
 use crate::eval;
 use crate::evaluation::{EvaluationMachinePoll, EvaluationTaskMachine, ReflectionTaskProfile};
 use crate::number::Number;
-use crate::reflection::{ReflectionEffects, coordinator_task_launcher};
+use crate::reflection::{ReflectionEffects, task_launcher};
 use crate::source::{SourceArtifact, SourceIdentity};
 use crate::test_support::ResultTestExt as _;
 
@@ -2873,7 +2873,7 @@ fn attached_runtime_default_reflection_profile_cannot_be_replaced() {
         .unwrap();
 
     let error = runtime
-        .seal_default_reflection_profile(coordinator_task_launcher(ReflectionEffects, replacement))
+        .seal_default_reflection_profile(task_launcher(ReflectionEffects, replacement))
         .expect_err_without_debug("a sealed runtime profile must reject replacement");
     assert!(error.to_string().contains("already sealed"));
 
@@ -2909,7 +2909,7 @@ fn retained_reflection_profile_keeps_only_shared_resources_alive() {
         .0,
     )
     .unwrap();
-    let profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
+    let profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
         ReflectionEffects,
         host.clone(),
     )));

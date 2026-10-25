@@ -10,9 +10,8 @@ use crate::diagnostic::Severity;
 #[cfg(test)]
 use crate::evaluation::ValidatedRuntimeSettlementPlan;
 use crate::evaluation::{
-    EvaluationTaskId, ExitIntent, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
-    RuntimeExitSnapshot, RuntimeObservationEpoch, RuntimeWorkKindSnapshot,
-    RuntimeWorkStateSnapshot,
+    EvaluationTaskId, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
+    RuntimeObservationEpoch, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
 };
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -373,8 +372,6 @@ impl RuntimeDisposition {
 /// Payload of one proposed runtime disposition.
 #[derive(Clone, Debug)]
 pub enum RuntimeDispositionKind {
-    ExitSuccess,
-    ExitError(Value),
     Killed(RuntimeKillReason),
 }
 
@@ -386,39 +383,30 @@ pub enum RuntimeKillReason {
 
 #[derive(Clone)]
 pub(super) enum RuntimeSettlementSnapshot {
-    Ready {
-        exits: Vec<RuntimeExitSnapshot>,
-    },
+    Ready,
     KilledDeadlock {
-        exits: Vec<RuntimeExitSnapshot>,
         unfinished: Vec<RuntimeDeadlockWorkSnapshot>,
         reason: RuntimeKillReason,
     },
 }
 
 impl RuntimeSettlementSnapshot {
-    pub(super) fn exits(&self) -> &[RuntimeExitSnapshot] {
-        match self {
-            Self::Ready { exits } | Self::KilledDeadlock { exits, .. } => exits,
-        }
-    }
-
     pub(super) fn kills(&self) -> &[RuntimeDeadlockWorkSnapshot] {
         match self {
-            Self::Ready { .. } => &[],
+            Self::Ready => &[],
             Self::KilledDeadlock { unfinished, .. } => unfinished,
         }
     }
 
     pub(super) fn kill_reason(&self) -> Option<RuntimeKillReason> {
         match self {
-            Self::Ready { .. } => None,
+            Self::Ready => None,
             Self::KilledDeadlock { reason, .. } => Some(*reason),
         }
     }
 }
 
-/// Retained proposal for accepting stable exit votes or forcefully settling a
+/// Retained proposal for settling a stable runtime, or forcefully settling a
 /// retained deadlock.
 #[derive(Clone)]
 pub struct QuiescenceSnapshot {
@@ -507,7 +495,6 @@ pub struct QuiescenceReport {
     pub(super) maintenance_failures: Vec<RuntimeMaintenanceFailure>,
     pub(super) pending_failed_machine_reports: Vec<FailedMachine>,
     pub(super) pending_delivery_failure_reports: RuntimeDeliveryFailureSnapshot,
-    pub(super) pending_exit_error_reports: Vec<RuntimeDisposition>,
     pub(super) pending_killed_work_reports: Vec<RuntimeDeadlockWork>,
     pub(super) pending_maintenance_failure_reports: Vec<RuntimeMaintenanceFailure>,
 }
@@ -579,13 +566,6 @@ impl QuiescenceReport {
         &self.pending_delivery_failure_reports
     }
 
-    /// Error exits created by this settlement and not yet committed to report
-    /// transport.
-    #[doc(hidden)]
-    pub fn pending_exit_error_reports(&self) -> &[RuntimeDisposition] {
-        &self.pending_exit_error_reports
-    }
-
     /// Killed-work records created by this settlement and not yet committed to
     /// report transport.
     #[doc(hidden)]
@@ -604,7 +584,6 @@ impl QuiescenceReport {
     pub fn mark_reports_enqueued(&mut self) {
         self.pending_failed_machine_reports.clear();
         self.pending_delivery_failure_reports.failures = RedBlackTreeMapSync::new_sync();
-        self.pending_exit_error_reports.clear();
         self.pending_killed_work_reports.clear();
         self.pending_maintenance_failure_reports.clear();
     }
@@ -734,7 +713,6 @@ pub struct DeadlockSnapshot {
     pub(super) dispositions: Vec<RuntimeDisposition>,
     pub(super) unfinished: Vec<RuntimeDeadlockWork>,
     pub(super) reflection: crate::reflection::StoreSnapshot,
-    pub(super) settlement_exits: Vec<RuntimeExitSnapshot>,
     pub(super) settlement_unfinished: Vec<RuntimeDeadlockWorkSnapshot>,
 }
 
@@ -788,26 +766,11 @@ impl DeadlockSnapshot {
             dispositions,
             reflection: self.reflection.clone(),
             settlement: RuntimeSettlementSnapshot::KilledDeadlock {
-                exits: self.settlement_exits.clone(),
                 unfinished: self.settlement_unfinished.clone(),
                 reason,
             },
             killed_work: self.unfinished.clone(),
         }
-    }
-}
-
-pub(super) fn runtime_disposition_from_snapshot(
-    snapshot: RuntimeExitSnapshot,
-) -> RuntimeDisposition {
-    RuntimeDisposition {
-        work_id: snapshot.work.get(),
-        session_id: Some(snapshot.session.get()),
-        task_id: Some(snapshot.task.get()),
-        kind: match snapshot.intent {
-            ExitIntent::Success => RuntimeDispositionKind::ExitSuccess,
-            ExitIntent::Error(message) => RuntimeDispositionKind::ExitError(Value(message)),
-        },
     }
 }
 

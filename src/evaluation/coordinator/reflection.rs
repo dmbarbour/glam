@@ -11,11 +11,10 @@ use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
 use super::super::{EvaluationDemandState, EvaluationTaskBlock};
 use super::deferred::terminalize_lazy_cycle;
 use super::{
-    ClaimedDemandSession, CoordinatorMutationKind, EvaluationExitBlock, EvaluationSessionId,
-    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken,
-    EvaluationWorkCoordinator, EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker,
-    ExitIntent, ObservationRegistration, ProducerSettlementObligation, RouteHazard,
-    SettlementObligations, TaskStatusPublisher, TaskStatusUpdate, TaskStatusWake, WakeRegistration,
+    ClaimedDemandSession, CoordinatorMutationKind, EvaluationSessionId, EvaluationTaskId,
+    EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken, EvaluationWorkCoordinator,
+    EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker, ProducerSettlementObligation,
+    RouteHazard, SettlementObligations, TaskStatusPublisher, TaskStatusUpdate, TaskStatusWake,
     WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord, WorkState,
     demand_session_is_closed, prune_closed_session_registration, publish_task_block_locked,
     queue_task, register_background_root, remove_ready_task, unregister_background_root,
@@ -159,7 +158,6 @@ impl EvaluationWorkCoordinator {
                     wait: wait.clone(),
                     machine: None,
                     block: None,
-                    exit: None,
                 }),
             };
             assert!(state.work.insert(id, record).is_none());
@@ -398,8 +396,7 @@ impl EvaluationWorkCoordinator {
                 WorkState::Dormant
                 | WorkState::Reserved
                 | WorkState::Queued
-                | WorkState::Blocked
-                | WorkState::ExitWaiting => {
+                | WorkState::Blocked => {
                     record
                         .control
                         .close_reason
@@ -469,7 +466,7 @@ impl EvaluationWorkCoordinator {
         let status = match poll {
             ReflectionWorkPoll::Runnable => EvaluationTaskStatus::Launched,
             ReflectionWorkPoll::Blocked(_) => EvaluationTaskStatus::Blocked,
-            ReflectionWorkPoll::Exit(_) | ReflectionWorkPoll::Terminal => return false,
+            ReflectionWorkPoll::Terminal => return false,
         };
         let mut state = self
             .state
@@ -526,28 +523,18 @@ impl EvaluationWorkCoordinator {
                     ),
                 )
             };
-            let (state_after, block, exit, remains_blocked, terminal) = if cancel || abandoned {
-                (WorkState::Terminalizing, None, None, false, true)
+            let (state_after, block, remains_blocked, terminal) = if cancel || abandoned {
+                (WorkState::Terminalizing, None, false, true)
             } else {
                 match poll {
-                    ReflectionWorkPoll::Runnable => (WorkState::Queued, None, None, false, false),
+                    ReflectionWorkPoll::Runnable => (WorkState::Queued, None, false, false),
                     ReflectionWorkPoll::Blocked(block) => {
-                        (WorkState::Blocked, Some(block), None, true, false)
+                        (WorkState::Blocked, Some(block), true, false)
                     }
-                    ReflectionWorkPoll::Exit(exit) => {
-                        (WorkState::ExitWaiting, None, Some(exit), true, false)
-                    }
-                    ReflectionWorkPoll::Terminal => {
-                        (WorkState::Terminalizing, None, None, false, true)
-                    }
+                    ReflectionWorkPoll::Terminal => (WorkState::Terminalizing, None, false, true),
                 }
             };
-            let exit_waiting = exit.is_some();
-            let retain_machine = !terminal
-                && exit
-                    .as_ref()
-                    .is_none_or(|exit| exit.observed_epoch.is_some());
-            if retain_machine {
+            if !terminal {
                 let record = state
                     .work
                     .get_mut(&id)
@@ -559,10 +546,6 @@ impl EvaluationWorkCoordinator {
             let exact_subscription = if let Some(block) = block {
                 assert!(matches!(state_after, WorkState::Blocked));
                 publish_task_block_locked(&mut state, self.runtime, id, block)
-            } else if let Some(exit) = exit {
-                assert!(matches!(state_after, WorkState::ExitWaiting));
-                publish_reflection_exit_locked(&mut state, self.runtime, id, exit);
-                None
             } else {
                 let record = state
                     .work
@@ -570,7 +553,6 @@ impl EvaluationWorkCoordinator {
                     .expect("claimed reflection work must remain registered");
                 let reflection = reflection_work_mut(record);
                 reflection.block = None;
-                reflection.exit = None;
                 record.state = state_after;
                 state.observation_waiters.remove(&id);
                 None
@@ -596,7 +578,6 @@ impl EvaluationWorkCoordinator {
             (
                 ReflectionWorkRelease {
                     remains_blocked,
-                    exit_waiting,
                     terminal,
                     cancel,
                     abandoned,
@@ -631,7 +612,7 @@ impl EvaluationWorkCoordinator {
         if observation_woke {
             release.remains_blocked = false;
         }
-        let status_updates = if !release.terminal && !release.exit_waiting {
+        let status_updates = if !release.terminal {
             let mut state = self
                 .state
                 .lock()
@@ -651,7 +632,7 @@ impl EvaluationWorkCoordinator {
                         | WorkState::Reserved
                         | WorkState::Queued
                         | WorkState::Running => Some(EvaluationTaskStatus::Launched),
-                        WorkState::ExitWaiting | WorkState::Terminalizing => None,
+                        WorkState::Terminalizing => None,
                         WorkState::InlineForced => {
                             unreachable!("only a lazy route is forced inline")
                         }
@@ -777,7 +758,6 @@ pub(super) struct ReflectionWork {
     pub(super) wait: EvaluationWaitToken,
     pub(super) machine: Option<Box<dyn EvaluationTaskMachine>>,
     pub(super) block: Option<EvaluationTaskBlock>,
-    pub(super) exit: Option<EvaluationExitBlock>,
 }
 
 #[derive(Default)]
@@ -840,13 +820,11 @@ pub(in crate::evaluation) enum ReflectionWorkPoll {
     /// The work runs again: it spent its budget, or another thread stopped it.
     Runnable,
     Blocked(EvaluationTaskBlock),
-    Exit(EvaluationExitBlock),
     Terminal,
 }
 
 pub(in crate::evaluation) struct ReflectionWorkRelease {
     pub(in crate::evaluation) remains_blocked: bool,
-    pub(in crate::evaluation) exit_waiting: bool,
     pub(in crate::evaluation) terminal: bool,
     pub(in crate::evaluation) cancel: bool,
     pub(in crate::evaluation) abandoned: bool,
@@ -863,7 +841,6 @@ pub(in crate::evaluation) enum ReflectionWorkState {
     Queued,
     Running,
     Blocked(EvaluationTaskBlock),
-    ExitWaiting(EvaluationExitBlock),
     Terminalizing,
 }
 
@@ -901,54 +878,6 @@ pub(super) fn reflection_work_mut(record: &mut WorkRecord) -> &mut ReflectionWor
         WorkKind::Spark(_) => panic!("spark work cannot be used as a reflection task"),
         WorkKind::Deferred(_) => panic!("deferred work cannot be used as a reflection task"),
         WorkKind::LazyRoute(_) => panic!("lazy route cannot be used as a reflection task"),
-    }
-}
-
-pub(super) fn publish_reflection_exit_locked(
-    state: &mut WorkCoordinatorState,
-    runtime: EvaluationRuntimeId,
-    id: EvaluationWorkId,
-    exit: EvaluationExitBlock,
-) {
-    if let ExitIntent::Error(error) = &exit.intent {
-        debug_assert_eq!(
-            error.runtime_id(),
-            runtime,
-            "exit error values must belong to the coordinator runtime"
-        );
-    }
-    state.observation_waiters.remove(&id);
-    let observed_epoch = exit.observed_epoch;
-    let record = state
-        .work
-        .get_mut(&id)
-        .expect("exiting reflection work must remain registered");
-    assert!(matches!(record.state, WorkState::Running));
-    record.subscription_epoch = record
-        .subscription_epoch
-        .checked_add(1)
-        .expect("evaluation work subscription epochs exhausted");
-    let registration = WakeRegistration {
-        work: id,
-        subscription_epoch: record.subscription_epoch,
-    };
-    let reflection = reflection_work_mut(record);
-    reflection.block = None;
-    reflection.exit = Some(exit);
-    assert_eq!(
-        reflection.machine.is_some(),
-        observed_epoch.is_some(),
-        "only retryable exit waits retain their sanitized machine"
-    );
-    record.state = WorkState::ExitWaiting;
-    if let Some(observed_epoch) = observed_epoch {
-        state.observation_waiters.insert(
-            id,
-            ObservationRegistration {
-                wake: registration,
-                observed_epoch,
-            },
-        );
     }
 }
 
@@ -1016,12 +945,6 @@ pub(super) fn reflection_state(record: &WorkRecord) -> ReflectionWorkState {
                 .block
                 .clone()
                 .expect("blocked reflection work must retain its block"),
-        ),
-        WorkState::ExitWaiting => ReflectionWorkState::ExitWaiting(
-            reflection_work(record)
-                .exit
-                .clone()
-                .expect("exit-waiting reflection work must retain its exit summary"),
         ),
         WorkState::Terminalizing => ReflectionWorkState::Terminalizing,
     }

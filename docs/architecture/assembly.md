@@ -107,7 +107,7 @@ for provenance and macro-bus bridging.
 The binary's batch layer installs a runtime diagnostic ingress, optionally
 runs `conf.log` as a separate demand session, and retains independent assembler
 and logger bus counts. The logger reads transactionally, buffers output in
-runtime outboxes, and votes to exit only after input is quiescent. Returning
+runtime outboxes, and waits, idle, while its input is empty. Returning
 non-unit is an error. The runtime ingress, transactional event endpoints, and
 effect-host protocols are generic library mechanisms; selecting and supervising
 `conf.log` is executable policy.
@@ -150,9 +150,8 @@ construct an assembler or load configuration.
 
 ## Batch Lifecycle
 
-The settlement steps below are the CLI's during the runtime API's
-transition; `quiescence-reports-unresolved-state` replaces exit votes and
-the CLI's report rendering with a report that a machine emits.
+The batch ends at a quiescence it recognizes as its end
+(`quiescence-is-analyzed`):
 
 ```text
 construct one dormant assembler, wire diagnostics to the logger machine,
@@ -182,16 +181,16 @@ rendering, so rendering cannot turn an unsuccessful batch into a successful
 one. Main checks the assembler and logger bus error counts independently; both
 are independent of what ports hold, reads, and rendering.
 
-The settlement loop is the CLI's only collection point. A stable pump may
+The quiescence loop is the CLI's only collection point. A stable pump may
 promote collector pressure to `MaintenanceRequired`; the loop services it and
 pumps again. A failed service other than a stale snapshot fails the batch, and
-so does any maintenance failure in a settled report, even if a later retry
-succeeded, because the report keeps the durable failure history. Readiness
+so does any maintenance failure an analysis finds, even if a later retry
+succeeded, because the runtime keeps the durable failure history. Readiness
 `MaintenanceFailed` (heap poison) or `Poisoned` (runtime-core poison) ends
-settlement at once: the batch writes plain host text to stderr, without
+the loop at once: the batch writes plain host text to stderr, without
 entering the value domain, and fails. Assembly collects at its foreground
 driver's quantum boundaries whenever collector pressure requires it, without
-waiting for settlement (see [`evaluation.md`](evaluation.md)
+waiting for quiescence (see [`evaluation.md`](evaluation.md)
 "Context and Session").
 
 Standalone `--parse` inspects one built-in `.g` source through the narrow

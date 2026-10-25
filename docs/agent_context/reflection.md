@@ -270,13 +270,14 @@ and control flow.
   reasoning runs through workers or explicit `Assembler::drain_reasoning`.
 - Runtime-wide reasoning drain has no timeout or step limit. It includes newly
   launched work from every demand session and returns a stable
-  `RuntimeReadiness` snapshot. Ready exit votes require explicit settlement;
-  deadlock snapshots retain known dependencies and structured retryable
-  failures until the client chooses whether to kill them. A settled
-  `QuiescenceReport::failed_machines()` lists every machine in error as a
-  `FailedMachine` (path and diagnostic): flagged child machines and failed
-  anonymous roots, in path order; `pending_failed_machine_reports()` lists
-  each once for rendering.
+  `RuntimeReadiness` snapshot. `EvaluationRuntime::analysis()`, at any time,
+  says what the runtime holds (`quiescence-is-analyzed`) and changes
+  nothing: its waits by family, its backlogs, and its issues, unresolved by
+  default, among them every machine in error as a `FailedMachine` (path and
+  diagnostic), flagged child machines and failed anonymous roots, in path
+  order. Until `settlement-retires`, a deadlock snapshot still retains known
+  dependencies and structured retryable failures for a client that chooses
+  to kill them.
 
 ## Front-End and Logger Integration
 
@@ -296,8 +297,8 @@ and control flow.
   scanner waits for final `refl.*`, queues each named task, in order, on its
   own child keyed by the task's name, requires unit from each, and stores
   ordered `{key, task}` records whose `task` is the task's promise
-  (`[guard, 'tasks]`). A failing `refl.*` task flags its machine, which
-  settlement reports among `failed_machines`, as the CLI renders
+  (`[guard, 'tasks]`). A failing `refl.*` task flags its machine, which an
+  analysis reports as a machine in error, as the CLI renders
   (`runtime: machine failure (machine refl/<abstract>/scanner/<key>)`) and
   fails the batch on.
 - The CLI logger's assembler-bus input and its session-local diagnostic bus are
@@ -305,4 +306,4 @@ and control flow.
 - Logger input claims and heap edits share one atomic runtime commit without
   sharing conflict addresses. See
   [`diagnostics.md`](diagnostics.md) for ingress, output, and rendering
-  invariants and [`assembly.md`](assembly.md) for settlement and exit policy.
+  invariants and [`assembly.md`](assembly.md) for the batch's end and exit policy.

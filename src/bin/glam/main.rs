@@ -313,10 +313,6 @@ mod tests {
         }
     }
 
-    fn messages(diagnostics: &[Diagnostic]) -> Vec<&str> {
-        diagnostics.iter().map(Diagnostic::message).collect()
-    }
-
     #[test]
     fn final_local_file_change_is_only_a_warning() {
         let directory =
@@ -358,93 +354,6 @@ mod tests {
             diagnostics,
             assembler.reflection_environment_for_role("logger"),
         ))
-    }
-
-    #[test]
-    fn logger_exit_vote_retries_new_input_before_its_hand_over() {
-        let assembler = Assembler::default();
-        let mut runtime = logger_runtime(assembler.clone());
-        let evaluation_runtime = assembler.evaluation_runtime();
-        let module = assembler
-            .module(["logger_exit_retry"])
-            .script(
-                "g",
-                concat!(
-                    "language g0\n",
-                    "import 'std\n",
-                    "refl.effect = .cut (.alt ",
-                    "(.read_log >>= (\\_message -> .r ())) ",
-                    "(.exit.success))\n",
-                    "refl.producer = .log 'info {msg:{text:\"arrived before settlement\"}}\n",
-                ),
-            )
-            .build()
-            .expect("logger retry fixture should compile");
-        let effect = assembler
-            .get(module.value(), "refl.effect")
-            .expect("logger retry fixture should define its effect");
-        let producer = assembler
-            .get(module.value(), "refl.producer")
-            .expect("logger retry fixture should define its producer");
-        // The producer reports on the assembler's bus, which reaches the
-        // logger's input, as an independent producer's reports do.
-        let host = logger_host(&assembler, assembler.diagnostic_bus());
-        let lifecycle = EffectLifecycle::new_closing_session(&evaluation_runtime);
-        let task = EffectRun::new(
-            &evaluation_runtime,
-            &effect,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&lifecycle)
-        .expect("logger root should enter coordinator work");
-
-        let report = evaluation_runtime.pump_background(4096);
-        assert_eq!(report.state, glam::BackgroundPumpState::Stable);
-        assert!(
-            matches!(evaluation_runtime.readiness(), RuntimeReadiness::Ready(_)),
-            "the retryable exit should be ready for settlement before disturbance"
-        );
-        let producer_lifecycle = EffectLifecycle::new(&evaluation_runtime);
-        let producer_task = EffectRun::new(
-            &evaluation_runtime,
-            &producer,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&producer_lifecycle)
-        .expect("independent diagnostic producer should schedule");
-        let report = evaluation_runtime.pump_background(4096);
-        assert_eq!(report.state, glam::BackgroundPumpState::Stable);
-        assert!(matches!(
-            producer_task.run_with(|| host.deliver()).unwrap(),
-            TaskOutcome::Complete(_)
-        ));
-
-        assert!(matches!(
-            task.run_with(|| host.deliver()).unwrap(),
-            TaskOutcome::Complete(_)
-        ));
-        assert!(matches!(
-            lifecycle.status(),
-            glam::reflection::EffectLifecycleStatus::Complete(_)
-        ));
-        assert_eq!(
-            held_by_logger(&mut runtime),
-            0,
-            "the disturbed logger must consume the pre-settlement diagnostic"
-        );
-
-        hand_over_logger(&mut runtime);
-        assembler.diagnostic_bus().publish_local(Diagnostic::new(
-            &assembler.values(),
-            Severity::Info,
-            "after the hand-over",
-        ));
-        assert_eq!(
-            messages(&take_from_fallback(&mut runtime)),
-            ["after the hand-over"]
-        );
     }
 
     #[test]
@@ -531,9 +440,7 @@ mod tests {
                     "language g0\n",
                     "import 'std\n",
                     "object logger with\n  alias logger_object\n",
-                    "  run = (.cut (.alt ",
-                    "(.read_log >>= (\\_message -> .r ())) ",
-                    "(.exit.success))) =>> logger_object\n",
+                    "  run = (.cut (.read_log >>= (\\_message -> .r ()))) =>> logger_object\n",
                     "  eff = logger_object.run.eff\n",
                     "refl.effect = (.cut (.heap.get ['start] >>= ",
                     "(\\start -> (start == 1) =>> .r ()))) =>> logger\n",
@@ -562,6 +469,7 @@ mod tests {
         )
         .schedule(&lifecycle)
         .expect("recursive logger root should enter coordinator work");
+        let stop = task.stopper();
         evaluation_runtime.pump_until_stable();
         assert!(matches!(
             evaluation_runtime.readiness(),
@@ -607,21 +515,21 @@ mod tests {
         ));
 
         evaluation_runtime.pump_until_stable();
-        let RuntimeReadiness::Ready(snapshot) = evaluation_runtime.readiness() else {
-            panic!("the recursive logger should drain prequeued input and vote to exit")
-        };
-        let report = snapshot.settle().expect("logger exit should settle");
-        assert!(report.failed_machines().is_empty());
-        assert!(report.killed_work().is_empty());
+        let analysis = evaluation_runtime.analysis().unwrap();
         assert!(
-            task.run_with(|| host.deliver()).is_err(),
-            "settlement should terminalize the exit vote"
+            analysis.quiescent() && analysis.issues().is_empty(),
+            "the recursive logger should drain prequeued input and wait on its input, idle"
         );
         assert_eq!(
             held_by_logger(&mut runtime),
             0,
             "the logger read what was queued before its first poll"
         );
+        stop.stop();
+        assert!(matches!(
+            task.run_with(|| host.deliver()),
+            Ok(TaskOutcome::Cancelled)
+        ));
     }
 
     /// Commits a value to an output whose adapter fails, and delivers it,

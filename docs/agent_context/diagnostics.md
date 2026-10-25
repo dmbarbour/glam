@@ -33,7 +33,7 @@ client-owned rendering. Current flow lives in
   `{diagnostic:{from:Frames}}`, the frames its sender composed onto it, so
   an error raised by the diagnostic itself says where it came from.
 - A child task's failure breaks its reply with the failure's own diagnostic
-  and adds no frame. The CLI's settled report of a failed machine adds
+  and adds no frame. The CLI's report of a machine in error adds
   `runtime:{op:'machine_failure, args:{machine:Path}}`.
 - Explicit net computation adds `eval:{op:'net_computation}`. Raw `Value::Net`
   is already WHNF and receives none.
@@ -124,11 +124,13 @@ client-owned rendering. Current flow lives in
   policy. It is not another semantic severity.
 - The cached Glam formatter arranges client-supplied viewer data. It must not
   gain privileged origin inspection or presentation-policy inference.
-- Failed machines and retained delivery, exit, and killed-work failures make
-  batch execution fail independently of successful diagnostic rendering.
-  Rendering cannot turn a failed batch into success.
-- Settled report obligations are one-shot. Do not retain growing identity sets
-  to suppress repeated rendering.
+- Every issue an analysis at quiescence finds, machines in error and retained
+  delivery and maintenance failures among them, makes batch execution fail
+  independently of successful diagnostic rendering. Rendering cannot turn a
+  failed batch into success.
+- An analysis reports what the runtime holds, every time. The batch
+  publishes each issue once, by its identity (`PublishedIssues`), for the
+  batch's life.
 
 ## Locking and Destruction
 

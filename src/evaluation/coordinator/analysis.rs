@@ -73,7 +73,7 @@ impl EvaluationWorkCoordinator {
                 continue;
             }
             let Some(work) = unfinished_work_snapshot_locked(&state, record) else {
-                quiescent &= matches!(record.state, WorkState::ExitWaiting);
+                quiescent = false;
                 continue;
             };
             let (family, cause) = classify_wait_locked(&state, record.id);

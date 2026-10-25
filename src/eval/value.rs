@@ -527,9 +527,7 @@ pub(crate) fn poll_lazy_route(
                 claims.release(&top);
                 return spill_inline(&context, &top, poll);
             }
-            EvaluationMachinePoll::Exit(_)
-            | EvaluationMachinePoll::Cancelled
-            | EvaluationMachinePoll::Panicked { .. } => {
+            EvaluationMachinePoll::Cancelled | EvaluationMachinePoll::Panicked { .. } => {
                 unreachable!("an inline lazy only completes, fails, yields, blocks or sparks")
             }
         }

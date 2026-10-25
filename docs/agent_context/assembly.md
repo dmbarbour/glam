@@ -72,9 +72,8 @@ configuration live in [`../CLI.md`](../CLI.md).
   diagnostic ingress and owns configured logger/fallback policy.
 - `conf.log` has its own demand session and diagnostic bus while sharing the
   runtime coordinator, reflection heap, and executor.
-- The logger is required to return unit. It reads its input in a cut; an
-  old-style `.exit.success` vote after the empty read only waits, as the read
-  does, until exit votes retire.
+- The logger is required to return unit. It reads its input in a cut, which
+  waits, idle, while its input is empty.
 - The diagnostic stream is never semantically closed. A quiescence whose
   analysis has nothing new ends the batch; nothing is killed or settled, and
   an idle configured logger is stopped (`EffectRunStop`), cleanly.
@@ -88,9 +87,8 @@ configuration live in [`../CLI.md`](../CLI.md).
 
 ## Batch Ordering
 
-For a selected assembly command, preserve this lifecycle, the CLI's during
-the runtime API's transition (`quiescence-reports-unresolved-state` replaces
-its exit votes and report rendering):
+For a selected assembly command, preserve this lifecycle
+(`quiescence-is-analyzed`):
 
 ```text
 load configuration on dormant runtime
@@ -120,8 +118,8 @@ reasoning may run indefinitely; stable blocked work is reported as deadlock.
   activation, the batch's analysis loop, fallback ordering, and exit
   accounting.
 - `src/api.rs` tests: diagnostic ingress, runtime event endpoints, public
-  readiness, and settlement.
+  readiness, and the runtime's analysis.
 
 When a lifecycle bug is order-dependent, add explicit barriers around the
-relevant publication or settlement boundary. Repetition without forced
+relevant publication or quiescence boundary. Repetition without forced
 ordering is not sufficient evidence that a race is fixed.

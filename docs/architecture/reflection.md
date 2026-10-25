@@ -437,21 +437,19 @@ the boundary task's child `'scanner`, which waits for final `refl.*`, then
 queues each named task, in deterministic order, on its own child keyed by its
 name (`.child.task`). Guards are stored with explicit shared-heap effects under
 identities derived from module paths or final object `spec.name`, holding the
-tasks' promises. A failed task's machine stays flagged, and settlement reports
-it (`QuiescenceReport::failed_machines`), which fails a CLI batch.
+tasks' promises. A failed task's machine stays flagged, and an analysis reports
+it as a machine in error (`RuntimeAnalysis::failed_machines`), which fails a
+CLI batch.
 
 ## CLI Logger Session
 
-This is the configured logger during the runtime API's transition; its exit
-vote retires with `quiescence-reports-unresolved-state`.
-
 Configured `conf.log` is a reflection task with a broader specialization.
 Main-only requests read the diagnostics waiting at the CLI's `logger`
-machine, buffer stderr or diagnostic output, and coordinate
-`.exit.success`/`.exit.error`. The input stream has no close request and
-logger output uses a separate bus, so it cannot feed its own input. The
-root's end closes its demand session.
+machine and buffer stderr or diagnostic output. The input stream has no close
+request, and logger output uses a separate bus, so it cannot feed its own
+input. A logger waiting on its input is idle, and its wait ends with the
+batch (`EffectRunStop`). The root's end closes its demand session.
 
 See [`diagnostics.md`](diagnostics.md) for the logger's wiring, transactional
 transport, its hand-over to the fallback, and rendering, and
-[`assembly.md`](assembly.md) for settlement and process exit.
+[`assembly.md`](assembly.md) for the batch's end and process exit.

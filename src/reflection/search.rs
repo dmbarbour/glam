@@ -143,17 +143,6 @@ impl<B, R> SearchPolicy<B, R> {
             Self::RetainAll(search) => search.completed.clone(),
         }
     }
-
-    /// Drops every branch-local result and alternative while retaining the
-    /// immutable root needed to restart an isolated search.
-    pub(super) fn discard_progress(&mut self) {
-        let Self::RetainAll(search) = self else {
-            return;
-        };
-        search.alternatives.clear();
-        search.results.clear();
-        search.completed = None;
-    }
 }
 
 impl<B: Clone, R> SearchPolicy<B, R> {
@@ -308,9 +297,6 @@ impl<S: TaskSpecialization> IsolatedEffectSearch<S> {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(_) => {
-                unreachable!("isolated effect-search profiles do not expose runtime exit")
-            }
         }
     }
 
@@ -411,7 +397,6 @@ impl<S: TaskSpecialization> HostedEffectRun<S> {
                 _ => HostedPoll::Failed(error.root_for_values(self.task.eval_context.values())),
             },
             EffectTaskPoll::Cancelled => HostedPoll::Cancelled,
-            EffectTaskPoll::Exit(_) => unreachable!("hosted runs do not expose runtime exit"),
         }
     }
 
@@ -621,7 +606,7 @@ mod tests {
     }
 
     #[test]
-    fn search_policy_discards_progress_but_returned_results_own_their_roots() {
+    fn returned_search_results_own_their_roots() {
         let core = crate::core::private_test_value_factory();
         let values = Values::from_core_factory(core);
         let domain = EffectTokenDomain::new(&values);
@@ -643,11 +628,13 @@ mod tests {
         assert!(retained_result.upgrade().is_some());
         assert!(retained_root.upgrade().is_some());
 
-        policy.discard_progress();
+        drop(
+            policy
+                .next_alternative()
+                .expect("the right branch should remain an alternative"),
+        );
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_right.upgrade().is_none());
-        assert!(retained_result.upgrade().is_none());
-        assert!(retained_root.upgrade().is_some());
 
         let (completed, retained_completed) = retained_search_value(&domain);
         policy.retain(completed);
@@ -658,9 +645,11 @@ mod tests {
         drop(policy);
         domain.collect_and_drain_retired_external_owners_for_test();
         assert!(retained_root.upgrade().is_none());
+        assert!(retained_result.upgrade().is_some());
         assert!(retained_completed.upgrade().is_some());
         drop(returned);
         domain.collect_and_drain_retired_external_owners_for_test();
+        assert!(retained_result.upgrade().is_none());
         assert!(retained_completed.upgrade().is_none());
     }
 

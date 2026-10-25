@@ -1002,7 +1002,13 @@ crates/glam-gc/scripts/check-g0-semantics.sh
 | Retryable promise cycle | `promise_only_cycle_remains_blocked_without_poisoning_its_assignment` |
 | Concurrent worker evaluation | `workers_force_sparks_and_poll_ready_reflection_tasks` |
 | Shared interaction-net function state | `compiled_function_values_reuse_one_shared_interaction_net` |
-| Settlement and retained exit failures | `ready_settlement_publishes_exited_once_and_retains_exit_errors` |
+| Quiescence analysis and retained failures | `an_analysis_tells_idle_waits_from_what_is_owed` |
+
+The seventh regression first latched settlement publishing exit votes once
+and retaining exit errors. Exit votes retired 2026-10-25
+(`quiescence-is-analyzed`), and the slot now latches their successor: an
+analysis at quiescence keeps an erred wait's error alive and reports the
+machines left in error, changing nothing.
 
 Recapture the operational data on Linux with:
 

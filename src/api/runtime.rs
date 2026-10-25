@@ -53,8 +53,7 @@ pub(crate) use machines::{
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire, WireEnd};
 pub use readiness::*;
 use readiness::{
-    RuntimeSettlementSnapshot, runtime_deadlock_work_from_snapshot,
-    runtime_disposition_from_snapshot, runtime_killed_failure,
+    RuntimeSettlementSnapshot, runtime_deadlock_work_from_snapshot, runtime_killed_failure,
 };
 pub(in crate::api) use shares::ShareJournal;
 
@@ -1457,15 +1456,7 @@ impl EvaluationRuntime {
 
         match coordinator {
             RuntimeCoordinatorReadiness::Busy => unreachable!("handled above"),
-            RuntimeCoordinatorReadiness::Ready {
-                work_generation,
-                exits,
-            } => {
-                let dispositions = exits
-                    .iter()
-                    .cloned()
-                    .map(runtime_disposition_from_snapshot)
-                    .collect();
+            RuntimeCoordinatorReadiness::Ready { work_generation } => {
                 RuntimeReadiness::Ready(QuiescenceSnapshot {
                     runtime: self.clone(),
                     stamp: RuntimeReadinessStamp {
@@ -1473,15 +1464,14 @@ impl EvaluationRuntime {
                         observation_epoch,
                         gc_maintenance_revision: maintenance.revision,
                     },
-                    dispositions,
+                    dispositions: Vec::new(),
                     reflection,
-                    settlement: RuntimeSettlementSnapshot::Ready { exits },
+                    settlement: RuntimeSettlementSnapshot::Ready,
                     killed_work: Vec::new(),
                 })
             }
             RuntimeCoordinatorReadiness::Deadlocked {
                 work_generation,
-                exits,
                 unfinished,
             } => RuntimeReadiness::Deadlocked(DeadlockSnapshot {
                 runtime: self.clone(),
@@ -1490,18 +1480,13 @@ impl EvaluationRuntime {
                     observation_epoch,
                     gc_maintenance_revision: maintenance.revision,
                 },
-                dispositions: exits
-                    .iter()
-                    .cloned()
-                    .map(runtime_disposition_from_snapshot)
-                    .collect(),
+                dispositions: Vec::new(),
                 unfinished: unfinished
                     .iter()
                     .cloned()
                     .map(|work| runtime_deadlock_work_from_snapshot(self.values().core(), work))
                     .collect(),
                 reflection,
-                settlement_exits: exits,
                 settlement_unfinished: unfinished,
             }),
         }
@@ -1546,7 +1531,7 @@ impl EvaluationRuntime {
         // collection that ran between probe and commit cannot change the
         // settlement-relevant instant: pure-evaluation work, observations, and
         // retained roots are identical before and after. The clauses above
-        // observe that instant directly -- quiescent work generation and exits
+        // observe that instant directly -- quiescent work generation and kills
         // (below), observation epoch, empty outputs, and a clean GC disposition
         // with no in-flight lease. A collection that *failed* surfaces through
         // `disposition`/`explicit_request`, and an in-flight collection through
@@ -1566,7 +1551,6 @@ impl EvaluationRuntime {
         }
         self.state.work.validate_runtime_settlement(
             snapshot.stamp.work_generation,
-            snapshot.settlement.exits(),
             snapshot.settlement.kills(),
         )
     }
@@ -1599,20 +1583,12 @@ impl EvaluationRuntime {
             return Err(RuntimeSettlementError::RuntimeChanged);
         };
 
-        let (work_generation, remaining_exits) = match self.state.work.runtime_readiness_snapshot()
-        {
-            RuntimeCoordinatorReadiness::Ready {
-                work_generation,
-                exits,
-            } => (work_generation, exits),
+        let work_generation = match self.state.work.runtime_readiness_snapshot() {
+            RuntimeCoordinatorReadiness::Ready { work_generation } => work_generation,
             RuntimeCoordinatorReadiness::Busy | RuntimeCoordinatorReadiness::Deadlocked { .. } => {
-                unreachable!("exclusive exit settlement must leave no unfinished work")
+                unreachable!("exclusive settlement must leave no unfinished work")
             }
         };
-        assert!(
-            remaining_exits.is_empty(),
-            "settlement must consume every validated exit disposition"
-        );
         let (failed_roots, pending_failed_roots) = self.state.work.failed_roots_for_settlement();
         let (maintenance_failures, pending_maintenance_reports, gc_maintenance_revision) = self
             .state
@@ -1677,14 +1653,6 @@ impl EvaluationRuntime {
             flags.sort_by(|left, right| left.0.cmp(&right.0));
             flags
         };
-        let pending_exit_error_reports = snapshot
-            .dispositions
-            .iter()
-            .filter(|disposition| {
-                matches!(disposition.kind(), RuntimeDispositionKind::ExitError(_))
-            })
-            .cloned()
-            .collect();
         Ok(QuiescenceReport {
             runtime: self.clone(),
             stamp: RuntimeReadinessStamp {
@@ -1706,7 +1674,6 @@ impl EvaluationRuntime {
                 pending_failed_roots,
             )),
             pending_delivery_failure_reports: pending_delivery_reports,
-            pending_exit_error_reports,
             pending_killed_work_reports: snapshot.killed_work.clone(),
             pending_maintenance_failure_reports: pending_maintenance_reports
                 .into_iter()

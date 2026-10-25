@@ -1047,8 +1047,8 @@ fn configured_logger_rejects_removed_log_status() {
 }
 
 #[test]
-fn configured_logger_can_drain_until_coordinated_exit() {
-    let dir = unique_temp_dir("glam-conf-log-exit");
+fn configured_logger_can_drain_until_the_batch_ends() {
+    let dir = unique_temp_dir("glam-conf-log-drain");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
     let config = dir.join("conf.g");
@@ -1058,10 +1058,8 @@ fn configured_logger_can_drain_until_coordinated_exit() {
             "language g0\n",
             "object conf.env\n",
             "object conf.logger_loop with\n  alias logger_loop\n",
-            "  run = (.cut (.alt ",
-            "(.read_log >>= (\\message -> ",
-            "(.write_stderr (message.msg.text ++ [10])) =>> .r ())) ",
-            "(.exit.success))) =>> logger_loop\n",
+            "  run = (.cut (.read_log >>= (\\message -> ",
+            "(.write_stderr (message.msg.text ++ [10])) =>> .r ()))) =>> logger_loop\n",
             "  eff = logger_loop.run.eff\n",
             "conf.log = conf.logger_loop\n",
         ),
@@ -1095,7 +1093,7 @@ fn configured_logger_does_not_read_its_own_log_output() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = (.log 'warn { msg:{ text:\"LOGGER OUTPUT\" } }) =>> .cut (.alt (.read_log >>= (\\_message -> .log 'error { msg:{ text:\"READ OWN OUTPUT\" } })) (.exit.success))\n",
+        "language g0\nobject conf.env\nconf.log = (.log 'warn { msg:{ text:\"LOGGER OUTPUT\" } }) =>> .cut (.read_log >>= (\\_message -> .log 'error { msg:{ text:\"READ OWN OUTPUT\" } }))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 

@@ -227,7 +227,6 @@ fn poll_list_effect_until_blocked(
                 panic!("list-effect fixture failed: {failure}")
             }
             EvaluationMachinePoll::Contended
-            | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("list-effect fixture crossed an unexpected orchestration boundary")
@@ -270,7 +269,6 @@ fn drive_list_effect_after_route_loss(
                 panic!("list-effect fixture failed: {failure}")
             }
             EvaluationMachinePoll::Contended
-            | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("list-effect fixture crossed an unexpected orchestration boundary")
@@ -1117,7 +1115,6 @@ fn poll_until_blocked_after_route_loss(
             EvaluationMachinePoll::Complete(_) => panic!("the fixture completed before blocking"),
             EvaluationMachinePoll::Failed(failure) => panic!("the fixture failed: {failure}"),
             EvaluationMachinePoll::Contended
-            | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("the fixture crossed an unexpected orchestration boundary")
@@ -1163,7 +1160,6 @@ fn poll_until_stalled_child_wait_after_route_loss(
                 panic!("construction failed before its wait: {failure}")
             }
             EvaluationMachinePoll::Contended
-            | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("construction crossed an unexpected orchestration boundary")
@@ -1212,7 +1208,6 @@ fn drive_after_route_loss(
             EvaluationMachinePoll::Complete(value) => return value.clone_core_for_test(),
             EvaluationMachinePoll::Failed(failure) => panic!("the fixture failed: {failure}"),
             EvaluationMachinePoll::Contended
-            | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("the fixture crossed an unexpected orchestration boundary")
@@ -1260,7 +1255,6 @@ fn drive_failure_after_route_loss(
                 panic!("the failure fixture unexpectedly completed")
             }
             EvaluationMachinePoll::Contended
-            | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("the failure fixture crossed an unexpected orchestration boundary")
@@ -1338,7 +1332,6 @@ fn poll_object_until_blocked(
             EvaluationMachinePoll::Failed(failure) => panic!("object fixture failed: {failure}"),
             EvaluationMachinePoll::Complete(_) => panic!("object fixture completed early"),
             EvaluationMachinePoll::Contended
-            | EvaluationMachinePoll::Exit(_)
             | EvaluationMachinePoll::Cancelled
             | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("object fixture crossed an unexpected orchestration boundary")
@@ -1628,9 +1621,6 @@ fn net_whnf_checkpoint_survives_route_loss_and_collection() {
                 EvaluationMachinePoll::Contended => {
                     panic!("resumed net-WHNF checkpoint was unexpectedly contended")
                 }
-                EvaluationMachinePoll::Exit(_) => {
-                    panic!("resumed net-WHNF checkpoint unexpectedly requested exit")
-                }
                 EvaluationMachinePoll::Cancelled | EvaluationMachinePoll::Panicked { .. } => {
                     panic!("resumed net-WHNF checkpoint was unexpectedly cancelled")
                 }
@@ -1764,7 +1754,6 @@ fn object_checkpoint_preserves_linearization_prefixes_across_route_loss_and_coll
                     panic!("object fixture failed: {failure}")
                 }
                 EvaluationMachinePoll::Contended
-                | EvaluationMachinePoll::Exit(_)
                 | EvaluationMachinePoll::Cancelled
                 | EvaluationMachinePoll::Panicked { .. } => {
                     panic!("object fixture crossed an unexpected orchestration boundary")
@@ -3188,9 +3177,7 @@ fn host_call_follows_a_lazy_result_without_reinvocation() {
                 panic!("the local semantic thunk must not block")
             }
             EvaluationMachinePoll::Failed(failure) => panic!("{failure}"),
-            EvaluationMachinePoll::Exit(_)
-            | EvaluationMachinePoll::Cancelled
-            | EvaluationMachinePoll::Panicked { .. } => {
+            EvaluationMachinePoll::Cancelled | EvaluationMachinePoll::Panicked { .. } => {
                 panic!("the local semantic thunk must not terminate its task")
             }
         }
@@ -3246,7 +3233,6 @@ fn reflection_source_hands_off_to_an_ordinary_promised_whnf_checkpoint() {
         EvaluationMachinePoll::Contended => {
             panic!("reflection handoff was unexpectedly contended")
         }
-        EvaluationMachinePoll::Exit(_) => panic!("reflection handoff requested exit"),
         EvaluationMachinePoll::Panicked { report, .. } => {
             panic!("reflection handoff panicked: {report}")
         }

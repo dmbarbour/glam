@@ -172,19 +172,16 @@ the analysis of what the runtime left unresolved among them. When the
 runtime is quiescent and an analysis finds nothing new, the batch ends, and a
 logger waiting on its input ends with it, cleanly. A logger that leaves
 diagnostics unread at quiescence has stopped reading: the batch halts it,
-saying so, and the fallback logger renders what it left. Until exit votes
-retire, a logger may still place an exit vote after the empty-read
-alternative, which waits as the read does:
+saying so, and the fallback logger renders what it left. A conventional
+logger loops on a read in a cut:
 
 ```g
 object conf.logger_loop with
   alias logger_loop
   run =
-    (.cut (.alt
-      (.read_log >>= \message ->
-        .write_stderr (message.msg.text ++ [10]) =>>
-        .r ())
-      (.exit.success))) =>>
+    (.cut (.read_log >>= \message ->
+      .write_stderr (message.msg.text ++ [10]) =>>
+      .r ())) =>>
     logger_loop
 
   eff = logger_loop.run.eff
@@ -192,12 +189,11 @@ object conf.logger_loop with
 conf.log = conf.logger_loop
 ```
 
-A diagnostic arriving first makes `.read_log` run instead. The diagnostic
-stream is not semantically closed; the batch's end, not the logger, decides
-when it stops. Recurrence is deliberately outside `.cut`: a successful read
-and write must commit before the next iteration begins, while the empty-read
-alternative remains inside the transactional choice so later input can disturb
-it.
+With no diagnostic waiting, `.read_log` fails, and the cut waits, idle, until
+input arrives. The diagnostic stream is not semantically closed; the batch's
+end, not the logger, decides when it stops. Recurrence is deliberately outside
+`.cut`: a successful read and write must commit before the next iteration
+begins, while the read stays inside the cut so that later input wakes it.
 
 The remaining sections focus on `conf.cli`.
 

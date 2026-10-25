@@ -147,7 +147,7 @@ boundary task's child, and each `refl.*` entry as the scanner's.
 | `.task.ack_error H` | `.child.recover Key`. |
 | `.task.cancel H` | `.child.interrupt Key Reason`. |
 | — | `.child.clear Key`; `.child.call Key Op`. |
-| `.exit.success`, `.exit.error` | Retire: a machine waiting on input or for tasks is idle. |
+| `.exit.success`, `.exit.error` | Retire: a machine waiting on input or for tasks is idle. Retired 2026-10-25 (`exit-votes-retire`). |
 | — | Obligations, as accepted promises (`obligations-are-accepted-promises`): `.promise.accept Resolver Diagnostic`, `.promise.abandon Resolver`, `.promise.accepted Resolver`. |
 | `.eval` | `.try (seq V (.r V))`: it answers `wait` where it waited (see [Trying an operation](#trying-an-operation)). |
 | `.meta.inspect`, `.dict_items`, `.env 'glam.origin.inspect` | Unchanged: inspection. |

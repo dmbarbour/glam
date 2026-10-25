@@ -121,7 +121,7 @@ path as production. Readiness observed after a pump matches ordinary mode,
 and heap policy remains `NoAuto`. Tests that need a collection at a
 particular boundary request it explicitly.
 
-Settlement validation rechecks the probe's work generation and exits, its
+Settlement validation rechecks the probe's work generation and kills, its
 observation epoch, empty outputs, and a clean maintenance state: no active
 lease, no pending request, and an `Idle` disposition. It does not compare the
 maintenance revision. The collector is non-moving and preserves registered
@@ -855,7 +855,7 @@ state:
 | failed anonymous roots, and those not yet reported | runtime work coordinator `FailedRoots` |
 | task wait, current published status, optional host lifecycle publisher, and test-only status observer | coordinator `TaskTerminalPublisher` obligation |
 | task/wait lookup and retirement indexes | runtime work coordinator |
-| completed, failed, cancelled, abandoned, exited, killed, or panicked outcome | shared `EvaluationWaitToken` cell |
+| completed, failed, cancelled, abandoned, killed, or panicked outcome | shared `EvaluationWaitToken` cell |
 | a child machine's error flag | transactional flag record (`api/runtime/flags.rs`) |
 
 Terminal publication precedes coordinator record removal. `poll_wait` checks

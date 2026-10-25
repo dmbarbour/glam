@@ -177,13 +177,10 @@ fn run_configured_logger(
         // waits on its input, idle, or halting it, with a diagnostic of its
         // own, for leaving its input unread (`quiescence-is-analyzed`).
         Ok(TaskOutcome::Complete(_) | TaskOutcome::Cancelled) => {}
-        // A failure is the logger's own, which its caller reports; an exit
-        // or a kill settlement reports.
+        // A failure is the logger's own, which its caller reports; a kill
+        // settlement reports.
         Err(error) => {
-            if !matches!(
-                lifecycle.status(),
-                EffectLifecycleStatus::Exited | EffectLifecycleStatus::Killed(_)
-            ) {
+            if !matches!(lifecycle.status(), EffectLifecycleStatus::Killed(_)) {
                 diagnostics.publish_local(error.diagnostic(values));
             }
         }

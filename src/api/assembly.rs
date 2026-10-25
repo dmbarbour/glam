@@ -31,7 +31,7 @@ use crate::evaluation::{EvalContext, EvaluationSession, ReflectionTaskProfile};
 use crate::g_syntax::compile_source;
 use crate::reflection::{
     CommitResult, ConflictAnalysisStrategy, HostSnapshot, ReasoningSessionId, ReflectionEffects,
-    ReflectionServices, TaskCommit, TaskEnvironment, TaskHost, VolumeId, coordinator_task_launcher,
+    ReflectionServices, TaskCommit, TaskEnvironment, TaskHost, VolumeId, task_launcher,
     volume_effects,
 };
 use crate::runtime::RuntimeValueRoot;
@@ -77,7 +77,7 @@ impl CompilationExecution {
             &reasoning.sealed_environment(),
             "macro",
         ))?;
-        let task_profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
             ReflectionEffects,
             host.clone(),
         )));
@@ -314,7 +314,7 @@ impl ReasoningSession {
         diagnostics: DiagnosticBus,
         runtime: EvaluationRuntime,
     ) -> Result<Self, Error> {
-        let task_profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
             ReflectionEffects,
             host.clone(),
         )));
@@ -866,12 +866,10 @@ impl AssemblerBuilder {
         };
         self.host.seal_environment(environment)?;
         if !self.runtime.has_default_reflection_profile() {
-            match self
-                .runtime
-                .seal_default_reflection_profile(coordinator_task_launcher(
-                    ReflectionEffects,
-                    self.host.clone(),
-                )) {
+            match self.runtime.seal_default_reflection_profile(task_launcher(
+                ReflectionEffects,
+                self.host.clone(),
+            )) {
                 Ok(()) => {}
                 Err(error) if self.runtime.has_default_reflection_profile() => {
                     // Another builder sealed the same dormant runtime first.
@@ -1038,8 +1036,8 @@ impl Assembler {
     ///
     /// This method imposes no step or time limit. A runnable infinite task
     /// therefore keeps it running forever. The returned snapshot is not
-    /// committed: clients explicitly settle ready exit votes or choose
-    /// whether to kill a deadlock.
+    /// committed: clients analyze the runtime, or choose whether to kill a
+    /// deadlock.
     pub fn drain_reasoning(&self) -> RuntimeReadiness {
         let runtime = self.evaluation_runtime();
         runtime.pump_until_stable();

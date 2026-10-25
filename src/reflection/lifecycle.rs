@@ -44,7 +44,6 @@ pub enum EffectLifecycleStatus {
     Failed(TaskHalt),
     Cancelled,
     Abandoned,
-    Exited,
     Killed(TaskHalt),
     /// The effect root was interrupted by a panic.
     Panicked(TaskHalt),
@@ -166,7 +165,6 @@ impl EffectLifecycleState {
             }
             EvaluationTaskStatus::Cancelled => EffectLifecycleStatus::Cancelled,
             EvaluationTaskStatus::Abandoned => EffectLifecycleStatus::Abandoned,
-            EvaluationTaskStatus::Exited => EffectLifecycleStatus::Exited,
             EvaluationTaskStatus::Killed(error) => {
                 EffectLifecycleStatus::Killed(TaskHalt::rooted_failure(error))
             }
@@ -242,15 +240,6 @@ impl ScheduledEffectRun {
                     return combine_composed_result(
                         &values,
                         Err(TaskHalt::new("scheduled effect root was abandoned")),
-                        children,
-                    );
-                }
-                EvaluationWaitPoll::Exited => {
-                    return combine_composed_result(
-                        &values,
-                        Err(TaskHalt::new(
-                            "scheduled effect root exited without a result",
-                        )),
                         children,
                     );
                 }
@@ -420,8 +409,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
 
     /// Installs this effect as coordinator work in a fresh demand session.
     /// The returned handle retains the hidden task and session lease; tasks
-    /// it queues on child machines inherit the same complete, exit-capable
-    /// task profile.
+    /// it queues on child machines inherit the same complete task profile.
     #[doc(hidden)]
     pub fn schedule(self, lifecycle: &EffectLifecycle) -> Result<ScheduledEffectRun, TaskHalt> {
         let Self {
@@ -433,7 +421,7 @@ impl<S: TaskSpecialization> EffectRun<S> {
             result_assertion_context,
             failure_context,
         } = self;
-        let task_profile = Arc::new(ReflectionTaskProfile::sealed(coordinator_task_launcher(
+        let task_profile = Arc::new(ReflectionTaskProfile::sealed(task_launcher(
             specialization.clone(),
             host.clone(),
         )));
@@ -465,7 +453,6 @@ impl<S: TaskSpecialization> EffectRun<S> {
                         host,
                         task_context,
                         false,
-                        true,
                     )
                     .map_err(|error| {
                         let failure = error.into_failure();
@@ -580,40 +567,20 @@ fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskHalt> {
     )))
 }
 
-/// Builds a type-erased launcher for annotation and joinable reflection tasks.
+/// Builds a type-erased launcher for reflection tasks.
 pub(crate) fn task_launcher<S: TaskSpecialization>(
     specialization: S,
     host: Arc<S::Host>,
 ) -> Arc<dyn ReflectionTaskLauncher> {
-    effect_task_launcher(specialization, host, false)
-}
-
-/// Builds a launcher for reflection tasks owned by the runtime coordinator.
-/// Such tasks participate in quiescence settlement and therefore expose the
-/// divergent `.exit.*` coordination family.
-pub(crate) fn coordinator_task_launcher<S: TaskSpecialization>(
-    specialization: S,
-    host: Arc<S::Host>,
-) -> Arc<dyn ReflectionTaskLauncher> {
-    effect_task_launcher(specialization, host, true)
-}
-
-fn effect_task_launcher<S: TaskSpecialization>(
-    specialization: S,
-    host: Arc<S::Host>,
-    exposes_exit: bool,
-) -> Arc<dyn ReflectionTaskLauncher> {
     Arc::new(EffectTaskLauncher {
         specialization,
         host,
-        exposes_exit,
     })
 }
 
 struct EffectTaskLauncher<S: TaskSpecialization> {
     specialization: S,
     host: Arc<S::Host>,
-    exposes_exit: bool,
 }
 
 impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
@@ -629,7 +596,6 @@ impl<S: TaskSpecialization> ReflectionTaskLauncher for EffectTaskLauncher<S> {
             self.host.clone(),
             context,
             false,
-            self.exposes_exit,
         )
         .map_err(TaskHalt::into_failure)?;
         Ok(match result_policy {
@@ -677,8 +643,7 @@ mod root_inventory_tests {
             EffectLifecycleStatus::Launched
             | EffectLifecycleStatus::Blocked
             | EffectLifecycleStatus::Cancelled
-            | EffectLifecycleStatus::Abandoned
-            | EffectLifecycleStatus::Exited => {}
+            | EffectLifecycleStatus::Abandoned => {}
             EffectLifecycleStatus::Complete(value) => {
                 let _: &PublicValue = value;
             }
@@ -724,11 +689,9 @@ mod root_inventory_tests {
         let EffectTaskLauncher {
             specialization,
             host,
-            exposes_exit,
         } = launcher;
         let _: &StandardEffects = specialization;
         let _: &Arc<<StandardEffects as TaskSpecialization>::Host> = host;
-        let _: &bool = exposes_exit;
     }
 
     #[test]

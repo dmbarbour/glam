@@ -155,7 +155,7 @@ Abandoned alternatives cannot leak diagnostics or bytes because their event
 journals never commit.
 
 The logger's profile includes `.read_log`, `.write_stderr`, its environment,
-diagnostic destination, and coordinated exit effects. Annotation-created
+and its diagnostic destination. Annotation-created
 reflection tasks instead use the runtime's immutable default reflection
 profile and shared reflection bus policy.
 
@@ -203,33 +203,33 @@ privileged inspection.
 
 Formatting failure uses a minimal Rust renderer. That fallback is a last-mile
 presentation path; it does not replace or acknowledge the authoritative
-machine, delivery, exit, or killed-work failure which caused the message.
+failure, or the issue an analysis found, which caused the message.
 Both Glam formatting and fallback rendering finish into owned bytes before the
 terminal writer is invoked, so a writer is another mutator-free host callback
 rather than an extension of evaluation.
 
 ## Logger Completion and Fallback
 
-This section describes the CLI's logger as it is during the runtime API's
-transition: its exit vote and the settled reports the CLI renders are bridge
-behavior, which `quiescence-reports-unresolved-state` replaces with machines
-that outlive quiescence and a report that a machine emits.
-
 The diagnostic stream has no semantic closed state. A conventional logger loop
-uses `.read_log` as the first branch and `.exit.success` as its terminal vote.
-New committed input disturbs the vote and retries the read. Runtime readiness
-and settlement, not a bus-close bit, determine whether the logger and every
-other live machine agree that batch work may finish.
+reads with `.read_log` in a cut, which waits, idle, while its input is empty;
+new committed input wakes it and retries the read. The batch, not a bus-close
+bit, decides when diagnostics stop: it ends at a quiescence whose analysis
+has nothing new (`quiescence-is-analyzed`), and a logger still waiting on its
+input ends with it (`EffectRunStop`), cleanly. A logger whose input holds
+unread diagnostics at quiescence has stopped reading: the batch halts it,
+with an error diagnostic saying so, and the fallback renders its backlog.
 
-When the configured logger ends, at settlement or before, the logger hands
+When the configured logger ends, at the batch's end or before, the logger hands
 over in one cut: it wires its input on to `fallback` and sends what the input
 holds there, so the fallback receives every diagnostic in order and nothing
 arrives between. Without a configured logger, the logger hands over at once.
 The CLI renders what waits at the fallback with its default renderer: between
-settlement pumps while no configured logger's fork holds the logger, and at the
-end. Settled reports render directly. They are one-shot reporting obligations;
-rendering does not maintain an ever-growing set of previously seen failure
-identities, and work it admits causes another runtime pump before final exit.
+pumps while no configured logger's fork holds the logger, and at the end.
+
+The batch publishes each issue an analysis at quiescence finds through the
+assembler's bus, and so through the logger, never around it: each issue once,
+by its identity (`PublishedIssues`), for the batch's life. Work that
+publishing admits causes another runtime pump before the next analysis.
 
 Delivery and rendering run only on client threads, never on an evaluation
 worker. The logger task only journals and commits its outputs, wherever it
@@ -238,14 +238,15 @@ runs; the CLI's logger thread delivers them between pumps
 hand-over runs on that thread too, as the configured logger ends, and the
 fallback renders on the thread of the turn that reads it.
 
-A stable deadlock may be explicitly killed and settled. Failed machines,
-output delivery failures, exit errors, killed work, and collector maintenance
-failures make the batch unsuccessful directly, even if their diagnostic
-presentation also fails. Valid assembly bytes may therefore be written to
+Nothing is killed at the batch's end. Each issue an analysis at quiescence
+finds, a wait on a promise no one resolves, an erred wait, a backlog, a
+pending obligation, a machine in error, or a retained output delivery or
+collector maintenance failure, makes the batch unsuccessful directly, even if
+its diagnostic presentation also fails. Valid assembly bytes may therefore be written to
 stdout before reasoning produces a nonzero exit status.
 
 A failed machine, a flagged child machine or a failed anonymous root
-(`QuiescenceReport::failed_machines`), renders with its own diagnostic under
+(`RuntimeAnalysis::failed_machines`), renders with its own diagnostic under
 context `runtime:{op:'machine_failure, args:{machine:Path}}`, which the
 terminal viewer summarizes as
 `runtime: machine failure (machine refl/<abstract>/scanner/k)`, where
@@ -255,13 +256,15 @@ A maintenance failure from a usable heap renders as an error diagnostic with
 context `runtime:{op:'maintenance_failure, args:{failure:Id, kind:Kind}}`.
 `Kind` is `'collector_panic` for a recovered trace panic or `'finalizer_panic`
 when a panic left finalizer work pending; both leave a retry obligation. A
-`'poisoned` failure never reaches a settled report, because a poisoned heap
-reports `MaintenanceFailed` and stops settlement with host-text fallback (see
+`'poisoned` failure never reaches an analysis's issues, because a poisoned
+heap reports `MaintenanceFailed` and ends the batch's loop with host-text
+fallback (see
 [`assembly.md`](assembly.md) "Batch Lifecycle").
 
 ## Adjacent Owners
 
-- [`assembly.md`](assembly.md): batch ordering, settlement, and process exit.
+- [`assembly.md`](assembly.md): batch ordering, the batch's end, and process
+  exit.
 - [`evaluation.md`](evaluation.md): permanent versus retryable demand results,
   task publication, and readiness.
 - [`reflection.md`](reflection.md): transactional `.log`, logger host

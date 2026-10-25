@@ -160,10 +160,6 @@ fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
                 EvaluationWaitTerminal::Abandoned,
                 "reflection task was abandoned when its evaluation session closed",
             ),
-            (
-                EvaluationWaitTerminal::Exited,
-                "reflection task exited without producing a result",
-            ),
         ];
         for (terminal, expected) in cases {
             let error = TaskPromiseTerminalMapper::ReflectionReturnValue
@@ -2769,122 +2765,6 @@ fn observation_published_after_block_registration_requeues_exact_work() {
 
     publish_test_observation(&coordinator);
     assert_eq!(coordinator.ready_task_count(), 1);
-    let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
-    assert!(
-        coordinator
-            .release_reflection(claimed, ReflectionWorkPoll::Terminal)
-            .terminal
-    );
-    settle_test_reflection(&coordinator, work);
-}
-
-#[test]
-fn permanent_exit_wait_retains_only_its_summary_and_obligations() {
-    let (coordinator, _executor) =
-        super::super::test_execution_resources(0).expect("test execution resources should build");
-    let session = TestDemand::new(&coordinator);
-    let (_task, work) = reserve_ready_test_reflection(&coordinator, &session);
-    let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
-    let message = rooted_unit(&session.demand.values);
-
-    let mut release = coordinator.release_reflection(
-        claimed,
-        ReflectionWorkPoll::Exit(EvaluationExitBlock {
-            intent: ExitIntent::Error(message.clone()),
-            observed_epoch: None,
-        }),
-    );
-    assert!(release.exit_waiting);
-    assert!(release.remains_blocked);
-    assert!(!release.terminal);
-    assert!(release.machine.is_some());
-    {
-        let state = coordinator
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        let record = state
-            .work
-            .get(&work)
-            .expect("exit-waiting work must remain registered");
-        let reflection = reflection_work(record);
-        assert!(matches!(record.state, WorkState::ExitWaiting));
-        assert!(reflection.machine.is_none());
-        assert!(reflection.block.is_none());
-        assert_eq!(
-            reflection.exit,
-            Some(EvaluationExitBlock {
-                intent: ExitIntent::Error(message),
-                observed_epoch: None,
-            })
-        );
-        assert!(record.obligations.producer.is_some());
-        assert!(!state.observation_waiters.contains_key(&work));
-    }
-    drop(release.machine.take());
-
-    assert!(matches!(
-        coordinator
-            .reflection_snapshots(session.demand.id)
-            .as_slice(),
-        [ReflectionWorkSnapshot {
-            state: ReflectionWorkState::ExitWaiting(EvaluationExitBlock {
-                intent: ExitIntent::Error(_),
-                observed_epoch: None,
-            }),
-            ..
-        }]
-    ));
-
-    assert_eq!(
-        coordinator.request_reflection_cancellation(work),
-        ReflectionCancellation::Terminalize
-    );
-    settle_test_reflection(&coordinator, work);
-}
-
-#[test]
-fn retryable_exit_wait_requeues_after_runtime_observation() {
-    let (coordinator, _executor) =
-        super::super::test_execution_resources(0).expect("test execution resources should build");
-    let session = TestDemand::new(&coordinator);
-    let observed = coordinator.current_observation_epoch();
-    let (_, work) = reserve_ready_test_reflection(&coordinator, &session);
-    let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
-
-    let release = coordinator.release_reflection(
-        claimed,
-        ReflectionWorkPoll::Exit(EvaluationExitBlock {
-            intent: ExitIntent::Success,
-            observed_epoch: Some(observed),
-        }),
-    );
-    assert!(release.exit_waiting);
-    assert!(release.remains_blocked);
-    assert!(release.machine.is_none());
-    assert!(matches!(
-        coordinator.reflection_snapshots(session.demand.id).as_slice(),
-        [ReflectionWorkSnapshot {
-            state: ReflectionWorkState::ExitWaiting(EvaluationExitBlock {
-                intent: ExitIntent::Success,
-                observed_epoch: Some(epoch),
-            }),
-            ..
-        }] if *epoch == observed
-    ));
-
-    publish_test_observation(&coordinator);
-    assert_eq!(coordinator.ready_task_count(), 1);
-    assert!(matches!(
-        coordinator
-            .reflection_snapshots(session.demand.id)
-            .as_slice(),
-        [ReflectionWorkSnapshot {
-            state: ReflectionWorkState::Queued,
-            ..
-        }]
-    ));
-
     let claimed = claim_ready_test_reflection(&coordinator, session.demand.id);
     assert!(
         coordinator

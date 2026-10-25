@@ -35,20 +35,20 @@ pub(crate) use access::{EvaluationPollContext, EvaluationValueAccess, EvaluatorS
 pub(crate) use coordinator::EvaluationTaskCancellation;
 pub(crate) use coordinator::EvaluationWorkId;
 #[cfg(test)]
+use coordinator::test_wake_registration;
+#[cfg(test)]
 pub(crate) use coordinator::{ClientDemandHandle, ClientDemandResult};
 pub(crate) use coordinator::{
-    CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationExitBlock,
-    EvaluationMachinePoll, EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskHandle,
-    EvaluationTaskId, EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll,
-    EvaluationWaitToken, EvaluationWorkCoordinator, ExactDemandRoute, ExitIntent, FailedRoots,
-    PreparedEvaluationTask, PromiseProducerObligation, PromiseProducerPublication,
-    ReflectionTaskResultPolicy, RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot,
-    RuntimeDependencySnapshot, RuntimeExitSnapshot, RuntimeWaitFamilySnapshot,
-    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, TaskStatusPublisher, TaskStatusWake,
-    ValidatedRuntimeSettlementPlan, WakeRegistration, WorkDependency,
+    CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationMachinePoll,
+    EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskHandle, EvaluationTaskId,
+    EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll, EvaluationWaitToken,
+    EvaluationWorkCoordinator, ExactDemandRoute, FailedRoots, PreparedEvaluationTask,
+    PromiseProducerObligation, PromiseProducerPublication, ReflectionTaskResultPolicy,
+    RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
+    RuntimeWaitFamilySnapshot, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
+    TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan, WakeRegistration,
+    WorkDependency,
 };
-#[cfg(test)]
-use coordinator::{ReflectionWorkSnapshot, test_wake_registration};
 pub(crate) use executor::EvaluationExecutor;
 #[cfg(test)]
 pub(crate) use executor::WorkerValueHoldProbe;
@@ -62,7 +62,7 @@ pub(crate) use session::{
 pub(crate) use session::{EvaluationTaskRegistryCounts, OwnedEvalContext};
 pub(crate) use task_machine::{
     AnonymousRootGuard, DeferredHalt, MachineHost, MachineRunGuard, MachineTaskOutcome, QueuedTask,
-    RunHalt, TaskMachine,
+    TaskMachine,
 };
 pub(crate) use whnf::{
     LazyCheckpointPoll, WhnfOwnerPoll, interpret_poll as interpret_whnf_poll,

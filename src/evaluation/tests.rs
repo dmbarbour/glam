@@ -121,19 +121,6 @@ fn assert_evaluation_machine_poll_boundary_inventory(poll: &EvaluationMachinePol
             let _: &Option<RuntimeObservationEpoch> = observed_epoch;
             let _: &Option<RuntimeFailureRoot> = error;
         }
-        EvaluationMachinePoll::Exit(exit) => {
-            let EvaluationExitBlock {
-                intent,
-                observed_epoch,
-            } = exit;
-            match intent {
-                ExitIntent::Success => {}
-                ExitIntent::Error(value) => {
-                    let _: &RuntimeValueRoot = value;
-                }
-            }
-            let _: &Option<RuntimeObservationEpoch> = observed_epoch;
-        }
         EvaluationMachinePoll::Complete(value) => {
             let _: &RuntimeValueRoot = value;
         }
@@ -2065,7 +2052,6 @@ enum ProbePollOutcome {
     Complete,
     Failed,
     Cancelled,
-    Exit,
 }
 
 struct ProbePollOutcomeMachine(ProbePollOutcome);
@@ -2088,46 +2074,6 @@ impl EvaluationTaskMachine for ProbePollOutcomeMachine {
                 context.root_failure(evaluation_failure("probe failure")),
             ),
             ProbePollOutcome::Cancelled => EvaluationMachinePoll::Cancelled,
-            ProbePollOutcome::Exit => EvaluationMachinePoll::Exit(EvaluationExitBlock {
-                intent: ExitIntent::Error(
-                    context.root_value(Value::binary_from_text("probe exit")),
-                ),
-                observed_epoch: None,
-            }),
-        }
-    }
-}
-
-struct ExitVote(EvaluationExitBlock);
-
-impl EvaluationTaskMachine for ExitVote {
-    fn poll(
-        &mut self,
-        _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
-        EvaluationMachinePoll::Exit(self.0.clone())
-    }
-}
-
-struct ExitUntilObservation {
-    context: EvalContext,
-    observed: RuntimeObservationEpoch,
-}
-
-impl EvaluationTaskMachine for ExitUntilObservation {
-    fn poll(
-        &mut self,
-        _context: &mut crate::evaluation::EvaluationPollContext,
-        _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-    ) -> EvaluationMachinePoll {
-        if self.context.current_observation_epoch() == self.observed {
-            EvaluationMachinePoll::Exit(EvaluationExitBlock {
-                intent: ExitIntent::Success,
-                observed_epoch: Some(self.observed),
-            })
-        } else {
-            EvaluationMachinePoll::Complete(_context.root_unit())
         }
     }
 }
@@ -2149,148 +2095,6 @@ impl RecordedStatuses {
             })
         })
     }
-}
-
-#[test]
-fn exit_wait_does_not_publish_task_status_or_failure() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let coordinator = context
-        .coordinator()
-        .expect("test task must retain its coordinator");
-    let message = rooted_unit(&context);
-    let task = context
-        .schedule_task(move |_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Error(message),
-                observed_epoch: None,
-            })))
-        })
-        .expect("exit-voting task should schedule");
-    let statuses = Arc::new(RecordedStatuses::default());
-    assert!(
-        coordinator
-            .attach_reflection_status_publisher(task.work, RecordedStatuses::publisher(&statuses),)
-    );
-
-    let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
-        panic!("a permanent exit vote should remain unfinished")
-    };
-    assert_eq!(report.unfinished.len(), 1);
-    assert_eq!(
-        report.unfinished[0].state,
-        EvaluationUnfinishedState::Blocked
-    );
-    assert!(report.unfinished[0].error.is_none());
-    assert!(statuses.0.lock().unwrap().is_empty());
-    assert!(matches!(
-        context.poll_reflection_task(&task),
-        EvaluationWaitPoll::Pending(_)
-    ));
-    assert!(matches!(
-        coordinator
-            .reflection_snapshots(context.session.id)
-            .as_slice(),
-        [ReflectionWorkSnapshot {
-            state: ReflectionWorkState::ExitWaiting(EvaluationExitBlock {
-                intent: ExitIntent::Error(_),
-                observed_epoch: None,
-            }),
-            ..
-        }]
-    ));
-
-    assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
-}
-
-#[test]
-fn retryable_exit_wake_skips_intermediate_task_statuses() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let coordinator = context
-        .coordinator()
-        .expect("test task must retain its coordinator");
-    let observed = context.current_observation_epoch();
-    let task = context
-        .schedule_task(|task_context| {
-            Ok(Box::new(ExitUntilObservation {
-                context: task_context,
-                observed,
-            }))
-        })
-        .expect("retryable exit task should schedule");
-    let statuses = Arc::new(RecordedStatuses::default());
-    assert!(
-        coordinator
-            .attach_reflection_status_publisher(task.work, RecordedStatuses::publisher(&statuses),)
-    );
-
-    assert!(matches!(
-        context.run_until_quiescent(),
-        EvaluationSessionRun::Deadlocked(_)
-    ));
-    assert!(statuses.0.lock().unwrap().is_empty());
-
-    coordinator.publish_runtime_observation();
-    let EvaluationSessionRun::Complete(report) = context.run_until_quiescent() else {
-        panic!("observation wake should resume and complete the exit voter")
-    };
-    assert!(report.unfinished.is_empty());
-    assert!(matches!(
-        statuses.0.lock().unwrap().as_slice(),
-        [EvaluationTaskStatus::Complete(_)]
-    ));
-}
-
-#[test]
-fn task_join_dependency_remains_pending_for_exit_waiting_child() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let child = context
-        .schedule_task(|_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Success,
-                observed_epoch: None,
-            })))
-        })
-        .expect("exit-voting child should schedule");
-    let child_wait = child.wait().clone();
-    let parent = context
-        .schedule_task(move |task_context| {
-            Ok(Box::new(Await {
-                context: task_context,
-                dependency: child_wait,
-            }))
-        })
-        .expect("joining parent should schedule");
-
-    let EvaluationSessionRun::Deadlocked(report) = context.run_until_quiescent() else {
-        panic!("a join on an exit-waiting child must remain pending")
-    };
-    assert_eq!(report.unfinished.len(), 2);
-    assert!(matches!(
-        context.poll_reflection_task(&child),
-        EvaluationWaitPoll::Pending(_)
-    ));
-    assert!(matches!(
-        context.poll_reflection_task(&parent),
-        EvaluationWaitPoll::Pending(_)
-    ));
-    let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
-        panic!("strict join on an exit voter should remain a runtime deadlock")
-    };
-    assert_eq!(snapshot.dispositions().len(), 1);
-    assert_eq!(snapshot.dispositions()[0].task_id(), Some(child.id().get()));
-    assert_eq!(snapshot.unfinished().len(), 1);
-    assert_eq!(snapshot.unfinished()[0].task_id(), Some(parent.id().get()));
-    assert!(matches!(
-        snapshot.unfinished()[0].dependency(),
-        Some(crate::api::RuntimeDependency::TaskWait { task_id, .. })
-            if *task_id == child.id().get()
-    ));
-
-    assert_eq!(child.cancel(), EvaluationTaskCancellation::Requested);
-    let _ = context.run_until_quiescent();
 }
 
 struct Await {
@@ -2336,10 +2140,6 @@ impl EvaluationTaskMachine for Await {
             EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
                 poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
             ),
-            EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(
-                poll_context
-                    .root_failure(evaluation_failure("waited-on task exited without a result")),
-            ),
             EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
         }
     }
@@ -2372,10 +2172,6 @@ impl EvaluationTaskMachine for AwaitWithObservation {
             EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Cancelled,
             EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
                 poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
-            ),
-            EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(
-                poll_context
-                    .root_failure(evaluation_failure("waited-on task exited without a result")),
             ),
             EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
         }
@@ -2449,10 +2245,6 @@ impl EvaluationTaskMachine for AwaitCell {
             EvaluationWaitPoll::Cancelled => EvaluationMachinePoll::Cancelled,
             EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
                 poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
-            ),
-            EvaluationWaitPoll::Exited => EvaluationMachinePoll::Failed(
-                poll_context
-                    .root_failure(evaluation_failure("waited-on task exited without a result")),
             ),
             EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
         }
@@ -3304,7 +3096,6 @@ fn terminal_wait_dispositions_retain_only_their_documented_runtime_roots() {
     );
     exercise(EvaluationWaitTerminal::Cancelled, false);
     exercise(EvaluationWaitTerminal::Abandoned, false);
-    exercise(EvaluationWaitTerminal::Exited, false);
     exercise(
         EvaluationWaitTerminal::Killed(RuntimeFailureRoot::new(
             context.values(),
@@ -3396,7 +3187,6 @@ fn every_poll_outcome_releases_managed_access_before_publication() {
         ProbePollOutcome::Complete,
         ProbePollOutcome::Failed,
         ProbePollOutcome::Cancelled,
-        ProbePollOutcome::Exit,
     ] {
         let fixture = SameRuntimeFixture::new();
         let context = fixture.context();
@@ -3426,20 +3216,10 @@ fn every_poll_outcome_releases_managed_access_before_publication() {
                         ProbePollOutcome::Cancelled,
                         EvaluationMachinePoll::Cancelled
                     )
-                    | (ProbePollOutcome::Exit, EvaluationMachinePoll::Exit(_))
             );
             assert!(matched, "poll returned the wrong outcome for {expected:?}");
-            match poll {
-                EvaluationMachinePoll::Complete(root) => {
-                    assert_eq!(root.runtime_id(), context.values().runtime_id());
-                }
-                EvaluationMachinePoll::Exit(EvaluationExitBlock {
-                    intent: ExitIntent::Error(root),
-                    ..
-                }) => {
-                    assert_eq!(root.runtime_id(), context.values().runtime_id());
-                }
-                _ => {}
+            if let EvaluationMachinePoll::Complete(root) = poll {
+                assert_eq!(root.runtime_id(), context.values().runtime_id());
             }
             context
                 .values()
@@ -7609,177 +7389,6 @@ fn killed_work_report_diagnostic_survives_after_settlement_owners_retire() {
 }
 
 #[test]
-fn runtime_readiness_retains_exit_dispositions_without_settling_tasks() {
-    let fixture = SameRuntimeFixture::new();
-    let success_context = fixture.context();
-    let error_context = fixture.context();
-    let success = success_context
-        .schedule_task(|_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Success,
-                observed_epoch: None,
-            })))
-        })
-        .expect("success exit task should schedule");
-    let message = RuntimeValueRoot::new(
-        error_context.values(),
-        Value::binary_from_text("exit message"),
-    );
-    let error = error_context
-        .schedule_task(move |_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Error(message),
-                observed_epoch: None,
-            })))
-        })
-        .expect("error exit task should schedule");
-
-    fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
-        panic!("two stable exit votes should make the runtime ready")
-    };
-
-    assert_eq!(snapshot.dispositions().len(), 2);
-    assert!(snapshot.dispositions().iter().any(|disposition| {
-        disposition.task_id() == Some(success.id().get())
-            && matches!(
-                disposition.kind(),
-                crate::api::RuntimeDispositionKind::ExitSuccess
-            )
-    }));
-    assert!(snapshot.dispositions().iter().any(|disposition| {
-        disposition.task_id() == Some(error.id().get())
-            && matches!(
-                disposition.kind(),
-                crate::api::RuntimeDispositionKind::ExitError(value)
-                    if fixture.runtime.values().clone_core(value).is_ok_and(|value| {
-                        matches!(value, Value::Binary(bytes) if bytes.as_ref() == b"exit message")
-                    })
-            )
-    }));
-    assert!(matches!(
-        success_context.poll_reflection_task(&success),
-        EvaluationWaitPoll::Pending(_)
-    ));
-    assert!(matches!(
-        error_context.poll_reflection_task(&error),
-        EvaluationWaitPoll::Pending(_)
-    ));
-    let crate::api::RuntimeReadiness::Ready(repeated) = fixture.runtime.readiness() else {
-        panic!("observing readiness must not settle exit votes")
-    };
-    assert_eq!(snapshot.stamp(), repeated.stamp());
-    assert_eq!(snapshot.dispositions().len(), repeated.dispositions().len());
-    assert!(
-        snapshot
-            .dispositions()
-            .iter()
-            .zip(repeated.dispositions())
-            .all(|(left, right)| left.work_id() == right.work_id()
-                && left.session_id() == right.session_id()
-                && left.task_id() == right.task_id())
-    );
-}
-
-#[test]
-fn exit_readiness_snapshot_root_survives_after_settlement_report_drop() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let values = context.values().clone();
-    let message = RuntimeValueRoot::new(
-        context.values(),
-        Value::binary_from_text("snapshot-owned exit"),
-    );
-    let task = context
-        .schedule_task(move |_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Error(message),
-                observed_epoch: None,
-            })))
-        })
-        .expect("the exit-snapshot fixture should schedule");
-
-    fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
-        panic!("the stable exit vote should produce a readiness snapshot")
-    };
-    let report = snapshot.settle().expect("the exit snapshot should settle");
-    drop(report);
-    drop(task);
-
-    let expected = fixture.runtime.values().text("snapshot-owned exit");
-    let snapshot_live = values
-        .collect_managed_for_test()
-        .expect("the settled readiness snapshot should retain its exit-message root");
-    assert!(snapshot.dispositions().iter().any(|disposition| {
-        let crate::api::RuntimeDispositionKind::ExitError(value) = disposition.kind() else {
-            return false;
-        };
-        fixture
-            .runtime
-            .values()
-            .same_representation_for_test(value, &expected)
-            .unwrap_or(false)
-    }));
-
-    drop(snapshot);
-    let reclaimed = values
-        .collect_managed_for_test()
-        .expect("dropping the readiness snapshot should release its managed roots");
-    assert!(reclaimed.root_entries() < snapshot_live.root_entries());
-    assert!(reclaimed.finalized_slots() >= 1);
-}
-
-#[test]
-fn settled_report_root_survives_after_exit_snapshot_and_task_retire() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let values = context.values().clone();
-    let message = RuntimeValueRoot::new(
-        context.values(),
-        Value::binary_from_text("report-owned exit"),
-    );
-    let task = context
-        .schedule_task(move |_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Error(message),
-                observed_epoch: None,
-            })))
-        })
-        .expect("the settled-report fixture should schedule");
-
-    fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
-        panic!("the stable exit vote should produce a readiness snapshot")
-    };
-    let report = snapshot.settle().expect("the exit snapshot should settle");
-    drop(snapshot);
-    drop(task);
-
-    let expected = fixture.runtime.values().text("report-owned exit");
-    let report_live = values
-        .collect_managed_for_test()
-        .expect("the settled report should retain its exit-message root");
-    assert!(report.dispositions().iter().any(|disposition| {
-        let crate::api::RuntimeDispositionKind::ExitError(value) = disposition.kind() else {
-            return false;
-        };
-        fixture
-            .runtime
-            .values()
-            .same_representation_for_test(value, &expected)
-            .unwrap_or(false)
-    }));
-
-    drop(report);
-    let reclaimed = values
-        .collect_managed_for_test()
-        .expect("dropping the settled report should release its managed roots");
-    assert!(reclaimed.root_entries() < report_live.root_entries());
-    assert!(reclaimed.finalized_slots() >= 1);
-}
-
-#[test]
 fn quiescence_validation_is_observational_and_rejects_stale_state() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
@@ -7794,7 +7403,6 @@ fn quiescence_validation_is_observational_and_rejects_stale_state() {
         .validate_without_settling()
         .expect("unchanged readiness should validate");
     assert_eq!(validated.work_generation, generation);
-    assert!(validated.exits.is_empty());
     assert_eq!(
         context
             .coordinator()
@@ -7818,103 +7426,12 @@ fn quiescence_validation_is_observational_and_rejects_stale_state() {
 }
 
 #[test]
-fn ready_settlement_publishes_exited_once_and_retains_exit_errors() {
-    let fixture = SameRuntimeFixture::new();
-    let success_context = fixture.context();
-    let error_context = fixture.context();
-    let statuses = Arc::new(RecordedStatuses::default());
-    let success = success_context
-        .schedule_task(|_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Success,
-                observed_epoch: None,
-            })))
-        })
-        .expect("success exit task should schedule");
-    assert!(
-        success_context
-            .attach_task_status_publisher(&success, RecordedStatuses::publisher(&statuses),)
-    );
-    let message = RuntimeValueRoot::new(
-        error_context.values(),
-        Value::binary_from_text("retained exit failure"),
-    );
-    let error = error_context
-        .schedule_task(move |_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Error(message),
-                observed_epoch: None,
-            })))
-        })
-        .expect("error exit task should schedule");
-
-    fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
-        panic!("stable exit tasks should be ready")
-    };
-    let report = snapshot.settle().expect("ready snapshot should settle");
-
-    assert_eq!(
-        success_context.poll_reflection_task(&success),
-        EvaluationWaitPoll::Exited
-    );
-    assert_eq!(
-        error_context.poll_reflection_task(&error),
-        EvaluationWaitPoll::Exited
-    );
-    assert_eq!(
-        statuses
-            .0
-            .lock()
-            .expect("recorded statuses were poisoned")
-            .as_slice(),
-        [EvaluationTaskStatus::Exited]
-    );
-    assert_eq!(report.dispositions().len(), snapshot.dispositions().len());
-    assert!(
-        report
-            .dispositions()
-            .iter()
-            .zip(snapshot.dispositions())
-            .all(|(left, right)| left.work_id() == right.work_id()
-                && left.session_id() == right.session_id()
-                && left.task_id() == right.task_id())
-    );
-    assert!(report.failed_machines().is_empty());
-    assert!(report.dispositions().iter().any(|disposition| {
-        matches!(
-            disposition.kind(),
-            crate::api::RuntimeDispositionKind::ExitError(value)
-                if fixture.runtime.values().clone_core(value).is_ok_and(|value| {
-                    matches!(value, Value::Binary(bytes) if bytes.as_ref() == b"retained exit failure")
-                })
-        )
-    }));
-    assert!(
-        matches!(
-            snapshot.settle(),
-            Err(crate::api::RuntimeSettlementError::RuntimeChanged)
-        ),
-        "a settled exit obligation must not publish twice"
-    );
-    assert!(matches!(
-        fixture.runtime.readiness(),
-        crate::api::RuntimeReadiness::Ready(_)
-    ));
-}
-
-#[test]
-fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
+fn forced_deadlock_settlement_kills_every_participant() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let child = context
-        .schedule_task(|_| {
-            Ok(Box::new(ExitVote(EvaluationExitBlock {
-                intent: ExitIntent::Success,
-                observed_epoch: None,
-            })))
-        })
-        .expect("exit-voting child should schedule");
+        .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
+        .expect("blocked child should schedule");
     let child_wait = child.wait().clone();
     let parent = context
         .schedule_task(move |task_context| {
@@ -7949,20 +7466,17 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
     let killed_details = deadlock.unfinished().to_vec();
     let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
     assert_eq!(forced.dispositions().len(), 2);
-    assert!(forced.dispositions().iter().any(|disposition| {
-        disposition.task_id() == Some(child.id().get())
-            && matches!(
-                disposition.kind(),
-                crate::api::RuntimeDispositionKind::ExitSuccess
-            )
-    }));
-    assert!(forced.dispositions().iter().any(|disposition| {
-        disposition.task_id() == Some(parent.id().get())
-            && matches!(
-                disposition.kind(),
-                crate::api::RuntimeDispositionKind::Killed(crate::api::RuntimeKillReason::Deadlock)
-            )
-    }));
+    for task in [child.id(), parent.id()] {
+        assert!(forced.dispositions().iter().any(|disposition| {
+            disposition.task_id() == Some(task.get())
+                && matches!(
+                    disposition.kind(),
+                    crate::api::RuntimeDispositionKind::Killed(
+                        crate::api::RuntimeKillReason::Deadlock
+                    )
+                )
+        }));
+    }
     let report = forced
         .settle()
         .expect("unchanged forced deadlock should settle");
@@ -7977,10 +7491,10 @@ fn forced_deadlock_settlement_preserves_exits_and_kills_other_participants() {
                 && left.task_id() == right.task_id())
     );
     assert!(report.failed_machines().is_empty());
-    assert_eq!(
+    assert!(matches!(
         context.poll_reflection_task(&child),
-        EvaluationWaitPoll::Exited
-    );
+        EvaluationWaitPoll::Killed(_)
+    ));
     let EvaluationWaitPoll::Killed(parent_failure) = context.poll_reflection_task(&parent) else {
         panic!("forced parent should publish a killed terminal")
     };
@@ -8197,88 +7711,6 @@ fn forced_deadlock_settlement_rejects_a_stale_busy_runtime() {
         context.poll_reflection_task(&blocked),
         EvaluationWaitPoll::Pending(_)
     ));
-}
-
-#[test]
-fn exit_settlement_fails_owned_promises_and_drops_reusable_machine_after_unlock() {
-    struct ExitWithDropCheck {
-        coordinator: Weak<EvaluationWorkCoordinator>,
-        dropped_without_runtime_locks: Arc<AtomicBool>,
-    }
-
-    impl EvaluationTaskMachine for ExitWithDropCheck {
-        fn poll(
-            &mut self,
-            _context: &mut crate::evaluation::EvaluationPollContext,
-            _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-        ) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Exit(EvaluationExitBlock {
-                intent: ExitIntent::Success,
-                observed_epoch: Some(RuntimeObservationEpoch::from_raw(1)),
-            })
-        }
-    }
-
-    impl Drop for ExitWithDropCheck {
-        fn drop(&mut self) {
-            let unlocked = self
-                .coordinator
-                .upgrade()
-                .is_none_or(|coordinator| coordinator.runtime_locks_are_free());
-            self.dropped_without_runtime_locks
-                .store(unlocked, Ordering::Release);
-        }
-    }
-
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let promise_output = Arc::new(Mutex::new(None));
-    let output = promise_output.clone();
-    let dropped_without_runtime_locks = Arc::new(AtomicBool::new(false));
-    let drop_check = dropped_without_runtime_locks.clone();
-    let coordinator = context
-        .coordinator()
-        .expect("coordinator should remain live");
-    let weak_coordinator = Arc::downgrade(&coordinator);
-    let task = context
-        .schedule_task(move |task_context| {
-            let promise = task_context
-                .values()
-                .with_boundary_access(|access| PromisedValue::fixpoint(&access, &task_context))?;
-            *output.lock().expect("promise output was poisoned") = Some(promise);
-            Ok(Box::new(ExitWithDropCheck {
-                coordinator: weak_coordinator,
-                dropped_without_runtime_locks: drop_check,
-            }))
-        })
-        .expect("exit promise task should schedule");
-    let promise = promise_output
-        .lock()
-        .expect("promise output was poisoned")
-        .take()
-        .expect("task construction should expose its promise");
-    let _promise_root = root_promise(context.values(), &promise);
-
-    fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
-        panic!("exit promise task should become ready")
-    };
-    snapshot.settle().expect("exit promise task should settle");
-
-    assert_eq!(
-        context.poll_reflection_task(&task),
-        EvaluationWaitPoll::Exited
-    );
-    let promise_failure = promise
-        .assignment(context.values())
-        .expect("settlement should terminalize the owned promise")
-        .expect_err_without_debug("an unfulfilled exit-owned promise must fail");
-    assert!(
-        promise_failure
-            .to_string()
-            .contains("exited without fulfilling")
-    );
-    assert!(dropped_without_runtime_locks.load(Ordering::Acquire));
 }
 
 #[test]

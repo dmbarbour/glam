@@ -6,8 +6,8 @@ use bytes::Bytes;
 use glam::{
     Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, Diagnostic,
     DiagnosticEvent, EvaluatedValue, EvaluationRuntime, HandleValue, ImportResolver, ModuleInput,
-    QuiescenceReport, RelativeSourcePath, RuntimeDispositionKind, RuntimeReadiness, Severity,
-    SourceArtifact, SourceError, SourceIdentity, SourceSystem, ValueKind,
+    QuiescenceReport, RelativeSourcePath, RuntimeReadiness, Severity, SourceArtifact, SourceError,
+    SourceIdentity, SourceSystem, ValueKind,
 };
 
 fn record<I, S>(values: &glam::Values, entries: I) -> HandleValue
@@ -360,36 +360,6 @@ fn public_api_reports_an_empty_reasoning_session_as_complete() {
     let assembler = Assembler::default();
     let report = settle_ready_reasoning(&assembler);
 
-    assert!(report.failed_machines().is_empty());
-    assert!(report.killed_work().is_empty());
-}
-
-#[test]
-fn public_runtime_profile_exposes_exit_to_scheduled_reflection() {
-    let assembler = Assembler::default();
-    let module = assembler
-        .module(["public_exit"])
-        .script("g", "language g0\nrefl.exit = .exit.success\nvalue = ()\n")
-        .build()
-        .expect("reflection exit fixture should compile");
-    evaluate(
-        &assembler,
-        &required_access(&assembler, module.value(), "value")
-            .expect("fixture should define its ordinary value"),
-    )
-    .expect("ordinary demand should schedule automatic reflection");
-
-    let RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
-        panic!("an exit vote should make the runtime ready for settlement")
-    };
-    assert!(
-        snapshot.dispositions().iter().any(|disposition| {
-            matches!(disposition.kind(), RuntimeDispositionKind::ExitSuccess)
-        })
-    );
-    let report = snapshot
-        .settle()
-        .expect("unchanged exit readiness should settle");
     assert!(report.failed_machines().is_empty());
     assert!(report.killed_work().is_empty());
 }

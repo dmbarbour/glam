@@ -11,7 +11,7 @@ tests=(
   promise_only_cycle_remains_blocked_without_poisoning_its_assignment
   workers_force_sparks_and_poll_ready_reflection_tasks
   compiled_function_values_reuse_one_shared_interaction_net
-  ready_settlement_publishes_exited_once_and_retains_exit_errors
+  an_analysis_tells_idle_waits_from_what_is_owed
 )
 
 # Fail closed: a filter that matches zero tests must be an error, not a vacuous

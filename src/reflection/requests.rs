@@ -4,8 +4,7 @@ use crate::api::{Diagnostic, Value};
 use crate::core::{Atom, Dict, Key, RuntimeValueAccess, Value as CoreValue, keys};
 use crate::diagnostic::Severity;
 use crate::evaluation::{
-    EvalContext, EvaluationTaskId, MachineHost, MachineTaskOutcome, QueuedTask, RunHalt,
-    TaskMachine,
+    EvalContext, EvaluationTaskId, MachineHost, MachineTaskOutcome, QueuedTask, TaskMachine,
 };
 use crate::list::{ListFrontStep, ListItem};
 use crate::number::Number;
@@ -1314,18 +1313,13 @@ pub(super) fn launch_machine_tasks(
                 let handle = pending.handle().clone();
                 let halt = {
                     let (context, host, machine) = (context.clone(), host.clone(), machine.clone());
-                    Box::new(move |how| {
-                        let outcome = match how {
-                            RunHalt::Stopped => {
-                                MachineTaskOutcome::Failed(RuntimeFailureRoot::new(
-                                    context.values(),
-                                    Arc::new(crate::core::EvaluationFailure::message(
-                                        "the task halted before it finished",
-                                    )),
-                                ))
-                            }
-                            RunHalt::Exited => MachineTaskOutcome::Exited,
-                        };
+                    Box::new(move || {
+                        let outcome = MachineTaskOutcome::Failed(RuntimeFailureRoot::new(
+                            context.values(),
+                            Arc::new(crate::core::EvaluationFailure::message(
+                                "the task halted before it finished",
+                            )),
+                        ));
                         let next = host.finish(&machine, sequence, outcome, None);
                         launch_machine_tasks(&context, &host, &machine, next);
                     })

@@ -1955,7 +1955,7 @@ impl EvalContext {
                         }
                         // A task that never launched halts its run.
                         if let Some(machine) = &activation.machine {
-                            machine.halt(crate::evaluation::RunHalt::Stopped);
+                            machine.halt();
                         }
                         return;
                     }
@@ -1989,7 +1989,7 @@ impl EvalContext {
                     drop(coordinator.retire_reflection(handle.work));
                 }
                 if let Some(machine) = &activation.machine {
-                    machine.halt(crate::evaluation::RunHalt::Stopped);
+                    machine.halt();
                 }
             }
         }

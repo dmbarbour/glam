@@ -13,9 +13,7 @@
 //!
 //! Every run ends once. A task that stops without finishing, as a panic
 //! stops one, or that never launches, halts its run, which fails as a
-//! failure would: its reply breaks and its machine is flagged. A task that
-//! settlement retires on its exit vote ends its run as exited, its reply
-//! broken and its machine unflagged.
+//! failure would: its reply breaks and its machine is flagged.
 
 use std::fmt;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -24,18 +22,10 @@ use super::EvaluationTaskHandle;
 use crate::core::Key;
 use crate::runtime::{RuntimeFailureRoot, RuntimeValueRoot};
 
-/// How a run ended without its task finishing.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum RunHalt {
-    /// The task stopped, as a panic stops it, or never launched.
-    Stopped,
-    /// Settlement retired the task on its exit vote.
-    Exited,
-}
-
-/// What halting a run does: it ends the run as `RunHalt` says, and starts
-/// the machine's next task where it goes on. It runs with no mutator held.
-pub(crate) type HaltAction = Box<dyn FnOnce(RunHalt) + Send>;
+/// What halting a run does: it ends the run of a task that stopped without
+/// finishing, as a panic stops it, or that never launched, and starts the
+/// machine's next task where it goes on. It runs with no mutator held.
+pub(crate) type HaltAction = Box<dyn FnOnce() + Send>;
 
 /// A halt the host runs at its next safe point.
 pub(crate) type DeferredHalt = Box<dyn FnOnce() + Send>;
@@ -77,14 +67,13 @@ impl TaskMachine {
             .take()
     }
 
-    /// Halts the run, unless it already ended, as `how` says. Where this
-    /// thread holds a mutator, or unwinds, the host halts it at its next
-    /// safe point.
-    pub(crate) fn halt(&self, how: RunHalt) {
+    /// Halts the run, unless it already ended. Where this thread holds a
+    /// mutator, or unwinds, the host halts it at its next safe point.
+    pub(crate) fn halt(&self) {
         let Some(halt) = self.end() else {
             return;
         };
-        self.host.defer(Box::new(move || halt(how)));
+        self.host.defer(halt);
         if !std::thread::panicking() && !glam_gc::Heap::thread_holds_mutator() {
             self.host.run_deferred();
         }
@@ -132,8 +121,6 @@ pub(crate) enum MachineTaskOutcome {
     Complete(RuntimeValueRoot),
     /// Its failure, which breaks the reply and flags the machine.
     Failed(RuntimeFailureRoot),
-    /// Its exit, which breaks the reply and leaves the machine unflagged.
-    Exited,
 }
 
 /// The runtime's child machines, as the tasks on them need them: their
@@ -190,20 +177,14 @@ pub(crate) trait MachineHost: Send + Sync {
 }
 
 /// Halts its run when dropped, unless the run ended: a task on a child
-/// machine holds one, so a task that stops without finishing halts its run,
-/// and one retired on its exit vote ends it as exited.
+/// machine holds one, so a task that stops without finishing halts its run.
 pub(crate) struct MachineRunGuard {
     machine: Arc<TaskMachine>,
-    /// Whether the task holds an exit vote.
-    pub(crate) exiting: bool,
 }
 
 impl MachineRunGuard {
     pub(crate) fn new(machine: Arc<TaskMachine>) -> Self {
-        Self {
-            machine,
-            exiting: false,
-        }
+        Self { machine }
     }
 }
 
@@ -233,10 +214,6 @@ impl Drop for AnonymousRootGuard {
 
 impl Drop for MachineRunGuard {
     fn drop(&mut self) {
-        self.machine.halt(if self.exiting {
-            RunHalt::Exited
-        } else {
-            RunHalt::Stopped
-        });
+        self.machine.halt();
     }
 }

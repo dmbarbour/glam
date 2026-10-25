@@ -105,7 +105,6 @@ pub(crate) fn assert_spent_when_exhausted(exhausted: bool, budget: &super::Evalu
 }
 
 enum ReleasedTaskMachine {
-    DropOnly(Box<dyn EvaluationTaskMachine>),
     Drop {
         machine: Box<dyn EvaluationTaskMachine>,
         retirement: WorkRetirement,
@@ -136,10 +135,6 @@ impl ReleasedTaskMachine {
 
     fn finish(self) {
         let retirement = match self {
-            Self::DropOnly(machine) => {
-                drop(machine);
-                return;
-            }
             Self::Drop {
                 machine,
                 retirement,
@@ -412,7 +407,6 @@ fn release_lazy_route(
             (DeferredWorkPoll::Runnable, None)
         }
         EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
-        EvaluationMachinePoll::Exit(_) => unreachable!("lazy route cannot vote to exit"),
         EvaluationMachinePoll::Complete(value) => (
             DeferredWorkPoll::Terminal,
             Some(EvaluationWaitTerminal::Complete(value)),
@@ -458,7 +452,6 @@ fn release_lazy_route(
         }
         EvaluationWaitTerminal::Cancelled
         | EvaluationWaitTerminal::Abandoned
-        | EvaluationWaitTerminal::Exited
         | EvaluationWaitTerminal::Killed(_) => {
             unreachable!("lazy route terminal is complete, failed, or panicked")
         }
@@ -547,20 +540,15 @@ impl EvaluationDemandState {
         let mut unfinished = Vec::new();
         let mut has_live_cross_session_dependency = false;
         for snapshot in snapshots {
-            let (state, block, exit) = match &snapshot.state {
-                ReflectionWorkState::Dormant => (EvaluationUnfinishedState::Dormant, None, None),
-                ReflectionWorkState::Reserved => (EvaluationUnfinishedState::Reserved, None, None),
-                ReflectionWorkState::Queued => (EvaluationUnfinishedState::Queued, None, None),
-                ReflectionWorkState::Running => (EvaluationUnfinishedState::Running, None, None),
+            let (state, block) = match &snapshot.state {
+                ReflectionWorkState::Dormant => (EvaluationUnfinishedState::Dormant, None),
+                ReflectionWorkState::Reserved => (EvaluationUnfinishedState::Reserved, None),
+                ReflectionWorkState::Queued => (EvaluationUnfinishedState::Queued, None),
+                ReflectionWorkState::Running => (EvaluationUnfinishedState::Running, None),
                 ReflectionWorkState::Blocked(block) => {
-                    (EvaluationUnfinishedState::Blocked, Some(block), None)
+                    (EvaluationUnfinishedState::Blocked, Some(block))
                 }
-                ReflectionWorkState::ExitWaiting(exit) => {
-                    (EvaluationUnfinishedState::Blocked, None, Some(exit))
-                }
-                ReflectionWorkState::Terminalizing => {
-                    (EvaluationUnfinishedState::Running, None, None)
-                }
+                ReflectionWorkState::Terminalizing => (EvaluationUnfinishedState::Running, None),
             };
             let dependency = block
                 .and_then(|block| block.dependency.as_ref())
@@ -576,9 +564,7 @@ impl EvaluationDemandState {
                     .as_ref()
                     .and_then(|dependency| dependency.session),
                 wait: dependency.as_ref().map(|dependency| dependency.wait),
-                observed_epoch: block
-                    .and_then(|block| block.observed_epoch)
-                    .or_else(|| exit.and_then(|exit| exit.observed_epoch)),
+                observed_epoch: block.and_then(|block| block.observed_epoch),
                 error: block.and_then(|block| block.error.clone()),
             });
         }
@@ -779,7 +765,6 @@ fn release_reflection_task(
             (ReflectionWorkPoll::Runnable, None)
         }
         EvaluationMachinePoll::Blocked(block) => (ReflectionWorkPoll::Blocked(block), None),
-        EvaluationMachinePoll::Exit(exit) => (ReflectionWorkPoll::Exit(exit), None),
         EvaluationMachinePoll::Complete(value) => (
             ReflectionWorkPoll::Terminal,
             Some(EvaluationWaitTerminal::Complete(value)),
@@ -815,12 +800,8 @@ fn release_reflection_task(
         );
     }
     if !release.terminal {
-        if !release.exit_waiting {
-            debug_assert!(release.machine.is_none());
-            return (None, route);
-        }
-        let released = release.machine.take().map(ReleasedTaskMachine::DropOnly);
-        return (released, route);
+        debug_assert!(release.machine.is_none());
+        return (None, route);
     }
 
     // A machine's own panic outranks cancellation and session closure. A
@@ -844,9 +825,6 @@ fn release_reflection_task(
         )),
         EvaluationWaitTerminal::Abandoned => Some(evaluation_failure(
             "reflection fixpoint producer was abandoned",
-        )),
-        EvaluationWaitTerminal::Exited => Some(evaluation_failure(
-            "reflection fixpoint producer exited without a result",
         )),
         EvaluationWaitTerminal::Killed(error) => Some(error.as_failure().clone()),
         EvaluationWaitTerminal::Panicked(_) => None,
@@ -898,10 +876,6 @@ fn release_deferred_task(
             (DeferredWorkPoll::Runnable, None)
         }
         EvaluationMachinePoll::Blocked(block) => (DeferredWorkPoll::Blocked(block), None),
-        EvaluationMachinePoll::Exit(exit) => {
-            drop(exit);
-            unreachable!("deferred work cannot publish a runtime exit vote")
-        }
         EvaluationMachinePoll::Complete(value) => (
             DeferredWorkPoll::Terminal,
             Some(EvaluationWaitTerminal::Complete(value)),
@@ -967,9 +941,6 @@ fn release_deferred_task(
         )),
         EvaluationWaitTerminal::Abandoned => Some(evaluation_failure(
             "evaluation fixpoint producer was abandoned",
-        )),
-        EvaluationWaitTerminal::Exited => Some(evaluation_failure(
-            "evaluation fixpoint producer exited without a result",
         )),
         EvaluationWaitTerminal::Killed(error) => Some(error.as_failure().clone()),
         EvaluationWaitTerminal::Panicked(_) => None,

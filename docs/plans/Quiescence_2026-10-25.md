@@ -216,6 +216,21 @@ final diagnostics through it).
 3. `exit-votes-retire` — `.exit.*`, `ExitIntent`, exit dispositions and
    the exits readiness carries, with the tests and docs that vote, under
    `api-refl-retirements`; the `conf.log` idiom waits on `.read_log`.
+   Built 2026-10-25: gone are `.exit.*`, `ExitIntent`, the exit wait and
+   its work state, the exited terminals, statuses and polls, the exit
+   dispositions and the exits readiness and settlement carried, a task's
+   exit state and the profile's exit flag, and the halt's exit (`RunHalt`):
+   a halt is an action. Settlement's plan carries only kills; a ready
+   snapshot settles with nothing to publish. The two task launchers,
+   which differed only in exposing exits, are one `task_launcher`. A
+   search's discard of its progress, which only an exit used, retires;
+   its test now checks that taking an alternative releases it and that
+   returned results own their roots. Tests that voted retire with the
+   votes, a deadlock's forced kill now meets a child that always waits,
+   and the two CLI logger tests and the `conf.log` idiom wait on
+   `.read_log` in a cut. The G0 latch's settlement slot, which latched
+   exit votes, now latches an analysis keeping an erred wait's error and
+   its machines in error (`crates/glam-gc/VERIFY.md`).
 4. After `quiescence-options` gives hosts their deliberate interrupt:
    `settlement-retires` — `QuiescenceSnapshot::settle`, the deadlock
    kill, `QuiescenceReport` and its pending lists, with the tests that

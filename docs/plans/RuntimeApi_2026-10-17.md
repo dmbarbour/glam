@@ -922,7 +922,8 @@ handle API goes.
       rest of the step.
     - CLI slice: `conf.log`, which the logger's turn runs as an effect
       since `api-effect-providers`, reads its diagnostics input and writes
-      a `stderr` port with `.port.*`, and its exit vote goes.
+      a `stderr` port with `.port.*`, and its exit vote goes (gone
+      2026-10-25, `exit-votes-retire`).
     - Slices (2026-10-23), in roughly this order, which is the
       implementer's to adjust (maintainer); checkpoints where they make
       sense, and the full gate at least once a slice:
@@ -1053,7 +1054,8 @@ handle API goes.
         task say it. The quiescence analysis counts such a wait idle,
         where an error awaiting a change is unresolved
         ([Quiescence](Quiescence_2026-10-25.md)).
-      - `api-refl-retirements`: exit votes and `.exit.*`,
+      - `api-refl-retirements`: exit votes and `.exit.*` (retired
+        2026-10-25 by `exit-votes-retire`, under `api-quiescence`),
         `AssemblerReflectionHost` and `TaskHost`'s hooks, and the `'macro`
         role, host, profile and bus. `macro-import-waits` is revisited here,
         where the macro session moves to the pure front end, or with
@@ -1245,10 +1247,11 @@ until a late step would hinder validating the new API as it grows.
 Some of what the CLI and the runtime do now is scaffolding for the
 transition, not design (maintainer, 2026-10-19). Each goes with the step
 named:
-- The CLI's settlement loops, the configured logger's exit vote, and the
-  settled reports the CLI renders itself, or publishes on the bus where no
-  logger runs: `api-settlement`, where a machine reports what remains
-  unresolved (`quiescence-reports-unresolved-state`).
+- Retired 2026-10-25 under `api-quiescence` (`quiescence-is-analyzed`): the
+  CLI's settlement loops and the settled reports it rendered
+  (`quiescence-batch`), for a batch that publishes an analysis's issues
+  through its logger, and the configured logger's exit vote
+  (`exit-votes-retire`).
 - The configured logger as an `EffectRun` with `MainEffects`, reading the
   logger's input through `RuntimeEventJournal::read_port`, with a lifecycle
   that closes its session when its root ends

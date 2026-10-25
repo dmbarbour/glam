@@ -976,8 +976,7 @@ pub(in crate::eval) fn drive_net_semantic_action(
                 }
                 crate::evaluation::EvaluationWaitPoll::Complete(_)
                 | crate::evaluation::EvaluationWaitPoll::Cancelled
-                | crate::evaluation::EvaluationWaitPoll::Abandoned
-                | crate::evaluation::EvaluationWaitPoll::Exited => {}
+                | crate::evaluation::EvaluationWaitPoll::Abandoned => {}
             }
             let retried = with_core_net_access(context, &runtime, |runtime| {
                 runtime.retry_blocked_callable_checkpoint(&blocked)

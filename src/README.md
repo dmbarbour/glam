@@ -18,7 +18,7 @@ not define language semantics or collect subsystem invariants.
 | Path | Responsibility |
 | --- | --- |
 | `bin/glam/main.rs` | Process entry, typed command dispatch, and command-specific I/O adapters |
-| `bin/glam/batch.rs` | Assembly output, runtime settlement, reports, and exit policy |
+| `bin/glam/batch.rs` | Assembly output, the batch's quiescence loop and its reports, and exit policy |
 | `bin/glam/rendering.rs` | Default and fallback terminal diagnostic rendering |
 | `bin/glam/configuration/` | `GLAM_CONF`, `conf.env`, configured logger lifecycle, and executable configuration policy |
 | `bin/glam/command_line/` | Private bootstrap command grammar, validated command models, help, and shell completion |
@@ -118,7 +118,7 @@ over their submodules rather than additional implementation layers.
   -> SourceArtifact bytes + CompileContext capabilities
   -> selected front end produces closed module Value
   -> explicit evaluation / reflection inspection / extraction
-  -> runtime readiness, settlement, diagnostics, process result
+  -> runtime readiness, analysis, diagnostics, process result
 ```
 
 See [`architecture/assembly.md`](../docs/architecture/assembly.md) for client

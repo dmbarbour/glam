@@ -25,11 +25,10 @@ use crate::eval::whnf::WhnfComputation;
 #[cfg(test)]
 use crate::evaluation::OwnedEvalContext;
 use crate::evaluation::{
-    EvalContext, EvaluationExitBlock, EvaluationMachinePoll, EvaluationPollContext,
-    EvaluationPumpOutcome, EvaluationSession, EvaluationTaskBlock, EvaluationTaskId,
-    EvaluationTaskMachine, EvaluationValueAccess, EvaluationWaitPoll, EvaluatorStepContext,
-    ExactDemandRoute, ExitIntent, MachineTaskOutcome, TaskMachine, WhnfOwnerPoll, WorkDependency,
-    poll_whnf_computation,
+    EvalContext, EvaluationMachinePoll, EvaluationPollContext, EvaluationPumpOutcome,
+    EvaluationSession, EvaluationTaskBlock, EvaluationTaskId, EvaluationTaskMachine,
+    EvaluationValueAccess, EvaluationWaitPoll, EvaluatorStepContext, ExactDemandRoute,
+    MachineTaskOutcome, TaskMachine, WhnfOwnerPoll, WorkDependency, poll_whnf_computation,
 };
 use crate::interaction_net::NetBuilder;
 use crate::number::Number;
@@ -80,8 +79,6 @@ struct Tags {
     reset: Key,
     shift: Key,
     resume: Key,
-    exit_success: Key,
-    exit_error: Key,
     continuation_state: Key,
 }
 
@@ -127,8 +124,6 @@ impl Tags {
             reset: tag("reset"),
             shift: tag("shift"),
             resume: tag("resume"),
-            exit_success: tag("exit_success"),
-            exit_error: tag("exit_error"),
             // The key is private, but its value deliberately travels with
             // whole-user-state get/set operations.
             continuation_state: Key::abstract_global_path([
@@ -156,7 +151,6 @@ pub(super) struct EffectTask<S: TaskSpecialization> {
     search: SearchPolicy<Branch<S>, IsolatedSearchBranch<S>>,
     execution: TaskExecution<S>,
     blocked: Option<BlockedExecution<S>>,
-    exit: Option<TaskExitState<S>>,
     terminal: Option<TaskTerminal>,
     /// The local state the task leaves, where its top-level branch ended:
     /// what a child machine keeps for its next task
@@ -336,7 +330,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             host,
             eval_context,
             retain_all,
-            false,
         )
     }
 
@@ -346,7 +339,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         host: Arc<S::Host>,
         eval_context: EvalContext,
         retain_all: bool,
-        exposes_exit: bool,
     ) -> Result<Self, TaskHalt> {
         Self::new_rooted_in_context_with_capabilities(
             effect,
@@ -354,7 +346,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             host,
             eval_context,
             retain_all,
-            exposes_exit,
         )
     }
 
@@ -364,7 +355,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         host: Arc<S::Host>,
         eval_context: EvalContext,
         retain_all: bool,
-        exposes_exit: bool,
     ) -> Result<Self, TaskHalt> {
         // A task on a child machine starts from the state its last task left.
         let state = eval_context
@@ -377,7 +367,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             host,
             eval_context,
             retain_all,
-            exposes_exit,
         )
     }
 
@@ -399,7 +388,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             host,
             eval_context,
             false,
-            false,
         )?;
         task.hosted = Some(HostedCuts::default());
         Ok(task)
@@ -413,7 +401,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         host: Arc<S::Host>,
         eval_context: EvalContext,
         retain_all: bool,
-        exposes_exit: bool,
     ) -> Result<Self, TaskHalt> {
         let eval_context = eval_context.for_effect_task();
         let run_guard = eval_context
@@ -427,7 +414,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             specialization.requests(),
             specialization.serves_host_families(),
             specialization.exposes_shared_heap(),
-            exposes_exit,
         )?;
         let id = eval_context
             .task_id()
@@ -471,7 +457,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 cuts: Vec::new(),
             },
             blocked: None,
-            exit: None,
             terminal: None,
             machine_state: None,
             _run_guard: run_guard,
@@ -483,26 +468,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
             #[cfg(test)]
             force_unfused: false,
         })
-    }
-
-    #[cfg(test)]
-    fn new_exit_in_context(
-        effect: Value,
-        specialization: S,
-        host: Arc<S::Host>,
-        eval_context: EvalContext,
-    ) -> Result<Self, TaskHalt> {
-        let effect = eval_context
-            .values()
-            .construct_runtime_value_root(|_| effect);
-        Self::new_in_context_with_capabilities(
-            effect,
-            specialization,
-            host,
-            eval_context,
-            false,
-            true,
-        )
     }
 
     #[cfg(test)]
@@ -724,9 +689,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 EffectTaskPoll::Failed(error) => return Err(error),
                 EffectTaskPoll::Cancelled => return Ok(TaskOutcome::Cancelled),
                 EffectTaskPoll::Paused(_) => unreachable!("only a task whose host runs its cuts pauses"),
-                EffectTaskPoll::Exit(_) => {
-                    unreachable!("direct effect-run profiles do not expose runtime exit")
-                }
             }
         })
     }
@@ -840,9 +802,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         if let Some(terminal) = &self.terminal {
             return terminal.poll();
         }
-        if let Some(poll) = self.poll_exit(context) {
-            return poll;
-        }
         if let Some(blocked) = self.poll_blocked(context, step_budget) {
             return blocked;
         }
@@ -941,12 +900,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                             if let Some(poll) = self.install_blocked_in(context, blocked) {
                                 return poll;
                             }
-                        }
-                        MachineStep::Exit(intent) => {
-                            let exit = self.prepare_exit(intent);
-                            let poll = exit.poll.clone();
-                            self.set_exit(Some(exit));
-                            return EffectTaskPoll::Exit(poll);
                         }
                         MachineStep::Terminal(terminal) => {
                             self.finish_in(context, terminal);
@@ -1079,12 +1032,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 Ok(MachineStep::Terminal(terminal)) => {
                     self.finish_in(context, terminal);
                     return self.terminal.as_ref().expect("terminal set above").poll();
-                }
-                Ok(MachineStep::Exit(intent)) => {
-                    let exit = self.prepare_exit(intent);
-                    let poll = exit.poll.clone();
-                    self.set_exit(Some(exit));
-                    return EffectTaskPoll::Exit(poll);
                 }
                 Err(error) => {
                     if let Some(poll) = self.handle_step_error(context, error) {
@@ -1445,7 +1392,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 branch.control.sequence.pop();
                 MachineStep::Continue(MachineWork::deliver_root(scoped_value, branch, scope_depth))
             }
-            ScalarDemandPurpose::ExitError => MachineStep::Exit(ExitIntent::Error(value)),
         };
         ScalarDemandStep::Complete(step)
     }
@@ -3015,17 +2961,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     ControlWork::install_captured(stack, captured, value, branch, scope_depth),
                 )));
             }
-            Request::ExitSuccess => {
-                return Ok(MachineStep::Exit(ExitIntent::Success));
-            }
-            Request::ExitError(message) => {
-                return Ok(MachineStep::Demand(ScalarDemandWork::new(
-                    message,
-                    ScalarDemandPurpose::ExitError,
-                    branch,
-                    scope_depth,
-                )));
-            }
             Request::Fix(function) => {
                 // A restart resumes the fixpoint's entry.
                 self.hosted_set_aside();
@@ -4386,119 +4321,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
             | EvaluationWaitPoll::Failed(_)
             | EvaluationWaitPoll::Cancelled
             | EvaluationWaitPoll::Abandoned
-            | EvaluationWaitPoll::Exited
             | EvaluationWaitPoll::Killed(_) => {
                 self.blocked = None;
                 None
             }
         }
-    }
-
-    fn poll_exit(&mut self, context: &mut EvaluationPollContext) -> Option<EffectTaskPoll> {
-        let validation = self.exit.as_ref()?.restart.as_ref().and_then(|retry| {
-            retry
-                .validation
-                .as_ref()
-                .map(|transaction| context.suspend(|| self.host.validate(transaction.validation())))
-        });
-        match validation {
-            Some(ValidationResult::Current { generation }) => {
-                let exit = self.exit.as_mut().expect("checked exit state above");
-                exit.restart
-                    .as_mut()
-                    .expect("validated exit must retain its retry capsule")
-                    .observed_generation = generation;
-                exit.poll.observed_generation = Some(generation);
-                return Some(EffectTaskPoll::Exit(exit.poll.clone()));
-            }
-            Some(ValidationResult::Conflict) => {}
-            Some(ValidationResult::MissingVolume(volume)) => {
-                let error = context
-                    .with_runtime_access(|access| missing_volume_error(volume).root_in(&access));
-                self.finish_in(context, TaskTerminal::Failed(error));
-                return Some(self.terminal.as_ref().expect("terminal set above").poll());
-            }
-            Some(ValidationResult::Closed) => {
-                self.finish_in(context, TaskTerminal::Cancelled);
-                return Some(self.terminal.as_ref().expect("terminal set above").poll());
-            }
-            None => {
-                let exit = self.exit.as_ref().expect("checked exit state above");
-                let changed = exit.restart.as_ref().is_some_and(|retry| {
-                    context.suspend(|| self.host.snapshot().generation())
-                        != retry.observed_generation
-                });
-                if !changed {
-                    return Some(EffectTaskPoll::Exit(exit.poll.clone()));
-                }
-            }
-        }
-
-        let retry = self
-            .set_exit(None)
-            .and_then(|exit| exit.restart)
-            .expect("a changed exit observation must retain its restart capsule");
-        self.apply_wake(context, retry.action);
-        None
-    }
-
-    /// Records the task's exit vote, or its withdrawal, which its run on a
-    /// child machine ends by where settlement retires the task. Returns the
-    /// vote it replaces.
-    fn set_exit(&mut self, exit: Option<TaskExitState<S>>) -> Option<TaskExitState<S>> {
-        if let Some(guard) = &mut self._run_guard {
-            guard.exiting = exit.is_some();
-        }
-        std::mem::replace(&mut self.exit, exit)
-    }
-
-    fn prepare_exit(&mut self, intent: ExitIntent) -> TaskExitState<S> {
-        let restart = self.retry_wake();
-        let poll = TaskExitBlock {
-            intent,
-            observed_generation: restart.as_ref().map(|restart| restart.observed_generation),
-        };
-        self.discard_exit_attempt(restart.as_ref());
-        TaskExitState { poll, restart }
-    }
-
-    /// Retains only the control checkpoint named by `restart`. Every active
-    /// branch, queued alternative, failed attempt, isolated result, and cloned
-    /// transaction is dropped here so its pending task reservations and
-    /// buffered host effects cannot survive the exit vote.
-    fn discard_exit_attempt(&mut self, restart: Option<&RetryWake<S>>) {
-        self.search.discard_progress();
-        match restart.map(|restart| &restart.action) {
-            Some(WakeAction::RestartCut(index)) => {
-                assert_eq!(
-                    *index, 0,
-                    "the transaction-owning retry cut must be the outermost active cut"
-                );
-                let mut frame = self
-                    .execution
-                    .cuts
-                    .get(*index)
-                    .cloned()
-                    .expect("exit retry must retain its cut checkpoint");
-                frame.outer.transaction = None;
-                frame.alternatives.clear();
-                frame.retry = None;
-                frame.observed_failure = false;
-                self.execution.cuts.clear();
-                self.execution.cuts.push(frame);
-            }
-            Some(WakeAction::ReplaceWork(_)) | Some(WakeAction::RestartSearch) | None => {
-                self.execution.cuts.clear()
-            }
-        }
-        self.execution.decoding = None;
-        self.execution.demanding = None;
-        self.execution.pathing = None;
-        self.execution.specializing = None;
-        self.execution.work = MachineWork::Outcome {
-            outcome: BranchOutcome::Cancelled,
-            scope_depth: 0,
-        };
     }
 
     fn blocked_poll(&self) -> EffectTaskPoll {
@@ -4699,7 +4526,6 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.controlling = None;
         self.execution.specializing = None;
         self.blocked = None;
-        self.exit = None;
         self.terminal = Some(terminal);
         wakes
     }
@@ -4841,10 +4667,6 @@ fn poll_value_effect_task<S: TaskSpecialization>(
             }
         }
         EffectTaskPoll::Paused(_) => unreachable!("only a task whose host runs its cuts pauses"),
-        EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
-            intent: exit.intent,
-            observed_epoch: exit.observed_generation.map(|_| observed_epoch),
-        }),
         EffectTaskPoll::Complete(value) => {
             EvaluationMachinePoll::Complete(value.into_runtime_root())
         }
@@ -4874,10 +4696,6 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
             EffectTaskPoll::Paused(_) => {
                 unreachable!("only a task whose host runs its cuts pauses")
             }
-            EffectTaskPoll::Exit(exit) => EvaluationMachinePoll::Exit(EvaluationExitBlock {
-                intent: exit.intent,
-                observed_epoch: exit.observed_generation.map(|_| observed_epoch),
-            }),
             EffectTaskPoll::Complete(value) => {
                 let value = value.into_runtime_root();
                 let (is_unit, kind) = context.evaluate(&self.0.eval_context, |evaluator| {
@@ -5221,7 +5039,6 @@ enum ScalarDemandPurpose {
     RestoreScopedValue {
         scoped_value: RuntimeValueRoot,
     },
-    ExitError,
 }
 
 impl<S: TaskSpecialization> ScalarDemandWork<S> {
@@ -6082,7 +5899,6 @@ enum MachineStep<S: TaskSpecialization> {
     Control(Box<ControlWork<S>>),
     Specialize(Box<SpecializationWork<S>>),
     Blocked(BlockedExecution<S>),
-    Exit(ExitIntent),
     Terminal(TaskTerminal),
 }
 
@@ -6167,17 +5983,6 @@ pub(super) struct TaskBlock {
     pub(super) error: Option<crate::runtime::RuntimeFailureRoot>,
 }
 
-#[derive(Clone)]
-pub(super) struct TaskExitBlock {
-    intent: ExitIntent,
-    observed_generation: Option<u64>,
-}
-
-struct TaskExitState<S: TaskSpecialization> {
-    poll: TaskExitBlock,
-    restart: Option<RetryWake<S>>,
-}
-
 /// What a task whose host runs its cuts tells the host
 /// (`alt-cuts-its-first-operand`). The host keeps the effects of the task's
 /// requests, which a failed alternative must undo, so the task reports
@@ -6236,7 +6041,6 @@ impl<S: TaskSpecialization> Default for HostedCuts<S> {
 pub(super) enum EffectTaskPoll {
     BudgetExhausted,
     Blocked(TaskBlock),
-    Exit(TaskExitBlock),
     /// Where the host runs the cuts, paused for the host to handle this.
     Paused(HostControl),
     Complete(PublicValue),
@@ -6425,8 +6229,6 @@ enum Request<R, V = RuntimeValueRoot> {
     Reset(V, V),
     Shift(V, V),
     Resume(EvaluationTaskId, u64, V),
-    ExitSuccess,
-    ExitError(V),
     Specialized(R, Vec<V>),
 }
 
@@ -6621,15 +6423,13 @@ enum RequestSelection<R> {
     Reset,
     Shift,
     Resume,
-    ExitSuccess,
-    ExitError,
     Specialized { request: R, arity: usize },
 }
 
 impl<R> RequestSelection<R> {
     fn arity(&self) -> usize {
         match self {
-            Self::Fail | Self::HeapVolume | Self::PromiseNew | Self::ExitSuccess => 0,
+            Self::Fail | Self::HeapVolume | Self::PromiseNew => 0,
             Self::Return
             | Self::Cut
             | Self::Try
@@ -6641,7 +6441,6 @@ impl<R> RequestSelection<R> {
             | Self::Del
             | Self::HeapTryGet
             | Self::HeapDel
-            | Self::ExitError
             | Self::VolumeNew
             | Self::Handle(HandleOperation::Promise(PromiseOperation::Status))
             | Self::Volume(VolumeRequestIdentity {
@@ -6723,8 +6522,6 @@ impl<R> RequestSelection<R> {
             Self::PromiseNew => Request::PromiseNew,
             Self::Reset => Request::Reset(next(), next()),
             Self::Shift => Request::Shift(next(), next()),
-            Self::ExitSuccess => Request::ExitSuccess,
-            Self::ExitError => Request::ExitError(next()),
             Self::Specialized { request, .. } => Request::Specialized(request, arguments.collect()),
             Self::Resume => unreachable!("resume IDs require WHNF conversion before dispatch"),
             Self::Handle(_) => {
@@ -7135,8 +6932,6 @@ fn select_request_from_whnf<R: Clone>(
     );
     select!(&tags.reset, RequestSelection::Reset);
     select!(&tags.shift, RequestSelection::Shift);
-    select!(&tags.exit_success, RequestSelection::ExitSuccess);
-    select!(&tags.exit_error, RequestSelection::ExitError);
     select!(&tags.resume, RequestSelection::Resume);
     for specialized in specialized {
         if let Some(payload) = dict.get(&specialized.tag) {
@@ -7244,7 +7039,6 @@ fn effect_api<R: Clone>(
     specs: Vec<EffectRequestSpec<R>>,
     serve_host_families: bool,
     expose_shared_heap: bool,
-    expose_exit: bool,
 ) -> Result<(RuntimeValueRoot, Vec<SpecializedRequest<R>>), TaskHalt> {
     let mut requests = Vec::with_capacity(specs.len());
     let api = values.try_construct_runtime_value_root(|access| {
@@ -7397,33 +7191,6 @@ fn effect_api<R: Clone>(
                 entries.push(entry("heap", heap_api));
                 entries.push(entry("vol", volume_api));
             }
-        }
-        if expose_exit {
-            entries.push(entry(
-                "exit",
-                Value::Dict(
-                    [
-                        entry(
-                            "success",
-                            nullary_request(access, tags.exit_success.clone()),
-                        ),
-                        entry(
-                            "error",
-                            request_function_in(
-                                access,
-                                tags.exit_error.clone(),
-                                1,
-                                Vec::new(),
-                                false,
-                            ),
-                        ),
-                    ]
-                    .into_iter()
-                    .fold(Dict::new_sync(), |dict, (key, value)| {
-                        dict.insert(key, value)
-                    }),
-                ),
-            ));
         }
         let mut api = entries
             .into_iter()

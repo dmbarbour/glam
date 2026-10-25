@@ -284,10 +284,6 @@ impl MachineHost for RuntimeSharedResources {
                 MachineTaskOutcome::Failed(failure) => {
                     crate::diagnostic::failure_diagnostic_in(access, failure.as_failure())
                 }
-                MachineTaskOutcome::Exited => crate::diagnostic::failure_diagnostic_in(
-                    access,
-                    &EvaluationFailure::message("the task exited before it finished"),
-                ),
             });
         let flag = failed.then(|| resolution.clone());
         let resolution = if completed {
@@ -603,7 +599,7 @@ mod tests {
             0,
             Box::new({
                 let halts = halts.clone();
-                move |_| {
+                move || {
                     halts.fetch_add(1, Ordering::SeqCst);
                 }
             }),
@@ -611,11 +607,11 @@ mod tests {
         runtime
             .values()
             .core()
-            .with_boundary_access(|_| machine.halt(crate::evaluation::RunHalt::Stopped));
+            .with_boundary_access(|_| machine.halt());
         assert_eq!(halts.load(Ordering::SeqCst), 0, "no halt under a mutator");
         resources.process_death_notices();
         assert_eq!(halts.load(Ordering::SeqCst), 1);
-        machine.halt(crate::evaluation::RunHalt::Stopped);
+        machine.halt();
         resources.process_death_notices();
         assert_eq!(halts.load(Ordering::SeqCst), 1, "a run halts once");
     }
