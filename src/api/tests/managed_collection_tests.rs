@@ -9,6 +9,7 @@ use crate::evaluation::{
     EvalContext, EvaluationMachinePoll, EvaluationTaskMachine, EvaluationWaitPoll,
 };
 use crate::reflection::{StoreCommitResult, StoreJournal};
+use crate::runtime::aggressive_gc_verification;
 
 use super::runtime_tests::{decode_test_integer, input_transaction};
 use super::{OpaqueRetentionProbe, access_path, public_value};
@@ -803,10 +804,9 @@ fn passive_finalization_produces_no_runtime_work() {
 
     // Under aggressive verification a worker-boundary collection may finalize
     // the shell first; only this count depends on that.
-    #[cfg(not(feature = "aggressive-gc-verification"))]
-    assert_eq!(report.finalized_slots(), 1);
-    #[cfg(feature = "aggressive-gc-verification")]
-    let _ = report;
+    if !aggressive_gc_verification() {
+        assert_eq!(report.finalized_slots(), 1);
+    }
     // The external-owner registry, never the collector's finalization,
     // retires the payload: the runtime drains it once the collection is done
     // (`opaque-resources-reclaimed-when-unreachable`).
@@ -1296,9 +1296,11 @@ fn runtime_manual_maintenance_never_mutates_heap_policy() {
 
 // Primarily tests the NoAuto pressure-promotion protocol, which aggressive
 // verification replaces; see the 2026-10-03 regression plan, D11.
-#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn stable_pump_without_pressure_changes_no_maintenance_state() {
+    if aggressive_gc_verification() {
+        return;
+    }
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let RuntimeReadiness::Ready(before) = runtime.readiness() else {
         panic!("new runtime should be ready")
@@ -1318,9 +1320,11 @@ fn stable_pump_without_pressure_changes_no_maintenance_state() {
 
 // Primarily tests the NoAuto pressure-promotion protocol, which aggressive
 // verification replaces; see the 2026-10-03 regression plan, D11.
-#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn stable_pump_promotes_pressure_once_without_changing_policy() {
+    if aggressive_gc_verification() {
+        return;
+    }
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     runtime
         .service_managed_collection()
@@ -1378,9 +1382,11 @@ fn stable_pump_promotes_pressure_once_without_changing_policy() {
 
 // Primarily tests the NoAuto pressure-promotion protocol, which aggressive
 // verification replaces; see the 2026-10-03 regression plan, D11.
-#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn pressure_after_one_stable_snapshot_waits_for_the_next_pump() {
+    if aggressive_gc_verification() {
+        return;
+    }
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     runtime.pump_until_stable();
     let RuntimeReadiness::Ready(before_pressure) = runtime.readiness() else {
@@ -1409,9 +1415,11 @@ fn pressure_after_one_stable_snapshot_waits_for_the_next_pump() {
 
 // Primarily tests the NoAuto pressure-promotion protocol, which aggressive
 // verification replaces; see the 2026-10-03 regression plan, D11.
-#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn explicit_request_and_pressure_promotion_coalesce_in_both_orders() {
+    if aggressive_gc_verification() {
+        return;
+    }
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     runtime
         .service_managed_collection()
@@ -1509,8 +1517,7 @@ fn pressure_after_collection_snapshot_survives_older_outcome_publication() {
     );
     // Promoting the latch is NoAuto protocol, which aggressive verification
     // replaces; see the 2026-10-03 regression plan, D11.
-    #[cfg(not(feature = "aggressive-gc-verification"))]
-    {
+    if !aggressive_gc_verification() {
         runtime.pump_until_stable();
         assert!(matches!(
             runtime.readiness(),
@@ -1565,21 +1572,24 @@ fn parked_pump_promotes_pressure_after_activity_wake() {
     pump.join().expect("runtime pump should finish cleanly");
     // Under aggressive verification the woken pump also services its own
     // promotion; see the 2026-10-03 regression plan, D7 and D11.
-    #[cfg(not(feature = "aggressive-gc-verification"))]
-    assert!(matches!(
-        runtime.readiness(),
-        RuntimeReadiness::MaintenanceRequired(_)
-    ));
-    #[cfg(feature = "aggressive-gc-verification")]
-    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+    if aggressive_gc_verification() {
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+    } else {
+        assert!(matches!(
+            runtime.readiness(),
+            RuntimeReadiness::MaintenanceRequired(_)
+        ));
+    }
     drop(retained);
 }
 
 // Primarily tests the NoAuto pressure-promotion protocol, which aggressive
 // verification replaces; see the 2026-10-03 regression plan, D11.
-#[cfg(not(feature = "aggressive-gc-verification"))]
 #[test]
 fn promoted_pressure_reclaims_dead_allocations_and_preserves_assembly_result() {
+    if aggressive_gc_verification() {
+        return;
+    }
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let assembler = Assembler::builder()
         .evaluation_runtime(runtime.clone())
@@ -1631,9 +1641,12 @@ fn promoted_pressure_reclaims_dead_allocations_and_preserves_assembly_result() {
     );
 }
 
-#[cfg(feature = "aggressive-gc-verification")]
+// Tests the aggressive verification mode itself, so runs only within it.
 #[test]
 fn repository_aggressive_mode_services_new_allocations_at_each_stable_pump() {
+    if !aggressive_gc_verification() {
+        return;
+    }
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let epoch = || {
         runtime

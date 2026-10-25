@@ -140,7 +140,22 @@ checks the `glam` package; glam-gc is a separate crate with its own gate
   code, or to unsafe, tracing, mutation, root, admission, finalization, or
   scheduler behavior. Documentation-only changes may reuse the last result.
   Running it only periodically once let a regression stay unnoticed for
-  weeks.
+  weeks. The unit tests rerun on the default build with
+  `GLAM_TEST_AGGRESSIVE_GC=1`, a switch only test builds read; the binary,
+  integration and doc tests build with the `aggressive-gc-verification`
+  feature.
+
+Most of a gate is compiling: each feature set rebuilds the whole crate, and
+each build's critical path is the library's unit-test target, one crate of
+about 2,100 tests whose front end runs mostly on one thread. So a level first
+builds what it runs side by side, each feature set in a target directory of
+its own (`target/gate-clippy`, `target/gate-prof`, `target/gate-agc`; the
+default build keeps `target/`), since cargo builds one directory at a time.
+A unit-test build peaks near 2.5 GB, so `full`'s four builds fit the
+15 GB machine. Each step's header shows the seconds elapsed. Measured
+2026-10-25 after a small edit: a full gate took 178 s, against about 240 s
+estimated from each build timed alone, one after another; a cold one, with
+every target directory's dependencies to build, 303 s.
 
 A commit's gate runs as `scripts/check.sh <level> --record`: it runs
 `cargo fmt`, then the level under a timeout (`--timeout SECONDS` overrides

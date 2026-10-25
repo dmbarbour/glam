@@ -267,6 +267,20 @@ Ideas the maintainer means to pursue, short of a plan.
   accept a raw `TypeId`. This also gives the
   [runtime API review](../reviews/RuntimeApi_2026-10-17.md)'s machine keys
   and heap capabilities private namespaces.
+- **Split the `glam` crate** (maintainer, 2026-10-25). Most of a gate is
+  compiling (about 70–80% of a full gate, measured 2026-10-24), and each
+  build's critical path is the library's unit-test target: one crate of
+  about 2,100 unit tests whose front end runs mostly on one thread, 25–80 s
+  after a small edit. Crates along the existing layers (core values and the
+  collector's integration, evaluation and the runtime, reflection, the
+  `g_syntax` front end, the public API) would build in parallel, and an edit
+  would rebuild only its crate and those above it, each crate's unit tests
+  moving with its code. Costs: `pub(crate)` items that cross layers become
+  cross-crate API, shared test fixtures need a home, and cross-crate
+  inlining at opt-level 1 may want `#[inline]` where it shows in profiles.
+  First, measure: which layers edits touch most, and each layer's
+  unit-test build time. The gate already builds its feature sets side by
+  side (2026-10-25).
 
 ## Open Items Without a Plan
 

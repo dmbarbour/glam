@@ -42,6 +42,26 @@ pub(crate) fn allocate_evaluation_runtime_id() -> EvaluationRuntimeId {
     EvaluationRuntimeId::from_u64(id).expect("evaluation runtime IDs start at one")
 }
 
+/// Whether the private aggressive-GC verification mode is on: always with
+/// the `aggressive-gc-verification` feature, and in this crate's unit tests
+/// when `GLAM_TEST_AGGRESSIVE_GC` is set, so the full gate reruns them on
+/// the default build rather than rebuilding the crate. The mode replaces
+/// only the collector's pressure input (`gc_pressure_requested`) and has
+/// the stable pump service what it promotes.
+#[cfg(any(test, feature = "aggressive-gc-verification"))]
+pub(crate) fn aggressive_gc_verification() -> bool {
+    #[cfg(feature = "aggressive-gc-verification")]
+    {
+        true
+    }
+    #[cfg(not(feature = "aggressive-gc-verification"))]
+    {
+        static ON: std::sync::LazyLock<bool> =
+            std::sync::LazyLock::new(|| std::env::var_os("GLAM_TEST_AGGRESSIVE_GC").is_some());
+        *ON
+    }
+}
+
 /// Shared admission boundary for runtime-owned state publication.
 ///
 /// Ordinary component transitions hold a shared guard through their complete
@@ -57,7 +77,7 @@ pub(crate) struct RuntimeMutationAdmission {
     cores: Mutex<Vec<Weak<dyn RuntimeCoreState>>>,
     /// Heap allocation count observed by the last aggressive pressure
     /// evaluation. See `gc_pressure_requested`.
-    #[cfg(feature = "aggressive-gc-verification")]
+    #[cfg(any(test, feature = "aggressive-gc-verification"))]
     aggressive_promoted_allocations: AtomicU64,
     /// Runs once, at the next attempt to take the settlement guard without
     /// waiting, so a test can hold the guard just then.
@@ -74,7 +94,7 @@ impl RuntimeMutationAdmission {
             cores: Mutex::new(Vec::new()),
             #[cfg(test)]
             settlement_probe: Mutex::new(None),
-            #[cfg(feature = "aggressive-gc-verification")]
+            #[cfg(any(test, feature = "aggressive-gc-verification"))]
             aggressive_promoted_allocations: AtomicU64::new(0),
         })
     }
@@ -351,19 +371,22 @@ impl RuntimeMutationAdmission {
 
     /// Whether [`Self::gc_pressure_requested`] might hold, without its
     /// side effects.
-    #[cfg(not(feature = "aggressive-gc-verification"))]
+    #[cfg(not(any(test, feature = "aggressive-gc-verification")))]
     fn gc_pressure_possible(&self, values: &CoreValueFactory) -> bool {
         values.managed_collection_requested()
     }
 
-    #[cfg(feature = "aggressive-gc-verification")]
+    #[cfg(any(test, feature = "aggressive-gc-verification"))]
     fn gc_pressure_possible(&self, values: &CoreValueFactory) -> bool {
+        if !aggressive_gc_verification() {
+            return values.managed_collection_requested();
+        }
         values.managed_allocation_count()
             > self.aggressive_promoted_allocations.load(Ordering::Relaxed)
             || values.managed_collection_requested()
     }
 
-    #[cfg(not(feature = "aggressive-gc-verification"))]
+    #[cfg(not(any(test, feature = "aggressive-gc-verification")))]
     fn gc_pressure_requested(&self, values: &CoreValueFactory) -> bool {
         values.managed_collection_requested()
     }
@@ -381,8 +404,11 @@ impl RuntimeMutationAdmission {
     ///
     /// A requested collection still counts: another thread may be waiting
     /// for it, and drivers join it at their quantum boundaries.
-    #[cfg(feature = "aggressive-gc-verification")]
+    #[cfg(any(test, feature = "aggressive-gc-verification"))]
     fn gc_pressure_requested(&self, values: &CoreValueFactory) -> bool {
+        if !aggressive_gc_verification() {
+            return values.managed_collection_requested();
+        }
         if values.managed_maintenance_snapshot().is_poisoned() {
             return false;
         }
@@ -1362,7 +1388,7 @@ mod tests {
         // Aggressive verification counts any earlier allocation as pressure,
         // so a driver that finds the waiting collection already done may
         // start another.
-        if cfg!(feature = "aggressive-gc-verification") {
+        if aggressive_gc_verification() {
             assert!(
                 observed >= 1,
                 "the next quantum must begin after the waiting collection"

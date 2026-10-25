@@ -18,6 +18,15 @@
 #         work and after changes to runtime or collector behavior (see
 #         docs/AgentContext.md, "Verification").
 #
+# A level first builds everything it runs, side by side, each feature set in
+# a target directory of its own (target/gate-clippy, target/gate-prof,
+# target/gate-agc; the default build keeps target/), since cargo builds one
+# directory at a time and each build's critical path, the library's
+# unit-test target, runs mostly on one rustc thread. The aggressive-GC pass
+# reruns the unit tests of the default build with GLAM_TEST_AGGRESSIVE_GC
+# set, and builds the feature only for the binary, integration and doc
+# tests. Each step's header shows the seconds elapsed.
+#
 # --record is the gate to commit by. It formats the workspace (`cargo fmt`),
 # then runs the level under a timeout into a fresh target/check-<level>.log,
 # which ends with `exit <status>`, and prints the log's tail. The timeout
@@ -38,8 +47,9 @@ set -euo pipefail
 root="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$root"
 
+# The comment block that opens this script.
 usage() {
-  sed -n '3,35p' "$0" | sed 's/^#\{0,1\} \{0,1\}//'
+  awk 'NR > 2 && /^#/ { sub(/^# ?/, ""); print; next } NR > 2 { exit }' "$0"
 }
 
 usage_line() {
@@ -130,13 +140,62 @@ if [[ "$mode" == record ]]; then
   exit "$status"
 fi
 
-step() { printf '\n==> %s\n' "$*"; }
+step() { printf '\n==> %s [%ds]\n' "$*" "$SECONDS"; }
+
+clippy_dir=target/gate-clippy
+prof_dir=target/gate-prof
+agc_dir=target/gate-agc
+
+# Starts the build named $1, the command after it, in the background, its
+# output kept for `finish_builds`.
+builds=()
+start_build() {
+  local name="$1"
+  shift
+  mkdir -p target/gate-builds
+  "$@" >"target/gate-builds/$name.log" 2>&1 &
+  builds+=("$name=$!")
+}
+
+# Waits for every build started, printing each one's output in turn, and
+# fails where any failed.
+finish_builds() {
+  local failed=0 entry name
+  for entry in "${builds[@]}"; do
+    name="${entry%%=*}"
+    if wait "${entry##*=}"; then
+      step "build $name: done"
+    else
+      step "build $name: FAILED"
+      failed=1
+    fi
+    cat "target/gate-builds/$name.log"
+  done
+  builds=()
+  return "$failed"
+}
+
+run_builds() {
+  step "builds for $level, side by side"
+  start_build clippy env CARGO_TARGET_DIR="$clippy_dir" \
+    cargo clippy --package glam --all-targets --all-features -- -D warnings
+  start_build test cargo test --package glam --no-run
+  if [[ "$level" != fast ]]; then
+    start_build glam-prof env CARGO_TARGET_DIR="$prof_dir" \
+      cargo test --package glam --features glam-prof --lib --test cli --no-run
+  fi
+  if [[ "$level" == full ]]; then
+    start_build aggressive-gc env CARGO_TARGET_DIR="$agc_dir" \
+      cargo test --package glam --features aggressive-gc-verification \
+      --bins --test '*' --no-run
+  fi
+  finish_builds
+}
 
 run_fast() {
   step "fmt (workspace)"
   cargo fmt --check
-  step "clippy (glam, all targets, all features)"
-  cargo clippy --package glam --all-targets --all-features -- -D warnings
+  run_builds
   step "test (glam)"
   cargo test --package glam
 }
@@ -146,13 +205,18 @@ run_all() {
   step "G0 semantic regressions"
   crates/glam-gc/scripts/check-g0-semantics.sh
   step "profiling fixtures (glam-prof)"
-  scripts/check-profiling-fixtures.sh
+  CARGO_TARGET_DIR="$prof_dir" scripts/check-profiling-fixtures.sh
 }
 
 run_full() {
   run_all
-  step "aggressive-GC verification (glam)"
-  cargo test --package glam -q --features aggressive-gc-verification
+  step "aggressive-GC verification (glam unit tests, by the runtime switch)"
+  GLAM_TEST_AGGRESSIVE_GC=1 cargo test --package glam -q --lib
+  step "aggressive-GC verification (glam binary, integration and doc tests)"
+  CARGO_TARGET_DIR="$agc_dir" cargo test --package glam -q \
+    --features aggressive-gc-verification --bins --test '*'
+  CARGO_TARGET_DIR="$agc_dir" cargo test --package glam -q \
+    --features aggressive-gc-verification --doc
   step "cursor-stress proofs"
   scripts/check-cursor-stress.sh
 }

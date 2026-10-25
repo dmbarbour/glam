@@ -1330,10 +1330,11 @@ impl EvaluationRuntime {
     /// an explicit maintenance request only after reaching a stable runtime
     /// boundary. It does not perform collection itself.
     ///
-    /// Under the private `aggressive-gc-verification` mode only, the pump
-    /// services each request it promotes, standing in for the embedding
-    /// client, and then continues toward stability. Readiness observed after
-    /// the pump therefore matches ordinary mode.
+    /// Under the private aggressive-GC verification mode only
+    /// (`aggressive_gc_verification`), the pump services each request it
+    /// promotes, standing in for the embedding client, and then continues
+    /// toward stability. Readiness observed after the pump therefore matches
+    /// ordinary mode.
     pub fn pump_until_stable(&self) {
         const BACKGROUND_DRAIN_BUDGET: usize = 4096;
 
@@ -1386,12 +1387,11 @@ impl EvaluationRuntime {
                 // the request. A failed service is retained by maintenance
                 // state and later reported by readiness, and it blocks further
                 // promotion, so the loop still converges.
-                #[cfg(feature = "aggressive-gc-verification")]
-                {
+                #[cfg(any(test, feature = "aggressive-gc-verification"))]
+                if crate::runtime::aggressive_gc_verification() {
                     let _ = self.service_managed_collection();
                     continue;
                 }
-                #[cfg(not(feature = "aggressive-gc-verification"))]
                 return;
             }
 
