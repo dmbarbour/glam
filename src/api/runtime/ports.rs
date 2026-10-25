@@ -475,6 +475,11 @@ impl PortJournal {
             .collect()
     }
 
+    /// Whether this journal is to append to the buffer at `address`.
+    pub(in crate::api) fn appends_to(&self, address: &PortAddress) -> bool {
+        self.appends.iter().any(|(appended, _)| appended == address)
+    }
+
     /// The buffers of `port` at the machine at `machine` and its
     /// descendants, in address order. It observes nothing: it is discovery.
     pub(in crate::api) fn buffers_below(&self, machine: &[Key], port: &Key) -> Vec<PortAddress> {

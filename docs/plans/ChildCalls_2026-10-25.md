@@ -106,12 +106,19 @@ The cells keep only the runs.
    `Op`'s value. An explicit failure, `Op`'s `.fail`, restores the
    caller's state with the frame, which a cut's alternatives or `.try`
    then handle, and stages nothing for the child. An error that ends `Op`
-   stages the child's flag, with the state `Op` left, half-done, for its
-   recovery, and fails the call with the error (maintainer, 2026-10-25),
-   as an error that ends a turn flags its machine; the flag is the
-   child's state, staged in the caller's transaction, so it commits where
-   the caller handles the error, as `.try` does, and aborts with it
-   otherwise. Observing the error never clears the flag.
+   flags the child (maintainer, 2026-10-25), as an error that ends a turn
+   flags its machine: the flag stages with the caller's transaction, as a
+   Rust turn's error in a descendant's turn within a cut stages the
+   descendant's, part of its machine's state, and commits where the
+   caller handles the error and goes on. Observing the error never clears
+   the flag. Glam has no such handler: `.try` undoes what it tried, the
+   child's state and flag with it, and an error within a cut that
+   observed state, as a call has, waits for a change
+   (`dict-empty-is-a-value`). So within a transaction an error in `Op`
+   leaves the child as it was, and the call stages no flag (agent,
+   2026-10-25, at `child-call-frame`; first written here as committing
+   "where the caller handles the error, as `.try` does", which `.try`'s
+   undo contradicts).
 4. **The machine per branch.** The branch carries the machine it runs on,
    replacing the task-level `EvalContext::machine` where requests read it,
    so `.child.*` within `Op` names the child's children and a call nests
@@ -121,7 +128,10 @@ The cells keep only the runs.
    The heap, volumes, promises and `.log`: as the caller sees them, all
    transactional with the caller. `.env`: the caller's for now, since
    tasks bind no shares yet; the child's composed environment once
-   `api-refl-ports` gives tasks shares.
+   `api-refl-ports` gives tasks shares. Control: the reset stack is part
+   of a branch's local state, so a `.shift` within `Op` reaches only the
+   `.reset`s within `Op`, as a Rust descendant's turn is a closure of its
+   own.
 
 `Op`'s own cuts nest in the caller's transaction, and its `.child.task`
 queues on the child's children, reaching them when the caller's
@@ -161,10 +171,26 @@ Each with tests, the full gate, and a commit.
    child's state, which commits with the caller's cut and aborts with a
    failed one; a call to a busy child waits until its task ends; a call
    to a flagged child fails until a recovery; a call after the
-   transaction queued on the child fails; an error in `Op` flags the
-   child where `.try` handles it, and not where the cut aborts; nested
-   calls; a task queued on the child after the caller's snapshot
-   conflicts, and the cut runs again.
+   transaction queued on the child fails; an error in `Op` that `.try`
+   answers leaves the child as it was, unflagged; nested calls; a task
+   queued on the child after the caller's snapshot conflicts, and the
+   cut runs again.
+   Built 2026-10-25: `.child.call` answers a scoped request, whose
+   operation is `Op` and whose close, a hidden request, writes the state
+   `Op` left as the child's, in the caller's transaction; each branch
+   keeps a stack of the calls it runs within (`ChildCall`: the child and
+   the caller's state), whose innermost child the `.child.*` requests act
+   on, so a failure or a `.try` restores the caller's machine and state
+   with its branch. A call on an anonymous root's child installs the
+   root's guard, as a task does, so reclamation drops the state it
+   leaves. Outside a transaction it fails with an error until
+   `child-call-plain`. A task committed to the child meanwhile cannot
+   come from Glam today: only the parent's tasks, one at a time, queue on
+   a child, and a busy child turns a call away. So the conflict is tested
+   on the journals, as a call reads them; it guards Rust turns and
+   settlement as they come to act on children. Mutation-checked: each
+   entry condition, the state's swap in and out, the per-branch machine,
+   the root's guard, and the reads' observation.
 3. `child-call-plain` — the call outside a transaction, queued and
    awaited. Tests: order after earlier tasks, the result, the failure and
    the child's flag, and a flagged child.
@@ -177,7 +203,9 @@ runtime API plan's `turn-pending-input-conflicts`.
 1. An error that ends a call's `Op` flags the child, plain or within a
    transaction, as an error that ends a turn flags its machine; within a
    transaction the flag stages with the caller. Observation never clears
-   it, only recovery.
+   it, only recovery. (Agent, 2026-10-25, for review: within a
+   transaction no Glam handler keeps what an error ended, so the staged
+   flag never commits; see "Within a transaction", step 3.)
 2. A call cannot enter a child in error: recovery is the only way in, for
    the reason machines have one (`machine-errors-mark-and-recover`).
 3. A call cannot ignore tasks its own transaction queued on the child; it

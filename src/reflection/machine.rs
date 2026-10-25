@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use super::protocol::{
-    CommitResult, EffectRequestSpec, RequestActivity, RequestContext, RequestResult,
+    ChildCall, CommitResult, EffectRequestSpec, RequestActivity, RequestContext, RequestResult,
     SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork, TaskCommit,
     TaskHalt, TaskHost, TaskOutcome, TaskSpecialization, Transaction, ValidationResult,
     request_value,
@@ -1262,6 +1262,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     host: &self.host,
                     transaction: work.branch.transaction.as_mut(),
                     state: &mut work.branch.state,
+                    calls: &mut work.branch.calls,
                     activity: &mut activity,
                 },
             )
@@ -4591,7 +4592,11 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return None;
         }
         let machine = self.eval_context.machine().cloned()?;
-        let state = self.machine_state.take().or_else(|| self.settled_state());
+        let state = self
+            .machine_state
+            .take()
+            .or_else(|| self.settled_state())
+            .map(|state| without_reset_frames(access, state, &self.tags.continuation_state));
         let outcome = match terminal {
             TaskTerminal::Complete(value) => {
                 MachineTaskOutcome::Complete(value.clone().into_runtime_root())
@@ -4901,6 +4906,9 @@ struct Branch<S: TaskSpecialization> {
     effect: RuntimeValueRoot,
     control: Control,
     state: RuntimeValueRoot,
+    /// The calls into child machines this branch runs within, whose
+    /// innermost child its requests act on (`child-call-frame`).
+    calls: Vec<ChildCall>,
     transaction: Option<Transaction<S>>,
     active_fixes: Vec<ActiveFix<S>>,
     fix_restarts: Vec<FixRestart<S>>,
@@ -4928,6 +4936,7 @@ impl<S: TaskSpecialization> Branch<S> {
             effect,
             control: Control::default(),
             state,
+            calls: Vec::new(),
             transaction: None,
             active_fixes: Vec::new(),
             fix_restarts: Vec::new(),
@@ -7578,6 +7587,22 @@ fn reset_stack_root_in(
                 .unwrap_or_else(|| Value::List(List::empty())),
         ))
     })
+}
+
+/// The local state a task leaves its machine, without the task's reset
+/// frames: control is the task's own, and a frame that a task ending within
+/// a `.reset` left would be a stranger's to the next task on the machine.
+fn without_reset_frames(
+    access: &RuntimeValueAccess<'_>,
+    state: RuntimeValueRoot,
+    continuation_state: &Key,
+) -> RuntimeValueRoot {
+    match state.clone_core_with(access) {
+        Value::Dict(dict) if dict.contains_key(continuation_state) => {
+            access.root_runtime_value(Value::Dict(dict.remove(continuation_state)))
+        }
+        _ => state,
+    }
 }
 
 fn encode_reset_frames(access: &EvaluationValueAccess<'_>, frames: &[ResetFrame]) -> Value {

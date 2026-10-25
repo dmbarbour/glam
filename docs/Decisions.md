@@ -2764,6 +2764,12 @@ maps the short names used here to file names.
     have left half-done, which only an explicit recovery acknowledges; and
     a call that ignored its own transaction's tasks, or ran them within
     it, would surprise its caller.)
+  - (Noted by the agent, 2026-10-25, at `child-call-frame`, for the
+    maintainer's review: within a transaction the staged flag never
+    commits, since Glam has no handler that keeps what an error ended:
+    `.try` undoes what it tried, and a cut waits out an error after an
+    observation, as a call's is. So within a transaction a call's error
+    leaves the child as it was, and only a plain call's flags it.)
   - (Decided by the maintainer, 2026-10-25, at `child-task-halts`: a
     child task that panics halts with its machine's error flag, its reply
     broken, so its parent can recover it. Reasons: a run that never ends

@@ -1021,7 +1021,9 @@ handle API goes.
         queued, awaited task. The maintainer decided its questions the
         same day: an error ending a call flags the child, a call cannot
         enter a child in error, and one after tasks its own transaction
-        queued on the child fails with a conflict error.
+        queued on the child fails with a conflict error. Built
+        2026-10-25: `child-state-transactional` and `child-call-frame`,
+        the call within a transaction; `child-call-plain` is next.
       - `turn-pending-input-conflicts` (maintainer, 2026-10-25: machines
         get a call's rule): a turn that enters a child within a
         transaction that has sent the child input, appended to the child's

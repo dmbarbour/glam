@@ -178,7 +178,7 @@ and control flow.
   `api/runtime/states.rs`), whose journals validate the flags and the
   versioned states they read. A run takes its state as it starts and
   writes the state it leaves in the commit that ends it, so a transaction
-  that read the state, as a call will, conflicts with it. A queued task's launch is a
+  that read the state, as a call does, conflicts with it. A queued task's launch is a
   commit-time `ReflectionUpdate::Wake`; a finishing task starts the next
   itself. An interrupt stops the run at commit
   (`ReflectionUpdate::Interrupt`): the stopped task's end claims nothing,
@@ -192,8 +192,20 @@ and control flow.
   it finished" and the machine is flagged. A halt where the thread holds a
   mutator, or unwinds, waits on the host for its next safe point
   (`run_deferred`, also run with the death notices).
+- `.child.call Key Op` within a transaction (`child-call-frame`): an error
+  on a flagged child or one the transaction queued tasks on
+  (`RuntimeEventJournal::queues_tasks_on`), `RequestResult::Fail` with
+  observation on a busy one, else `RequestResult::Scoped` with `Op` and a
+  hidden close (`ReflectionRequest::ChildCallLeave`). Entering pushes a
+  `ChildCall` on the branch (`Branch::calls`, `RequestContext::enter_call`)
+  and swaps in the child's state; the close pops it and stages the state
+  `Op` left (`set_machine_state`). `child_machine` takes the innermost
+  call's child before the task's machine. Within a cut, an error in `Op`
+  waits for a change like any error after an observation; under `.try` it
+  answers `err` and undoes, so no flag stages. Outside a transaction the
+  call is an error until `child-call-plain`.
 - An anonymous root's subtree is unreachable once the root's task ends: its
-  keys name a task id never reused. The root's task, once it tasks a child,
+  keys name a task id never reused. The root's task, once it tasks or calls a child,
   holds an `AnonymousRootGuard` reporting its end, and the host reclaims
   the subtree, its cells and port buffers, when the last of the root and
   its runs ends with no task waiting in an unflagged queue. Failed machines

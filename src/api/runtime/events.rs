@@ -414,14 +414,21 @@ impl RuntimeEventJournal {
         self.flags.read(machine)
     }
 
+    /// Whether this journal queues tasks on the child machine at `machine`,
+    /// which reach it only when the journal commits.
+    pub(crate) fn queues_tasks_on(&self, machine: &[Key]) -> bool {
+        self.ports.appends_to(&task_address(machine.to_vec()))
+    }
+
     /// The local state of the child machine at `machine`, with this
     /// journal's writes, observing it.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "a call reads it, at `child-call-frame`")
-    )]
     pub(crate) fn machine_state(&mut self, machine: &[Key]) -> Option<Value> {
         self.states.read(machine).map(Value::from_runtime_root)
+    }
+
+    /// Writes `state` as the local state of the child machine at `machine`.
+    pub(crate) fn set_machine_state(&mut self, machine: &[Key], state: Value) {
+        self.states.set(machine.to_vec(), state.into_runtime_root());
     }
 
     /// Whether the child machine at `machine` is busy: unflagged, with a

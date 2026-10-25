@@ -30,6 +30,9 @@ pub enum ReflectionRequest {
     ChildRecover,
     ChildInterrupt,
     ChildClear,
+    ChildCall,
+    /// The close of a `.child.call`, which Glam code cannot name.
+    ChildCallLeave,
 }
 
 /// Durable interpretation state for one reusable reflection request.
@@ -46,12 +49,13 @@ enum ReflectionRequestOperation {
     Inspection(InspectionRequestWork),
     Log(LogRequestWork),
     Child(ChildRequestWork),
+    ChildCallLeave,
     Poisoned,
 }
 
 /// `.child.task Key Op`, `.child.status Key`, `.child.recover Key`,
-/// `.child.interrupt Key Reason` and `.child.clear Key`, which convert their
-/// key first (`reflection-tasks-are-machine-tasks`).
+/// `.child.interrupt Key Reason`, `.child.clear Key` and `.child.call Key
+/// Op`, which convert their key first (`reflection-tasks-are-machine-tasks`).
 struct ChildRequestWork {
     request: ChildRequest,
     state: ChildRequestState,
@@ -64,13 +68,14 @@ enum ChildRequest {
     Recover,
     Interrupt,
     Clear,
+    Call,
 }
 
 impl ChildRequest {
-    /// Whether the request takes a value after its key: a task's operation,
-    /// or an interrupt's reason.
+    /// Whether the request takes a value after its key: a task's or a call's
+    /// operation, or an interrupt's reason.
     fn takes_value(self) -> bool {
-        matches!(self, Self::Task | Self::Interrupt)
+        matches!(self, Self::Task | Self::Interrupt | Self::Call)
     }
 }
 
@@ -213,6 +218,11 @@ impl ReflectionRequestWork {
                 request: ChildRequest::Clear,
                 state: ChildRequestState::Start(arguments),
             }),
+            ReflectionRequest::ChildCall => ReflectionRequestOperation::Child(ChildRequestWork {
+                request: ChildRequest::Call,
+                state: ChildRequestState::Start(arguments),
+            }),
+            ReflectionRequest::ChildCallLeave => ReflectionRequestOperation::ChildCallLeave,
         };
         Self { operation }
     }
@@ -296,6 +306,9 @@ where
                         }
                         (ChildRequest::Interrupt, Some(reason)) => {
                             interrupt_child(key, reason, context)?
+                        }
+                        (ChildRequest::Call, Some(operation)) => {
+                            call_child(key, operation, context)?
                         }
                         (ChildRequest::Recover, _) => recover_child(key, context)?,
                         (ChildRequest::Clear, _) => clear_child(key, context)?,
@@ -454,6 +467,12 @@ where
                     RequestResult::ReturnUnit,
                 ))
             }
+            ReflectionRequestOperation::ChildCallLeave => {
+                assert!(input.is_none(), "a call's close cannot have demand input");
+                Ok(SpecializationRequestPoll::Complete(leave_child_call(
+                    context,
+                )?))
+            }
             ReflectionRequestOperation::Poisoned => {
                 panic!("completed reflection request work was polled again")
             }
@@ -468,6 +487,7 @@ fn child_request_name(request: ChildRequest) -> &'static str {
         ChildRequest::Recover => ".child.recover",
         ChildRequest::Interrupt => ".child.interrupt",
         ChildRequest::Clear => ".child.clear",
+        ChildRequest::Call => ".child.call",
     }
 }
 
@@ -487,15 +507,17 @@ pub(crate) fn is_anonymous_key(key: &Key) -> bool {
         if parts.len() == 3 && parts[0] == "glam" && parts[1] == "anonymous")
 }
 
-/// The child `key` of the machine the current task runs on.
+/// The child `key` of the machine the current branch runs on: within a
+/// call, the call's child, and otherwise its task's machine.
 fn child_machine<S>(key: Key, context: &RequestContext<'_, S>) -> Result<Vec<Key>, TaskHalt>
 where
     S: TaskSpecialization,
 {
     let eval_context = context.eval_context();
-    let mut path = match eval_context.machine() {
-        Some(machine) => machine.path().to_vec(),
-        None => anonymous_root(
+    let mut path = match (context.called_machine(), eval_context.machine()) {
+        (Some(machine), _) => machine.to_vec(),
+        (None, Some(machine)) => machine.path().to_vec(),
+        (None, None) => anonymous_root(
             eval_context
                 .task_id()
                 .map_err(|error| TaskHalt::new(error.as_ref()))?,
@@ -824,6 +846,128 @@ where
         });
         Ok(())
     })
+}
+
+/// `.child.call Key Op`, within a transaction: runs `Op` on the child `Key`
+/// within the caller's transaction and answers its result
+/// (`child-call-frame`). `Op` runs on the child's local state, and its
+/// requests act on the child's children; as the call returns, the state
+/// `Op` left becomes the child's, committing or aborting with the caller.
+/// The call reads the child's flag, queue and state, all observed:
+///
+/// - a child in error it cannot enter, as recovery alone does, so it fails
+///   with an error;
+/// - tasks the transaction queued on the child reach it only as the
+///   transaction commits, and the call cannot run before them, so it fails
+///   with an error, as a conflict;
+/// - a child busy with what was committed to it, as the transaction's
+///   snapshot shows it, the call waits for, failing having observed it.
+///
+/// An explicit failure in `Op` backtracks, the caller's state and machine
+/// with it. An error that ends `Op` is the caller's, as any error within
+/// its transaction: `.try` answers it, undoing what it tried, and a cut,
+/// having observed the child, waits for a change. Either way the child is
+/// left as it was, unflagged: its flag would stage with the caller's
+/// transaction, as a Rust turn's error in a descendant's turn within a cut
+/// stages the descendant's, but Glam has no handler that keeps what an
+/// error ended.
+fn call_child<S>(
+    key: Key,
+    operation: Value,
+    context: &mut RequestContext<'_, S>,
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let Machines(host) = context
+        .host()
+        .machines()
+        .ok_or_else(|| TaskHalt::new("`.child.call` needs a host with machines"))?;
+    let machine = child_machine(key, context)?;
+    let Some(generation) = context.transaction_generation() else {
+        return Err(TaskHalt::new(
+            "`.child.call` runs only within a cut or a `.try`, for now",
+        ));
+    };
+    context.observe_host_generation(generation);
+    let state = {
+        let mut transaction = context
+            .transaction()
+            .expect("a transaction has a generation");
+        let events = transaction
+            .parts()
+            .1
+            .reflection_journal()
+            .events
+            .as_mut()
+            .ok_or_else(|| TaskHalt::new("`.child.call` needs a host with machines"))?;
+        if events.machine_flagged(&machine) {
+            return Err(TaskHalt::new(
+                "`.child.call` cannot enter a child in error until its parent recovers it",
+            ));
+        }
+        if events.queues_tasks_on(&machine) {
+            return Err(TaskHalt::new(
+                "`.child.call` conflicts with the tasks its transaction queued on the child, \
+                 which reach it only as the transaction commits",
+            ));
+        }
+        if events.queued_tasks(&machine) > 0 {
+            return Ok(RequestResult::Fail);
+        }
+        events.machine_state(&machine)
+    };
+    if context.eval_context().machine().is_none() {
+        context.note_anonymous_children(host);
+    }
+    let values = context.values();
+    let state = state.unwrap_or_else(|| values.empty_dict());
+    let close = child_call_leave_spec().effect(&values, [])?;
+    context.enter_call(Arc::from(machine), state.into_runtime_root());
+    Ok(RequestResult::Scoped { operation, close })
+}
+
+/// The close of a `.child.call`: the state its operation left becomes the
+/// child's, in the caller's transaction, and the caller takes back its own.
+fn leave_child_call<S>(context: &mut RequestContext<'_, S>) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let (machine, state) = context
+        .leave_call()
+        .ok_or_else(|| TaskHalt::new("a call's close found no call to leave"))?;
+    let mut transaction = context
+        .transaction()
+        .ok_or_else(|| TaskHalt::new("a call returns within its caller's transaction"))?;
+    let events = transaction
+        .parts()
+        .1
+        .reflection_journal()
+        .events
+        .as_mut()
+        .ok_or_else(|| TaskHalt::new("`.child.call` needs a host with machines"))?;
+    events.set_machine_state(&machine, Value::from_runtime_root(state));
+    Ok(RequestResult::ReturnUnit)
+}
+
+/// The hidden request that closes a `.child.call`.
+fn child_call_leave_spec() -> EffectRequestSpec<ReflectionRequest> {
+    EffectRequestSpec::hidden(
+        [
+            "reflection_runtime",
+            "v0",
+            "request",
+            "child",
+            "call",
+            "leave",
+        ],
+        0,
+        ReflectionRequest::ChildCallLeave,
+    )
 }
 
 /// Starts each task the child machine at `machine` runs next, from `task`
@@ -1484,6 +1628,13 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 1,
                 ReflectionRequest::ChildClear,
             ),
+            EffectRequestSpec::at_path(
+                ["child", "call"],
+                ["reflection_runtime", "v0", "request", "child", "call"],
+                2,
+                ReflectionRequest::ChildCall,
+            ),
+            child_call_leave_spec(),
         ])
         .collect()
 }
@@ -1536,7 +1687,9 @@ mod tests {
             | ReflectionRequest::ChildStatus
             | ReflectionRequest::ChildRecover
             | ReflectionRequest::ChildInterrupt
-            | ReflectionRequest::ChildClear => {}
+            | ReflectionRequest::ChildClear
+            | ReflectionRequest::ChildCall
+            | ReflectionRequest::ChildCallLeave => {}
         }
     }
 
@@ -1581,6 +1734,7 @@ mod tests {
             ReflectionRequestOperation::Environment(_)
             | ReflectionRequestOperation::Inspection(_)
             | ReflectionRequestOperation::Log(_)
+            | ReflectionRequestOperation::ChildCallLeave
             | ReflectionRequestOperation::Poisoned => {}
             ReflectionRequestOperation::Child(work) => {
                 let ChildRequestWork { request, state } = work;

@@ -358,6 +358,19 @@ volume to retry. Dropping the Rust owner does not revoke it.
   Recovering a busy child, or clearing a subtree with a busy machine,
   fails having observed it (`ChildBusy`), so it waits as `.child.call`
   does.
+- `.child.call Key Op`, within a transaction, runs `Op` on the child within
+  the caller's transaction and answers its result (`child-call-frame`). It
+  reads the child's flag, queue and state, observed: a child in error is
+  an error, as are tasks the transaction itself queued on the child, and a
+  busy child fails, so the call waits. It answers a scoped request: the
+  operation is `Op`, and the close, a hidden request, writes the state
+  `Op` left as the child's in the caller's journal. Each branch keeps the
+  calls it runs within (`ChildCall`: the child, and the caller's state the
+  close restores); the innermost call's child is the machine the `.child.*`
+  requests act on, else the task's own. A failed or tried branch drops the
+  call with itself. Since the reset stack is part of a branch's state, a
+  `.shift` within `Op` reaches only `Op`'s own resets. Outside a
+  transaction a call fails with an error, for now.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,

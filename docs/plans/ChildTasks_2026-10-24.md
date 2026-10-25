@@ -236,6 +236,17 @@ Each with tests, the full gate, and a commit.
    anonymous roots, which tasks cannot own yet, wait for `api-refl-ports`.
    The failed machines kept here clear with `settlement-clears-machines`
    in the runtime API plan's `api-settlement`.
+9. `run-end-drops-reset-frames` — found while building `child-call-frame`:
+   a branch's reset stack lives in its local state, under a private key,
+   so a task that failed within a `.reset` left its frame in the state it
+   wrote its machine, and the next task, once the machine was recovered,
+   ended by resuming the stranger's continuation, which the runtime
+   refused ("captured continuation belongs to another reflection task").
+   Built 2026-10-25: a run's end writes its state without the private
+   key, as control is a task's own; a call needs nothing more, since its
+   operation pops its own frames before it returns. Test: a recovered
+   child's next task ends as itself, on the state the failure left;
+   mutation-checked.
 
 ## Defaults, open to the maintainer
 

@@ -1271,6 +1271,7 @@ fn assert_branch_root_inventory(
         effect,
         control,
         state,
+        calls,
         transaction,
         active_fixes,
         fix_restarts,
@@ -1278,6 +1279,7 @@ fn assert_branch_root_inventory(
         host_version,
     } = branch;
     let _: &u64 = host_version;
+    let _: &Vec<ChildCall> = calls;
     let _: &RuntimeValueRoot = effect;
     let _: &RuntimeValueRoot = state;
     let _ = (

@@ -2210,6 +2210,18 @@ untouched = anno refl:(.child.interrupt 'z "unheard" =>> .child.recover 'z =>> .
 }
 
 #[test]
+fn a_task_leaves_its_machine_none_of_its_reset_frames() {
+    // Control is a task's own: a task that fails within a `.reset` leaves
+    // its machine the state it reached, without its reset frames, so the
+    // next task, once the machine is recovered, ends as itself.
+    let source = r#"language g0
+import 'std
+reset = anno refl:(.child.task 's (.reset 'k (.set ['n] 1 =>> (1 / 0)) >>= (\_ -> .r "the failed task's continuation")) >>= (\p -> .try (seq p (.r ())) >>= (\_ -> .child.recover 's =>> .child.task 's (.get ['n] >>= (\n -> .r (if n == 1 then "its own" else "another state"))) >>= (\q -> .try (seq q (.r q)) >>= (\r -> .heap.set ['reset] (if dict.defines ['ok] r then r.ok else r.err.msg.text)))))) ()
+"#;
+    assert_eq!(run_reflection_texts(source, &["reset"]), ["its own"]);
+}
+
+#[test]
 fn a_clear_empties_a_child_and_its_descendants_once_none_is_busy() {
     // `.child.clear` stops no work: it waits while the child or a
     // descendant is busy, so a parent interrupts first, and an interrupt
@@ -2244,6 +2256,81 @@ import 'std
 waited = anno refl:(.child.task 'w (.cut (.heap.try_get ['w_gate]) =>> .set ['n] 5 =>> .r "done") >>= (\p -> .try (.child.clear 'w) >>= (\early -> .try (.child.recover 'w) >>= (\recovered -> .child.task 'o (.cut (.heap.try_get ['w_waiting]) =>> .heap.set ['w_gate] ()) >>= (\_ -> .heap.set ['w_waiting] () =>> .child.clear 'w =>> seq p (.child.task 'w (.try (.get ['n])) >>= (\n -> seq n (.heap.set ['waited] (if [early, recovered] == ['fail, 'fail] then (if dict.defines ['err] n then p else "state kept") else "acted while busy"))))))))) ()
 "#;
     assert_eq!(run_reflection_texts(source, &["waited"]), ["done"]);
+}
+
+#[test]
+fn a_call_runs_on_its_child_s_state_within_the_caller_s_transaction() {
+    // `child-call-frame`: `.child.call` runs its operation on the child's
+    // local state, not the caller's, and answers its result; the state it
+    // leaves commits with the caller's cut, and a failed cut undoes it. The
+    // caller's own state returns as the call does.
+    let source = r#"language g0
+import 'std
+called = anno refl:(.set ['who] "caller" =>> .child.task 'a (.set ['n] 1) >>= (\p -> seq p (.cut (.child.call 'a (.try (.get ['who]) >>= (\w -> .get ['n] >>= (\n -> .set ['n] (n + 1) =>> .r {w:w, n:n})))) >>= (\r -> .alt (.cut (.child.call 'a (.set ['n] 100) =>> .fail)) (.r ()) =>> .get ['who] >>= (\who -> .child.task 'a (.get ['n]) >>= (\q -> seq q (.heap.set ['called] (if [r.n, q, who] == [1, 2, "caller"] then (if dict.defines ['err] r.w then "committed" else "saw the caller's state") else "wrong")))))))) ()
+"#;
+    assert_eq!(run_reflection_texts(source, &["called"]), ["committed"]);
+}
+
+#[test]
+fn a_call_waits_while_its_child_is_busy() {
+    // A call waits until the child has finished what was committed to it:
+    // `.try`, which never waits, reports it failed, and a cut enters once
+    // the child's task has ended, on the state that task left.
+    let source = r#"language g0
+import 'std
+waited = anno refl:(.child.task 'w (.cut (.heap.try_get ['w_gate]) =>> .set ['n] 5) >>= (\_ -> .try (.child.call 'w (.get ['n])) >>= (\early -> .child.task 'o (.cut (.heap.try_get ['w_waiting]) =>> .heap.set ['w_gate] ()) >>= (\_ -> .heap.set ['w_waiting] () =>> .cut (.child.call 'w (.get ['n])) >>= (\n -> .heap.set ['waited] (if early == 'fail then (if n == 5 then "waited" else "entered early") else "entered while busy")))))) ()
+"#;
+    assert_eq!(run_reflection_texts(source, &["waited"]), ["waited"]);
+}
+
+#[test]
+fn a_call_enters_neither_a_child_in_error_nor_one_its_transaction_queued_on() {
+    // Recovery is the only way into a child in error, so a call fails with
+    // an error until the parent recovers it, then finds the state the
+    // failure left. A task the caller's transaction queued on the child
+    // reaches it only as the transaction commits, and a call cannot run
+    // before it: the call fails with an error, as a conflict.
+    let source = r#"language g0
+import 'std
+flagged = anno refl:(.child.task 'f (.set ['n] 1 =>> (1 / 0)) >>= (\p -> .try (seq p (.r ())) >>= (\_ -> .try (.child.call 'f (.get ['n])) >>= (\r -> .child.recover 'f =>> .cut (.child.call 'f (.get ['n])) >>= (\n -> .heap.set ['flagged] (if n == 1 then r.err.msg.text else "unrecovered")))))) ()
+pending = anno refl:(.try (.child.task 'q (.r ()) >>= (\_ -> .child.call 'q (.r ()))) >>= (\r -> .heap.set ['pending] r.err.msg.text)) ()
+"#;
+    assert_eq!(
+        run_reflection_texts(source, &["flagged", "pending"]),
+        [
+            "`.child.call` cannot enter a child in error until its parent recovers it",
+            "`.child.call` conflicts with the tasks its transaction queued on the child, \
+             which reach it only as the transaction commits",
+        ]
+    );
+}
+
+#[test]
+fn an_error_in_a_call_undoes_with_the_caller_s_transaction() {
+    // An error that ends a call's operation is the caller's: `.try`
+    // answers it, undoing what it tried, the child's state with it, and
+    // leaves the child unflagged, as it was.
+    let source = r#"language g0
+import 'std
+tried = anno refl:(.child.task 'e (.set ['n] 1) >>= (\p -> seq p (.try (.child.call 'e (.set ['n] 2 =>> (1 / 0))) >>= (\r -> .child.status 'e >>= (\s -> .cut (.child.call 'e (.get ['n])) >>= (\n -> .heap.set ['tried] (if [s, n] == ['idle, 1] then (if dict.defines ['err] r then "undone" else "no error") else "flagged or changed"))))))) ()
+"#;
+    assert_eq!(run_reflection_texts(source, &["tried"]), ["undone"]);
+}
+
+#[test]
+fn calls_nest_on_their_children_s_children() {
+    // Within a call, requests act on the child's children: a call nests in
+    // a call, on the grandchild, and the caller's child of the same key is
+    // another machine. So it goes for a task on a machine of its own.
+    let source = r#"language g0
+import 'std
+nested = anno refl:(.cut (.child.call 'a (.set ['n] 1 =>> .child.call 'b (.set ['m] 2) =>> .child.status 'b)) >>= (\s -> .child.task 'a (.get ['n] >>= (\n -> .child.task 'b (.get ['m]) >>= (\m -> seq m (.r [n, m])))) >>= (\q -> seq q (.cut (.child.call 'b (.try (.try_get ['m]))) >>= (\own -> .heap.set ['nested] (if [s, q, own] == ['idle, [1, 2], 'fail] then "nested" else "wrong")))))) ()
+tasked = anno refl:(.child.task 'p (.cut (.child.call 'a (.child.call 'b (.set ['m] 2))) =>> .child.task 'a (.child.task 'b (.get ['m]) >>= (\m -> seq m (.r m))) >>= (\q -> seq q (.r q))) >>= (\p -> seq p (.heap.set ['tasked] (if p == 2 then "nested" else "wrong")))) ()
+"#;
+    assert_eq!(
+        run_reflection_texts(source, &["nested", "tasked"]),
+        ["nested", "nested"]
+    );
 }
 
 #[test]
@@ -2371,14 +2458,16 @@ fn an_anonymous_root_s_subtree_is_reclaimed_once_nothing_runs_there() {
     // `anonymous-root-reclamation`: once an anonymous root's task has ended
     // and no task runs or waits in its subtree, nothing reaches the subtree,
     // and the runtime drops its machines, whichever ends last: the root,
-    // after the children it awaited, or a child, after its root. A failed
-    // machine stays whole for settlement.
+    // after the children it awaited, or a child, after its root. A child a
+    // root only called goes with it. A failed machine stays whole for
+    // settlement.
     let source = r#"language g0
 import 'std
 awaited = anno refl:(.child.task 'a (.set ['n] 1 =>> .r 1) >>= (\p -> seq p (.child.task 'a (.r 2) >>= (\q -> seq q (.heap.set ['awaited] "done"))))) ()
 detached = anno refl:(.child.task 'd (.cut (.heap.try_get ['d_gate]) =>> .r ()) >>= (\_ -> .heap.set ['detached] "done")) ()
 opener = anno refl:(.cut (.heap.try_get ['detached] >>= (\_ -> .r ())) =>> .heap.set ['d_gate] () =>> .heap.set ['opener] "done") ()
 failed = anno refl:(.child.task 'f (.fail) >>= (\_ -> .child.task 'g (.r ()) >>= (\q -> seq q (.heap.set ['failed] "done")))) ()
+called = anno refl:(.cut (.child.call 'c (.set ['n] 1)) =>> .heap.set ['called] "done") ()
 "#;
     let assembler = Assembler::default();
     let module = assembler
@@ -2386,14 +2475,15 @@ failed = anno refl:(.child.task 'f (.fail) >>= (\_ -> .child.task 'g (.r ()) >>=
         .script("g", source)
         .build()
         .expect("the fixture should compile");
-    for name in ["awaited", "detached", "opener", "failed"] {
+    let names = ["awaited", "detached", "opener", "failed", "called"];
+    for name in names {
         assembler
             .evaluate(&assembler.get(module.value(), name).unwrap())
             .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
     let _ = assembler.drain_reasoning();
     let heap = assembler.test_reflection_heap();
-    for name in ["awaited", "detached", "opener", "failed"] {
+    for name in names {
         assert!(assembler.get(&heap, name).is_ok(), "{name} finished");
     }
     let left = assembler

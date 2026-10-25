@@ -157,6 +157,15 @@ pub(super) struct RequestActivity {
     pub(super) anonymous_children: Option<Arc<dyn crate::evaluation::MachineHost>>,
 }
 
+/// A call into a child machine that a branch runs within (`child-call-frame`):
+/// the child, which the branch's requests act on, and the caller's local
+/// state, which the branch takes back as the call returns.
+#[derive(Clone)]
+pub(crate) struct ChildCall {
+    pub(crate) machine: Arc<[Key]>,
+    pub(crate) caller_state: RuntimeValueRoot,
+}
+
 /// Extra effects and transactional resources available to one task kind.
 ///
 /// A specialization is immutable dispatch policy; mutable resources belong to
@@ -767,6 +776,8 @@ pub struct RequestContext<'a, S: TaskSpecialization> {
     pub(super) host: &'a Arc<S::Host>,
     pub(super) transaction: Option<&'a mut Transaction<S>>,
     pub(super) state: &'a mut RuntimeValueRoot,
+    /// The calls into child machines the branch runs within, innermost last.
+    pub(super) calls: &'a mut Vec<ChildCall>,
     pub(super) activity: &'a mut RequestActivity,
 }
 
@@ -825,6 +836,33 @@ impl<'a, S: TaskSpecialization> RequestContext<'a, S> {
         self.transaction
             .as_deref_mut()
             .map(|transaction| TransactionContext { transaction })
+    }
+
+    /// The child machine the branch runs on within a call, the innermost
+    /// call's, or `None` outside every call, where it runs on its task's.
+    pub(crate) fn called_machine(&self) -> Option<&Arc<[Key]>> {
+        self.calls.last().map(|call| &call.machine)
+    }
+
+    /// Enters a call into the child machine at `machine`: the branch runs on
+    /// it, with `state`, the child's, as its local state, until
+    /// [`Self::leave_call`].
+    pub(crate) fn enter_call(&mut self, machine: Arc<[Key]>, state: RuntimeValueRoot) {
+        let caller_state = std::mem::replace(self.state, state);
+        self.calls.push(ChildCall {
+            machine,
+            caller_state,
+        });
+    }
+
+    /// Leaves the innermost call, returning its child and the local state
+    /// the branch left on it, and gives the branch back its caller's state.
+    pub(crate) fn leave_call(&mut self) -> Option<(Arc<[Key]>, RuntimeValueRoot)> {
+        let ChildCall {
+            machine,
+            caller_state,
+        } = self.calls.pop()?;
+        Some((machine, std::mem::replace(self.state, caller_state)))
     }
 
     /// Records that this request consulted host state at `generation`.
@@ -1046,9 +1084,19 @@ mod root_inventory_tests {
             host,
             transaction,
             state,
+            calls,
             activity,
         } = request;
         let _ = (eval_context, host, transaction, state, activity);
+        // A call keeps its child's path and its caller's state, no task value.
+        for ChildCall {
+            machine,
+            caller_state,
+        } in calls.iter()
+        {
+            let _: &Arc<[Key]> = machine;
+            let _: &RuntimeValueRoot = caller_state;
+        }
         let TransactionContext { transaction } = transaction_context;
         let _ = transaction;
     }
