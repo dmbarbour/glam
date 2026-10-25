@@ -438,8 +438,12 @@ impl DefaultLogger {
         let kind = self
             .context_field_tag_text(payload, &["args", "kind"])
             .map(|kind| kind.replace('_', " "));
+        let machine = self.machine_path_text(payload);
 
         let mut details = Vec::new();
+        if let Some(machine) = machine {
+            details.push(format!("machine {machine}"));
+        }
         if let Some(work) = work {
             details.push(format!("work {work}"));
         }
@@ -465,6 +469,33 @@ impl DefaultLogger {
         } else {
             format!("runtime: {operation} ({})", details.join(", "))
         }
+    }
+
+    /// A runtime context's `args.machine`, a list of keys, as a path joined
+    /// by `/`: a key without text, such as an anonymous root's, shows as
+    /// `<abstract>`.
+    fn machine_path_text(&self, payload: &HandleValue) -> Option<String> {
+        let path = self
+            .evaluator
+            .values()
+            .access_names(payload, ["args", "machine"])
+            .ok()?;
+        let keys = self
+            .evaluator
+            .evaluator()
+            .eval(&path)
+            .ok()?
+            .array_items()
+            .ok()??;
+        Some(
+            keys.iter()
+                .map(|key| {
+                    self.context_tag_text(key)
+                        .unwrap_or_else(|| "<abstract>".to_owned())
+                })
+                .collect::<Vec<_>>()
+                .join("/"),
+        )
     }
 
     fn context_field_text(&self, value: &HandleValue, path: &[&str]) -> Option<String> {

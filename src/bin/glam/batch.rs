@@ -293,6 +293,7 @@ pub(super) fn settle_batch_runtime(
 
 fn settled_report_is_fatal(report: &QuiescenceReport) -> bool {
     !report.task_failures().is_empty()
+        || !report.failed_machines().is_empty()
         || !report.delivery_failures().failures().is_empty()
         || !report.maintenance_failures().is_empty()
         || report

@@ -44,7 +44,9 @@ pub(in crate::api) use events::{
     RuntimePreparedInput, admit_runtime_request, register_runtime_diagnostic_route,
     route_runtime_diagnostic_guarded,
 };
-pub(crate) use machines::{break_replies, clear_child_machines, machine_diagnostic};
+pub(crate) use machines::{
+    break_replies, clear_child_machines, machine_diagnostic, reason_diagnostic,
+};
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire, WireEnd};
 pub use readiness::*;
 use readiness::{
@@ -1645,7 +1647,7 @@ impl EvaluationRuntime {
             .shared_resources
             .mutation_admission
             .gc_failure_ledgers_for_settlement(&settlement);
-        let (reflection, delivery_failures, pending_delivery_reports) = {
+        let (reflection, delivery_failures, pending_delivery_reports, flags, pending_flags) = {
             let mut state = self
                 .state
                 .shared_resources
@@ -1657,6 +1659,7 @@ impl EvaluationRuntime {
                 &mut state.events.outputs.pending_failure_reports,
                 RedBlackTreeMapSync::new_sync(),
             );
+            let pending_flags = state.events.flags.take_unreported();
             (
                 state.reflection.snapshot(),
                 RuntimeDeliveryFailureSnapshot {
@@ -1667,7 +1670,17 @@ impl EvaluationRuntime {
                     runtime: self.id(),
                     failures: pending_delivery_reports,
                 },
+                state.events.flags.standing(),
+                pending_flags,
             )
+        };
+        let failed_machines = |flags: Vec<(Vec<crate::core::Key>, RuntimeValueRoot)>| {
+            flags
+                .into_iter()
+                .map(|(path, diagnostic)| {
+                    FailedMachine::new(self.id(), self.values().core(), path, &diagnostic)
+                })
+                .collect::<Vec<_>>()
         };
         let observation_epoch = self.state.shared_resources.observations.current().get();
         drop(settlement);
@@ -1716,6 +1729,7 @@ impl EvaluationRuntime {
             },
             dispositions: snapshot.dispositions.clone(),
             task_failures,
+            failed_machines: failed_machines(flags),
             delivery_failures,
             reflection,
             killed_work: snapshot.killed_work.clone(),
@@ -1724,6 +1738,7 @@ impl EvaluationRuntime {
                 .map(maintenance_failure)
                 .collect(),
             pending_task_failure_reports,
+            pending_failed_machine_reports: failed_machines(pending_flags),
             pending_delivery_failure_reports: pending_delivery_reports,
             pending_exit_error_reports,
             pending_killed_work_reports: snapshot.killed_work.clone(),

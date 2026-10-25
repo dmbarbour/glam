@@ -264,10 +264,16 @@ and control flow.
   expression-local objects stay inert.
 - Object scanner identity derives from final `spec.name`; inherited definitions
   therefore use the derived object's overridable reflection namespace.
-- A boundary transaction first records one scanner handle in the shared heap.
-  The scanner waits
-  for final `refl.*`, launches named tasks in order, requires unit from each,
-  and stores ordered `{key,task}` records.
+- A boundary transaction first records one scanner's promise in the shared
+  heap (`[guard, 'claim]`): it queues the scanner on the annotation task's
+  child `'scanner` with `.child.task`, below the task's anonymous root. The
+  scanner waits for final `refl.*`, queues each named task, in order, on its
+  own child keyed by the task's name, requires unit from each, and stores
+  ordered `{key, task}` records whose `task` is the task's promise
+  (`[guard, 'tasks]`). A failing `refl.*` task flags its machine, which
+  settlement reports among `failed_machines`, as the CLI renders
+  (`runtime: machine failure (machine refl/<abstract>/scanner/<key>)`) and
+  fails the batch on.
 - The CLI logger's assembler-bus input and its session-local diagnostic bus are
   separate. Logger output cannot feed its own input stream, and logger children
   inherit `read_log`, `write_stderr`, and coordinated exit operations.

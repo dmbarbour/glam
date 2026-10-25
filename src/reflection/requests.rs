@@ -1142,8 +1142,11 @@ where
         .ok_or_else(|| TaskHalt::new("`.child.interrupt` needs a host with machines"))?;
     let machine = child_machine(key, context)?;
     let values = context.values();
+    let diagnostic = values.with_access(|scoped| {
+        crate::api::reason_diagnostic(scoped.runtime_access(), reason.runtime_root())
+    });
     transact_on_machines(".child.interrupt", context, |store, events, updates| {
-        let stopped = events.interrupt_tasks(&machine);
+        let stopped = events.interrupt_tasks(&machine, &diagnostic);
         let mut tasks = Vec::with_capacity(stopped.len());
         for (machine, sequence, task) in stopped {
             tasks.push(task);

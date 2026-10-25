@@ -2514,6 +2514,52 @@ waited = anno refl:(.child.task 'w (.cut (.heap.try_get ['w_gate]) =>> .set ['n]
 }
 
 #[test]
+fn settlement_reports_the_children_left_in_error() {
+    // A flagged child fails settlement, with what flagged it, until its
+    // parent recovers it: a failed task's diagnostic, or an interrupt's
+    // reason.
+    let source = r#"language g0
+import 'std
+recovered = anno refl:(.child.task 'r (.fail) >>= (\_ -> .cut (.child.status 'r >>= (\s -> if s == 'error then .r () else .fail)) =>> .child.recover 'r =>> .heap.set ['recovered] "recovered")) ()
+failed = anno refl:(.child.task 'f (.fail) >>= (\_ -> .cut (.child.status 'f >>= (\s -> if s == 'error then .r () else .fail)) =>> .heap.set ['failed] "failed")) ()
+stopped = anno refl:(.child.task 's (.heap.set ['s_started] () =>> .cut (.heap.try_get ['s_gate])) >>= (\_ -> .cut (.heap.try_get ['s_started]) =>> .child.interrupt 's "stopped by its parent" =>> .heap.set ['stopped] "stopped")) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["failed_children"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    for name in ["recovered", "failed", "stopped"] {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    let RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+        panic!("the children should leave the runtime ready")
+    };
+    let report = snapshot.settle().expect("the runtime should settle");
+    let failed: Vec<(Key, String)> = report
+        .failed_machines()
+        .iter()
+        .map(|machine| {
+            (
+                machine.path().keys().last().cloned().unwrap(),
+                machine
+                    .diagnostic()
+                    .rendered_text_for_test(&assembler.values()),
+            )
+        })
+        .collect();
+    assert_eq!(failed.len(), 2, "{failed:?}");
+    assert!(failed.contains(&(
+        Key::atom_from_text("f"),
+        "reflection task failed permanently".to_owned()
+    )));
+    assert!(failed.contains(&(Key::atom_from_text("s"), "stopped by its parent".to_owned())));
+}
+
+#[test]
 fn an_interrupt_within_a_failed_cut_stops_nothing() {
     // An interrupt is a write like any other: a cut that fails undoes it,
     // and the task runs on to its end.

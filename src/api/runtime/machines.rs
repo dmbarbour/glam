@@ -100,6 +100,16 @@ pub(crate) fn break_replies(
     }
 }
 
+/// The diagnostic an interrupt flags a machine with: its reason, as a
+/// failure's emission.
+pub(crate) fn reason_diagnostic(
+    access: &RuntimeValueAccess<'_>,
+    reason: &RuntimeValueRoot,
+) -> RuntimeValueRoot {
+    let failure = EvaluationFailure::emission_in(access, reason.clone_core_with(access));
+    access.root_runtime_value(crate::diagnostic::failure_diagnostic_in(access, &failure))
+}
+
 /// The diagnostic a control operation breaks a reply with: what happened
 /// to the task's machine.
 pub(crate) fn machine_diagnostic(access: &RuntimeValueAccess<'_>, text: &str) -> RuntimeValueRoot {
@@ -180,6 +190,7 @@ impl MachineHost for RuntimeSharedResources {
                     crate::diagnostic::failure_diagnostic_in(access, failure.as_failure())
                 }
             });
+        let flag = failed.then(|| resolution.clone());
         let resolution = if failed {
             Resolution::Break(resolution)
         } else {
@@ -211,8 +222,8 @@ impl MachineHost for RuntimeSharedResources {
                 // A reply already resolved keeps its resolution.
                 let _ = store.resolve(&resolver, resolution.clone());
             }
-            if failed {
-                events.flags.set(machine.to_vec());
+            if let Some(diagnostic) = &flag {
+                events.flags.set(machine.to_vec(), diagnostic.clone());
             }
             match self.try_commit_transaction(&store, &events) {
                 StoreCommitResult::Conflict => continue,

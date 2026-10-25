@@ -925,8 +925,10 @@ fn build_constant_object_defs(values: &CoreValueFactory) -> RuntimeValueRoot {
 
 /// `\guard final_defs -> scanner`: the reflection operation a namespace
 /// runs by default. It replays the final journal, logging conflicts, then
-/// launches each final `refl.*` task and records them under `guard`. It
-/// first takes ownership of `guard`'s state, so it runs once per namespace.
+/// queues each final `refl.*` task on its own child machine, keyed by its
+/// name, and records their promises under `guard`
+/// (`reflection-tasks-are-machine-tasks`). It first takes ownership of
+/// `guard`'s state, so it runs once per namespace.
 fn build_reflection_scanner(
     values: &CoreValueFactory,
     cache: &dyn EffectValueCache,
@@ -974,7 +976,7 @@ fn build_reflection_scanner(
             "`refl.*` task result",
             &mut locals,
         );
-        let handle = locals.push_internal_binding("<reflection-task-handle>");
+        let promise = locals.push_internal_binding("<reflection-task-promise>");
         let task_record = apply_builtin(
             access,
             Builtin::DictUnion,
@@ -992,7 +994,7 @@ fn build_reflection_scanner(
                     Builtin::DictSingleton,
                     [
                         ResolvedExpr::Embedded(Value::Atom(atom_from_str("task"))),
-                        ResolvedExpr::Local(handle),
+                        ResolvedExpr::Local(promise),
                     ],
                 ),
             ],
@@ -1002,8 +1004,16 @@ fn build_reflection_scanner(
             cache,
             "seq",
             [
-                effect_path_call(access, cache, &["task", "new"], [require_unit]),
-                ResolvedExpr::lambda(vec![handle], effect_call(access, cache, "r", [task_record])),
+                effect_path_call(
+                    access,
+                    cache,
+                    &["child", "task"],
+                    [item_field("key"), require_unit],
+                ),
+                ResolvedExpr::lambda(
+                    vec![promise],
+                    effect_call(access, cache, "r", [task_record]),
+                ),
             ],
         );
         let launcher = ResolvedExpr::lambda(vec![item], launch_item);
@@ -1141,10 +1151,12 @@ fn build_reflection_scanner(
     })
 }
 
-/// `\guard operation target -> target` annotated to launch `operation`, a
-/// namespace's reflection operation, in a task unless `guard` records one
-/// started. The new task forces `operation`, so forcing a definition never
-/// forces a final namespace that `operation` reads, such as `meta.refl`.
+/// `\guard operation target -> target` annotated to queue `operation`, a
+/// namespace's reflection operation, on the annotation task's child
+/// `'scanner`, unless `guard` records one queued, whose promise it records
+/// (`reflection-tasks-are-machine-tasks`). The child's task forces
+/// `operation`, so forcing a definition never forces a final namespace that
+/// `operation` reads, such as `meta.refl`.
 fn build_reflection_annotator(
     values: &CoreValueFactory,
     cache: &dyn EffectValueCache,
@@ -1161,7 +1173,7 @@ fn build_reflection_annotator(
             ])
         };
 
-        let scanner_handle = locals.push_internal_binding("<reflection-scanner-handle>");
+        let scanner = locals.push_internal_binding("<reflection-scanner-promise>");
         let launch_and_remember = effect_call(
             access,
             cache,
@@ -1170,22 +1182,25 @@ fn build_reflection_annotator(
                 effect_path_call(
                     access,
                     cache,
-                    &["task", "new"],
-                    [ResolvedExpr::Local(operation)],
+                    &["child", "task"],
+                    [
+                        ResolvedExpr::Embedded(Value::Atom(atom_from_str("scanner"))),
+                        ResolvedExpr::Local(operation),
+                    ],
                 ),
                 ResolvedExpr::lambda(
-                    vec![scanner_handle],
+                    vec![scanner],
                     effect_path_call(
                         access,
                         cache,
                         &["heap", "set"],
-                        [state_path("claim"), ResolvedExpr::Local(scanner_handle)],
+                        [state_path("claim"), ResolvedExpr::Local(scanner)],
                     ),
                 ),
             ],
         );
-        // A claim already defined means a task started; its value, a task
-        // handle, is never compared (`dict-empty-is-a-value`).
+        // A claim already defined means a scanner was queued; its value, the
+        // scanner's promise, is never compared (`dict-empty-is-a-value`).
         let existing = locals.push_internal_binding("<reflection-claim>");
         let already_started = effect_call(
             access,

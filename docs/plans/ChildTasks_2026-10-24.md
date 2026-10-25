@@ -144,9 +144,25 @@ Each with tests, the full gate, and a commit.
    `.task.*` to `.child.*`. Failures reach the CLI as flagged machines in
    place of the ledger's `task_failures`, until `api-settlement` reports
    them.
+   Built 2026-10-25, with defaults 2 and 3. The annotator queues the
+   boundary's operation on `'scanner` and records its promise as
+   `[guard, 'claim]`; the scanner queues each `refl.*` entry under its key,
+   recording `{key, task}` with the task's promise. A flag keeps the
+   diagnostic of what raised it, a failure's or an interrupt's reason, and
+   settlement reports every standing flag as a `FailedMachine`
+   (`QuiescenceReport::failed_machines`), each once among the pending
+   reports, which the CLI fails a batch on and renders with the machine's
+   path (`Values::key` reifies its keys). The compiler's probe tests await
+   the recorded promises. The other `.task.*` uses, the tests of `.task.*`
+   itself and the CLI logger's children, wait for
+   `child-task-retirement`, each migrated or retired by its purpose. Noted:
+   the machines below anonymous roots stay, as the Reflection Model says
+   children do, so each boundary leaves a cell and empty queues per
+   machine; nothing reclaims them yet.
 6. `child-task-retirement` — `.task.*`, `TaskHandleCell`, the status
    queries, `acknowledge_reasoning_failure` and the failure ledger retire,
-   with their docs.
+   with their docs, and the remaining `.task.*` tests and the CLI logger's
+   `.task.new` children move to `.child.*` or retire with what they test.
 
 ## Defaults, open to the maintainer
 

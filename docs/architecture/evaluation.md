@@ -823,7 +823,10 @@ that bucket instead of upgrading the former owner session. Rust clients receive
 the corresponding opaque, runtime-bound `ReasoningFailure` from a settled
 `QuiescenceReport` and may remove the same entry with
 `Assembler::acknowledge_reasoning_failure`. Acknowledgement through either
-surface leaves the terminal result unchanged.
+surface leaves the terminal result unchanged. A task on a child machine,
+as the compiler's reflection boundaries queue, never reaches the ledger: its
+failure flags its machine, and the report lists the flagged machines as
+`failed_machines` (`reflection-tasks-are-machine-tasks`).
 
 ### Scheduler State Ownership
 

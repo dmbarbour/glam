@@ -420,11 +420,15 @@ impl RuntimeEventJournal {
 
     /// Interrupts the tasks running on the child machine at `machine` and
     /// its descendants, as this journal sees them: takes each from its
-    /// queue, whose head it is, and flags its machine. Returns each stopped
-    /// task's machine, its item's sequence and its record; where nothing
-    /// runs, on a flagged or an idle machine, it changes nothing. Its reads
-    /// are observed.
-    pub(crate) fn interrupt_tasks(&mut self, machine: &[Key]) -> Vec<(Vec<Key>, u64, Value)> {
+    /// queue, whose head it is, and flags its machine with `diagnostic`, the
+    /// interrupt's. Returns each stopped task's machine, its item's sequence
+    /// and its record; where nothing runs, on a flagged or an idle machine,
+    /// it changes nothing. Its reads are observed.
+    pub(crate) fn interrupt_tasks(
+        &mut self,
+        machine: &[Key],
+        diagnostic: &RuntimeValueRoot,
+    ) -> Vec<(Vec<Key>, u64, Value)> {
         let mut stopped = Vec::new();
         for address in self.ports.buffers_below(machine, &TASKS) {
             if self.flags.read(&address.machine) {
@@ -438,7 +442,7 @@ impl RuntimeEventJournal {
             else {
                 continue;
             };
-            self.flags.set(address.machine.clone());
+            self.flags.set(address.machine.clone(), diagnostic.clone());
             stopped.push((address.machine, sequence, task));
         }
         stopped

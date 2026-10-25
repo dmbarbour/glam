@@ -454,6 +454,12 @@ impl Values {
         self.with_access(|values| values.atom_from_text(text.as_ref()))
     }
 
+    /// The value `key` names, as raw data: an atom, a number, a binary, or a
+    /// list or dictionary of keys.
+    pub fn key(&self, key: &Key) -> Value {
+        self.with_access(|values| values.wrap(values.runtime_access().value_from_key(key)))
+    }
+
     pub fn integer(&self, value: i64) -> Value {
         self.with_access(|values| values.wrap(CoreValue::Number(Number::integer(value))))
     }

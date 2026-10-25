@@ -4336,6 +4336,55 @@ ordinary = "ordinary"
     );
 }
 
+/// A failing `refl.*` task flags its own child machine, keyed by its name
+/// under the scanner, the annotation task's child `'scanner`; settlement
+/// reports the machine failed while the flag stands, rendering it once
+/// (`reflection-tasks-are-machine-tasks`).
+#[test]
+fn a_failing_reflection_task_leaves_its_machine_failed() {
+    let source = r#"language g0
+import 'std
+refl.bad = 1 / 0
+refl.good = .r ()
+ordinary = "ordinary"
+"#;
+    let (assembler, context, module, _module_root, _diagnostics) =
+        reflection_test_module(source, &["failed_reflection_test"], &[]);
+
+    assert_same_value_representation(
+        &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
+        &Value::binary_from_text("ordinary"),
+    );
+    let settle = || {
+        let crate::api::RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+            panic!("a failed reflection task should leave the runtime ready")
+        };
+        snapshot
+            .settle()
+            .expect("unchanged runtime readiness should settle")
+    };
+    let report = settle();
+    assert!(report.task_failures().is_empty());
+    let [failed] = report.failed_machines() else {
+        panic!("one machine should fail: {:?}", report.failed_machines())
+    };
+    let path = failed.path().keys();
+    assert_eq!(path.len(), 4, "{path:?}");
+    assert_eq!(path[0], Key::atom_from_text("refl"));
+    assert!(crate::reflection::is_anonymous_key(&path[1]));
+    assert_eq!(
+        path[2..],
+        [Key::atom_from_text("scanner"), Key::atom_from_text("bad")]
+    );
+    assert_eq!(report.pending_failed_machine_reports().len(), 1);
+    let again = settle();
+    assert_eq!(again.failed_machines().len(), 1, "the flag stands");
+    assert!(
+        again.pending_failed_machine_reports().is_empty(),
+        "a failed machine is reported once"
+    );
+}
+
 #[test]
 fn quoted_paths_lower_to_ordinary_path_lists() {
     let parsed =
@@ -7302,7 +7351,7 @@ declare later
 assume outside
 outside := 2
 ok = "ok"
-meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "probe"
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> seq scanner (.r ()))) } "probe"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["journal_report_test"], &[("guard", "")]);
@@ -7604,7 +7653,7 @@ object foo extends base with
     assume w
     w := 4
     y = 5
-meta.probe = anno { refl:(.heap.get [[abstract_global_path foo, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "probe"
+meta.probe = anno { refl:(.heap.get [[abstract_global_path foo, 'meta, 'refl]:(),'claim] >>= (\scanner -> seq scanner (.r ()))) } "probe"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["object_journal_test"], &[("guard", "")]);
@@ -7691,7 +7740,7 @@ object foo with
     a = 1
 foo.b = 2
 meta.module_unclaimed = anno { refl:(not (.heap.try_get [guard,'claim])) } "module unclaimed"
-meta.object_claimed = anno { refl:(.heap.get [[abstract_global_path foo, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .r ()))) } "object claimed"
+meta.object_claimed = anno { refl:(.heap.get [[abstract_global_path foo, 'meta, 'refl]:(),'claim] >>= (\scanner -> seq scanner (.r ()))) } "object claimed"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["object_member_test"], &[("guard", "")]);
@@ -7720,7 +7769,7 @@ refl.notice := .log 'info { msg:{ text:"final reflection task" } }
 meta.hidden = "metadata"
 ordinary = "ordinary"
 ordinary_two = "ordinary two"
-probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
+probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> seq scanner (.heap.get [guard,'tasks] >>= (\tasks -> seq (list.head tasks).task (.r ()))))) } "probe"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
         reflection_test_module(source, &["module_refl_test"], &[("guard", "")]);
@@ -7757,7 +7806,7 @@ fn named_top_level_object_uses_object_refl_without_triggering_module_refl() {
     let source = r#"language g0
 import 'std
 refl.module_notice = .log 'info { msg:{ text:"module reflection task" } }
-meta.probe = anno { refl:(.heap.get [[foo.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[foo.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
+meta.probe = anno { refl:(.heap.get [[foo.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> seq scanner (.heap.get [[foo.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> seq (list.head tasks).task (.r ()))))) } "probe"
 object foo with
   refl.notice = .log 'info { msg:{ text:"object reflection task" } }
   meta.hidden = "metadata"
@@ -7793,7 +7842,7 @@ object foo with
 fn nested_declared_object_uses_final_extended_refl() {
     let source = r#"language g0
 import 'std
-meta.probe = anno { refl:(.heap.get [[parent.child.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[parent.child.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
+meta.probe = anno { refl:(.heap.get [[parent.child.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> seq scanner (.heap.get [[parent.child.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> seq (list.head tasks).task (.r ()))))) } "probe"
 object parent with
   refl.parent_notice = .log 'info { msg:{ text:"parent reflection task" } }
   object child with
@@ -7826,8 +7875,8 @@ extend parent.child with
 fn inherited_member_uses_derived_object_refl_and_guard() {
     let source = r#"language g0
 import 'std
-meta.derived_probe = anno { refl:(.heap.get [[derived.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[derived.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "derived probe"
-meta.base_probe = anno { refl:(.heap.get [[base.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [[base.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "base probe"
+meta.derived_probe = anno { refl:(.heap.get [[derived.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> seq scanner (.heap.get [[derived.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> seq (list.head tasks).task (.r ()))))) } "derived probe"
+meta.base_probe = anno { refl:(.heap.get [[base.spec.name, 'meta, 'refl]:(),'claim] >>= (\scanner -> seq scanner (.heap.get [[base.spec.name, 'meta, 'refl]:(),'tasks] >>= (\tasks -> seq (list.head tasks).task (.r ()))))) } "base probe"
 object base with
   refl.notice = .log 'info { msg:{ text:"base reflection task" } }
   inherited = "inherited value"
@@ -7900,7 +7949,7 @@ fn overriding_refl_with_undefined_disables_automatic_tasks() {
 import 'std
 refl.notice = .log 'info { msg:{ text:"disabled reflection task" } }
 refl := {}
-meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\_tasks -> .r ())))) } "probe"
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> seq scanner (.heap.get [guard,'tasks] >>= (\_tasks -> .r ())))) } "probe"
 ordinary = "ordinary"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
@@ -7926,7 +7975,7 @@ fn overriding_meta_refl_replaces_the_reflection_operation() {
 import 'std
 refl.notice = .log 'info { msg:{ text:"scanned reflection task" } }
 meta.refl := .r ()
-meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> not (.heap.try_get [guard,'tasks])))) } "probe"
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> seq scanner (not (.heap.try_get [guard,'tasks])))) } "probe"
 ordinary = "ordinary"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
@@ -7951,7 +8000,7 @@ fn the_reflection_scanner_runs_once_per_namespace() {
     let source = r#"language g0
 import 'std
 refl.again = meta.refl
-meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> .task.join (list.head tasks).task >>= (\_ -> .r ()))))) } "probe"
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> seq scanner (.heap.get [guard,'tasks] >>= (\tasks -> seq (list.head tasks).task (.r ()))))) } "probe"
 ordinary = "ordinary"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =
@@ -7977,7 +8026,7 @@ fn automatic_reflection_tasks_require_unit_results() {
     let source = r#"language g0
 import 'std
 refl.bad = .r "not unit"
-meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> .task.join scanner >>= (\_ -> .heap.get [guard,'tasks] >>= (\tasks -> .task.error (list.head tasks).task >>= (\_error -> .r ()))))) } "probe"
+meta.probe = anno { refl:(.heap.get [guard,'claim] >>= (\scanner -> seq scanner (.heap.get [guard,'tasks] >>= (\tasks -> .cut (.try (seq (list.head tasks).task (.r ())) >>= (\outcome -> dict.defines ['err] outcome)))))) } "probe"
 ordinary = "ordinary"
 "#;
     let (_assembler, context, module, _module_root, diagnostics) =

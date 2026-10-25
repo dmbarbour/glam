@@ -1272,8 +1272,17 @@ fn failed_reflection_tasks_fail_the_batch_after_writing_the_result() {
 
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("reflection task"));
-    assert!(String::from_utf8_lossy(&output.stderr).contains("failed"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("reflection task failed permanently"),
+        "{stderr}"
+    );
+    // Each `refl.*` task runs on its own child machine, below the
+    // annotation task's anonymous root and its scanner.
+    assert!(
+        stderr.contains("runtime: machine failure (machine refl/<abstract>/scanner/failure)"),
+        "{stderr}"
+    );
 }
 
 #[test]

@@ -1008,8 +1008,10 @@ handle API goes.
         reflection task is its own root for child tasks (maintainer,
         2026-10-24). Built so far (2026-10-24): the port journal in
         reflection transactions, `.child.task` and `.child.status` with
-        child machines' queues, persistent local state and flags, and
-        `.child.interrupt`, `.child.recover` and `.child.clear`.
+        child machines' queues, persistent local state and flags,
+        `.child.interrupt`, `.child.recover` and `.child.clear`, and the
+        compiler's reflection boundaries on child tasks, failed machines
+        reported at settlement (2026-10-25).
       - `api-refl-call`: `.child.call`, with a child's machine state where
         a caller's transaction stages it.
       - `api-refl-annotations`: annotation tasks on anonymous machines

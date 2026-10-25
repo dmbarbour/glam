@@ -11,6 +11,7 @@ use glam::{
 /// The reports of a settlement that are still to be rendered.
 pub(crate) struct SettledReportSelection {
     pub(crate) task_failures: Vec<glam::ReasoningFailure>,
+    pub(crate) failed_machines: Vec<glam::FailedMachine>,
     pub(crate) delivery_failures: Vec<Arc<RuntimeDeliveryFailure>>,
     pub(crate) exit_errors: Vec<RuntimeDisposition>,
     pub(crate) killed_work: Vec<RuntimeDeadlockWork>,
@@ -22,6 +23,7 @@ impl SettledReportSelection {
     pub(crate) fn pending(report: &QuiescenceReport) -> Self {
         Self {
             task_failures: report.pending_task_failure_reports().to_vec(),
+            failed_machines: report.pending_failed_machine_reports().to_vec(),
             delivery_failures: report
                 .pending_delivery_failure_reports()
                 .failures()
@@ -66,6 +68,11 @@ pub(crate) fn settled_report_diagnostics(
             ],
         )?;
         diagnostics.push(failure.diagnostic().clone().with_context(values, context)?);
+    }
+    for machine in selection.failed_machines {
+        let path = values.list(machine.path().keys().iter().map(|key| values.key(key)))?;
+        let context = runtime_report_context(values, "machine_failure", vec![("machine", path)])?;
+        diagnostics.push(machine.diagnostic().clone().with_context(values, context)?);
     }
     for failure in selection.delivery_failures {
         let context = runtime_report_context(
@@ -287,6 +294,7 @@ mod tests {
     fn assert_settled_report_owner_inventory(selection: &SettledReportSelection) {
         let SettledReportSelection {
             task_failures: _,
+            failed_machines: _,
             delivery_failures: _,
             exit_errors: _,
             killed_work: _,

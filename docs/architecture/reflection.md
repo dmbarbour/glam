@@ -414,10 +414,14 @@ decide whether an optimistic transaction conflicts.
 success reveals `Target` without forcing it.
 
 The built-in g front end also decorates ordinary module definitions and named
-declared-object members with one-shot boundaries. Demand launches one scanner,
-which waits for final `refl.*`, then launches each named task in deterministic
-order. Guards are stored with explicit shared-heap effects under identities
-derived from module paths or final object `spec.name`.
+declared-object members with one-shot boundaries. Demand queues one scanner on
+the boundary task's child `'scanner`, which waits for final `refl.*`, then
+queues each named task, in deterministic order, on its own child keyed by its
+name (`.child.task`). Guards are stored with explicit shared-heap effects under
+identities derived from module paths or final object `spec.name`, holding the
+tasks' promises. A failed task's machine stays flagged, and settlement reports
+it (`QuiescenceReport::failed_machines`), which fails a CLI batch as a task
+failure does.
 
 ## CLI Logger Session
 
