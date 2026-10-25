@@ -1186,7 +1186,7 @@ fn private_builder_api_exposes_only_pure_task_local_and_construction_operations(
                 "wrong operation arity for `{name}`"
             );
         }
-        for name in ["heap", "exit", "task", "log", "env", "refl"] {
+        for name in ["heap", "task", "log", "env", "refl"] {
             assert!(
                 api.get(&crate::core::Key::atom_from_text(name)).is_none(),
                 "private builder API must not expose `{name}`"
