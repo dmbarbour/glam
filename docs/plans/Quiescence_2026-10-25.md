@@ -120,7 +120,8 @@ the CLI moves onto it.
 4. `quiescence-options`: interrupt and clear through the analysis's
    entries, interrupts flagging what they halt early, with the call's
    callees. Recovery and acting go through turns as they do now.
-   Settlement Clearing's slices fold in here.
+   Settlement Clearing's slices fold in here; the design is
+   [Quiescence Options](QuiescenceOptions_2026-10-25.md).
    First, `reclaim-once-clear`, the reclamation Obligations left open.
    Built 2026-10-25: an ended anonymous root stays among the ended roots
    while a machine below it owes, and a commit that discharges an

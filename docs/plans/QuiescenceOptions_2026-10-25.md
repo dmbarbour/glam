@@ -1,0 +1,144 @@
+# Quiescence Options — 2026-10-25
+
+A design note for `quiescence-options`, step 4 of the
+[Quiescence](Quiescence_2026-10-25.md) transition: the operations a host
+takes after an analysis, interrupt and clear, through what the analysis's
+entries name. It folds in [Settlement Clearing](SettlementClearing_2026-10-25.md),
+whose slices become these options. Drafted 2026-10-25 for the maintainer's
+review before building; its first slice, `reclaim-once-clear`, was decided
+already and is built.
+
+## The model
+
+From `quiescence-is-analyzed` and the Quiescence note's end state:
+
+- A host may *interrupt* chosen work deliberately, at quiescence or at any
+  other time. Whatever an interrupt halts early is flagged: the machine of
+  each run it stops, and the children of the calls that run was inside
+  (maintainer, 2026-10-25). Idle work is never stopped by itself.
+- A host may *clear* a machine in error with its subtree, abandoning what
+  it accepted.
+- Recovery and other acts go through turns, as they do now.
+- Anonymous machines are reachable only through the analysis, whose
+  entries carry what these operations need.
+
+## Today (survey, 2026-10-25)
+
+- **Children have both operations.** `.child.interrupt Key Reason` takes
+  the running task of the child and of each descendant from its queue,
+  flags the machine with the reason, and breaks the reply, all in the
+  transaction; the commit then cancels each stopped run
+  (`MachineHost::interrupt`), whose end claims nothing.
+  `.child.clear Key` empties the subtree, breaking the replies of the tasks
+  it drops, and waits while a machine there is busy (`ChildBusy`), so a
+  parent interrupts first what it means to stop. Neither flags a callee.
+- **An annotation task's root is not a child.** Its machine is its
+  anonymous root, `refl/<task>`, with no queue; its failure flags the root
+  in the coordinator (`FailedRoots`), not in the flag record. Cancelling
+  the task ends it `Cancelled`, which flags nothing. A Rust-scheduled run,
+  the configured logger's among them, has an anonymous root too, for the
+  children it tasks; its host stops it (`EffectRunStop`).
+- **What the analysis names.** A machine in error carries its path
+  (`FailedMachine`), as do a backlog and each acceptor of an obligation. A
+  wait carries its work, task and session IDs, but no machine: the
+  coordinator knows a reflection task's work, not the child it runs on,
+  which only the task's own `TaskMachine` holds.
+- **Call frames are a branch's.** A branch's calls (`Branch::calls`) live
+  in the task's reflection machine. A cut that failed or erred within a
+  call waits to rerun from its start, holding no frame; only an evaluation
+  blocked inside `Op` holds one, so at quiescence only a promise wait
+  inside a call does. A cancelled machine is dropped with its frames.
+- **Reclamation keeps what owes, and now forgets it once discharged**
+  (`reclaim-once-clear`, below). Only a clear takes a flag from a machine
+  nothing runs on.
+
+## Proposed design
+
+### What a wait names
+
+`RuntimeWait::machine()`: the machine the waiting task runs on, a child's
+path or its anonymous root, recorded in the coordinator's reflection work
+as the task launches (`ReflectionLaunchPolicy` already carries both); none
+for an evaluation that is not a task.
+
+### Interrupt
+
+`EvaluationRuntime::interrupt(&MachinePath, reason) -> Result<Vec<MachinePath>, Error>`
+stops the run on the machine at the path and on each of its descendants,
+as `.child.interrupt` does a child's, in one transaction, and answers the
+machines it flagged:
+
+- a child's run: taken from its queue, its machine flagged with the
+  reason, its reply broken, and the run cancelled at commit, as now;
+- an annotation task's root: the task cancelled, and its root flagged with
+  the reason, as its failure would flag it (`FailedRoots`); a
+  Rust-scheduled run is its host's to stop, so its root's path stops only
+  the runs below it;
+- each callee of a call the stopped run was inside: flagged with the
+  reason too. The run's frames are found where the run waits: a blocked
+  task's block carries the frames of its blocked branch, which the
+  interrupt reads in its transaction. A run interrupted while it runs
+  (not at quiescence) flags its callees as its cancellation drops its
+  frames, in a commit of its own.
+
+Nothing running there changes nothing. `.child.interrupt` takes the same
+callee rule (see question 3).
+
+### Clear
+
+`EvaluationRuntime::clear(&MachinePath) -> Result<bool, Error>` empties
+the machine at the path and its subtree, in error or not (see question
+1), as `.child.clear` does a child:
+its flags, states, ports, shares and environment; its queues, whose
+tasks never ran, their replies broken; and what it accepted, abandoned.
+For an anonymous root it drops the root's failure too. It answers whether
+anything was there, and fails, changing nothing, where a task runs or
+waits in the subtree: a host interrupts first what it means to stop, as a
+parent does. Clearing below an ended root leaves the root forgotten once
+nothing there owes.
+
+### The CLI
+
+No option yet: a batch ends at quiescence, killing nothing, and the
+interactive mode or an IDE takes the choice from its user when it comes.
+Embedders and tests use the API.
+
+### Slices
+
+1. `reclaim-once-clear` — built; see the Quiescence note.
+2. `quiescence-waits-name-machines` — `RuntimeWait::machine()`. Test: the
+   analysis's waits name a child's path and an annotation task's root,
+   and no machine for an evaluation.
+3. `quiescence-interrupts` — `EvaluationRuntime::interrupt`, with the
+   frames on a task's block and the callee rule for both interrupts.
+   Tests: interrupting a child waiting idle flags it with the reason and
+   breaks its reply; an annotation root's interrupt flags the root; a
+   promise wait inside a call flags caller and callee; an interrupt of
+   nothing running changes nothing; a recovery then runs on a flagged
+   child, through its parent.
+4. `quiescence-clears` — `EvaluationRuntime::clear`. Tests: a failed
+   child under an ended root clears, leaving nothing; a failed annotation
+   root clears; a clear refused while a task waits there, then accepted
+   after an interrupt; a cleared queue breaks its replies; an abandoned
+   obligation leaves the analysis.
+
+Then `settlement-retires`, which these options unblock.
+
+## Questions for the maintainer
+
+1. **What a host may clear.** Settlement Clearing leaned toward clearing
+   only orphans, failures under an ended root, leaving one under a live
+   root to its parent, which may yet recover it. A host clear is an
+   action from outside, which is how quiescence ends; a parent waiting on
+   a cleared child sees it idle, and the replies the clear breaks. My
+   lean: any machine whose subtree is not busy, as `.child.clear` takes,
+   orphan or not, in error or not: the host acts for the user, a clear of
+   a machine that owes is how a host drops an obligation no one will
+   meet, and refusing would add a notion (orphan) to the API for little
+   gain.
+2. **Interrupt by path.** The options take a machine's path, which the
+   analysis's entries carry, rather than an entry, so a host may also name
+   a machine it knows. An anonymous root's path interrupts its annotation
+   task; a Rust-scheduled run stays its host's to stop. Is that the shape?
+3. **One callee rule.** `.child.interrupt` flags callees too, so one rule
+   holds for every interrupt. My lean: yes.
