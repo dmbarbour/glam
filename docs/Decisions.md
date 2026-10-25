@@ -2633,6 +2633,17 @@ maps the short names used here to file names.
     is lost.
   - Only a deliberate interrupt stops work. Whatever an interrupt halts
     early is flagged; idle work is never stopped, and stays unflagged.
+  - (Decided by the maintainer the same day, for `quiescence-options`: an
+    interrupt is transitive. It halts work in the direction of the
+    machine it names, the runs on it and its descendants and the calls
+    they run within, since a parent should not need to care how a child
+    does its task, whether it tasks or calls further children. Each
+    machine whose work it halts is flagged, a callee among them; an idle
+    machine is not, so a cleared one is untouched. `.child.interrupt` and
+    a host's interrupt keep the one rule. A host names a machine by its
+    path, as the analysis's entries carry it, and may clear any machine
+    whose subtree is not busy, in error or not, under an ended root or a
+    live one.)
   - (Decided by the maintainer the same day, for `quiescence-analysis`: a
     cut waiting for a change after an error is unresolved, its own
     family, distinct from intentional waits, a cut that fails by `.fail`

@@ -75,14 +75,19 @@ machines it flagged:
   Rust-scheduled run is its host's to stop, so its root's path stops only
   the runs below it;
 - each callee of a call the stopped run was inside: flagged with the
-  reason too. The run's frames are found where the run waits: a blocked
-  task's block carries the frames of its blocked branch, which the
-  interrupt reads in its transaction. A run interrupted while it runs
-  (not at quiescence) flags its callees as its cancellation drops its
-  frames, in a commit of its own.
+  reason too, since the call is work in the interrupt's direction
+  (decision 3). The run's frames are read where the run waits: the
+  coordinator holds a waiting task's reflection machine, whose active
+  branch holds its calls, so the interrupt reads them under the
+  coordinator lock and flags the callees in its own commit, where no
+  later flag can land on a machine cleared meanwhile. A run caught in the
+  middle of a quantum is held by its worker, not the coordinator: the
+  interrupt flags its machine and stops it at the quantum's end, its
+  calls unflagged, since they are that quantum's own and nothing of them
+  commits.
 
 Nothing running there changes nothing. `.child.interrupt` takes the same
-callee rule (see question 3).
+callee rule.
 
 ### Clear
 
@@ -105,7 +110,7 @@ Embedders and tests use the API.
 
 ### Slices
 
-1. `reclaim-once-clear` — built; see the Quiescence note.
+1. `reclaim-once-clear` — built 2026-10-25; see the Quiescence note.
 2. `quiescence-waits-name-machines` — `RuntimeWait::machine()`. Test: the
    analysis's waits name a child's path and an annotation task's root,
    and no machine for an evaluation.
@@ -124,7 +129,21 @@ Embedders and tests use the API.
 
 Then `settlement-retires`, which these options unblock.
 
-## Questions for the maintainer
+## Decisions (maintainer, 2026-10-25)
+
+1. **A host may clear any machine whose subtree is not busy**, in error
+   or not, orphan or not.
+2. **The options take a machine's path.** An anonymous root's path
+   interrupts its annotation task; a Rust-scheduled run stays its host's
+   to stop.
+3. **An interrupt is transitive.** It halts work in the direction of the
+   machine it names: a parent should not need to care how a child does
+   its task, whether it tasks further children or calls them, and just
+   wants what goes on in that direction to halt. Idle machines are still
+   not flagged, so a cleared machine is untouched. The same rule holds
+   for `.child.interrupt`.
+
+## Questions for the maintainer, as drafted
 
 1. **What a host may clear.** Settlement Clearing leaned toward clearing
    only orphans, failures under an ended root, leaving one under a live
