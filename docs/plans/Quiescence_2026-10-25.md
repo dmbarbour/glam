@@ -125,6 +125,47 @@ the CLI moves onto it.
    turn runtime meet, as `rt.analysis()`; and the analysis as a
    reflection effect, for a logger's or an IDE's status.
 
+### Step 3, planned (survey, 2026-10-25)
+
+**Today.** The CLI's batch is one turn on the root: it starts the logger,
+assembles, then loops settlement (`settle_batch_runtime`, and
+`settle_batch_runtime_default` without a configured logger) until a
+report renders nothing new, killing a deadlock on the way, and joins the
+logger. The configured logger, `conf.log`, runs as an `EffectRun` whose
+idiom (`CLI.md`) reads the log in a cut and, on an empty read, votes
+`.exit.success`. Settlement publishing that vote is what ends it, or a
+kill does; nothing else can stop the run from outside. So settlement
+cannot leave the CLI until the logger ends another way.
+
+**The logger's end.** When the CLI recognizes the batch's end, a
+quiescence whose analysis has nothing new, it stops the configured
+logger's run itself, deliberately: a logger waiting on its input, idle,
+ends cleanly, unflagged, as `quiescence-reports-unresolved-state` ends a
+fork waiting in an outermost cut. A logger blocked on anything else is
+already an issue in the analysis. The idiom drops `.exit.success`: the
+logger waits on `.read_log` in a cut. This needs a stop for a scheduled
+effect run, cancelling its root task, until the logger becomes a turn
+(`api-effect-providers`).
+
+**Slices.**
+
+1. `quiescence-batch` — both batch paths pump to quiescence, take the
+   analysis, render the issues not rendered before, each with a report
+   context as settled reports have (`promise_wait`, `erred_wait`,
+   `pending_obligation`, `machine_failure`), and end once an analysis has
+   nothing new, stopping the configured logger; the exit status fails on
+   any issue, as on any error diagnostic. No settlement, no kill. Tests:
+   the CLI's tests, rendering each family once, a logger without an exit
+   vote ending cleanly, and a stuck task failing the batch without being
+   killed.
+2. `exit-votes-retire` — `.exit.*`, `ExitIntent`, exit dispositions and
+   the exits readiness carries, with the tests and docs that vote, under
+   `api-refl-retirements`.
+3. After `quiescence-options` gives hosts their deliberate interrupt:
+   `settlement-retires` — `QuiescenceSnapshot::settle`, the deadlock
+   kill, `QuiescenceReport` and its pending lists, with the tests that
+   settle, each judged for whether the analysis's tests serve it.
+
 ### Decisions on the transition (maintainer, 2026-10-25)
 
 1. **An erred wait is unresolved**, clearly distinct from intentional
