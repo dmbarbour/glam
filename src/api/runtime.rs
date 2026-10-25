@@ -34,6 +34,7 @@ mod machines;
 mod ports;
 mod readiness;
 mod shares;
+mod states;
 
 pub use events::*;
 use events::{

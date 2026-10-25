@@ -9,6 +9,7 @@ use rpds::RedBlackTreeMapSync;
 use super::flags::{FlagJournal, FlagRecord};
 use super::ports::{IMPORTS, PortAddress, PortJournal, PortState};
 use super::shares::{ShareJournal, ShareRecord};
+use super::states::{StateJournal, StateRecord};
 use super::{RuntimeSharedResources, publish_runtime_observation};
 use crate::api::{Error, Value};
 use crate::core::Key;
@@ -183,6 +184,8 @@ pub(in crate::api) struct RuntimeEventState {
     pub(in crate::api) shares: ShareRecord,
     /// Which child machines are flagged, in error.
     pub(in crate::api) flags: FlagRecord,
+    /// The child machines' local states.
+    pub(in crate::api) states: StateRecord,
 }
 
 impl RuntimeEventState {
@@ -194,6 +197,7 @@ impl RuntimeEventState {
             ports: PortState::new(),
             shares: ShareRecord::new(),
             flags: FlagRecord::new(),
+            states: StateRecord::new(),
         }
     }
 
@@ -204,6 +208,7 @@ impl RuntimeEventState {
             ports: self.ports.clone(),
             shares: self.shares.clone(),
             flags: self.flags.clone(),
+            states: self.states.clone(),
         }
     }
 
@@ -239,6 +244,7 @@ impl RuntimeEventState {
             })
             && self.ports.validate(&journal.ports)
             && self.flags.validate(&journal.flags)
+            && self.states.validate(&journal.states)
     }
 
     pub(super) fn commit_validated(&mut self, journal: &RuntimeEventJournal) -> bool {
@@ -289,11 +295,13 @@ impl RuntimeEventState {
         let ports_changed = self.ports.commit(&journal.ports);
         let shares_changed = self.shares.commit(&journal.shares);
         let flags_changed = self.flags.commit(&journal.flags);
+        let states_changed = self.states.commit(&journal.states);
         input_changed
             || !journal.outputs.is_empty()
             || ports_changed
             || shares_changed
             || flags_changed
+            || states_changed
     }
 
     fn admit_input(
@@ -332,6 +340,7 @@ pub struct RuntimeEventSnapshot {
     pub(in crate::api) ports: PortState,
     pub(in crate::api) shares: ShareRecord,
     pub(in crate::api) flags: FlagRecord,
+    pub(in crate::api) states: StateRecord,
 }
 
 #[derive(Clone)]
@@ -363,6 +372,8 @@ pub struct RuntimeEventJournal {
     pub(in crate::api) shares: ShareJournal,
     /// Which child machines' flags this transaction read or changed.
     pub(in crate::api) flags: FlagJournal,
+    /// Which child machines' states this transaction read or wrote.
+    pub(in crate::api) states: StateJournal,
 }
 
 impl RuntimeEventJournal {
@@ -371,6 +382,7 @@ impl RuntimeEventJournal {
         let ports = PortJournal::new(snapshot.ports.clone());
         let shares = ShareJournal::new(&snapshot.shares);
         let flags = FlagJournal::new(&snapshot.flags);
+        let states = StateJournal::new(&snapshot.states);
         Self {
             runtime: snapshot.runtime,
             snapshot,
@@ -380,6 +392,7 @@ impl RuntimeEventJournal {
             ports,
             shares,
             flags,
+            states,
         }
     }
 
@@ -399,6 +412,16 @@ impl RuntimeEventJournal {
     /// Whether the child machine at `machine` is flagged, observing it.
     pub(crate) fn machine_flagged(&mut self, machine: &[Key]) -> bool {
         self.flags.read(machine)
+    }
+
+    /// The local state of the child machine at `machine`, with this
+    /// journal's writes, observing it.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "a call reads it, at `child-call-frame`")
+    )]
+    pub(crate) fn machine_state(&mut self, machine: &[Key]) -> Option<Value> {
+        self.states.read(machine).map(Value::from_runtime_root)
     }
 
     /// Whether the child machine at `machine` is busy: unflagged, with a
@@ -475,6 +498,7 @@ impl RuntimeEventJournal {
         self.ports.clear_below(machine);
         self.shares.clear_below(machine.to_vec());
         self.flags.clear_below(machine);
+        self.states.clear_below(machine);
         cleared
     }
 

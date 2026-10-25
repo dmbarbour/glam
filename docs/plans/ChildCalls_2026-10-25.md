@@ -146,6 +146,13 @@ Each with tests, the full gate, and a commit.
    (state persists between tasks, clears drop it, reclamation drops it),
    and a conflict between a run's end and a transaction that read the
    child's state.
+   Built 2026-10-25: `StateRecord` and `StateJournal`
+   (`api/runtime/states.rs`), versioned per machine so a read validates; a
+   run's end writes its state in the commit that claims its item, reading
+   it so a clear committed meanwhile conflicts, and the run's `discard`
+   still drops a state a clear came after; the cells keep only runs.
+   Mutation-checked: read validation, the run's write, the clear's and
+   reclamation's drops.
 2. `child-call-frame` — the per-branch machine and the call frame within
    a transaction: the errors for a child in error and for tasks the
    transaction queued on the child, busy as pushback, the child's state in

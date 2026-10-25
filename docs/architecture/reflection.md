@@ -347,7 +347,8 @@ volume to retry. Dropping the Rust owner does not revoke it.
   and answers the promise of its result; `.child.status Key` reads
   `'idle`, `'busy` or `'error`, observed within a cut. A task that a child's
   queue starts runs on that child (`EvalContext::machine`), whose local
-  state the runtime's `MachineHost` keeps between tasks; any other task is
+  state persists between tasks as transactional state, written in the
+  commit that ends each run; any other task is
   an anonymous root, `refl/<abstract task id>`. The finishing task claims
   its queue item, resolves its reply, flags the machine on failure and
   starts the next item itself (`MachineRunEnd`). `.child.interrupt`,

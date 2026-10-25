@@ -244,6 +244,7 @@ Taken unless the maintainer says otherwise (2026-10-24):
 1. A child machine's local state persists from task to task, as the
    Reflection Model says, taken at a task's start and written back at its
    end rather than staged transactionally; `.child.call` stages it later.
+   (Transactional since `child-state-transactional`, 2026-10-25.)
 2. The compiler's keys: the scanner as the boundary task's child
    `'scanner`, each `refl.*` entry as the scanner's child under its own
    key.

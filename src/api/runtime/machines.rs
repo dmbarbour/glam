@@ -42,9 +42,8 @@ pub(super) struct MachineCells {
 
 #[derive(Default)]
 struct MachineCell {
-    /// The local state its last task left.
-    state: Option<RuntimeValueRoot>,
-    /// The task that runs on it, started and not yet finished.
+    /// The task that runs on it, started and not yet finished. Its local
+    /// state lies in the transactional state (`api/runtime/states.rs`).
     run: Option<Run>,
 }
 
@@ -114,6 +113,10 @@ impl RuntimeSharedResources {
             .events
             .ports
             .remove_below(root, |machine| flags.is_set(machine));
+        state
+            .events
+            .states
+            .remove_below(root, |machine| flags.is_set(machine));
         drop(state);
         cells.retain(|path, _| !path.starts_with(root) || flags.is_set(path));
         drop(cells);
@@ -130,6 +133,13 @@ impl RuntimeSharedResources {
             .cloned()
             .collect();
         let (_, _, events) = self.transaction_snapshot();
+        machines.extend(
+            events
+                .states
+                .machines_for_test()
+                .into_iter()
+                .filter(|path| anonymous_root_of(path).is_some()),
+        );
         machines.extend(
             RuntimeEventJournal::new(events)
                 .present_below_for_test(&[Key::atom_from_text("refl")])
@@ -217,9 +227,13 @@ pub(crate) fn clear_child_machines(
 
 impl MachineHost for RuntimeSharedResources {
     fn local_state(&self, machine: &[Key]) -> Option<RuntimeValueRoot> {
-        self.cells()
+        self.transactions
+            .state
+            .lock()
+            .expect("runtime transaction mutex should not be poisoned")
+            .events
+            .states
             .get(machine)
-            .and_then(|cell| cell.state.clone())
     }
 
     fn start(&self, machine: &[Key]) -> Option<QueuedTask> {
@@ -284,34 +298,55 @@ impl MachineHost for RuntimeSharedResources {
         } else {
             Resolution::Break(resolution)
         };
-        // The task leaves the queue, its reply resolved, in one commit; a
-        // failure flags the machine with it. Where an interrupt or a clear
-        // took the task first, the run claims nothing.
+        // The task leaves the queue, its reply resolved, and the state it
+        // leaves becomes its machine's, in one commit; a failure flags the
+        // machine with it. Where an interrupt took the task first, the run
+        // claims nothing, though its state stays; where a clear came while
+        // it wound down, its state goes with the clear.
+        let ours = |cells: &HashMap<Vec<Key>, MachineCell>| {
+            cells
+                .get(machine)
+                .and_then(|cell| cell.run.as_ref())
+                .filter(|run| run.sequence == sequence)
+                .map(|run| !run.discard)
+        };
         loop {
+            let Some(keeps_state) = ours(&self.cells()) else {
+                break;
+            };
             let (_, store, events) = self.transaction_snapshot();
             let mut store = StoreJournal::new(store);
             let mut events = RuntimeEventJournal::new(events);
+            let mut staged = false;
+            if let Some(state) = state.as_ref().filter(|_| keeps_state) {
+                // Read, so that a clear committed meanwhile conflicts.
+                let _ = events.states.read(machine);
+                events.states.set(machine.to_vec(), state.clone());
+                staged = true;
+            }
             let address = task_address(machine.to_vec());
-            if events.ports.next_sequence(&address) != sequence {
-                break;
+            if events.ports.next_sequence(&address) == sequence
+                && let Some(mut claimed) = events.ports.claim(&address, 1)
+            {
+                let task = claimed
+                    .pop()
+                    .expect("a claim of one holds one")
+                    .into_runtime_root();
+                let resolver = self
+                    .values
+                    .core()
+                    .with_boundary_access(|access| task_reply(&access, &task));
+                if let Some(resolver) = resolver {
+                    // A reply already resolved keeps its resolution.
+                    let _ = store.resolve(&resolver, resolution.clone());
+                }
+                if let Some(diagnostic) = &flag {
+                    events.flags.set(machine.to_vec(), diagnostic.clone());
+                }
+                staged = true;
             }
-            let Some(mut claimed) = events.ports.claim(&address, 1) else {
+            if !staged {
                 break;
-            };
-            let task = claimed
-                .pop()
-                .expect("a claim of one holds one")
-                .into_runtime_root();
-            let resolver = self
-                .values
-                .core()
-                .with_boundary_access(|access| task_reply(&access, &task));
-            if let Some(resolver) = resolver {
-                // A reply already resolved keeps its resolution.
-                let _ = store.resolve(&resolver, resolution.clone());
-            }
-            if let Some(diagnostic) = &flag {
-                events.flags.set(machine.to_vec(), diagnostic.clone());
             }
             match self.try_commit_transaction(&store, &events) {
                 StoreCommitResult::Conflict => continue,
@@ -320,12 +355,7 @@ impl MachineHost for RuntimeSharedResources {
         }
         let mut cells = self.cells();
         let cell = cells.entry(machine.to_vec()).or_default();
-        let run = cell.run.take_if(|run| run.sequence == sequence)?;
-        if let Some(state) = state
-            && !run.discard
-        {
-            cell.state = Some(state);
-        }
+        cell.run.take_if(|run| run.sequence == sequence)?;
         let next = self.queued_head(machine);
         if let Some(next) = &next {
             cell.run = Some(Run {
@@ -398,13 +428,13 @@ impl MachineHost for RuntimeSharedResources {
     }
 
     fn clear(&self, machine: &[Key]) {
+        // The clear dropped the states with its commit.
         let mut cells = self.cells();
         cells.retain(|path, cell| !path.starts_with(machine) || cell.run.is_some());
         for (_, cell) in cells
             .iter_mut()
             .filter(|(path, _)| path.starts_with(machine))
         {
-            cell.state = None;
             if let Some(run) = &mut cell.run {
                 run.discard = true;
             }
@@ -591,6 +621,56 @@ mod tests {
         machine.halt(crate::evaluation::RunHalt::Stopped);
         resources.process_death_notices();
         assert_eq!(halts.load(Ordering::SeqCst), 1, "a run halts once");
+    }
+
+    #[test]
+    fn a_transaction_that_read_a_child_s_state_conflicts_with_a_run_ending_there() {
+        // `child-state-transactional`: a child's local state is
+        // transactional, so a transaction that read it, as a call will,
+        // conflicts with a run that ended on the child meanwhile, whose
+        // state the next run starts from.
+        let runtime = EvaluationRuntime::new(0).expect("the runtime should open");
+        let resources = runtime.state.shared_resources.clone();
+        let values = runtime.values();
+        let machine = vec![Key::atom_from_text("refl"), Key::atom_from_text("a")];
+        let (_, store, events) = resources.transaction_snapshot();
+        let mut events = RuntimeEventJournal::new(events);
+        events.queue_task(machine.clone(), values.integer(1));
+        assert!(matches!(
+            resources.try_commit_transaction(&StoreJournal::new(store), &events),
+            StoreCommitResult::Committed
+        ));
+        let run = resources.start(&machine).expect("the queue holds a task");
+
+        let (_, store, events) = resources.transaction_snapshot();
+        let mut reader = RuntimeEventJournal::new(events);
+        assert!(reader.machine_state(&machine).is_none());
+        reader
+            .states
+            .set(machine.clone(), values.integer(2).into_runtime_root());
+        let left = values.integer(7).into_runtime_root();
+        resources.finish(
+            &machine,
+            run.sequence,
+            MachineTaskOutcome::Complete(values.unit().into_runtime_root()),
+            Some(left),
+        );
+        assert!(matches!(
+            resources.try_commit_transaction(&StoreJournal::new(store), &reader),
+            StoreCommitResult::Conflict
+        ));
+        let state = resources
+            .local_state(&machine)
+            .expect("the run's state is the machine's");
+        assert_eq!(
+            values
+                .core()
+                .with_boundary_access(|access| match state.clone_core_with(&access) {
+                    Value::Number(number) => number.to_i64_if_integer(),
+                    _ => None,
+                }),
+            Some(7)
+        );
     }
 
     #[test]

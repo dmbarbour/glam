@@ -172,10 +172,13 @@ and control flow.
   busy machine, so a cut waits, and `.try` reports `'fail`). Recovery and
   clearing observe a queue's end, so a task queued meanwhile conflicts.
 - The runtime's `MachineHost` (`api/runtime/machines.rs`) keeps each
-  child's local state and its run, named by the sequence of the running
-  task's item in the queue (`TaskMachine::sequence`); its task input and
-  flag lie in the transactional event state (`api/runtime/flags.rs`),
-  whose journal validates the flags it read. A queued task's launch is a
+  child's run, named by the sequence of the running task's item in the
+  queue (`TaskMachine::sequence`); its task input, flag and local state lie
+  in the transactional event state (`api/runtime/flags.rs`,
+  `api/runtime/states.rs`), whose journals validate the flags and the
+  versioned states they read. A run takes its state as it starts and
+  writes the state it leaves in the commit that ends it, so a transaction
+  that read the state, as a call will, conflicts with it. A queued task's launch is a
   commit-time `ReflectionUpdate::Wake`; a finishing task starts the next
   itself. An interrupt stops the run at commit
   (`ReflectionUpdate::Interrupt`): the stopped task's end claims nothing,
