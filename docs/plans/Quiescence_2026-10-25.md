@@ -182,6 +182,14 @@ final diagnostics through it).
    and maintenance failures. Tests: a port holding unread input, a queue
    holding unstarted tasks, a machine's failed delivery, and their
    absence once read, run or acknowledged.
+   Built 2026-10-25: `RuntimeBacklog` (machine, port or `None` for a task
+   queue, count) from the event state's buffers, a task queue counting the
+   tasks behind its head on a machine not in error, and all of them on one
+   in error, whose queue stopped; the retained delivery failures, and the
+   maintenance failures read without draining the settlement's pending
+   list; each its own `RuntimeIssueFamily`. Mutation-checked: both queue
+   rules, empty queues left out, ports' counts, and each family's place in
+   the issues.
 2. `quiescence-batch` — both batch paths pump to quiescence, take the
    analysis, and publish each issue not published before; once the
    logger has a backlog at quiescence, they halt it for the fallback,
@@ -198,7 +206,10 @@ final diagnostics through it).
    kill, `QuiescenceReport` and its pending lists, with the tests that
    settle, each judged for whether the analysis's tests serve it.
 
-**Questions on the end design.**
+**Decided on the end design** (maintainer, 2026-10-25: yes to both, "this
+aligns nicely with my thinking"): a backlog is unresolved by default, its
+own family, and the logger is halted only when left with unread input at
+quiescence. The questions, as asked:
 
 1. **Is a backlog unresolved by default?** An input left unread at
    quiescence, or a queued task never started, is work that did not

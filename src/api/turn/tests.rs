@@ -576,3 +576,47 @@ fn undefined_reads_are_errors_naming_their_path() {
         assert!(named.same_representation(&keys).unwrap(), "{path}");
     }
 }
+
+#[test]
+fn an_analysis_lists_input_a_machine_left_unread() {
+    // `quiescence-is-analyzed`: input in a machine's buffer that no turn
+    // has read is a backlog, which reading clears.
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    rt.run("p", |p| {
+        p.wire_add(Endpoint::output("events"), Endpoint::child("b", "in"))?;
+        p.int_push(1);
+        p.int_push(2);
+        p.port_write("events", 2)
+    })
+    .expect("the turn should succeed");
+    let runtime = rt.assembler().evaluation_runtime();
+    let analysis = runtime.analysis().expect("the runtime is not poisoned");
+    let backlogs: Vec<_> = analysis
+        .backlogs()
+        .iter()
+        .map(|backlog| {
+            (
+                backlog.machine().keys().to_vec(),
+                backlog.port().cloned(),
+                backlog.count(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        backlogs,
+        [(
+            vec![Key::atom_from_text("p"), Key::atom_from_text("b")],
+            Some(Key::atom_from_text("in")),
+            2
+        )]
+    );
+    assert!(
+        analysis
+            .issues()
+            .iter()
+            .any(|issue| issue.family() == crate::api::RuntimeIssueFamily::Backlog)
+    );
+    rt.run("p", |p| p.run("b", |b| b.port_read("in", 2)))
+        .expect("the turn should succeed");
+    assert!(runtime.analysis().unwrap().backlogs().is_empty());
+}

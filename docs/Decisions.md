@@ -2640,6 +2640,15 @@ maps the short names used here to file names.
     idle. Such an erred wait is the recoverable kind; an unrecoverable
     error ends its task, flagging its machine. Rust turns join the
     analysis once settlement's runtime and the turn runtime meet.)
+  - (Decided by the maintainer the same day, for the batch's end: a batch
+    publishes each new issue through its logger, never around it. An
+    idle logger is not halted; its wait ends with the batch. A logger
+    whose input holds unread diagnostics at quiescence is halted, with a
+    diagnostic, and the fallback renders its backlog. A backlog, input
+    left unread or queued tasks never started, is unresolved by default,
+    as is a retained delivery or maintenance failure. Reasons: a client's
+    logger renders everything the client reports; and work that did not
+    happen is of interest, whether or not anything was owed.)
   - `api-settlement` is redirected to `api-quiescence`, and "settlement"
     leaves the vocabulary with the step.
 - **Reasons:** a batch's end is the client's judgment of a quiescent

@@ -1592,10 +1592,23 @@ fn output_failures_are_terminal_durable_and_acknowledgeable() {
     assert!(snapshot.get(adapter_id).is_some());
     assert!(snapshot.get(panic_id).is_some());
     assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+    // `quiescence-is-analyzed`: an analysis lists each retained failure,
+    // until the host acknowledges it.
+    let analyzed_failures = || {
+        runtime
+            .analysis()
+            .unwrap()
+            .issues()
+            .iter()
+            .filter(|issue| issue.family() == RuntimeIssueFamily::DeliveryFailure)
+            .count()
+    };
+    assert_eq!(analyzed_failures(), 3);
 
     let (generation, _, _) = runtime.transaction_snapshot();
     assert!(runtime.acknowledge_delivery_failure(adapter_id));
     assert!(!runtime.acknowledge_delivery_failure(adapter_id));
+    assert_eq!(analyzed_failures(), 2);
     let (after_acknowledgement, _, _) = runtime.transaction_snapshot();
     assert_eq!(after_acknowledgement, generation);
     assert!(
@@ -2885,4 +2898,59 @@ owing = anno refl:(.promise.new >>= (\pr -> .heap.set ['r3] pr.resolver =>> .chi
     assert!(last("o"), "the owing child stays: {left:?}");
     assert!(last("f"), "the child in error stays: {left:?}");
     assert!(!last("q"), "its clear sibling goes: {left:?}");
+}
+
+#[test]
+fn an_analysis_lists_queued_tasks_that_have_not_started() {
+    // `quiescence-is-analyzed`: tasks queued behind a task waiting idle,
+    // or on a child in error whose queue stopped, have not started: a
+    // backlog, gone once they run or a recovery drops them.
+    let source = r#"language g0
+import 'std
+behind = anno refl:(.child.task 'w (.cut (.heap.try_get ['w_gate])) >>= (\_ -> .child.task 'w (.r "second") >>= (\_ -> .heap.set ['behind] "queued"))) ()
+stopped = anno refl:(.child.task 'f (1 / 0) >>= (\p -> .try (seq p (.r ())) >>= (\_ -> .child.task 'f (.r "never") >>= (\_ -> .heap.set ['stopped] "queued")))) ()
+release = anno refl:(.heap.set ['w_gate] ()) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["backlogs"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    let run = |name: &str| {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let _ = assembler.drain_reasoning();
+    };
+    let backlogs = || {
+        let mut backlogs: Vec<_> = assembler
+            .evaluation_runtime()
+            .analysis()
+            .unwrap()
+            .backlogs()
+            .iter()
+            .map(|backlog| {
+                assert!(backlog.port().is_none(), "a task queue's backlog");
+                (backlog.machine().keys().last().cloned(), backlog.count())
+            })
+            .collect();
+        backlogs.sort();
+        backlogs
+    };
+    run("behind");
+    run("stopped");
+    assert_eq!(
+        backlogs(),
+        [
+            (Some(Key::atom_from_text("f")), 1),
+            (Some(Key::atom_from_text("w")), 1),
+        ]
+    );
+    run("release");
+    assert_eq!(
+        backlogs(),
+        [(Some(Key::atom_from_text("f")), 1)],
+        "the waiting task's successor ran"
+    );
 }

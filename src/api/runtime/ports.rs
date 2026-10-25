@@ -189,6 +189,15 @@ impl PortState {
 
     /// Whether a buffer of `port` at the machine at `root` or a descendant
     /// holds an item, at a machine that `counts`.
+    /// Each buffer that holds items, with how many.
+    pub(in crate::api) fn backlogs(&self) -> Vec<(PortAddress, usize)> {
+        self.buffers
+            .iter()
+            .filter(|(_, buffer)| !buffer.items.is_empty())
+            .map(|(address, buffer)| (address.clone(), buffer.items.len()))
+            .collect()
+    }
+
     pub(in crate::api) fn holds_items_below(
         &self,
         root: &[Key],

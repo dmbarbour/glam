@@ -29,6 +29,10 @@ demanded is in progress, which is not quiescent; one on a value nothing in
 progress will produce is a promise wait, naming the work its chain ends at;
 and a cut waiting after an error is an erred wait. Issues count a promise wait
 once, at the head of its chain, leaving out the links another work awaits.
+Beside the waits, the analysis lists the pending obligations, the backlogs
+(input a machine's buffer holds unread, and queued tasks not yet started), the
+machines in error, and the retained delivery and maintenance failures, each
+an issue family a client may mask.
 
 ## Module Ownership
 

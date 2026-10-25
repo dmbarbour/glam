@@ -416,6 +416,12 @@ impl RuntimeMutationAdmission {
         self.activity.record_gc_request_failure(outcome);
     }
 
+    /// The maintenance failures retained until acknowledged, as they stand,
+    /// for an analysis, which changes nothing.
+    pub(crate) fn retained_gc_failures(&self) -> Vec<RuntimeGcMaintenanceFailure> {
+        self.activity.retained_gc_failures()
+    }
+
     pub(crate) fn gc_failure_ledgers_for_settlement(
         &self,
         _settlement: &RuntimeSettlementGuard<'_>,
@@ -837,6 +843,11 @@ impl RuntimeActivityState {
         state.gc.explicit_request = true;
         state.gc.publish_outcome(outcome);
         state.gc.advance_revision();
+    }
+
+    fn retained_gc_failures(&self) -> Vec<RuntimeGcMaintenanceFailure> {
+        let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
+        state.gc.failures.clone()
     }
 
     fn gc_failure_ledgers_for_settlement(

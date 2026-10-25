@@ -5,9 +5,12 @@
 
 use std::sync::Arc;
 
-use super::EvaluationRuntime;
 use super::readiness::{FailedMachine, RuntimeDeadlockWork, runtime_deadlock_work_from_snapshot};
+use super::{
+    EvaluationRuntime, RuntimeDeliveryFailure, RuntimeMaintenanceFailure, maintenance_failure,
+};
 use crate::api::{Diagnostic, Error, MachinePath, Value, Values};
+use crate::core::Key;
 use crate::diagnostic::Severity;
 use crate::evaluation::RuntimeWaitFamilySnapshot;
 use crate::runtime::EvaluationRuntimeId;
@@ -79,29 +82,67 @@ impl PendingObligation {
     }
 }
 
+/// Input a machine left unread: items in one of its input buffers, or, in
+/// a child's task queue, tasks that have not started. Work that did not
+/// happen, whether or not anything was owed (maintainer, 2026-10-25).
+#[derive(Clone, Debug)]
+pub struct RuntimeBacklog {
+    machine: MachinePath,
+    port: Option<Key>,
+    count: usize,
+}
+
+impl RuntimeBacklog {
+    pub fn machine(&self) -> &MachinePath {
+        &self.machine
+    }
+
+    /// The input port, or `None` for a child's task queue.
+    pub fn port(&self) -> Option<&Key> {
+        self.port.as_ref()
+    }
+
+    /// How many items are unread, or tasks have not started.
+    pub fn count(&self) -> usize {
+        self.count
+    }
+}
+
 /// A family of unresolved items. By default each fails a batch; a client
 /// may mask families, or recognize issues of its own.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum RuntimeIssueFamily {
     PromiseWait,
     ErredWait,
+    Backlog,
     PendingObligation,
     MachineInError,
+    DeliveryFailure,
+    MaintenanceFailure,
 }
 
 /// One unresolved item of an analysis.
 #[derive(Clone, Copy, Debug)]
 pub enum RuntimeIssue<'a> {
     Wait(&'a RuntimeWait),
+    Backlog(&'a RuntimeBacklog),
     Obligation(&'a PendingObligation),
     Machine(&'a FailedMachine),
+    /// Output a machine sent to a host's endpoint, whose delivery failed,
+    /// retained until the host acknowledges it.
+    Delivery(&'a RuntimeDeliveryFailure),
+    /// A collection the runtime ran for maintenance that failed, retained.
+    Maintenance(&'a RuntimeMaintenanceFailure),
 }
 
 impl RuntimeIssue<'_> {
     pub fn family(&self) -> RuntimeIssueFamily {
         match self {
+            Self::Backlog(_) => RuntimeIssueFamily::Backlog,
             Self::Obligation(_) => RuntimeIssueFamily::PendingObligation,
             Self::Machine(_) => RuntimeIssueFamily::MachineInError,
+            Self::Delivery(_) => RuntimeIssueFamily::DeliveryFailure,
+            Self::Maintenance(_) => RuntimeIssueFamily::MaintenanceFailure,
             Self::Wait(wait) => match wait.family {
                 RuntimeWaitFamily::PromiseWait => RuntimeIssueFamily::PromiseWait,
                 RuntimeWaitFamily::ErredWait => RuntimeIssueFamily::ErredWait,
@@ -121,8 +162,11 @@ pub struct RuntimeAnalysis {
     runtime: EvaluationRuntimeId,
     quiescent: bool,
     waits: Vec<RuntimeWait>,
+    backlogs: Vec<RuntimeBacklog>,
     obligations: Vec<PendingObligation>,
     failed_machines: Vec<FailedMachine>,
+    delivery_failures: Vec<Arc<RuntimeDeliveryFailure>>,
+    maintenance_failures: Vec<RuntimeMaintenanceFailure>,
 }
 
 impl RuntimeAnalysis {
@@ -140,6 +184,21 @@ impl RuntimeAnalysis {
         &self.waits
     }
 
+    /// Each machine's input left unread, by machine and port.
+    pub fn backlogs(&self) -> &[RuntimeBacklog] {
+        &self.backlogs
+    }
+
+    /// The deliveries to hosts' endpoints that failed, until acknowledged.
+    pub fn delivery_failures(&self) -> &[Arc<RuntimeDeliveryFailure>] {
+        &self.delivery_failures
+    }
+
+    /// The maintenance collections that failed.
+    pub fn maintenance_failures(&self) -> &[RuntimeMaintenanceFailure] {
+        &self.maintenance_failures
+    }
+
     /// The promises machines accepted that are still pending, by promise.
     pub fn obligations(&self) -> &[PendingObligation] {
         &self.obligations
@@ -150,8 +209,9 @@ impl RuntimeAnalysis {
         &self.failed_machines
     }
 
-    /// What is unresolved: the waits that owe something, the pending
-    /// obligations, then the machines in error. A promise wait counts once, at the head of its chain, which
+    /// What is unresolved: the waits that owe something, the backlogs, the
+    /// pending obligations, the machines in error, then the retained
+    /// delivery and maintenance failures. A promise wait counts once, at the head of its chain, which
     /// names where the chain ends; the links another work awaits are left
     /// out. An erred wait counts wherever it is.
     pub fn issues(&self) -> Vec<RuntimeIssue<'_>> {
@@ -163,8 +223,19 @@ impl RuntimeAnalysis {
                 RuntimeWaitFamily::ErredWait => true,
             })
             .map(RuntimeIssue::Wait)
+            .chain(self.backlogs.iter().map(RuntimeIssue::Backlog))
             .chain(self.obligations.iter().map(RuntimeIssue::Obligation))
             .chain(self.failed_machines.iter().map(RuntimeIssue::Machine))
+            .chain(
+                self.delivery_failures
+                    .iter()
+                    .map(|failure| RuntimeIssue::Delivery(failure)),
+            )
+            .chain(
+                self.maintenance_failures
+                    .iter()
+                    .map(RuntimeIssue::Maintenance),
+            )
             .collect()
     }
 }
@@ -181,7 +252,7 @@ impl EvaluationRuntime {
         }
         let coordinator = self.state.work.runtime_analysis_snapshot();
         let failed_roots = self.state.work.failed_roots();
-        let (delivering, mut failures, accepted) = {
+        let (delivering, mut failures, accepted, backlogs, delivery_failures) = {
             let state = self
                 .state
                 .shared_resources
@@ -193,8 +264,18 @@ impl EvaluationRuntime {
                 !state.events.outputs.records.is_empty(),
                 state.events.flags.standing(),
                 state.events.accepted.pending(),
+                state.events.backlogs(),
+                state.events.outputs.failures.clone(),
             )
         };
+        let maintenance_failures = self
+            .state
+            .shared_resources
+            .mutation_admission
+            .retained_gc_failures()
+            .into_iter()
+            .map(maintenance_failure)
+            .collect();
         let values = self.values();
         let core = values.core();
         // An annotation task's failure flags its anonymous root
@@ -224,6 +305,19 @@ impl EvaluationRuntime {
                     awaited: wait.awaited,
                 })
                 .collect(),
+            backlogs: backlogs
+                .into_iter()
+                .map(|(machine, port, count)| RuntimeBacklog {
+                    machine: MachinePath::from(machine),
+                    port,
+                    count,
+                })
+                .collect(),
+            delivery_failures: delivery_failures
+                .iter()
+                .map(|(_, failure)| failure.clone())
+                .collect(),
+            maintenance_failures,
             obligations: accepted
                 .into_iter()
                 .map(|(promise, acceptors)| PendingObligation {

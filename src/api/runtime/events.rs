@@ -205,6 +205,26 @@ impl RuntimeEventState {
         }
     }
 
+    /// Each machine's input left unread, by machine and port, the port
+    /// `None` for a child's task queue, with how many items: for a queue,
+    /// the tasks that have not started, which, on a machine not in error,
+    /// are those behind its head, the task it runs.
+    pub(in crate::api) fn backlogs(&self) -> Vec<(Vec<Key>, Option<Key>, usize)> {
+        self.ports
+            .backlogs()
+            .into_iter()
+            .filter_map(|(address, held)| {
+                let (port, unstarted) = if address.port == *TASKS {
+                    let running = usize::from(!self.flags.is_set(&address.machine));
+                    (None, held - running)
+                } else {
+                    (Some(address.port), held)
+                };
+                (unstarted > 0).then_some((address.machine, port, unstarted))
+            })
+            .collect()
+    }
+
     pub(super) fn snapshot(&self, runtime: EvaluationRuntimeId) -> RuntimeEventSnapshot {
         RuntimeEventSnapshot {
             runtime,

@@ -1071,6 +1071,15 @@ fn recoverable_trace_panic_becomes_retryable_maintenance_and_durable_failure() {
         .expect("retained maintenance failure should settle repeatedly");
     assert_eq!(repeated.maintenance_failures().len(), 1);
     assert!(repeated.pending_maintenance_failure_reports().is_empty());
+    // `quiescence-is-analyzed`: an analysis lists the retained failure.
+    let analysis = runtime.analysis().expect("the runtime is not poisoned");
+    assert_eq!(analysis.maintenance_failures().len(), 1);
+    assert!(
+        analysis
+            .issues()
+            .iter()
+            .any(|issue| issue.family() == crate::api::RuntimeIssueFamily::MaintenanceFailure)
+    );
     drop(trace_root);
 }
 
