@@ -241,7 +241,7 @@ deterministic hooks.
   are the comparison metrics on a shared machine; wall time is trend data.
 - **Report.** A `glam-prof` binary writes one JSON object to the path in
   `GLAM_PROF`:
-  - `phases_ns`: the binary's own phases (build, evaluate, settle, total);
+  - `phases_ns`: the binary's own phases (build, evaluate, quiesce, total);
   - `runtime`: the runtime's counters.
 
   Runtime reductions count the budget's charge sites by kind (decision

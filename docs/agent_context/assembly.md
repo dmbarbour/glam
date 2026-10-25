@@ -72,16 +72,17 @@ configuration live in [`../CLI.md`](../CLI.md).
   diagnostic ingress and owns configured logger/fallback policy.
 - `conf.log` has its own demand session and diagnostic bus while sharing the
   runtime coordinator, reflection heap, and executor.
-- The logger is required to return unit. Its preferred loop reads input before
-  a terminal `.exit.success` vote; arriving input disturbs the vote.
-- The diagnostic stream is never semantically closed. Stable runtime readiness
-  plus explicit settlement determines completion.
-- Report rendering may admit more runtime work. Pump and settle again until the
-  fallback path and runtime are both stable.
-- Assembler and logger error counts are read separately. Retained task,
-  delivery, exit, killed-work, and managed-maintenance failure reports each
-  make the batch fail on their own. A maintenance failure fails the batch even
-  if a later service succeeds.
+- The logger is required to return unit. It reads its input in a cut; an
+  old-style `.exit.success` vote after the empty read only waits, as the read
+  does, until exit votes retire.
+- The diagnostic stream is never semantically closed. A quiescence whose
+  analysis has nothing new ends the batch; nothing is killed or settled, and
+  an idle configured logger is stopped (`EffectRunStop`), cleanly.
+- Publishing issues may admit more runtime work. Pump and analyze again until
+  an analysis at quiescence has nothing new; `PublishedIssues` publishes each
+  issue once.
+- Assembler and logger error counts are read separately. Every issue is an
+  error diagnostic, so any issue fails the batch, as a halted logger does.
 - Valid stdout may accompany a failing exit status when later reasoning or
   diagnostics fail.
 
@@ -98,11 +99,11 @@ load configuration on dormant runtime
   -> compile assembly
   -> demand and write valid asm.result
   -> finalize source tracking and optional manifest
-  -> pump runtime to stable readiness or deadlock
-  -> settle exit votes, or explicitly kill and settle deadlock
-  -> render retained reports directly
-  -> repump any work admitted by rendering, rendering the logger's fallback
-  -> join the configured logger and render what it left
+  -> pump runtime to quiescence, rendering the logger's fallback
+  -> analyze; halt a configured logger that left its input unread
+  -> publish each new issue through the bus, and repump (`quiesce_batch`)
+  -> once nothing is new, stop an idle configured logger and render what it
+     left
   -> combine result/report failures and both bus counts for exit status
 ```
 
@@ -116,7 +117,8 @@ reasoning may run indefinitely; stable blocked work is reported as deadlock.
 - `tests/hello_assemblies.rs`, `tests/executable_samples.rs`, and
   `tests/sample_sources.rs`: end-to-end assembly behavior.
 - `src/bin/glam/main.rs` and `src/bin/glam/configuration/logger/` tests: logger
-  activation, settlement, fallback ordering, and exit accounting.
+  activation, the batch's analysis loop, fallback ordering, and exit
+  accounting.
 - `src/api.rs` tests: diagnostic ingress, runtime event endpoints, public
   readiness, and settlement.
 

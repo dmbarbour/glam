@@ -2,11 +2,12 @@ use std::sync::Arc;
 use std::thread;
 
 use glam::reflection::{
-    EffectLifecycle, EffectLifecycleStatus, EffectRun, ScheduledEffectRun, TaskOutcome,
+    EffectLifecycle, EffectLifecycleStatus, EffectRun, EffectRunStop, ScheduledEffectRun,
+    TaskOutcome,
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticSubscription, Endpoint, Error, Fork,
-    HandleValue, Machine, Runtime, Severity, Values,
+    HandleValue, Machine, Runtime, Values,
 };
 
 use crate::DiagnosticBusLocal;
@@ -17,9 +18,7 @@ mod effects;
 mod reports;
 
 pub(crate) use effects::{LoggerTaskHost, MainEffects};
-pub(crate) use reports::{
-    SettledReportSelection, render_settled_report, settled_report_diagnostics,
-};
+pub(crate) use reports::PublishedIssues;
 
 /// The machine, a direct child of the root, to which the root sends the
 /// diagnostics gathered at its input. A configured logger reads them from
@@ -31,7 +30,7 @@ pub(crate) const LOGGER: &str = "logger";
 /// as [`DefaultLogger`] does.
 pub(crate) const FALLBACK: &str = "fallback";
 
-const DIAGNOSTICS: &str = "diagnostics";
+pub(crate) const DIAGNOSTICS: &str = "diagnostics";
 
 /// The logger's output to [`FALLBACK`], for what its input holds when it
 /// hands over.
@@ -131,12 +130,14 @@ pub(crate) fn start_logger<'scope>(
         root.run(LOGGER, hand_over)?;
         return Ok(LoggerRun {
             thread: None,
+            stop: None,
             diagnostics,
             renderer,
             _subscription: subscription,
         });
     };
     let fork_renderer = renderer.clone();
+    let stop = task.stopper();
     let builder = thread::Builder::new()
         .name("glam-logger".to_owned())
         // The logger evaluates ordinary Glam configuration and therefore
@@ -154,6 +155,7 @@ pub(crate) fn start_logger<'scope>(
     })?;
     Ok(LoggerRun {
         thread: Some(thread),
+        stop: Some(stop),
         diagnostics,
         renderer,
         _subscription: subscription,
@@ -171,21 +173,10 @@ fn run_configured_logger(
     values: &Values,
 ) {
     match task.run_with(|| host.deliver()) {
-        Ok(TaskOutcome::Complete(_)) => {}
-        Ok(TaskOutcome::Cancelled) => {
-            diagnostics.publish_local(
-                Diagnostic::new(
-                    values,
-                    Severity::Error,
-                    "configured logger remained blocked after the log stream closed",
-                )
-                .with_context(
-                    values,
-                    entry_context(values, "log").expect("configuration context is local"),
-                )
-                .expect("configuration context is local"),
-            );
-        }
+        // Only the batch stops the logger: at its end, where the logger
+        // waits on its input, idle, or halting it, with a diagnostic of its
+        // own, for leaving its input unread (`quiescence-is-analyzed`).
+        Ok(TaskOutcome::Complete(_) | TaskOutcome::Cancelled) => {}
         // A failure is the logger's own, which its caller reports; an exit
         // or a kill settlement reports.
         Err(error) => {
@@ -271,6 +262,8 @@ fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<HandleValue>, Error> 
 pub(crate) struct LoggerRun<'scope> {
     /// The configured logger's fork, where one runs.
     pub(crate) thread: Option<Fork<'scope>>,
+    /// Stops the configured logger's run, where one runs.
+    pub(crate) stop: Option<EffectRunStop>,
     /// What the configured logger reports, which `renderer` renders.
     pub(crate) diagnostics: DiagnosticBus,
     pub(crate) renderer: Arc<DefaultLogger>,
@@ -379,6 +372,7 @@ mod owner_tests {
     fn assert_logger_run_owner_inventory(run: &LoggerRun<'_>) {
         let LoggerRun {
             thread: _,
+            stop: _,
             diagnostics: _,
             renderer: _,
             _subscription: _,

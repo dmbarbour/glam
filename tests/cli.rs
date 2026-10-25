@@ -527,7 +527,7 @@ fn glam_prof_writes_a_json_report_to_the_requested_path() {
         json.starts_with("{\"glam_prof\":1,\"phases_ns\":{"),
         "{json}"
     );
-    for phase in ["\"build\":", "\"evaluate\":", "\"settle\":", "\"total\":"] {
+    for phase in ["\"build\":", "\"evaluate\":", "\"quiesce\":", "\"total\":"] {
         assert!(json.contains(phase), "missing {phase} in {json}");
     }
     assert!(json.contains("\"runtime\":{\"reductions\":"), "{json}");
@@ -1143,7 +1143,9 @@ fn configured_logger_error_diagnostic_fails_the_batch() {
 }
 
 #[test]
-fn configured_logger_without_an_exit_vote_is_killed_as_deadlocked() {
+fn a_configured_logger_waiting_on_its_input_ends_with_the_batch() {
+    // `quiescence-is-analyzed`: a logger that has read its input waits on
+    // it, idle, and its wait ends with the batch, cleanly.
     let dir = unique_temp_dir("glam-conf-log-close-deadlock");
     fs::create_dir_all(&dir)
         .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
@@ -1161,11 +1163,68 @@ fn configured_logger_without_an_exit_vote_is_killed_as_deadlocked() {
         .output()
         .expect("failed to run glam");
 
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(output.stdout, b"ok");
+    assert!(!String::from_utf8_lossy(&output.stderr).contains("killed"));
+}
+
+#[test]
+fn a_configured_logger_that_stops_reading_is_halted_for_the_fallback() {
+    // A logger whose input holds unread diagnostics at quiescence is not
+    // reading: the batch halts it, saying so, and the fallback renders what
+    // it left.
+    let dir = unique_temp_dir("glam-conf-log-halted");
+    fs::create_dir_all(&dir)
+        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
+    let config = dir.join("conf.g");
+    fs::write(
+        &config,
+        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\m -> .write_stderr (m.msg.text ++ [10]) =>> .cut (.heap.try_get ['never]))\n",
+    )
+    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
+
+    let output = glam_command()
+        .env("GLAM_CONF", &config)
+        .arg("--script.g")
+        .arg("language g0\nrefl.a = .log 'warn {msg:{text:\"first\"}}\nrefl.b = .log 'warn {msg:{text:\"second\"}}\nasm.result = \"ok\"\n")
+        .output()
+        .expect("failed to run glam");
+
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
+    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        String::from_utf8_lossy(&output.stderr).contains("runtime killed reflection_task work")
+        stderr.contains("the configured logger stopped reading, leaving 1 diagnostics unread"),
+        "{stderr}"
     );
+    assert!(
+        stderr.contains("first") && stderr.contains("second"),
+        "the logger rendered one and the fallback the other: {stderr}"
+    );
+}
+
+#[test]
+fn a_task_awaiting_a_promise_no_one_resolves_fails_the_batch_unkilled() {
+    let output = glam_command()
+        .arg("--script.g")
+        .arg(
+            "language g0\nimport 'std\nrefl.stuck = .promise.new >>= (\\pr -> .heap.set ['kept] pr.resolver =>> seq pr.promise (.r ()))\nasm.result = \"ok\"\n",
+        )
+        .output()
+        .expect("failed to run glam");
+
+    assert!(!output.status.success());
+    assert_eq!(output.stdout, b"ok");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("waits on a value that nothing in progress will produce"),
+        "{stderr}"
+    );
+    assert!(!stderr.contains("killed"), "{stderr}");
 }
 
 #[test]
@@ -1192,7 +1251,7 @@ fn failed_reflection_tasks_fail_the_batch_after_writing_the_result() {
 }
 
 #[test]
-fn quiescent_reflection_tasks_report_a_scheduler_deadlock() {
+fn a_reflection_task_waiting_after_an_error_fails_the_batch() {
     let output = glam_command()
         .arg("--script.g")
         .arg(
@@ -1203,11 +1262,16 @@ fn quiescent_reflection_tasks_report_a_scheduler_deadlock() {
 
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
-    assert!(String::from_utf8_lossy(&output.stderr).contains("reflection scheduler deadlocked"));
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("waits for a change after an error"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("`never` is undefined"), "{stderr}");
 }
 
 #[test]
-fn retryable_reflection_errors_are_reported_with_deadlocks() {
+fn an_erred_wait_renders_its_retained_error_once() {
     let output = glam_command()
         .arg("--script.g")
         .arg(
@@ -1219,8 +1283,10 @@ fn retryable_reflection_errors_are_reported_with_deadlocks() {
     assert!(!output.status.success());
     assert_eq!(output.stdout, b"ok");
     let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(stderr.contains("reflection scheduler deadlocked"));
-    assert!(stderr.contains("with a retained error"));
+    assert!(
+        stderr.contains("waits for a change after an error"),
+        "{stderr}"
+    );
     // The retained error stays structured, as a nested context message, and
     // the headline does not repeat it.
     assert!(stderr.contains("msg: application requires a function value"));

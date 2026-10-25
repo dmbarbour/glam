@@ -1,167 +1,201 @@
-//! The reports a settled runtime holds, rendered as diagnostics.
+//! The issues an analysis of the runtime finds, rendered as diagnostics
+//! (`quiescence-is-analyzed`): each with a report context, and each once,
+//! since what to do with an analysis is the batch's.
 
-use std::sync::Arc;
+use std::collections::BTreeSet;
 
 use glam::{
-    Diagnostic, Error, HandleValue, QuiescenceReport, RuntimeDeadlockWork, RuntimeDeliveryFailure,
-    RuntimeDependency, RuntimeDisposition, RuntimeDispositionKind, RuntimeMaintenanceFailure,
-    RuntimeWorkKind, RuntimeWorkState, Severity, Values,
+    Diagnostic, Error, HandleValue, Key, RuntimeAnalysis, RuntimeDeadlockWork, RuntimeDependency,
+    RuntimeIssue, RuntimeWaitFamily, RuntimeWorkKind, RuntimeWorkState, Severity, Values,
 };
 
-/// The reports of a settlement that are still to be rendered.
-pub(crate) struct SettledReportSelection {
-    pub(crate) failed_machines: Vec<glam::FailedMachine>,
-    pub(crate) delivery_failures: Vec<Arc<RuntimeDeliveryFailure>>,
-    pub(crate) exit_errors: Vec<RuntimeDisposition>,
-    pub(crate) killed_work: Vec<RuntimeDeadlockWork>,
-    pub(crate) maintenance_failures: Vec<RuntimeMaintenanceFailure>,
+/// What names an issue, so a batch publishes each once.
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+enum IssueKey {
+    Wait(u64),
+    Backlog(Vec<Key>, Option<Key>),
+    Obligation(u64, Vec<Key>),
+    Machine(Vec<Key>),
+    Delivery(u64),
+    Maintenance(u64),
 }
 
-impl SettledReportSelection {
-    /// The reports of `report` still to be rendered.
-    pub(crate) fn pending(report: &QuiescenceReport) -> Self {
-        Self {
-            failed_machines: report.pending_failed_machine_reports().to_vec(),
-            delivery_failures: report
-                .pending_delivery_failure_reports()
-                .failures()
-                .into_iter()
-                .collect(),
-            exit_errors: report.pending_exit_error_reports().to_vec(),
-            killed_work: report.pending_killed_work_reports().to_vec(),
-            maintenance_failures: report.pending_maintenance_failure_reports().to_vec(),
+/// The issues a batch has published.
+#[derive(Default)]
+pub(crate) struct PublishedIssues(BTreeSet<IssueKey>);
+
+impl PublishedIssues {
+    /// The diagnostics of `analysis`'s issues that are not published yet,
+    /// which count as published now.
+    pub(crate) fn take_new(
+        &mut self,
+        values: &Values,
+        analysis: &RuntimeAnalysis,
+    ) -> Result<Vec<Diagnostic>, Error> {
+        let mut diagnostics = Vec::new();
+        for issue in analysis.issues() {
+            match issue {
+                RuntimeIssue::Obligation(obligation) => {
+                    for (machine, owed) in obligation.acceptors() {
+                        let key =
+                            IssueKey::Obligation(obligation.promise_id(), machine.keys().to_vec());
+                        if self.0.insert(key) {
+                            let context = runtime_report_context(
+                                values,
+                                "pending_obligation",
+                                vec![
+                                    ("promise", report_id(values, obligation.promise_id())?),
+                                    ("machine", machine_path(values, machine.keys())?),
+                                ],
+                            )?;
+                            diagnostics.push(owed.clone().with_context(values, context)?);
+                        }
+                    }
+                }
+                issue => {
+                    if self.0.insert(issue_key(&issue)) {
+                        diagnostics.push(issue_diagnostic(values, &issue)?);
+                    }
+                }
+            }
         }
+        Ok(diagnostics)
     }
 }
 
-/// Renders the reports of `report` still to be rendered, each once, and
-/// returns how many it rendered. They count as rendered before `render`
-/// runs, so that a rendering that fails partway never repeats one.
-pub(crate) fn render_settled_report(
-    report: &mut QuiescenceReport,
-    values: &Values,
-    mut render: impl FnMut(Diagnostic),
-) -> Result<usize, Error> {
-    let diagnostics = settled_report_diagnostics(values, SettledReportSelection::pending(report))?;
-    report.mark_reports_enqueued();
-    let rendered = diagnostics.len();
-    for diagnostic in diagnostics {
-        render(diagnostic);
+fn issue_key(issue: &RuntimeIssue<'_>) -> IssueKey {
+    match issue {
+        RuntimeIssue::Wait(wait) => IssueKey::Wait(wait.work().work_id()),
+        RuntimeIssue::Backlog(backlog) => {
+            IssueKey::Backlog(backlog.machine().keys().to_vec(), backlog.port().cloned())
+        }
+        RuntimeIssue::Machine(machine) => IssueKey::Machine(machine.path().keys().to_vec()),
+        RuntimeIssue::Delivery(failure) => IssueKey::Delivery(failure.delivery_id().get()),
+        RuntimeIssue::Maintenance(failure) => IssueKey::Maintenance(failure.id()),
+        RuntimeIssue::Obligation(_) => unreachable!("each acceptor of an obligation has its own"),
     }
-    Ok(rendered)
 }
 
-pub(crate) fn settled_report_diagnostics(
-    values: &Values,
-    selection: SettledReportSelection,
-) -> Result<Vec<Diagnostic>, Error> {
-    let mut diagnostics = Vec::new();
-    for machine in selection.failed_machines {
-        let path = values.list(machine.path().keys().iter().map(|key| values.key(key)))?;
-        let context = runtime_report_context(values, "machine_failure", vec![("machine", path)])?;
-        diagnostics.push(machine.diagnostic().clone().with_context(values, context)?);
-    }
-    for failure in selection.delivery_failures {
-        let context = runtime_report_context(
-            values,
-            "delivery_failure",
-            vec![
-                ("delivery", report_id(values, failure.delivery_id().get())?),
-                ("endpoint", report_id(values, failure.endpoint_id().get())?),
-                (
-                    "kind",
-                    values.atom_from_text(match failure.kind() {
-                        glam::RuntimeDeliveryFailureKind::Decode => "decode",
-                        glam::RuntimeDeliveryFailureKind::Adapter => "adapter",
-                        glam::RuntimeDeliveryFailureKind::Panic => "panic",
-                    }),
-                ),
-            ],
-        )?;
-        diagnostics.push(
+fn issue_diagnostic(values: &Values, issue: &RuntimeIssue<'_>) -> Result<Diagnostic, Error> {
+    match issue {
+        RuntimeIssue::Wait(wait) => {
+            let work = wait.work();
+            let erred = wait.family() == RuntimeWaitFamily::ErredWait;
+            let mut args = work_args(values, work)?;
+            if let Some(cause) = wait.cause_work_id() {
+                args.push(("cause", report_id(values, cause)?));
+            }
+            let message = format!(
+                "{} work {} {}",
+                runtime_work_kind_name(work.kind()),
+                work.work_id(),
+                if erred {
+                    "waits for a change after an error"
+                } else {
+                    "waits on a value that nothing in progress will produce"
+                }
+            );
+            let context = runtime_report_context(
+                values,
+                if erred { "erred_wait" } else { "promise_wait" },
+                args,
+            )?;
+            let mut diagnostic = Diagnostic::new(values, Severity::Error, message);
+            // The retained error stays structured: it follows the wait's
+            // frame as a nested message with its own emission and context.
+            if let Some(blocked) = work.blocked_diagnostic() {
+                diagnostic = diagnostic.with_context(values, blocked.emission().clone())?;
+            }
+            diagnostic.with_context(values, context)
+        }
+        RuntimeIssue::Backlog(backlog) => {
+            let mut args = vec![
+                ("machine", machine_path(values, backlog.machine().keys())?),
+                ("count", report_id(values, backlog.count() as u64)?),
+            ];
+            if let Some(port) = backlog.port() {
+                args.push(("port", values.key(port)));
+            }
+            let message = match backlog.port() {
+                Some(_) => format!("{} input items left unread", backlog.count()),
+                None => format!("{} queued tasks never started", backlog.count()),
+            };
+            let context = runtime_report_context(values, "backlog", args)?;
+            Diagnostic::new(values, Severity::Error, message).with_context(values, context)
+        }
+        RuntimeIssue::Machine(machine) => {
+            let context = runtime_report_context(
+                values,
+                "machine_failure",
+                vec![("machine", machine_path(values, machine.path().keys())?)],
+            )?;
+            machine.diagnostic().clone().with_context(values, context)
+        }
+        RuntimeIssue::Delivery(failure) => {
+            let context = runtime_report_context(
+                values,
+                "delivery_failure",
+                vec![
+                    ("delivery", report_id(values, failure.delivery_id().get())?),
+                    ("endpoint", report_id(values, failure.endpoint_id().get())?),
+                    (
+                        "kind",
+                        values.atom_from_text(match failure.kind() {
+                            glam::RuntimeDeliveryFailureKind::Decode => "decode",
+                            glam::RuntimeDeliveryFailureKind::Adapter => "adapter",
+                            glam::RuntimeDeliveryFailureKind::Panic => "panic",
+                        }),
+                    ),
+                ],
+            )?;
             failure
                 .error()
                 .diagnostic(values)?
-                .with_context(values, context)?,
-        );
+                .with_context(values, context)
+        }
+        RuntimeIssue::Maintenance(failure) => {
+            maintenance_failure_diagnostic(values, failure.id(), failure.kind(), failure.message())
+        }
+        RuntimeIssue::Obligation(_) => unreachable!("obligations render per acceptor"),
     }
-    for failure in selection.maintenance_failures {
-        diagnostics.push(maintenance_failure_diagnostic(
-            values,
-            failure.id(),
-            failure.kind(),
-            failure.message(),
-        )?);
+}
+
+/// What names a waiting work in a report.
+fn work_args(
+    values: &Values,
+    work: &RuntimeDeadlockWork,
+) -> Result<Vec<(&'static str, HandleValue)>, Error> {
+    let mut args = vec![
+        ("work", report_id(values, work.work_id())?),
+        (
+            "kind",
+            values.atom_from_text(runtime_work_kind_name(work.kind())),
+        ),
+        (
+            "state",
+            values.atom_from_text(runtime_work_state_name(work.state())),
+        ),
+    ];
+    if let Some(session) = work.session_id() {
+        args.push(("session", report_id(values, session)?));
     }
-    for disposition in selection.exit_errors {
-        let RuntimeDispositionKind::ExitError(message) = disposition.kind() else {
-            unreachable!("report selection retains only error exits")
-        };
-        let mut args = vec![("work", report_id(values, disposition.work_id())?)];
-        if let Some(session) = disposition.session_id() {
-            args.push(("session", report_id(values, session)?));
-        }
-        if let Some(task) = disposition.task_id() {
-            args.push(("task", report_id(values, task)?));
-        }
-        let context = runtime_report_context(values, "exit_error", args)?;
-        diagnostics.push(
-            Diagnostic::from_emission(values, Severity::Error, message.clone())?
-                .with_context(values, context)?,
-        );
+    if let Some(lazy) = work.lazy_id() {
+        args.push(("lazy", report_id(values, lazy)?));
     }
-    for work in selection.killed_work {
-        let blocked_error = work.blocked_diagnostic().cloned();
-        let mut args = vec![
-            ("work", report_id(values, work.work_id())?),
-            (
-                "kind",
-                values.atom_from_text(runtime_work_kind_name(work.kind())),
-            ),
-            (
-                "state",
-                values.atom_from_text(runtime_work_state_name(work.state())),
-            ),
-        ];
-        if let Some(session) = work.session_id() {
-            args.push(("session", report_id(values, session)?));
-        }
-        if let Some(lazy) = work.lazy_id() {
-            args.push(("lazy", report_id(values, lazy)?));
-        }
-        if let Some(task) = work.task_id() {
-            args.push(("task", report_id(values, task)?));
-        }
-        if let Some(epoch) = work.observed_epoch() {
-            args.push(("observed_epoch", report_id(values, epoch)?));
-        }
-        if let Some(dependency) = work.dependency() {
-            args.push(("dependency", runtime_dependency_value(values, dependency)?));
-        }
-        let context = runtime_report_context(values, "killed", args)?;
-        let mut message = format!(
-            "{} deadlocked; runtime killed {} work {} in settlement",
-            if work.kind() == RuntimeWorkKind::ReflectionTask {
-                "reflection scheduler"
-            } else {
-                "evaluation runtime"
-            },
-            runtime_work_kind_name(work.kind()),
-            work.work_id()
-        );
-        // The retained error stays structured: it follows the kill frame as a
-        // nested message with its own emission and context, so the headline
-        // only notes that it exists.
-        if blocked_error.is_some() {
-            message.push_str(", with a retained error");
-        }
-        let mut diagnostic = Diagnostic::new(values, Severity::Error, message);
-        if let Some(blocked) = blocked_error {
-            diagnostic = diagnostic.with_context(values, blocked.emission().clone())?;
-        }
-        diagnostics.push(diagnostic.with_context(values, context)?);
+    if let Some(task) = work.task_id() {
+        args.push(("task", report_id(values, task)?));
     }
-    Ok(diagnostics)
+    if let Some(epoch) = work.observed_epoch() {
+        args.push(("observed_epoch", report_id(values, epoch)?));
+    }
+    if let Some(dependency) = work.dependency() {
+        args.push(("dependency", runtime_dependency_value(values, dependency)?));
+    }
+    Ok(args)
+}
+
+fn machine_path(values: &Values, keys: &[Key]) -> Result<HandleValue, Error> {
+    values.list(keys.iter().map(|key| values.key(key)))
 }
 
 fn maintenance_failure_diagnostic(
@@ -276,22 +310,7 @@ fn runtime_dependency_value(
 mod tests {
     use glam::Severity;
 
-    use super::{SettledReportSelection, maintenance_failure_diagnostic};
-
-    fn assert_settled_report_owner_inventory(selection: &SettledReportSelection) {
-        let SettledReportSelection {
-            failed_machines: _,
-            delivery_failures: _,
-            exit_errors: _,
-            killed_work: _,
-            maintenance_failures: _,
-        } = selection;
-    }
-
-    #[test]
-    fn settled_report_owner_inventory_is_compile_exhaustive() {
-        let _: fn(&SettledReportSelection) = assert_settled_report_owner_inventory;
-    }
+    use super::maintenance_failure_diagnostic;
 
     #[test]
     fn maintenance_failures_render_as_structured_error_diagnostics() {

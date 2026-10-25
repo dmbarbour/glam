@@ -167,8 +167,14 @@ The conventional exported values are:
 | `conf.log` | The configured diagnostic logger. |
 | `conf.completion_script.NAME` | An optional completion adapter generator named `NAME`. |
 
-`conf.log` is an effect. A logger which drains the complete batch stream places
-its coordinated exit after the empty-read alternative:
+`conf.log` is an effect. A logger reads the diagnostics the batch reports,
+the analysis of what the runtime left unresolved among them. When the
+runtime is quiescent and an analysis finds nothing new, the batch ends, and a
+logger waiting on its input ends with it, cleanly. A logger that leaves
+diagnostics unread at quiescence has stopped reading: the batch halts it,
+saying so, and the fallback logger renders what it left. Until exit votes
+retire, a logger may still place an exit vote after the empty-read
+alternative, which waits as the read does:
 
 ```g
 object conf.logger_loop with
@@ -186,12 +192,12 @@ object conf.logger_loop with
 conf.log = conf.logger_loop
 ```
 
-The exit vote remains retryable until the whole runtime settles; a diagnostic
-arriving first makes `.read_log` run instead. The diagnostic stream is not
-semantically closed; a logger terminates by participating in coordinated
-runtime exit. Recurrence is deliberately outside `.cut`: a successful read and
-write must commit before the next iteration begins, while the empty-read exit
-remains inside the transactional choice so later input can disturb it.
+A diagnostic arriving first makes `.read_log` run instead. The diagnostic
+stream is not semantically closed; the batch's end, not the logger, decides
+when it stops. Recurrence is deliberately outside `.cut`: a successful read
+and write must commit before the next iteration begins, while the empty-read
+alternative remains inside the transactional choice so later input can disturb
+it.
 
 The remaining sections focus on `conf.cli`.
 

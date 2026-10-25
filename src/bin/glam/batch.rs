@@ -10,15 +10,13 @@ use crate::command_line::{
 };
 use bytes::Bytes;
 use glam::{
-    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, Machine, ModuleInput,
-    QuiescenceReport, Runtime, RuntimeDispositionKind, RuntimeKillReason, RuntimeReadiness,
-    Severity, Values,
+    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, Fork, Key, Machine,
+    ModuleInput, Runtime, RuntimeReadiness, Severity, Values,
 };
 
 use crate::DiagnosticBusLocal;
 use crate::configuration::logger::{
-    LOGGER, SettledReportSelection, drain_fallback, render_settled_report, render_unread,
-    settled_report_diagnostics, start_logger,
+    DIAGNOSTICS, LOGGER, LoggerRun, PublishedIssues, drain_fallback, render_unread, start_logger,
 };
 use crate::configuration::{CLI, InitialCliEnvironment, PreparationFailure, PreparedAssembly};
 use crate::rendering::DefaultLogger;
@@ -180,28 +178,33 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
                 &assembler.values(),
             );
             let renderer = logger.renderer.clone();
-            let forked = logger.thread.is_some();
-            operation_failed |= super::profile::time("settle", || {
-                settle_batch_runtime(
+            operation_failed |= super::profile::time("quiesce", || {
+                let mut batch_logger = RootLogger {
+                    root: &mut *root,
+                    logger: &mut logger,
+                    values: values.clone(),
+                };
+                quiesce_batch(
                     &assembler.evaluation_runtime(),
                     &values,
-                    |diagnostic| renderer.emit(&diagnostic),
-                    || {
-                        // A configured logger's fork holds the fallback, which
-                        // receives nothing until the configured logger ends.
-                        if forked {
-                            return Ok(());
-                        }
-                        root.run(LOGGER, |logger| drain_fallback(logger, &renderer))
+                    |diagnostic| {
+                        assembler_diagnostics.publish_local(diagnostic);
                     },
+                    &mut batch_logger,
                 )
             });
 
-            if let Some(thread) = logger.thread.take()
-                && let Err(error) = root.join(thread)
-            {
-                operation_failed = true;
-                eprintln!("error: the logger ended in error: {error}");
+            // The batch ends at a quiescence whose analysis had nothing new:
+            // a configured logger still running waits on its input, idle,
+            // and its wait ends with the batch.
+            if let Some(thread) = logger.thread.take() {
+                if let Some(stop) = logger.stop.take() {
+                    stop.stop();
+                }
+                if let Err(error) = root.join(thread) {
+                    operation_failed = true;
+                    eprintln!("error: the logger ended in error: {error}");
+                }
             }
             if let Err(error) = root.recover(LOGGER, |logger| render_unread(logger, &renderer)) {
                 operation_failed = true;
@@ -222,95 +225,95 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     }
 }
 
-/// Pumps and settles the complete batch runtime, retaining report failures as
-/// authoritative batch status independently of whether fallback rendering
-/// succeeds.
-///
-/// A stable deadlock is explicitly killed and reported. Rendering may itself
-/// admit runtime work, so each non-empty report is followed by another
-/// complete pump/settlement cycle.
-pub(super) fn settle_batch_runtime(
-    runtime: &EvaluationRuntime,
-    values: &Values,
-    mut render: impl FnMut(Diagnostic),
-    mut drain_fallback: impl FnMut() -> Result<(), Error>,
-) -> bool {
-    let mut failed = false;
+/// The batch's logger, as the batch's quiescence drives it.
+pub(super) trait BatchLogger {
+    /// Renders what waits at the fallback, where no configured logger reads.
+    fn drain(&mut self) -> Result<(), Error>;
 
-    loop {
-        runtime.pump_until_stable();
-        if let Err(error) = drain_fallback() {
-            failed = true;
-            eprintln!("error: could not drain fallback diagnostics: {error}");
-        }
-        let snapshot = match runtime.readiness() {
-            RuntimeReadiness::Busy => continue,
-            RuntimeReadiness::MaintenanceRequired(maintenance) => {
-                if let Err(error) = maintenance.service()
-                    && error.kind() != glam::RuntimeMaintenanceErrorKind::RuntimeChanged
-                {
-                    failed = true;
-                }
-                continue;
-            }
-            RuntimeReadiness::MaintenanceFailed(maintenance) => {
-                if let Some(failure) = maintenance.failure() {
-                    eprintln!("error: managed maintenance failed: {}", failure.message());
-                } else {
-                    eprintln!(
-                        "error: evaluation runtime {} managed heap is permanently poisoned",
-                        maintenance.runtime_id().get()
-                    );
-                }
-                return true;
-            }
-            RuntimeReadiness::Poisoned => {
-                eprintln!(
-                    "error: evaluation runtime {} is poisoned by an internal panic",
-                    runtime.id().get()
-                );
-                return true;
-            }
-            RuntimeReadiness::Ready(snapshot) => snapshot,
-            RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
-        };
-        let mut report = match snapshot.settle() {
-            Ok(report) => report,
-            Err(_) => continue,
-        };
+    /// Halts the configured logger, which left `unread` diagnostics in its
+    /// input at quiescence, so that the fallback renders them; `false`
+    /// where no configured logger runs.
+    fn halt(&mut self, unread: usize) -> bool;
+}
 
-        failed |= settled_report_is_fatal(&report);
-        match render_settled_report(&mut report, values, &mut render) {
-            Ok(0) => return failed,
-            Ok(_) => {}
-            Err(error) => {
-                eprintln!("error: could not render runtime settlement: {error}");
-                return true;
-            }
-        }
+/// No logger machine: the bus's subscribers render what it publishes.
+struct BusLogger;
+
+impl BatchLogger for BusLogger {
+    fn drain(&mut self) -> Result<(), Error> {
+        Ok(())
+    }
+
+    fn halt(&mut self, _unread: usize) -> bool {
+        false
     }
 }
 
-fn settled_report_is_fatal(report: &QuiescenceReport) -> bool {
-    !report.failed_machines().is_empty()
-        || !report.delivery_failures().failures().is_empty()
-        || !report.maintenance_failures().is_empty()
-        || report
-            .dispositions()
-            .iter()
-            .any(|disposition| matches!(disposition.kind(), RuntimeDispositionKind::ExitError(_)))
-        || !report.killed_work().is_empty()
+/// The root's `logger` machine, with a configured logger's fork or the
+/// fallback.
+struct RootLogger<'r, 'scope, 'env> {
+    root: &'r mut Machine<'scope, 'env>,
+    logger: &'r mut LoggerRun<'scope>,
+    values: Values,
 }
 
-fn settle_batch_runtime_default(
+impl BatchLogger for RootLogger<'_, '_, '_> {
+    fn drain(&mut self) -> Result<(), Error> {
+        // A configured logger's fork holds the fallback, which receives
+        // nothing until the configured logger ends.
+        if self.logger.thread.is_some() {
+            return Ok(());
+        }
+        let renderer = self.logger.renderer.clone();
+        self.root
+            .run(LOGGER, |logger| drain_fallback(logger, &renderer))
+    }
+
+    fn halt(&mut self, unread: usize) -> bool {
+        let Some(thread): Option<Fork<'_>> = self.logger.thread.take() else {
+            return false;
+        };
+        self.logger.renderer.emit(&Diagnostic::new(
+            &self.values,
+            Severity::Error,
+            format!(
+                "the configured logger stopped reading, leaving {unread} diagnostics unread; \
+                 the fallback renders them"
+            ),
+        ));
+        if let Some(stop) = self.logger.stop.take() {
+            stop.stop();
+        }
+        if let Err(error) = self.root.join(thread) {
+            eprintln!("error: the logger ended in error: {error}");
+        }
+        true
+    }
+}
+
+/// Pumps the batch's runtime to quiescence and publishes each issue its
+/// analysis finds that it has not published before, until a quiescence's
+/// analysis has nothing new: there the batch ends, an atomic transition
+/// that kills nothing (`quiescence-is-analyzed`). A configured logger whose
+/// input holds unread diagnostics at quiescence is not reading, so it is
+/// halted, and the fallback renders them. Returns whether the batch failed:
+/// any issue fails it, as rendering may itself start work and report.
+pub(super) fn quiesce_batch(
     runtime: &EvaluationRuntime,
-    diagnostics: &DiagnosticBus,
     values: &Values,
+    mut publish: impl FnMut(Diagnostic),
+    logger: &mut dyn BatchLogger,
 ) -> bool {
+    let logger_input = [Key::atom_from_text(LOGGER)];
+    let mut published = PublishedIssues::default();
     let mut failed = false;
     loop {
         runtime.pump_until_stable();
-        let snapshot = match runtime.readiness() {
+        if let Err(error) = logger.drain() {
+            failed = true;
+            eprintln!("error: could not drain fallback diagnostics: {error}");
+        }
+        match runtime.readiness() {
             RuntimeReadiness::Busy => continue,
             RuntimeReadiness::MaintenanceRequired(maintenance) => {
                 if let Err(error) = maintenance.service()
@@ -338,29 +341,46 @@ fn settle_batch_runtime_default(
                 );
                 return true;
             }
-            RuntimeReadiness::Ready(snapshot) => snapshot,
-            RuntimeReadiness::Deadlocked(deadlock) => deadlock.kill(RuntimeKillReason::Deadlock),
-        };
-        let mut report = match snapshot.settle() {
-            Ok(report) => report,
-            Err(_) => continue,
-        };
-        failed |= settled_report_is_fatal(&report);
-        let selection = SettledReportSelection::pending(&report);
-        let rendered = match settled_report_diagnostics(values, selection) {
-            Ok(rendered) => rendered,
+            RuntimeReadiness::Ready(_) | RuntimeReadiness::Deadlocked(_) => {}
+        }
+        let analysis = match runtime.analysis() {
+            Ok(analysis) => analysis,
             Err(error) => {
-                eprintln!("error: could not render runtime settlement: {error}");
+                eprintln!("error: {error}");
                 return true;
             }
         };
-        let rendered_count = rendered.len();
-        for diagnostic in rendered {
-            diagnostics.publish_local(diagnostic);
+        if !analysis.quiescent() {
+            continue;
         }
-        report.mark_reports_enqueued();
-        if rendered_count == 0 {
+        // Halted, the logger hands its input to the fallback, so its
+        // backlog never reaches the issues.
+        if let Some(unread) = analysis
+            .backlogs()
+            .iter()
+            .find(|backlog| {
+                backlog.machine().keys() == logger_input
+                    && backlog.port() == Some(&Key::atom_from_text(DIAGNOSTICS))
+            })
+            .map(|backlog| backlog.count())
+            && logger.halt(unread)
+        {
+            failed = true;
+            continue;
+        }
+        let diagnostics = match published.take_new(values, &analysis) {
+            Ok(diagnostics) => diagnostics,
+            Err(error) => {
+                eprintln!("error: could not render the runtime's analysis: {error}");
+                return true;
+            }
+        };
+        if diagnostics.is_empty() {
             return failed;
+        }
+        failed = true;
+        for diagnostic in diagnostics {
+            publish(diagnostic);
         }
     }
 }
@@ -371,10 +391,13 @@ pub(super) fn finish_without_logger(
     operation_failed: bool,
 ) -> ExitCode {
     let diagnostics = prepared.assembler().diagnostic_bus();
-    let runtime_failed = settle_batch_runtime_default(
+    let runtime_failed = quiesce_batch(
         &prepared.assembler().evaluation_runtime(),
-        &diagnostics,
         &prepared.assembler().values(),
+        |diagnostic| {
+            diagnostics.publish_local(diagnostic);
+        },
+        &mut BusLogger,
     );
     let file_failure = finish_local_files(
         &prepared.local_files,
@@ -512,7 +535,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn default_batch_settlement_services_managed_maintenance() {
+    fn a_batch_without_a_logger_services_managed_maintenance() {
         let runtime = EvaluationRuntime::new(0).expect("runtime should build");
         let diagnostics = DiagnosticBus::for_runtime(&runtime);
         let values = runtime.values();
@@ -520,10 +543,13 @@ mod tests {
             .request_managed_collection()
             .expect("explicit maintenance should publish");
 
-        assert!(!settle_batch_runtime_default(
+        assert!(!quiesce_batch(
             &runtime,
-            &diagnostics,
-            &values
+            &values,
+            |diagnostic| {
+                diagnostics.publish_local(diagnostic);
+            },
+            &mut BusLogger,
         ));
         assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
     }

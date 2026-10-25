@@ -16,7 +16,8 @@ mod volume_handle;
 
 pub(crate) use lifecycle::coordinator_task_launcher;
 pub use lifecycle::{
-    EffectLifecycle, EffectLifecycleStatus, EffectRun, ScheduledEffectRun, run, run_standard,
+    EffectLifecycle, EffectLifecycleStatus, EffectRun, EffectRunStop, ScheduledEffectRun, run,
+    run_standard,
 };
 pub(crate) use machine::ContinuationKey;
 pub(crate) use machine::volume_effects;

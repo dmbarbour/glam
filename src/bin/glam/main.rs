@@ -25,20 +25,20 @@ use batch::{assemble_inputs, configured_cli, finish_without_logger, prepare_asse
 use configuration::{CLI, select_entry, selects_nothing};
 
 #[cfg(test)]
-use batch::{finish_local_files, settle_batch_runtime};
+use batch::{BatchLogger, finish_local_files, quiesce_batch};
 
 #[cfg(test)]
 use configuration::logger::test_support::{
     hand_over_logger, held_by_logger, logger_runtime, take_from_fallback, take_unread,
 };
 #[cfg(test)]
-use configuration::logger::{LoggerTaskHost, MainEffects, render_settled_report};
+use configuration::logger::{LoggerTaskHost, MainEffects, PublishedIssues};
 #[cfg(test)]
 use glam::reflection::{EffectLifecycle, EffectRun, TaskOutcome};
 #[cfg(test)]
 use glam::{
-    EvaluationRuntime, FileSourceSystem, RuntimeDeliveryOutcome, RuntimeDispositionKind,
-    RuntimeEventJournal, RuntimeReadiness,
+    EvaluationRuntime, FileSourceSystem, RuntimeDeliveryOutcome, RuntimeEventJournal,
+    RuntimeIssueFamily, RuntimeReadiness,
 };
 
 trait DiagnosticBusLocal {
@@ -648,12 +648,28 @@ mod tests {
         ));
     }
 
+    /// A batch's logger that drains with `drain` and runs no configured
+    /// logger.
+    struct DrainingLogger<'a>(&'a mut dyn FnMut() -> Result<(), Error>);
+
+    impl BatchLogger for DrainingLogger<'_> {
+        fn drain(&mut self) -> Result<(), Error> {
+            (self.0)()
+        }
+
+        fn halt(&mut self, _unread: usize) -> bool {
+            false
+        }
+    }
+
     #[test]
-    fn settled_report_renders_machine_and_delivery_failures_once() {
+    fn analysis_issues_render_once_with_their_context() {
+        // `quiescence-is-analyzed`: a batch publishes each issue of an
+        // analysis once, with a report context.
         let assembler = Assembler::default();
         let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
-            .module(["settled_failure_report"])
+            .module(["analyzed_failures"])
             .script(
                 "g",
                 concat!(
@@ -663,10 +679,10 @@ mod tests {
                 ),
             )
             .build()
-            .expect("failure report fixture should compile");
+            .expect("failure fixture should compile");
         let effect = assembler
             .get(module.value(), "refl.effect")
-            .expect("failure report fixture should define its effect");
+            .expect("failure fixture should define its effect");
         let logger_diagnostics = DiagnosticBus::for_runtime(&evaluation_runtime);
         let host = logger_host(&assembler, logger_diagnostics.clone());
         let lifecycle = EffectLifecycle::new(&evaluation_runtime);
@@ -677,31 +693,35 @@ mod tests {
             host.clone(),
         )
         .schedule(&lifecycle)
-        .expect("failure-report root should schedule");
+        .expect("failure root should schedule");
         assert!(task.run_with(|| host.deliver()).is_err());
         fail_a_delivery(&evaluation_runtime, "output adapter failed");
-
         evaluation_runtime.pump_until_stable();
-        let RuntimeReadiness::Ready(snapshot) = evaluation_runtime.readiness() else {
-            panic!("terminal failures should be retained state, not active work")
-        };
-        let mut report = snapshot.settle().expect("failure report should settle");
-        assert_eq!(report.failed_machines().len(), 1);
-        assert_eq!(report.delivery_failures().failures().len(), 1);
 
         let values = assembler.values();
-        let mut rendered = Vec::new();
+        let mut published = PublishedIssues::default();
+        let analysis = evaluation_runtime.analysis().unwrap();
+        let families: Vec<_> = analysis
+            .issues()
+            .iter()
+            .map(|issue| issue.family())
+            .collect();
         assert_eq!(
-            render_settled_report(&mut report, &values, |diagnostic| rendered.push(diagnostic))
-                .unwrap(),
-            2
+            families,
+            [
+                RuntimeIssueFamily::MachineInError,
+                RuntimeIssueFamily::DeliveryFailure
+            ]
         );
-        assert_eq!(
-            render_settled_report(&mut report, &values, |diagnostic| rendered.push(diagnostic))
-                .unwrap(),
-            0
-        );
+        let rendered = published.take_new(&values, &analysis).unwrap();
         assert_eq!(rendered.len(), 2);
+        assert!(
+            published
+                .take_new(&values, &evaluation_runtime.analysis().unwrap())
+                .unwrap()
+                .is_empty(),
+            "each issue renders once"
+        );
         assert!(rendered.iter().any(|diagnostic| {
             rendered_text_for_test(&assembler, diagnostic).contains("reflection task failed")
         }));
@@ -713,121 +733,98 @@ mod tests {
         assert!(
             rendered
                 .iter()
-                .all(|diagnostic| { assembler.get(diagnostic.emission(), "msg.context").is_ok() })
+                .all(|diagnostic| assembler.get(diagnostic.emission(), "msg.context").is_ok())
         );
-        assert_eq!(assembler.diagnostic_bus().counts().total(), 0);
-        assert_eq!(logger_diagnostics.counts().total(), 0);
     }
 
     #[test]
-    fn settled_report_renders_exit_errors_and_killed_work_once() {
+    fn waits_render_as_promise_and_erred_waits() {
+        // A wait on a promise no one resolves, and a cut waiting for a
+        // change after an error, render with their work; the erred wait's
+        // error stays one nested message.
         let assembler = Assembler::default();
         let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
-            .module(["settled_disposition_report"])
+            .module(["analyzed_waits"])
             .script(
                 "g",
                 concat!(
                     "language g0\n",
                     "import 'std\n",
-                    "refl.exit = .exit.error {msg:{text:\"settled exit failure\"}}\n",
-                    "refl.blocked = .cut (.read_log)\n",
+                    "refl.erred = .cut (.heap.get ['never])\n",
+                    "refl.awaits = .promise.new >>= (\\pr -> .heap.set ['kept] pr.resolver =>> seq pr.promise (.r ()))\n",
                 ),
             )
             .build()
-            .expect("settlement-report fixture should compile");
-        let exit = assembler
-            .get(module.value(), "refl.exit")
-            .expect("fixture should define its exit effect");
-        let blocked = assembler
-            .get(module.value(), "refl.blocked")
-            .expect("fixture should define its blocked effect");
+            .expect("wait fixture should compile");
         let host = logger_host(&assembler, DiagnosticBus::for_runtime(&evaluation_runtime));
-        let exit_lifecycle = EffectLifecycle::new(&evaluation_runtime);
-        let blocked_lifecycle = EffectLifecycle::new(&evaluation_runtime);
-        let _exit_task = EffectRun::new(
-            &evaluation_runtime,
-            &exit,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&exit_lifecycle)
-        .expect("exit effect should schedule");
-        let _blocked_task = EffectRun::new(
-            &evaluation_runtime,
-            &blocked,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&blocked_lifecycle)
-        .expect("blocked effect should schedule");
-
-        evaluation_runtime.pump_until_stable();
-        let RuntimeReadiness::Deadlocked(snapshot) = evaluation_runtime.readiness() else {
-            panic!("an exit vote plus a blocked reader should retain a deadlock")
-        };
-        let mut report = snapshot
-            .kill(glam::RuntimeKillReason::Deadlock)
-            .settle()
-            .expect("forced deadlock report should settle");
-        let exit_message = report
-            .dispositions()
+        let lifecycles = [
+            EffectLifecycle::new(&evaluation_runtime),
+            EffectLifecycle::new(&evaluation_runtime),
+        ];
+        let _tasks: Vec<_> = ["refl.erred", "refl.awaits"]
             .iter()
-            .find_map(|disposition| match disposition.kind() {
-                RuntimeDispositionKind::ExitError(message) => Some(message),
-                _ => None,
+            .zip(&lifecycles)
+            .map(|(name, lifecycle)| {
+                let effect = assembler
+                    .get(module.value(), name)
+                    .expect("fixture should define its effect");
+                EffectRun::new(
+                    &evaluation_runtime,
+                    &effect,
+                    MainEffects::new(assembler.values()),
+                    host.clone(),
+                )
+                .schedule(lifecycle)
+                .expect("the effect should schedule")
             })
-            .expect("report should retain the exit message");
-        assert_eq!(
-            assembler
-                .get_evaluated(exit_message, "msg.text")
-                .expect("exit error should retain its structured message")
-                .as_bytes()
-                .unwrap()
-                .as_deref(),
-            Some(b"settled exit failure".as_slice())
-        );
-        assert_eq!(report.killed_work().len(), 1);
+            .collect();
+        evaluation_runtime.pump_until_stable();
 
         let values = assembler.values();
-        let mut rendered = Vec::new();
+        let analysis = evaluation_runtime.analysis().unwrap();
+        assert!(analysis.quiescent());
+        let mut families: Vec<_> = analysis
+            .issues()
+            .iter()
+            .map(|issue| issue.family())
+            .collect();
+        families.sort();
         assert_eq!(
-            render_settled_report(&mut report, &values, |diagnostic| rendered.push(diagnostic))
-                .unwrap(),
-            2
+            families,
+            [
+                RuntimeIssueFamily::PromiseWait,
+                RuntimeIssueFamily::ErredWait
+            ]
         );
-        assert_eq!(
-            render_settled_report(&mut report, &values, |diagnostic| rendered.push(diagnostic))
-                .unwrap(),
-            0
-        );
-        assert_eq!(rendered.len(), 2);
+        let rendered = PublishedIssues::default()
+            .take_new(&values, &analysis)
+            .unwrap();
+        let messages: Vec<_> = rendered
+            .iter()
+            .map(|diagnostic| diagnostic.message())
+            .collect();
         assert!(
-            rendered
+            messages
                 .iter()
-                .any(|diagnostic| rendered_text_for_test(&assembler, diagnostic)
-                    == "settled exit failure"),
-            "rendered messages: {:?}",
-            rendered
-                .iter()
-                .map(|diagnostic| rendered_text_for_test(&assembler, diagnostic))
-                .collect::<Vec<_>>()
+                .any(|message| message.ends_with("waits for a change after an error")),
+            "{messages:?}"
         );
-        assert!(rendered.iter().any(|diagnostic| {
-            diagnostic
-                .message()
-                .contains("runtime killed reflection_task work")
-        }));
+        assert!(
+            messages.iter().any(|message| message
+                .ends_with("waits on a value that nothing in progress will produce")),
+            "{messages:?}"
+        );
     }
 
     #[test]
-    fn batch_settlement_renders_what_its_rendering_reports() {
+    fn a_batch_renders_what_its_publishing_reports() {
         let assembler = Assembler::default();
         let mut runtime = logger_runtime(assembler.clone());
         hand_over_logger(&mut runtime);
         let evaluation_runtime = assembler.evaluation_runtime();
         let module = assembler
-            .module(["reentrant_settled_report"])
+            .module(["reentrant_report"])
             .script(
                 "g",
                 concat!(
@@ -867,12 +864,18 @@ mod tests {
                 ));
             }
         };
-        let failed = settle_batch_runtime(&evaluation_runtime, &assembler.values(), render, || {
+        let mut drain = || {
             for diagnostic in take_from_fallback(&mut runtime) {
                 render(diagnostic);
             }
             Ok(())
-        });
+        };
+        let failed = quiesce_batch(
+            &evaluation_runtime,
+            &assembler.values(),
+            render,
+            &mut DrainingLogger(&mut drain),
+        );
 
         assert!(failed, "the failed machine fails the batch");
         assert_eq!(
@@ -886,16 +889,16 @@ mod tests {
     }
 
     #[test]
-    fn batch_settlement_fails_on_a_retained_delivery_failure() {
+    fn a_batch_fails_on_a_retained_delivery_failure() {
         let assembler = Assembler::default();
         let evaluation_runtime = assembler.evaluation_runtime();
         fail_a_delivery(&evaluation_runtime, "authoritative adapter failure");
 
-        assert!(settle_batch_runtime(
+        assert!(quiesce_batch(
             &evaluation_runtime,
             &assembler.values(),
             |_| {},
-            || Ok(())
+            &mut DrainingLogger(&mut || Ok(())),
         ));
         assert_eq!(
             evaluation_runtime
@@ -907,18 +910,18 @@ mod tests {
     }
 
     #[test]
-    fn configured_batch_settlement_services_managed_maintenance() {
+    fn a_batch_services_managed_maintenance() {
         let assembler = Assembler::default();
         let evaluation_runtime = assembler.evaluation_runtime();
         evaluation_runtime
             .request_managed_collection()
             .expect("explicit maintenance should publish");
 
-        assert!(!settle_batch_runtime(
+        assert!(!quiesce_batch(
             &evaluation_runtime,
             &assembler.values(),
             |_| {},
-            || Ok(())
+            &mut DrainingLogger(&mut || Ok(())),
         ));
         assert!(matches!(
             evaluation_runtime.readiness(),

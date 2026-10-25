@@ -198,6 +198,21 @@ final diagnostics through it).
    through a configured logger, a logger without an exit vote ending
    cleanly, a logger that stops reading halted with its backlog rendered
    by the fallback, and a stuck task failing the batch unkilled.
+   Built 2026-10-25: `quiesce_batch` over a `BatchLogger` (the root's
+   logger machine, or the bus alone without one), publishing through the
+   assembler's bus, so the configured logger receives the issues;
+   `PublishedIssues` keys each issue (a work, a backlog's machine and port,
+   an obligation's promise and acceptor, a machine, a delivery, a
+   maintenance failure) so each publishes once, with a report context:
+   `promise_wait`, `erred_wait` (its retained error one nested message),
+   `backlog`, `pending_obligation`, `machine_failure`, `delivery_failure`,
+   `maintenance_failure`. `ScheduledEffectRun::stopper` gives the batch an
+   `EffectRunStop` for the logger: the end stops an idle one, and a halt
+   one with unread input, after its own diagnostic; a cancelled logger
+   reports nothing. The settled-report rendering and its tests retire;
+   killed work and exit errors render no more, the latter until exit
+   votes retire. Mutation-checked: the halt, and a cancellation being
+   clean.
 3. `exit-votes-retire` — `.exit.*`, `ExitIntent`, exit dispositions and
    the exits readiness carries, with the tests and docs that vote, under
    `api-refl-retirements`; the `conf.log` idiom waits on `.read_log`.

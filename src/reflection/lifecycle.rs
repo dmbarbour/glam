@@ -275,6 +275,28 @@ impl ScheduledEffectRun {
     pub fn cancel(&self) {
         let _ = self.task.cancel();
     }
+
+    /// A handle that stops this run from another thread, deliberately, as a
+    /// host's batch does to a logger at its end: the run then returns
+    /// [`TaskOutcome::Cancelled`].
+    pub fn stopper(&self) -> EffectRunStop {
+        EffectRunStop {
+            task: self.task.clone(),
+        }
+    }
+}
+
+/// Stops a scheduled effect run from another thread
+/// ([`ScheduledEffectRun::stopper`]).
+#[derive(Clone)]
+pub struct EffectRunStop {
+    task: EvaluationTaskHandle,
+}
+
+impl EffectRunStop {
+    pub fn stop(&self) {
+        let _ = self.task.cancel();
+    }
 }
 
 /// Configures and synchronously runs one effect task.

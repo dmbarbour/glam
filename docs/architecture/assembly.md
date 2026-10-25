@@ -163,13 +163,15 @@ construct one dormant assembler, wire diagnostics to the logger machine,
   -> compile assembly
   -> evaluate and write valid asm.result bytes
   -> recheck observed local files and write optional manifest
-  -> pump all runtime work to a stable readiness or deadlock
+  -> pump all runtime work to quiescence, rendering the logger's fallback
+     between pumps when no configured logger's fork holds it
   -> service any MaintenanceRequired collection, then pump again
-  -> settle exit votes, or explicitly kill and settle a stable deadlock
-  -> render retained task, delivery, exit, and killed-work reports directly
-  -> repump if rendering admitted work, rendering the logger's fallback between
-     pumps when no configured logger's fork holds it
-  -> join conf.log, which hands what it left to the fallback, and render that
+  -> analyze the runtime (`quiescence-is-analyzed`); where conf.log's input
+     holds unread diagnostics, halt it, saying so, for the fallback
+  -> publish each issue not yet published through the bus, and so the logger,
+     then repump; nothing is killed or settled
+  -> once an analysis finds nothing new, end: stop an idle conf.log, which
+     hands what it left to the fallback, and render that
   -> read assembler/logger bus counts independently
   -> exit nonzero for result/report failure or either bus's error count
 ```
