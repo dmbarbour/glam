@@ -2633,6 +2633,13 @@ maps the short names used here to file names.
     is lost.
   - Only a deliberate interrupt stops work. Whatever an interrupt halts
     early is flagged; idle work is never stopped, and stays unflagged.
+  - (Decided by the maintainer the same day, for `quiescence-analysis`: a
+    cut waiting for a change after an error is unresolved, its own
+    family, distinct from intentional waits, a cut that fails by `.fail`
+    or diverges by pushback awaiting heap state or a queue, which are
+    idle. Such an erred wait is the recoverable kind; an unrecoverable
+    error ends its task, flagging its machine. Rust turns join the
+    analysis once settlement's runtime and the turn runtime meet.)
   - `api-settlement` is redirected to `api-quiescence`, and "settlement"
     leaves the vocabulary with the step.
 - **Reasons:** a batch's end is the client's judgment of a quiescent

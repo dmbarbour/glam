@@ -111,17 +111,25 @@ the CLI moves onto it.
    turn runtime meet, as `rt.analysis()`; and the analysis as a
    reflection effect, for a logger's or an IDE's status.
 
-### Questions on the transition
+### Decisions on the transition (maintainer, 2026-10-25)
 
-1. **An erred wait.** A cut that erred after observing state waits for a
-   change that might change the error (`dict-empty-is-a-value`). Is that
-   unresolved by default, as an error no change has cured, or idle, as a
-   wait on observed state? My lean: unresolved, its own family, so a
-   client may mask it.
-2. **Turns.** Settlement's runtime counts no Rust turn: a turn running
-   Rust code is invisible to its readiness. Defer counting turns to when
-   the runtimes meet (step 5), leaving the batch to its own turns as
-   now? My lean: yes.
+1. **An erred wait is unresolved**, clearly distinct from intentional
+   waits: a cut that fails by `.fail`, or diverges by pushback, awaiting
+   a machine's heap state or a queue, is idle. An erred wait is the
+   recoverable kind of error, which a change might cure; an
+   unrecoverable one ends its task, flagging the machine and emitting
+   its diagnostic, so it shows as a machine in error.
+2. **`.retry`.** Glam may want an explicit `.retry` for the general case:
+   intentional divergence until something observable changes, as
+   opposed to backtracking, the counterpart of Rust's `m.retry()`
+   (pushback, which no alternative takes). The runtime API plan holds it
+   as `api-refl-retry`; the analysis counts such a wait idle.
+3. **Turns wait.** Settlement's runtime counts no Rust turn: one running
+   Rust code is invisible to its readiness, and one waiting in a cut
+   blocks its own thread. Counting turns waits until settlement's
+   runtime and the turn runtime meet (step 5); until then, a batch
+   accounts for its own turns, as it does now, and the analysis says
+   nothing of them. Order the steps for convenient workflow (maintainer).
 
 ## Decisions (maintainer, 2026-10-25)
 

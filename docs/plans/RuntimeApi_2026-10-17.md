@@ -1041,6 +1041,14 @@ handle API goes.
       - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`
         and `.env.clear` for tasks.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
+      - `api-refl-retry` (maintainer, 2026-10-25, candidate): an explicit
+        `.retry`, intentional divergence until something observable
+        changes, as opposed to `.fail`'s backtracking, the counterpart of
+        Rust's `m.retry()`. Pushback today reaches glam only through what
+        cannot proceed, a short port read or a wait; `.retry` would let a
+        task say it. The quiescence analysis counts such a wait idle,
+        where an error awaiting a change is unresolved
+        ([Quiescence](Quiescence_2026-10-25.md)).
       - `api-refl-retirements`: exit votes and `.exit.*`,
         `AssemblerReflectionHost` and `TaskHost`'s hooks, and the `'macro`
         role, host, profile and bus. `macro-import-waits` is revisited here,
