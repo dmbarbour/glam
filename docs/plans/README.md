@@ -121,7 +121,13 @@ flags a step for discussion when work reaches it, not a decision.
   review of the runtime API plan's `api-settlement`: quiescence as a
   state, an analysis of what is owed when the runtime halts, and the
   options a host takes after it, in place of settlement's staged exit
-  votes and kills. Drafted 2026-10-25 for the maintainer's review.
+  votes and kills. Drafted 2026-10-25 for the maintainer's review; decided
+  the same day (`quiescence-is-analyzed`), through `quiescence-analysis`.
+- [`Obligations_2026-10-25.md`](Obligations_2026-10-25.md): a design note
+  for the runtime API plan's `api-refl-obligations`: accepted promises in
+  the event state, discharged as their promises resolve, which the
+  quiescence analysis reports. Drafted 2026-10-25 for the maintainer's
+  review.
 - [`DictSemantics_2026-10-24.md`](DictSemantics_2026-10-24.md): `dict-`
   steps revising dicts: `{}` as the empty dict rather than undefined,
   shallow union, paths fused by prefix, reads of what is undefined

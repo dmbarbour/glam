@@ -1041,6 +1041,8 @@ handle API goes.
       - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`
         and `.env.clear` for tasks.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
+        Designed in [Obligations](Obligations_2026-10-25.md), drafted
+        2026-10-25 for review.
       - `api-refl-retry` (maintainer, 2026-10-25, candidate): an explicit
         `.retry`, intentional divergence until something observable
         changes, as opposed to `.fail`'s backtracking, the counterpart of
