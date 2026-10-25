@@ -414,11 +414,13 @@ impl RuntimeEventJournal {
         self.flags.read(machine)
     }
 
-    /// Whether this journal sends input to the machine at `machine`, on any
-    /// of its ports, its task queue included, which the machine receives
-    /// only once the journal commits (`turn-pending-input-conflicts`).
-    pub(crate) fn sends_input_to(&self, machine: &[Key]) -> bool {
-        self.ports.appends_to_machine(machine)
+    /// Whether this journal queues tasks on the child machine at `machine`,
+    /// which reach it only when the journal commits. The task queue is no
+    /// ordinary port, whose input waits for a turn to read it: the child
+    /// drains it by itself, each task work forked onto the child, so a
+    /// synchronous entry after a queueing would overtake the task.
+    pub(crate) fn queues_tasks_on(&self, machine: &[Key]) -> bool {
+        self.ports.appends_to(&task_address(machine.to_vec()))
     }
 
     /// The local state of the child machine at `machine`, with this

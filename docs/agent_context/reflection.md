@@ -194,7 +194,7 @@ and control flow.
   (`run_deferred`, also run with the death notices).
 - `.child.call Key Op` within a transaction (`child-call-frame`): an error
   on a flagged child, or on one the transaction queued tasks on
-  (`RuntimeEventJournal::sends_input_to`), which the child starts only at
+  (`RuntimeEventJournal::queues_tasks_on`), which the child starts only at
   commit, so the call's wait for its queue could never end;
   `RequestResult::Fail` with
   observation on a busy one, else `RequestResult::Scoped` with `Op` and a

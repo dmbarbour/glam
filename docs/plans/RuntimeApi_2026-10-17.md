@@ -1026,22 +1026,16 @@ handle API goes.
         call within a transaction, and `child-call-plain`, the queued,
         awaited call outside one.
       - `turn-pending-input-conflicts` (maintainer, 2026-10-25: machines
-        get a call's rule): a turn that enters a child within a
-        transaction that has sent the child input, appended to the child's
-        buffers but not yet committed, fails with a conflict error rather
-        than run as if nothing were sent, which it does today, since reads
-        see committed input only. A machine reading what it wrote itself
-        stays pushback (`a_read_sees_committed_values_only`). The entries
-        are `run`, `recover`, `give` and `take`, each synchronous, as a
-        call is (maintainer, 2026-10-25). Built 2026-10-25: within a cut,
-        each fails without entering where the cut's journal appends to a
-        buffer of the target machine, on any port
-        (`RuntimeEventJournal::sends_input_to`, which a call's check now
-        shares, tasks being input). Test: each entry refused, a sibling
-        entered, and the input received after the commit; each entry's
-        check and the target's full path mutation-checked. Open to the
-        maintainer: `fork`, left out, whose branch would miss the input
-        too.
+        get a call's rule), retired the same day: built for `run`,
+        `recover`, `give` and `take`, it refused a turn that entered a
+        child its cut had sent input to, then was reverted on review with
+        the maintainer. There is no conflict: a machine has no driver of
+        its own, its ports buffer input for a turn to read, and a read
+        within the cut of what the cut sent is pushback, as reading one's
+        own write is (`a_cut_may_enter_a_child_it_sent_input_before_the_input_arrives`).
+        Only a reflection child's task queue, which the child drains by
+        itself, its tasks work forked onto it, can be overtaken, and a
+        call's rule covers it.
       - `api-refl-annotations`: annotation tasks on anonymous machines
         under `refl`.
       - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`

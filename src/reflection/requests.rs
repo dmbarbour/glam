@@ -939,9 +939,10 @@ where
 ///
 /// - a child in error it cannot enter, as recovery alone does, so it fails
 ///   with an error;
-/// - tasks the transaction queued on the child, as any input it sent the
-///   child, the child receives only once the transaction commits, so the
-///   wait could never end, and the call fails with an error;
+/// - tasks the transaction queued on the child, work forked onto it, the
+///   child starts only once the transaction commits, so the wait could
+///   never end, and the call fails with an error; other input it would
+///   only buffer, for a task to read;
 /// - a child busy with what was committed to it, as the transaction's
 ///   snapshot shows it, the call waits for, failing having observed it.
 ///
@@ -1004,7 +1005,7 @@ where
         if events.machine_flagged(&machine) {
             return Err(in_error());
         }
-        if events.sends_input_to(&machine) {
+        if events.queues_tasks_on(&machine) {
             return Err(TaskHalt::new(
                 "`.child.call` would wait for good: the child starts the tasks \
                  this transaction queued on it only once the transaction commits",

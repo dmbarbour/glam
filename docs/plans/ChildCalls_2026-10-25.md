@@ -207,8 +207,10 @@ Each with tests, the full gate, and a commit.
    committed meanwhile is a guard Glam cannot force in order, as the flag
    comes only from the child's own run ending in between.
 
-Turns get the same rule for what the transaction sent a child, in the
-runtime API plan's `turn-pending-input-conflicts`.
+Turns were to get the same rule for what the transaction sent a child,
+in the runtime API plan's `turn-pending-input-conflicts`, built and
+reverted the same day: only the task queue, which the child drains by
+itself, can be overtaken (see decision 3).
 
 ## Decisions (maintainer, 2026-10-25)
 
@@ -228,4 +230,7 @@ runtime API plan's `turn-pending-input-conflicts`.
    the same day: no special rule. The call waits for the child to finish
    its queue, which the child starts only once the transaction commits,
    and the error reports that wait, which could never end, where it is
-   noticed.)
+   noticed. Revised the same day: machines get no such rule. The task
+   queue is no ordinary port, its tasks work forked onto the child,
+   closer to a fork the parent need not join first; input on a port
+   waits for a turn or task to read it, and an entry overtakes nothing.)

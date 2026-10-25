@@ -2774,11 +2774,21 @@ maps the short names used here to file names.
     transaction queued on the child is no special rule: the call waits
     for the child to finish its queue, which the child starts only once
     the transaction commits, so the error reports a wait that could never
-    end, where it is noticed. Machines get the same reading: `run`,
-    `recover`, `give` and `take`, synchronous entries as a call is, fail
-    within a cut that sent the target input on any port, which arrives
-    only as the cut commits. Reasons: an undone error leaves no bad
+    end, where it is noticed. Reasons: an undone error leaves no bad
     state, and errors are reported when noticed.)
+  - (Revised by the maintainer, 2026-10-25, after
+    `turn-pending-input-conflicts` was built and reverted: machines get no
+    such rule, and a turn may enter a child its cut sent input to. The
+    task queue is no ordinary port: its tasks are work forked onto the
+    child, which drains them by itself, without a join, so a synchronous
+    call after a queueing would overtake them. A machine has no driver of
+    its own, and input on its ports waits in their buffers for a turn to
+    read it, so an entry overtakes nothing; a read within the cut of
+    what the cut sent is pushback, as a read of a machine's own write
+    is. Nor do a reflection child's other ports, once tasks have them,
+    count for a call: their input waits for a task to read it, and a busy
+    child makes a call wait already. Reasons: an error is for an actual
+    conflict, and only a queue drained by itself can be overtaken.)
   - (Decided by the maintainer, 2026-10-25, at `child-task-halts`: a
     child task that panics halts with its machine's error flag, its reply
     broken, so its parent can recover it. Reasons: a run that never ends

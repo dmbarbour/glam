@@ -475,12 +475,9 @@ impl PortJournal {
             .collect()
     }
 
-    /// Whether this journal is to append to a buffer of the machine at
-    /// `machine`.
-    pub(in crate::api) fn appends_to_machine(&self, machine: &[Key]) -> bool {
-        self.appends
-            .iter()
-            .any(|(address, _)| address.machine == machine)
+    /// Whether this journal is to append to the buffer at `address`.
+    pub(in crate::api) fn appends_to(&self, address: &PortAddress) -> bool {
+        self.appends.iter().any(|(appended, _)| appended == address)
     }
 
     /// The buffers of `port` at the machine at `machine` and its
