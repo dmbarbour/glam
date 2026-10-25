@@ -1033,7 +1033,15 @@ handle API goes.
         see committed input only. A machine reading what it wrote itself
         stays pushback (`a_read_sees_committed_values_only`). The entries
         are `run`, `recover`, `give` and `take`, each synchronous, as a
-        call is (maintainer, 2026-10-25).
+        call is (maintainer, 2026-10-25). Built 2026-10-25: within a cut,
+        each fails without entering where the cut's journal appends to a
+        buffer of the target machine, on any port
+        (`RuntimeEventJournal::sends_input_to`, which a call's check now
+        shares, tasks being input). Test: each entry refused, a sibling
+        entered, and the input received after the commit; each entry's
+        check and the target's full path mutation-checked. Open to the
+        maintainer: `fork`, left out, whose branch would miss the input
+        too.
       - `api-refl-annotations`: annotation tasks on anonymous machines
         under `refl`.
       - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`

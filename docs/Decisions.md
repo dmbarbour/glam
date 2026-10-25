@@ -2774,7 +2774,10 @@ maps the short names used here to file names.
     transaction queued on the child is no special rule: the call waits
     for the child to finish its queue, which the child starts only once
     the transaction commits, so the error reports a wait that could never
-    end, where it is noticed. Reasons: an undone error leaves no bad
+    end, where it is noticed. Machines get the same reading: `run`,
+    `recover`, `give` and `take`, synchronous entries as a call is, fail
+    within a cut that sent the target input on any port, which arrives
+    only as the cut commits. Reasons: an undone error leaves no bad
     state, and errors are reported when noticed.)
   - (Decided by the maintainer, 2026-10-25, at `child-task-halts`: a
     child task that panics halts with its machine's error flag, its reply

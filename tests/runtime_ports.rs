@@ -283,6 +283,45 @@ fn a_read_sees_committed_values_only() {
 }
 
 #[test]
+fn nothing_enters_a_child_before_the_input_its_cut_sent_it() {
+    // `turn-pending-input-conflicts`: input a cut sends a child arrives only
+    // as the cut commits, so within the cut no entry runs on the child as if
+    // nothing were sent: a turn, a recovery, or a move between stacks fails
+    // without entering. Other children it may enter, and once the cut
+    // commits, the child receives the input.
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire_add(Endpoint::output("events"), Endpoint::child("b", "in"))?;
+        p.cut(|p| {
+            p.int_push(1);
+            p.port_write("events", 1)?;
+            p.int_push(2);
+            let refused = [
+                p.run("b", |_| Ok(())).expect_err("a turn waits for the commit"),
+                p.recover("b", |_| Ok(()))
+                    .expect_err("a recovery waits for the commit"),
+                p.give("b", 1).expect_err("a give waits for the commit"),
+                p.take("b", 0).expect_err("a take waits for the commit"),
+            ];
+            for error in refused {
+                assert!(
+                    error
+                        .to_string()
+                        .ends_with("receives the input this cut sent it only once the cut commits, so nothing may enter it before"),
+                    "{error}"
+                );
+            }
+            assert_eq!(p.int_pop()?, 2, "the refused give moved nothing");
+            p.give("c", 0)?;
+            p.run("c", |_| Ok(()))
+        })?;
+        assert_eq!(receive(p, "b", "in", 1)?, [1], "after the commit it does");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
 fn rewiring_within_a_failed_cut_is_undone() {
     let mut rt = runtime();
     rt.run("p", |p| {

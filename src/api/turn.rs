@@ -836,7 +836,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     ///
     /// As [`Runtime::run`] does, it fails on a descendant in error without
     /// entering, and an error or panic that ends the turn leaves the
-    /// descendant in error.
+    /// descendant in error. Within a cut that sent the descendant input,
+    /// which arrives only as the cut commits, it fails without entering
+    /// rather than run as if nothing were sent, as [`Self::recover`],
+    /// [`Self::give`] and [`Self::take`] do.
     pub fn run<'b, R>(
         &mut self,
         path: impl Into<MachinePath>,
@@ -871,6 +874,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     where
         'scope: 'b,
     {
+        self.no_input_sent(&path)?;
         let mut state = std::mem::take(self.state.descendant(&path, reach)?);
         state.failed &= reach != Reach::Recover;
         let runtime: &'b Shared = self.runtime;
@@ -894,6 +898,24 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             .expect("a descendant's place stays during its turn") = state;
         self.state.prune(&path);
         outcome.unwrap_or_else(|panic| resume_unwind(panic))
+    }
+
+    /// Fails where this machine's cut sent input to the descendant at
+    /// `path`, which the descendant receives only once the cut commits: an
+    /// entry, a turn or a move between stacks, would run on it as if
+    /// nothing were sent (`turn-pending-input-conflicts`).
+    fn no_input_sent(&self, path: &[Key]) -> Result<(), Error> {
+        let Some(cut) = &self.cut else {
+            return Ok(());
+        };
+        let target: Vec<Key> = self.path.iter().chain(path).cloned().collect();
+        if cut.events.sends_input_to(&target) {
+            return Err(Error::new(format!(
+                "machine {path:?} receives the input this cut sent it only once \
+                 the cut commits, so nothing may enter it before"
+            )));
+        }
+        Ok(())
     }
 
     /// The machines below the one at `path`, relative to this machine, which
@@ -931,9 +953,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Moves the top `n` values, keeping their order, onto the stack of the
     /// descendant at `path`. Moving none only checks that the descendant is
-    /// neither forked nor in error.
+    /// neither forked nor in error. As a turn on it does, it fails within a
+    /// cut that sent the descendant input.
     pub fn give(&mut self, path: impl Into<MachinePath>, n: usize) -> Result<(), Error> {
         let path = descendant_path(path)?;
+        self.no_input_sent(&path)?;
         if n == 0 {
             return self.state.reachable(&path);
         }
@@ -950,9 +974,11 @@ impl<'scope, 'env> Machine<'scope, 'env> {
 
     /// Moves the top `n` values of the descendant at `path`, keeping their
     /// order, onto this machine's stack. Moving none only checks that the
-    /// descendant is neither forked nor in error.
+    /// descendant is neither forked nor in error. As a turn on it does, it
+    /// fails within a cut that sent the descendant input.
     pub fn take(&mut self, path: impl Into<MachinePath>, n: usize) -> Result<(), Error> {
         let path = descendant_path(path)?;
+        self.no_input_sent(&path)?;
         if n == 0 {
             return self.state.reachable(&path);
         }
