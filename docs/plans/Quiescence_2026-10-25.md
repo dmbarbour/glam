@@ -110,9 +110,8 @@ the CLI moves onto it.
    links' omission, quiescence by records, by waits in progress and by
    deliveries, and failed roots.
 2. `api-refl-obligations`: accepted promises, which the analysis lists as
-   *pending obligations*. Built 2026-10-25 for tasks
-   ([Obligations](Obligations_2026-10-25.md)); the turn operations
-   follow.
+   *pending obligations*. Built 2026-10-25, for tasks and turns
+   ([Obligations](Obligations_2026-10-25.md)).
 3. `quiescence-batch`: the CLI waits for quiescence, takes the analysis,
    renders it, and fails where an unmasked issue remains, by default any;
    it kills nothing. The settlement loops, kills, pending lists and

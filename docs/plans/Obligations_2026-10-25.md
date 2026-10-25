@@ -116,6 +116,14 @@ default unresolved.
    discharged, until a host clears it, since reclamation runs again only
    as its root or a run ends; `quiescence-options` takes it up.
 2. `obligations-turns` — the turn operations.
+   Built 2026-10-25: `m.accept_promise` (a diagnostic over a resolver),
+   `m.abandon_promise` and `m.promise_is_accepted` (the resolver stays),
+   for the turn's machine, through the cut's event journal or a
+   transaction of their own, the read observed within a cut; `m.clear`
+   abandons what the cleared machines accepted. Test: accept, read,
+   abandon, a failed atomic transaction undoing an abandonment that it
+   read, a child's clear, and a resolution's discharge; each operation
+   and the cut's read mutation-checked.
 
 A slice for children accepting their tasks' replies was dropped by
 decision 1.

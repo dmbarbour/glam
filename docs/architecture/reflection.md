@@ -290,7 +290,10 @@ accepted. A commit that resolves a promise discharges it for every acceptor,
 under the transaction lock, and an acceptance committed after another's
 resolution owes nothing. Clearing a machine abandons what it accepted; a
 flag keeps it, and reclamation keeps a machine that owes, as one in error.
-The quiescence analysis lists each pending obligation with its acceptors.
+Turns do the same for their machine with `m.accept_promise`,
+`m.abandon_promise` and `m.promise_is_accepted`, and `m.clear` abandons what
+the cleared machines accepted. The quiescence analysis lists each pending
+obligation with its acceptors.
 
 The runtime transaction lock makes reflection-store and generic event changes
 atomic. A failed validation cannot partially edit the heap, consume admitted

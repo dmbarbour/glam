@@ -366,3 +366,54 @@ fn a_cut_that_reads_a_promise_it_resolves_through_a_lazy_value_fails() {
     })
     .expect("the turn should succeed");
 }
+
+#[test]
+fn a_machine_owes_an_accepted_promise_until_anyone_resolves_it() {
+    // `obligations-are-accepted-promises`: a turn accepts a promise for its
+    // machine; whether any machine did reads true until it abandons it, or
+    // until anyone resolves the promise, which discharges it. A failed
+    // transaction undoes an abandonment, and clearing a machine abandons
+    // what it accepted.
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.promise_new();
+        p.swap()?;
+        p.discard(1)?;
+        assert!(!p.promise_is_accepted()?);
+        p.dup(1)?;
+        p.text_push("p owes it");
+        p.accept_promise()?;
+        assert!(p.promise_is_accepted()?);
+        let undone = p.atomic(|p| {
+            p.dup(1)?;
+            p.abandon_promise()?;
+            assert!(!p.promise_is_accepted()?, "the cut sees its abandonment");
+            Err::<(), _>(p.fail())
+        });
+        assert_eq!(undone.unwrap_err().kind(), ErrorKind::Backtrack);
+        assert!(p.promise_is_accepted()?, "the failed abandonment is undone");
+        p.dup(1)?;
+        p.abandon_promise()?;
+        assert!(!p.promise_is_accepted()?);
+
+        p.dup(1)?;
+        p.give("c", 1)?;
+        p.run("c", |c| {
+            c.text_push("c owes it");
+            c.accept_promise()
+        })?;
+        assert!(p.promise_is_accepted()?, "the child accepted it");
+        p.run("c", |c| c.clear())?;
+        assert!(!p.promise_is_accepted()?, "clearing abandoned it");
+
+        p.dup(1)?;
+        p.text_push("p owes it again");
+        p.accept_promise()?;
+        p.dup(1)?;
+        p.int_push(1);
+        p.promise_fulfill()?;
+        assert!(!p.promise_is_accepted()?, "the resolution discharged it");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}

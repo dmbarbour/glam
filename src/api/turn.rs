@@ -2433,6 +2433,70 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.resolve_promise(Resolution::Break)
     }
 
+    /// Pops a diagnostic, then a resolver, and accepts the resolver's
+    /// promise for this machine, which then owes it, as the diagnostic says
+    /// (`obligations-are-accepted-promises`): the quiescence analysis
+    /// reports it until anyone resolves it, which discharges it for every
+    /// acceptor. Accepting holds the resolver, so the promise is never lost.
+    /// It evaluates the resolver, never the diagnostic. Outside a cut it
+    /// commits at once; within one, with the outermost cut.
+    pub fn accept_promise(&mut self) -> Result<(), Error> {
+        let depth = self.require(2)?;
+        let resolver = self.state.stack[depth - 2].clone();
+        let diagnostic = self.state.stack[depth - 1].clone();
+        self.runtime.assembler.values().require(&diagnostic)?;
+        let resolver = self.resolver_at(resolver)?;
+        let (machine, diagnostic) = (self.path.clone(), diagnostic.into_runtime_root());
+        self.transact(|_, events| {
+            events.accept_promise(machine.clone(), resolver.clone(), diagnostic.clone());
+            Ok(())
+        })?;
+        self.state.stack.truncate(depth - 2);
+        Ok(())
+    }
+
+    /// Pops a resolver, and abandons this machine's acceptance of its
+    /// promise, without resolving it. As [`Self::accept_promise`], it
+    /// evaluates the resolver, and commits at once outside a cut.
+    pub fn abandon_promise(&mut self) -> Result<(), Error> {
+        let resolver = self.peek()?.clone();
+        let promise = self.resolver_at(resolver)?.id();
+        let machine = self.path.clone();
+        self.transact(|_, events| {
+            events.abandon_promise(machine.clone(), promise);
+            Ok(())
+        })?;
+        self.pop()?;
+        Ok(())
+    }
+
+    /// Whether any machine accepted the promise that the resolver on top,
+    /// which stays and is evaluated, resolves. Within a cut the read joins
+    /// the cut's transaction, so an acceptance or abandonment committed
+    /// meanwhile conflicts with the cut, and servers that check before
+    /// accepting serialize.
+    pub fn promise_is_accepted(&mut self) -> Result<bool, Error> {
+        let resolver = self.peek()?.clone();
+        let promise = self.resolver_at(resolver)?.id();
+        Ok(match &mut self.cut {
+            Some(cut) => {
+                cut.observed = true;
+                cut.events.promise_accepted(promise)
+            }
+            None => {
+                let (_, _, events) = self.resources().transaction_snapshot();
+                RuntimeEventJournal::new(events).promise_accepted(promise)
+            }
+        })
+    }
+
+    /// A hold on the breaker of the resolver `value`, which it evaluates.
+    fn resolver_at(&mut self, value: HandleValue) -> Result<ManagedResolverRoot, Error> {
+        let evaluated = self.runtime.assembler.evaluator().eval(&value);
+        let resolver = self.note_evaluation(evaluated)?.into_value();
+        self.resolver_root(&resolver)
+    }
+
     /// Resolves the promise of the resolver below the top value, with that
     /// value, popping both once it has.
     fn resolve_promise(
@@ -3605,9 +3669,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// its descendants: nothing waiting in their inputs, and the wiring they
     /// own back to the defaults. What arrives at their inputs later stays,
     /// and the wires its parent owns to and from it stay. The shares of the
-    /// environment that the machine and its descendants bind go too. The
-    /// ports and shares change as a write does: at once outside a cut, with
-    /// the outermost cut within one. It fails, changing nothing, while a
+    /// environment that the machine and its descendants bind go too, and
+    /// the promises they accepted are abandoned. The ports, shares and
+    /// acceptances change as a write does: at once outside a cut, with the
+    /// outermost cut within one. It fails, changing nothing, while a
     /// descendant is forked.
     pub fn clear(&mut self) -> Result<(), Error> {
         if self.state.has_fork() {
@@ -3634,6 +3699,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 store.remove_environment(node.clone());
             }
             events.shares.clear_below(path.clone());
+            events.accepted.clear_below(&path);
             Ok(())
         })?;
         self.state = MachineState::default();
