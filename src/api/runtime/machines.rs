@@ -674,40 +674,6 @@ mod tests {
     }
 
     #[test]
-    fn a_call_s_reads_conflict_with_a_task_queued_on_its_child_meanwhile() {
-        // `child-call-frame`: a call reads its child's flag, queue and state
-        // in its caller's transaction, so a task queued on the child after
-        // the caller's snapshot conflicts with it, and the caller's cut runs
-        // again, then to find the child busy.
-        let runtime = EvaluationRuntime::new(0).expect("the runtime should open");
-        let resources = runtime.state.shared_resources.clone();
-        let values = runtime.values();
-        let machine = vec![Key::atom_from_text("refl"), Key::atom_from_text("a")];
-        let (_, store, events) = resources.transaction_snapshot();
-        let mut caller = RuntimeEventJournal::new(events);
-        assert!(!caller.machine_flagged(&machine));
-        assert!(!caller.queues_tasks_on(&machine));
-        assert_eq!(caller.queued_tasks(&machine), 0);
-        assert!(caller.machine_state(&machine).is_none());
-        caller.set_machine_state(&machine, values.integer(1));
-
-        let (_, queue_store, events) = resources.transaction_snapshot();
-        let mut queueing = RuntimeEventJournal::new(events);
-        queueing.queue_task(machine.clone(), values.integer(2));
-        assert!(matches!(
-            resources.try_commit_transaction(&StoreJournal::new(queue_store), &queueing),
-            StoreCommitResult::Committed
-        ));
-        assert!(matches!(
-            resources.try_commit_transaction(&StoreJournal::new(store), &caller),
-            StoreCommitResult::Conflict
-        ));
-        assert!(resources.local_state(&machine).is_none());
-        let (_, _, events) = resources.transaction_snapshot();
-        assert!(RuntimeEventJournal::new(events).machine_busy(&machine));
-    }
-
-    #[test]
     fn listings_leave_anonymous_roots_out() {
         // An anonymous root, and the machines below it, are unnamed in
         // listings, where a named machine's task input shows it present.

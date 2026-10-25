@@ -193,8 +193,10 @@ and control flow.
   mutator, or unwinds, waits on the host for its next safe point
   (`run_deferred`, also run with the death notices).
 - `.child.call Key Op` within a transaction (`child-call-frame`): an error
-  on a flagged child or one the transaction queued tasks on
-  (`RuntimeEventJournal::queues_tasks_on`), `RequestResult::Fail` with
+  on a flagged child, or on one the transaction queued tasks on
+  (`RuntimeEventJournal::queues_tasks_on`), which the child starts only at
+  commit, so the call's wait for its queue could never end;
+  `RequestResult::Fail` with
   observation on a busy one, else `RequestResult::Scoped` with `Op` and a
   hidden close (`ReflectionRequest::ChildCallLeave`). Entering pushes a
   `ChildCall` on the branch (`Branch::calls`, `RequestContext::enter_call`)
@@ -202,13 +204,19 @@ and control flow.
   `Op` left (`set_machine_state`). `child_machine` takes the innermost
   call's child before the task's machine. Within a cut, an error in `Op`
   waits for a change like any error after an observation; under `.try` it
-  answers `err` and undoes, so no flag stages. Outside a transaction
+  answers `err` and undoes, so nothing flags the child: the flag means bad
+  state, and an undone error leaves none (maintainer). Outside a transaction
   (`child-call-plain`) the call queues through `queue_on_child`, as
   `.child.task` does, whose `admit` refuses a flagged child in the
   queueing's own journal (a flag set meanwhile conflicts, and the queueing
   runs again), and answers `RequestResult::Await(reply)`: the branch runs
   `seq reply (.r reply)`, waiting for the child, and a broken reply is the
   call's error.
+- Test builds register `.TEST_ONLY.*` effects for ordering what Glam alone
+  cannot: `.TEST_ONLY.queue_now Key Op` queues on a child and commits at
+  once even within a transaction, as another writer (a Rust turn,
+  settlement) would, so a test forces a commit between a cut's read and
+  its commit. Prefer such an effect to testing journals by hand.
 - An anonymous root's subtree is unreachable once the root's task ends: its
   keys name a task id never reused. The root's task, once it tasks or calls a child,
   holds an `AnonymousRootGuard` reporting its end, and the host reclaims

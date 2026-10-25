@@ -33,6 +33,11 @@ pub enum ReflectionRequest {
     ChildCall,
     /// The close of a `.child.call`, which Glam code cannot name.
     ChildCallLeave,
+    /// `.TEST_ONLY.queue_now Key Op`: queues `Op` on the child `Key`,
+    /// committing at once even within a transaction, as another writer
+    /// would, so that a test orders a commit against a transaction.
+    #[cfg(test)]
+    TestQueueNow,
 }
 
 /// Durable interpretation state for one reusable reflection request.
@@ -69,12 +74,18 @@ enum ChildRequest {
     Interrupt,
     Clear,
     Call,
+    #[cfg(test)]
+    QueueNow,
 }
 
 impl ChildRequest {
     /// Whether the request takes a value after its key: a task's or a call's
     /// operation, or an interrupt's reason.
     fn takes_value(self) -> bool {
+        #[cfg(test)]
+        if matches!(self, Self::QueueNow) {
+            return true;
+        }
         matches!(self, Self::Task | Self::Interrupt | Self::Call)
     }
 }
@@ -223,6 +234,13 @@ impl ReflectionRequestWork {
                 state: ChildRequestState::Start(arguments),
             }),
             ReflectionRequest::ChildCallLeave => ReflectionRequestOperation::ChildCallLeave,
+            #[cfg(test)]
+            ReflectionRequest::TestQueueNow => {
+                ReflectionRequestOperation::Child(ChildRequestWork {
+                    request: ChildRequest::QueueNow,
+                    state: ChildRequestState::Start(arguments),
+                })
+            }
         };
         Self { operation }
     }
@@ -309,6 +327,18 @@ where
                         }
                         (ChildRequest::Call, Some(operation)) => {
                             call_child(key, operation, context)?
+                        }
+                        #[cfg(test)]
+                        (ChildRequest::QueueNow, Some(operation)) => {
+                            let path = child_machine(key, context)?;
+                            queue_on_child(
+                                ".TEST_ONLY.queue_now",
+                                path,
+                                operation,
+                                context,
+                                Queueing::AtOnce,
+                                |_| Ok(()),
+                            )?
                         }
                         (ChildRequest::Recover, _) => recover_child(key, context)?,
                         (ChildRequest::Clear, _) => clear_child(key, context)?,
@@ -488,6 +518,8 @@ fn child_request_name(request: ChildRequest) -> &'static str {
         ChildRequest::Interrupt => ".child.interrupt",
         ChildRequest::Clear => ".child.clear",
         ChildRequest::Call => ".child.call",
+        #[cfg(test)]
+        ChildRequest::QueueNow => ".TEST_ONLY.queue_now",
     }
 }
 
@@ -542,19 +574,37 @@ where
     S::Journal: ReflectionTransaction,
 {
     let path = child_machine(key, context)?;
-    queue_on_child(".child.task", path, operation, context, |_| Ok(()))
+    queue_on_child(
+        ".child.task",
+        path,
+        operation,
+        context,
+        Queueing::WithTransaction,
+        |_| Ok(()),
+    )
+}
+
+/// How a queueing commits.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Queueing {
+    /// With the transaction it is made in, or at once outside one.
+    WithTransaction,
+    /// At once even within a transaction, as another writer's would.
+    #[cfg(test)]
+    AtOnce,
 }
 
 /// Queues `operation` on the child machine at `path`, for the request
-/// `name`, and answers the promise of its reply: within a transaction,
-/// staged with it, and otherwise committed at once, once `admit` accepts
-/// the child as the commit's journal reads it, so that what it read
-/// changing meanwhile runs the queueing again.
+/// `name`, and answers the promise of its reply: staged with the
+/// transaction it is made in, as `queueing` allows, and otherwise committed
+/// at once, once `admit` accepts the child as the commit's journal reads
+/// it, so that what it read changing meanwhile runs the queueing again.
 fn queue_on_child<S>(
     name: &str,
     path: Vec<Key>,
     operation: Value,
     context: &mut RequestContext<'_, S>,
+    queueing: Queueing,
     admit: impl Fn(&mut crate::api::RuntimeEventJournal) -> Result<(), TaskHalt>,
 ) -> Result<RequestResult, TaskHalt>
 where
@@ -597,7 +647,9 @@ where
         updates.push(wake.clone());
         Ok::<_, TaskHalt>(())
     };
-    if let Some(mut transaction) = context.transaction() {
+    if queueing == Queueing::WithTransaction
+        && let Some(mut transaction) = context.transaction()
+    {
         let journal = transaction.parts().1.reflection_journal();
         if let Err(error) = queue(journal.events.as_mut(), &mut journal.updates) {
             promises.forget(promise);
@@ -619,7 +671,9 @@ where
             .commit(TaskCommit::new(store, snapshot.extra().clone(), journal))
         {
             CommitResult::Committed => {
-                context.committed();
+                if context.transaction_generation().is_none() {
+                    context.committed();
+                }
                 return Ok(RequestResult::Return(promised));
             }
             CommitResult::Conflict => {}
@@ -877,27 +931,25 @@ where
 /// behind a stopped queue.
 ///
 /// Within a transaction, it runs `Op` on the child within the caller's
-/// transaction (`child-call-frame`). `Op` runs on the child's local state, and its
-/// requests act on the child's children; as the call returns, the state
-/// `Op` left becomes the child's, committing or aborting with the caller.
-/// The call reads the child's flag, queue and state, all observed:
+/// transaction (`child-call-frame`). `Op` runs on the child's local state,
+/// and its requests act on the child's children; as the call returns, the
+/// state `Op` left becomes the child's, committing or aborting with the
+/// caller. The call waits for the child to finish its task queue, reading
+/// the child's flag, queue and state, all observed:
 ///
 /// - a child in error it cannot enter, as recovery alone does, so it fails
 ///   with an error;
-/// - tasks the transaction queued on the child reach it only as the
-///   transaction commits, and the call cannot run before them, so it fails
-///   with an error, as a conflict;
+/// - tasks the transaction queued on the child the child starts only once
+///   the transaction commits, so the wait could never end, and the call
+///   fails with an error;
 /// - a child busy with what was committed to it, as the transaction's
 ///   snapshot shows it, the call waits for, failing having observed it.
 ///
 /// An explicit failure in `Op` backtracks, the caller's state and machine
-/// with it. An error that ends `Op` is the caller's, as any error within
-/// its transaction: `.try` answers it, undoing what it tried, and a cut,
-/// having observed the child, waits for a change. Either way the child is
-/// left as it was, unflagged: its flag would stage with the caller's
-/// transaction, as a Rust turn's error in a descendant's turn within a cut
-/// stages the descendant's, but Glam has no handler that keeps what an
-/// error ended.
+/// with it. An error that ends `Op` is undone with the transaction: `.try`
+/// answers it, undoing what it tried, and a cut, having observed the child,
+/// waits for a change. The error flag means a machine's state is bad, and
+/// an undone error leaves the child's as it was, so the call flags nothing.
 fn call_child<S>(
     key: Key,
     operation: Value,
@@ -918,13 +970,20 @@ where
     let machine = child_machine(key, context)?;
     let Some(generation) = context.transaction_generation() else {
         let check = machine.clone();
-        let queued = queue_on_child(".child.call", machine, operation, context, |events| {
-            if events.machine_flagged(&check) {
-                Err(in_error())
-            } else {
-                Ok(())
-            }
-        })?;
+        let queued = queue_on_child(
+            ".child.call",
+            machine,
+            operation,
+            context,
+            Queueing::WithTransaction,
+            |events| {
+                if events.machine_flagged(&check) {
+                    Err(in_error())
+                } else {
+                    Ok(())
+                }
+            },
+        )?;
         return Ok(match queued {
             RequestResult::Return(reply) => RequestResult::Await(reply),
             result => result,
@@ -947,8 +1006,8 @@ where
         }
         if events.queues_tasks_on(&machine) {
             return Err(TaskHalt::new(
-                "`.child.call` conflicts with the tasks its transaction queued on the child, \
-                 which reach it only as the transaction commits",
+                "`.child.call` would wait for good: the child starts the tasks \
+                 this transaction queued on it only once the transaction commits",
             ));
         }
         if events.queued_tasks(&machine) > 0 {
@@ -1672,6 +1731,19 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 ReflectionRequest::ChildCall,
             ),
             child_call_leave_spec(),
+            #[cfg(test)]
+            EffectRequestSpec::at_path(
+                ["TEST_ONLY", "queue_now"],
+                [
+                    "reflection_runtime",
+                    "v0",
+                    "request",
+                    "TEST_ONLY",
+                    "queue_now",
+                ],
+                2,
+                ReflectionRequest::TestQueueNow,
+            ),
         ])
         .collect()
 }
@@ -1726,7 +1798,8 @@ mod tests {
             | ReflectionRequest::ChildInterrupt
             | ReflectionRequest::ChildClear
             | ReflectionRequest::ChildCall
-            | ReflectionRequest::ChildCallLeave => {}
+            | ReflectionRequest::ChildCallLeave
+            | ReflectionRequest::TestQueueNow => {}
         }
     }
 

@@ -361,8 +361,11 @@ volume to retry. Dropping the Rust owner does not revoke it.
 - `.child.call Key Op`, within a transaction, runs `Op` on the child within
   the caller's transaction and answers its result (`child-call-frame`). It
   reads the child's flag, queue and state, observed: a child in error is
-  an error, as are tasks the transaction itself queued on the child, and a
-  busy child fails, so the call waits. It answers a scoped request: the
+  an error; a busy child fails, so the call waits for its queue; and tasks
+  the transaction itself queued on the child, which the child starts only
+  once the transaction commits, make a wait that could never end, an
+  error. An error in `Op` is undone with the transaction, `.try` answering
+  it or a cut waiting for a change, so it flags nothing. It answers a scoped request: the
   operation is `Op`, and the close, a hidden request, writes the state
   `Op` left as the child's in the caller's journal. Each branch keeps the
   calls it runs within (`ChildCall`: the child, and the caller's state the

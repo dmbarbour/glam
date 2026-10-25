@@ -1031,9 +1031,9 @@ handle API goes.
         buffers but not yet committed, fails with a conflict error rather
         than run as if nothing were sent, which it does today, since reads
         see committed input only. A machine reading what it wrote itself
-        stays pushback (`a_read_sees_committed_values_only`). Which entries
-        count, `run` and `recover` surely, `give` and `take` perhaps, is
-        for the build to settle with the maintainer.
+        stays pushback (`a_read_sees_committed_values_only`). The entries
+        are `run`, `recover`, `give` and `take`, each synchronous, as a
+        call is (maintainer, 2026-10-25).
       - `api-refl-annotations`: annotation tasks on anonymous machines
         under `refl`.
       - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`
@@ -1071,7 +1071,9 @@ handle API goes.
      a decision its host or user makes from the report, such as a CLI
      option or an IDE's command: failed child machines and failed
      anonymous roots, and alike the work blocked permanently on
-     divergence, which settlement kills and an interrupt flags. Clearing
+     divergence, which settlement kills and an interrupt flags: a call
+     blocked for good within a cut flags both its child and its caller
+     (maintainer, 2026-10-25). Clearing
      drops each machine with its subtree and its failure; inspection tools
      may later clear at a finer grain. Until then they stay as long as the
      runtime does.

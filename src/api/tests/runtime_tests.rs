@@ -2272,6 +2272,20 @@ called = anno refl:(.set ['who] "caller" =>> .child.task 'a (.set ['n] 1) >>= (\
 }
 
 #[test]
+fn a_task_committed_to_the_child_meanwhile_runs_the_call_s_cut_again() {
+    // A call reads its child's queue and state in the caller's
+    // transaction, so a task committed to the child after the caller's
+    // snapshot, here by `.TEST_ONLY.queue_now` as another writer would,
+    // conflicts with it: the cut runs again, waits for the child's task,
+    // and reads the state it left.
+    let source = r#"language g0
+import 'std
+raced = anno refl:(.child.task 'c (.set ['n] 1) >>= (\p -> seq p (.cut (.child.call 'c (.get ['n]) >>= (\n -> if n == 1 then .TEST_ONLY.queue_now 'c (.set ['n] 2) >>= (\_ -> .r n) else .r n)) >>= (\n -> .heap.set ['raced] (if n == 2 then "ran again" else "committed a stale read"))))) ()
+"#;
+    assert_eq!(run_reflection_texts(source, &["raced"]), ["ran again"]);
+}
+
+#[test]
 fn a_call_waits_while_its_child_is_busy() {
     // A call waits until the child has finished what was committed to it:
     // `.try`, which never waits, reports it failed, and a cut enters once
@@ -2287,9 +2301,9 @@ waited = anno refl:(.child.task 'w (.cut (.heap.try_get ['w_gate]) =>> .set ['n]
 fn a_call_enters_neither_a_child_in_error_nor_one_its_transaction_queued_on() {
     // Recovery is the only way into a child in error, so a call fails with
     // an error until the parent recovers it, then finds the state the
-    // failure left. A task the caller's transaction queued on the child
-    // reaches it only as the transaction commits, and a call cannot run
-    // before it: the call fails with an error, as a conflict.
+    // failure left. A call waits for the child to finish its queue, and the
+    // child starts a task the caller's transaction queued only once the
+    // transaction commits: the wait could never end, which is an error.
     let source = r#"language g0
 import 'std
 flagged = anno refl:(.child.task 'f (.set ['n] 1 =>> (1 / 0)) >>= (\p -> .try (seq p (.r ())) >>= (\_ -> .try (.child.call 'f (.get ['n])) >>= (\r -> .child.recover 'f =>> .cut (.child.call 'f (.get ['n])) >>= (\n -> .heap.set ['flagged] (if n == 1 then r.err.msg.text else "unrecovered")))))) ()
@@ -2299,8 +2313,8 @@ pending = anno refl:(.try (.child.task 'q (.r ()) >>= (\_ -> .child.call 'q (.r 
         run_reflection_texts(source, &["flagged", "pending"]),
         [
             "`.child.call` cannot enter a child in error until its parent recovers it",
-            "`.child.call` conflicts with the tasks its transaction queued on the child, \
-             which reach it only as the transaction commits",
+            "`.child.call` would wait for good: the child starts the tasks \
+             this transaction queued on it only once the transaction commits",
         ]
     );
 }

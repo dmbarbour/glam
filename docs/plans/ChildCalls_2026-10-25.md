@@ -88,12 +88,14 @@ The cells keep only the runs.
    2026-10-25), as `run`, `give`, `take` and `fork` fail on a machine in
    error (`machine-errors-mark-and-recover`): the flag records an early
    exit that may have left the child's state half-done, so no work runs on
-   it until its parent recovers it, acknowledging that. A child the
-   caller's own transaction queued tasks on, which reach it only when the
-   transaction commits, the call cannot ignore either: it fails with an
-   error as a conflict (maintainer: the error, over running the pending
-   tasks within the caller's transaction, which would surprise the
-   caller). Both reads are observed.
+   it until its parent recovers it, acknowledging that. Nor can a call
+   wait out tasks the caller's transaction queued on the child: it waits
+   for the child to finish its task queue, and the child starts those
+   tasks only once the transaction commits, so the wait could never end,
+   and the call reports it as an error. This is no special rule, only
+   reporting an error where it is noticed (maintainer, 2026-10-25: the
+   error, over running the pending tasks within the caller's transaction,
+   which would surprise the caller). Both reads are observed.
 2. **Busy is pushback.** Where the child is busy as the caller's snapshot
    shows it, an unflagged queue holding a task, the call fails having
    observed it, as recovery and clearing do, so the cut waits for the
@@ -106,19 +108,16 @@ The cells keep only the runs.
    `Op`'s value. An explicit failure, `Op`'s `.fail`, restores the
    caller's state with the frame, which a cut's alternatives or `.try`
    then handle, and stages nothing for the child. An error that ends `Op`
-   flags the child (maintainer, 2026-10-25), as an error that ends a turn
-   flags its machine: the flag stages with the caller's transaction, as a
-   Rust turn's error in a descendant's turn within a cut stages the
-   descendant's, part of its machine's state, and commits where the
-   caller handles the error and goes on. Observing the error never clears
-   the flag. Glam has no such handler: `.try` undoes what it tried, the
-   child's state and flag with it, and an error within a cut that
-   observed state, as a call has, waits for a change
-   (`dict-empty-is-a-value`). So within a transaction an error in `Op`
-   leaves the child as it was, and the call stages no flag (agent,
-   2026-10-25, at `child-call-frame`; first written here as committing
-   "where the caller handles the error, as `.try` does", which `.try`'s
-   undo contradicts).
+   is undone with the transaction: `.try` answers it, undoing what it
+   tried, the child's state with it, and a cut, having observed the child,
+   waits for a change that might change the error
+   (`dict-empty-is-a-value`). The error flag means a machine's state is
+   bad, and an undone error leaves the child's as it was, so the call
+   flags nothing; `.try` is how a caller bounds the wait (maintainer,
+   2026-10-25, at `child-call-frame`, clarifying decision 1, which this
+   note first read as staging a flag that `.try` would commit). A call
+   blocked for good within a cut is for settlement to find, which flags
+   both the child and the caller (`settlement-clears-machines`).
 4. **The machine per branch.** The branch carries the machine it runs on,
    replacing the task-level `EvalContext::machine` where requests read it,
    so `.child.*` within `Op` names the child's children and a call nests
@@ -186,11 +185,13 @@ Each with tests, the full gate, and a commit.
    leaves. Outside a transaction it fails with an error until
    `child-call-plain`. A task committed to the child meanwhile cannot
    come from Glam today: only the parent's tasks, one at a time, queue on
-   a child, and a busy child turns a call away. So the conflict is tested
-   on the journals, as a call reads them; it guards Rust turns and
-   settlement as they come to act on children. Mutation-checked: each
-   entry condition, the state's swap in and out, the per-branch machine,
-   the root's guard, and the reads' observation.
+   a child, and a busy child turns a call away; it guards Rust turns and
+   settlement as they come to act on children. So a test-only effect,
+   `.TEST_ONLY.queue_now`, commits a queueing at once within the caller's
+   cut, as such a writer would, and the cut runs again (first tested on
+   the journals by hand, retired for it, at the maintainer's suggestion).
+   Mutation-checked: each entry condition, the state's swap in and out,
+   the per-branch machine, the root's guard, and the reads' observation.
 3. `child-call-plain` — the call outside a transaction, queued and
    awaited. Tests: order after earlier tasks, the result, the failure and
    the child's flag, and a flagged child.
@@ -214,11 +215,17 @@ runtime API plan's `turn-pending-input-conflicts`.
 1. An error that ends a call's `Op` flags the child, plain or within a
    transaction, as an error that ends a turn flags its machine; within a
    transaction the flag stages with the caller. Observation never clears
-   it, only recovery. (Agent, 2026-10-25, for review: within a
-   transaction no Glam handler keeps what an error ended, so the staged
-   flag never commits; see "Within a transaction", step 3.)
+   it, only recovery. (Clarified by the maintainer the same day: the flag
+   means a machine's state is bad. Within a transaction the error is
+   undone, `.try` answering it or a cut waiting for a change, so the child
+   is left as it was and unflagged; only a plain call's error flags it.
+   A call blocked for good flags child and caller at settlement.)
 2. A call cannot enter a child in error: recovery is the only way in, for
    the reason machines have one (`machine-errors-mark-and-recover`).
 3. A call cannot ignore tasks its own transaction queued on the child; it
    fails with a conflict error, rather than run them within the caller's
-   transaction. Machines get the same rule.
+   transaction. Machines get the same rule. (Clarified by the maintainer
+   the same day: no special rule. The call waits for the child to finish
+   its queue, which the child starts only once the transaction commits,
+   and the error reports that wait, which could never end, where it is
+   noticed.)
