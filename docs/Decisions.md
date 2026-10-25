@@ -2599,9 +2599,56 @@ maps the short names used here to file names.
   vote, and settled reports that the CLI renders are bridge behavior until
   `api-settlement`. Aligning the reflection API becomes a design step,
   `api-reflection-model`, ahead of `api-settlement`. `--interactive` can
-  build on settlement without its tangles.
+  build on settlement without its tangles. (Amended by
+  `quiescence-is-analyzed`, 2026-10-25: no settlement step renders,
+  kills or reports once; a client analyzes the runtime and decides.)
 - **Recorded in:** runtime API plan, `api-reflection-model` and
   `api-settlement`.
+
+### A halted runtime is analyzed, not settled
+`quiescence-is-analyzed` · 2026-10-25 · maintainer · accepted
+- **Context:** `quiescence-reports-unresolved-state` kept a settlement
+  step, which publishes exit votes, kills a deadlock, reports each failure
+  once, and has the logger render the report. Exit votes are retiring
+  (`reflection-tasks-are-machine-tasks`), obligations are accepted
+  promises (`obligations-are-accepted-promises`), and a step that staged
+  votes has nothing left to stage. Meanwhile, under the bridge, a
+  reflection task waiting without a vote reads as deadlocked and is
+  killed, whatever it waits on.
+- **Decision:**
+  - Quiescence is a state, not a step: no turn or task progresses
+    without action from outside. An analysis says what is owed:
+    unresolved are pending accepted promises, machines in error, and
+    evaluations awaiting promises; waits on input, observed state or
+    queued tasks are idle, owe nothing, and stay as they are.
+  - The runtime can be analyzed at any time, a form of reflection on the
+    runtime, as an IDE or a logger reporting status may want; at
+    quiescence the analysis says what is left unresolved.
+  - What to do with an analysis belongs to whoever asked for it: nothing
+    renders it automatically.
+  - By default any unresolved item fails a batch; a client may mask
+    families of issues, or recognize issues the default does not. A
+    batch is a quiescent state that a client decides to recognize as an
+    end, an atomic transition: nothing is killed at its end, and nothing
+    is lost.
+  - Only a deliberate interrupt stops work. Whatever an interrupt halts
+    early is flagged; idle work is never stopped, and stays unflagged.
+  - `api-settlement` is redirected to `api-quiescence`, and "settlement"
+    leaves the vocabulary with the step.
+- **Reasons:** a batch's end is the client's judgment of a quiescent
+  state, not something the runtime stages; an analysis serves IDEs,
+  loggers and batches alike once it reflects state rather than staging
+  events; and work stops only where someone chose to stop it.
+- **Alternatives rejected:** a settlement step publishing exit votes and
+  kills; reporting each failure once on the runtime's behalf; rendering
+  the report through the logger automatically; killing a deadlock to end
+  a batch.
+- **Consequences:** exit votes, settlement's publication and its pending
+  report lists, the CLI's settlement loops and its automatic kills
+  retire; clearing machines in error becomes a host's option after an
+  analysis (`settlement-clears-machines` folds into the options).
+- **Recorded in:** Quiescence note (`Quiescence_2026-10-25.md`); runtime
+  API plan, `api-quiescence`.
 
 ### A forced import asks for its source's binary on a port
 `imports-are-source-requests` · 2026-10-21 · maintainer · accepted

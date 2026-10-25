@@ -1047,11 +1047,14 @@ handle API goes.
         where the macro session moves to the pure front end, or with
         `compile-resumable` if that fits better (maintainer).
       - `api-refl-cli-log`: the CLI slice above.
-23. `api-settlement` — settlement as `quiescence-reports-unresolved-state`
-    decides (maintainer, 2026-10-19), in place of exit votes. Under
-    review (2026-10-25): [Quiescence](Quiescence_2026-10-25.md) reframes
-    it as an analysis of a halted runtime and the host's options after
-    it, with no staging step. It follows
+23. `api-settlement` — redirected to `api-quiescence`
+    (`quiescence-is-analyzed`, maintainer, 2026-10-25): settlement as a
+    staging step belonged to exit votes, which are retiring, and under the
+    bridge it killed every task waiting without a vote. A halted runtime
+    is analyzed instead, at any time, by whoever asks, who decides what
+    follows; [Quiescence](Quiescence_2026-10-25.md) holds the end state
+    and the transition. The text below is the step as first planned
+    (maintainer, 2026-10-19), in place of exit votes. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
     tasks as machines and no exit votes, rather than building on both. The runtime is
     quiescent when every machine waits on input or a heap change, retrying

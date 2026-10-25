@@ -82,24 +82,31 @@ Drafted 2026-10-25 for the maintainer's review. It reframes
 3. `quiescence-options`: interrupt and clear through the analysis's
    entries, interrupts flagging what they halt early, with the call's
    callees. Recovery and acting go through turns as they do now.
-4. CLI: the batch on the analysis; exit votes, settlement's publication
-   and its pending lists retire (`api-refl-retirements`).
+4. CLI: the batch on the analysis, rendering it itself, with masks for
+   families of issues; exit votes, settlement's publication, its pending
+   lists and the automatic rendering retire (`api-refl-retirements`).
+5. Later: the analysis as a reflection effect, for a logger's or an
+   IDE's status.
 
 Settlement Clearing's slices fold into step 3: its kill flags become the
 interrupt's, and its clearing the clear option.
 
-## Questions for the maintainer
+## Decisions (maintainer, 2026-10-25)
 
-1. **What fails a batch.** Every unresolved item: a pending obligation, a
-   machine in error, an evaluation awaiting a promise no one will
-   resolve? And never idle waits alone?
-2. **No kills.** A batch exits without interrupting anything, and only a
-   host's deliberate interrupt stops work. Is anything lost, such as
-   abort hooks a Rust turn's cut registered, which an exit never runs?
-3. **The analysis's reach.** Taken only at quiescence, or at any time,
-   for an IDE, with "unresolved" meaningful only at quiescence?
-4. **Reporting once.** The analysis reflects state, so a host sees the
-   same machine in error each time until it acts; the CLI renders only
-   what is new. Is that the right owner for repeat suppression?
-5. **The name.** `api-settlement` becomes `api-quiescence`, and
-   "settlement" leaves the vocabulary?
+The questions this review asked, answered (`quiescence-is-analyzed`):
+
+1. **What fails a batch.** By default, any unresolved item. A client may
+   mask families of issues, or recognize issues the default does not: a
+   batch is a quiescent state that a user decides should be one.
+2. **No kills.** Nothing is lost at a batch's end: a batch is an atomic
+   transition the client has chosen to recognize.
+3. **The analysis's reach.** At any time, as reflection on the runtime,
+   which an IDE or a logger may use to report status.
+4. **Reporting once.** What to do with a report belongs to whoever asked
+   for it; nothing renders one automatically.
+5. **The name.** `api-settlement` is redirected to `api-quiescence`, with
+   its cause.
+
+So point 6 above reads: a batch asks for the analysis at quiescence and
+renders it as it chooses, failing by default where anything is
+unresolved, less what it masks.
