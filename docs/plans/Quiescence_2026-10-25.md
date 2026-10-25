@@ -137,34 +137,79 @@ idiom (`CLI.md`) reads the log in a cut and, on an empty read, votes
 kill does; nothing else can stop the run from outside. So settlement
 cannot leave the CLI until the logger ends another way.
 
-**The logger's end.** When the CLI recognizes the batch's end, a
-quiescence whose analysis has nothing new, it stops the configured
-logger's run itself, deliberately: a logger waiting on its input, idle,
-ends cleanly, unflagged, as `quiescence-reports-unresolved-state` ends a
-fork waiting in an outermost cut. A logger blocked on anything else is
-already an issue in the analysis. The idiom drops `.exit.success`: the
-logger waits on `.read_log` in a cut. This needs a stop for a scheduled
-effect run, cancelling its root task, until the logger becomes a turn
-(`api-effect-providers`).
+**The batch's end, as designed** (review asked for by the maintainer,
+2026-10-25: whether to halt the configured logger at all, or only report
+final diagnostics through it).
 
-**Slices.**
+- **Everything goes through the logger.** The batch publishes each new
+  issue of an analysis as an error diagnostic on its bus, which routes to
+  the logger's input as any diagnostic does, so a configured logger
+  renders the analysis too. Nothing bypasses it with the CLI's own
+  renderer, as settled reports do today.
+- **An idle logger is not halted.** At quiescence a logger that has read
+  all its input waits on it, idle. When an analysis finds nothing new,
+  the batch ends there: an atomic transition the CLI recognizes, at which
+  nothing is lost, so the logger's wait ends with the process, cleanly,
+  as any idle wait does, with no diagnostic and no flag. (Its run must
+  still end for the batch's turn to return; that is an implementation
+  detail of the bridge, a cancellation, until the logger is a turn's
+  fork.)
+- **A logger with a backlog is halted.** At quiescence, unread
+  diagnostics in the logger's input mean it is not reading: blocked on
+  something else, or broken. The batch then halts it, a diagnostic of its
+  own ("the configured logger stopped reading with N diagnostics
+  unread"), and hands its input to the fallback, which renders the
+  backlog and all that follows, as it does when a configured logger ends
+  today. The heuristic is the maintainer's.
+- **Backlogs in general.** A machine's input that holds unread items at
+  quiescence is incomplete work, of interest for debugging, and so is a
+  child's task queue holding tasks that have not started. The analysis
+  lists each backlog, by machine and port, with its count, as an issue
+  family, `Backlog` (see question 1). The logger's backlog is one of
+  them, which the batch acts on as above.
+- **Retained failures.** A delivery failure, output a machine sent to a
+  host's Rust endpoint whose callback failed (decoding, the adapter, or a
+  panic), and a maintenance failure, a collection the runtime ran for
+  maintenance that failed, are kept until the host acknowledges them: the
+  analysis lists them as issue families of their own (maintainer: analyze
+  them).
+- **The exit status** fails on any error diagnostic the batch rendered,
+  issues included, less what a client masks.
 
-1. `quiescence-batch` — both batch paths pump to quiescence, take the
-   analysis, render the issues not rendered before, each with a report
-   context as settled reports have (`promise_wait`, `erred_wait`,
-   `pending_obligation`, `machine_failure`), and end once an analysis has
-   nothing new, stopping the configured logger; the exit status fails on
-   any issue, as on any error diagnostic. No settlement, no kill. Tests:
-   the CLI's tests, rendering each family once, a logger without an exit
-   vote ending cleanly, and a stuck task failing the batch without being
-   killed.
-2. `exit-votes-retire` — `.exit.*`, `ExitIntent`, exit dispositions and
+**Slices, revised.**
+
+1. `quiescence-backlogs` — the analysis lists backlogs, delivery failures
+   and maintenance failures. Tests: a port holding unread input, a queue
+   holding unstarted tasks, a machine's failed delivery, and their
+   absence once read, run or acknowledged.
+2. `quiescence-batch` — both batch paths pump to quiescence, take the
+   analysis, and publish each issue not published before; once the
+   logger has a backlog at quiescence, they halt it for the fallback,
+   with its diagnostic; once an analysis finds nothing new, they end. No
+   settlement, no kill. Tests: the CLI's tests, each family rendered once
+   through a configured logger, a logger without an exit vote ending
+   cleanly, a logger that stops reading halted with its backlog rendered
+   by the fallback, and a stuck task failing the batch unkilled.
+3. `exit-votes-retire` — `.exit.*`, `ExitIntent`, exit dispositions and
    the exits readiness carries, with the tests and docs that vote, under
-   `api-refl-retirements`.
-3. After `quiescence-options` gives hosts their deliberate interrupt:
+   `api-refl-retirements`; the `conf.log` idiom waits on `.read_log`.
+4. After `quiescence-options` gives hosts their deliberate interrupt:
    `settlement-retires` — `QuiescenceSnapshot::settle`, the deadlock
    kill, `QuiescenceReport` and its pending lists, with the tests that
    settle, each judged for whether the analysis's tests serve it.
+
+**Questions on the end design.**
+
+1. **Is a backlog unresolved by default?** An input left unread at
+   quiescence, or a queued task never started, is work that did not
+   happen, so it would fail a batch unless masked. That includes tasks
+   queued behind a task waiting idle, which the reflection model counted
+   idle (`reflection-tasks-are-machine-tasks`). My lean: unresolved, its
+   own family, since nothing was owed by the waiting task but the queued
+   ones never ran.
+2. **The logger's halt.** Halted when its input holds unread diagnostics
+   at quiescence, with a diagnostic, the fallback taking over; otherwise
+   never halted, its idle wait ending with the batch. Is that the rule?
 
 ### Decisions on the transition (maintainer, 2026-10-25)
 
