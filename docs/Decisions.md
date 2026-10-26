@@ -2371,7 +2371,10 @@ maps the short names used here to file names.
     duplicate, and several into one merge in commit order.
   - Too few to read, or a full buffer, is pushback: a divergence, the new
     error kind `Retry`, which a cut recognizes by waiting and running
-    again, while `Backtrack` stays for alternatives. An evaluation that
+    again, while `Backtrack` stays for alternatives. (Decided by the
+    maintainer, 2026-10-26: glam says it too, with `.retry`, pushback by
+    intent; and a machine may put values back at the head of its input,
+    `.port.unread`, to be read first, a putback often convenient.) An evaluation that
     waits on what is not known yet, such as an unresolved promise, is
     pushback too (the same day, at `api-machine-environment`). Outside a cut, `read`
     and `write` block, and `try_read` returns `Retry`. A
@@ -2441,6 +2444,14 @@ maps the short names used here to file names.
     machine binds its `glam` entry.
   - Shares live in a store of the runtime, keyed by machine path, so
     reflection tasks read them through their hosts until they are machines.
+  - (Decided by the maintainer, 2026-10-26, for tasks: get and set connote
+    direct state manipulation, which an environment is not. Glam reads it
+    with `.env.lookup Path`, which `.env Path` becomes, and overlays it
+    with `.env.overlay Mixin`: overlays stack, each over the machine's
+    share as it stood, and `.env.clear` resets the share, so `.env.mine`,
+    which served stacking by hand, goes. A name under a callable maps to
+    its `apply`, for compatible extensions, but a record of operations is
+    the better design.)
 - **Alternatives rejected:** a promise of the whole environment left on the
   root machine's stack, which binds once, waits on everything at once, and
   hides the convention on a stack; the shared heap, which any task may

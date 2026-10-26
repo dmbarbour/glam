@@ -1053,8 +1053,19 @@ handle API goes.
         are pass/fail effects. The test forces each wait by a heap gate;
         building it found two faults, a cut's pushback surviving into its
         rerun and a fallback consumed by a pushback, both fixed and
-        mutation-checked. The `.env` shares follow; `.retry` stays a
-        candidate (`api-refl-retry`), and would reuse the pushback outcome.
+        mutation-checked.
+        Decided after (maintainer, 2026-10-26), in the order built: `.retry`
+        (`api-refl-retry`, no longer a candidate), on the pushback outcome;
+        the environment as `.env.lookup Path`, `.env.overlay Mixin`, whose
+        overlays stack, and `.env.clear`, composed along the task's own
+        machine, `.env Path` and `.env.mine` going
+        (`machines-inherit-an-environment`); `.port.unread Port List`, a
+        putback at the head of the machine's input, for tasks and turns;
+        then the logger, `api-refl-cli-log`, whose machine runs `conf.log`
+        through its turn's `effect_run`, ports passing through to the
+        turn's machine, so `.read_log` and `.write_stderr` become
+        `.port.read 'diagnostics 1` and `.port.write 'stderr [Bin]` and
+        `LoggerTaskHost` retires.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
         Designed in [Obligations](Obligations_2026-10-25.md), drafted
         2026-10-25 for review, decided the same day (acceptance explicit,
