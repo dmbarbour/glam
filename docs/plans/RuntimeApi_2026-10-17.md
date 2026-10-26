@@ -1109,7 +1109,11 @@ handle API goes.
         thread starts, so an interrupt posted meanwhile reaches it. The
         turn `Runtime` has no host options yet, so its tests interrupt
         through `glam::transition`, until turns join the analysis),
-        `diagnostics-enriched`,
+        `diagnostics-enriched` (built 2026-10-26: the bus's port route and
+        a turn's `.log` write `Diagnostic::enrich`'s message, `.read_log`
+        returns what the port holds, and the CLI's fallback reads a port's
+        message as a renderer, evaluating its severity, source and line;
+        the logger host's own output transport retires with it),
         `effect-run-ports`, then the logger itself.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
         Designed in [Obligations](Obligations_2026-10-25.md), drafted

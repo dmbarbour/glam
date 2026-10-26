@@ -18,18 +18,21 @@ fn the_runtime_s_diagnostics_join_the_root_s_diagnostics_input() {
             root.port_read(DIAGNOSTICS.clone(), 2)?;
             let second = root.pop()?;
             let first = root.pop()?;
-            Ok([first, second].map(|value| {
-                Diagnostic::from_transport_value(&values, &value)
-                    .expect("the port holds transport values")
-            }))
+            Ok([first, second])
         })
         .expect("the root reads its diagnostics input");
     assert_eq!(
-        decoded.each_ref().map(|diagnostic| diagnostic.message()),
+        decoded
+            .each_ref()
+            .map(|message| Diagnostic::message_text_for_test(&values, message)),
         ["first", "second"],
         "in the bus's order"
     );
-    assert_eq!(decoded[0].severity(), Severity::Warning);
+    assert_eq!(
+        Diagnostic::message_severity_for_test(&values, &decoded[0]),
+        Severity::Warning,
+        "the port carries the enriched message"
+    );
     assert_eq!(bus.counts().warnings(), 2, "the bus still counts them");
 }
 
@@ -65,9 +68,7 @@ fn a_read_of_the_root_s_diagnostics_waits_for_one_to_arrive() {
             root.port_read(DIAGNOSTICS.clone(), 1)?;
             publisher.join().expect("the publisher should finish");
             let value = root.pop()?;
-            Ok(Diagnostic::from_transport_value(&values, &value)?
-                .message()
-                .to_owned())
+            Ok(Diagnostic::message_text_for_test(&values, &value))
         })
         .expect("the read waits for the diagnostic");
     assert_eq!(message, "late");
@@ -189,9 +190,7 @@ fn a_hand_over_cut_reruns_when_a_diagnostic_arrives_and_keeps_their_order() {
             let mut messages = (0..count)
                 .map(|_| {
                     let value = fallback.pop()?;
-                    Ok(Diagnostic::from_transport_value(&values, &value)?
-                        .message()
-                        .to_owned())
+                    Ok(Diagnostic::message_text_for_test(&values, &value))
                 })
                 .collect::<Result<Vec<_>, Error>>()?;
             messages.reverse();

@@ -335,9 +335,10 @@ fn production_collection_preserves_each_serial_boundary() {
         StoreCommitResult::Committed
     );
     drop(diagnostic_events);
-    let transported = Diagnostic::from_transport_value(&logger.values(), &transported)
-        .expect("logger service should decode the retained diagnostic");
-    assert_eq!(transported.message(), "preserved diagnostic");
+    assert_eq!(
+        Diagnostic::message_text_for_test(&logger.values(), &transported),
+        "preserved diagnostic"
+    );
 
     runtime.pump_until_stable();
     let RuntimeReadiness::Stable(snapshot) = runtime.readiness() else {
@@ -818,10 +819,8 @@ fn passive_finalization_produces_no_runtime_work() {
         runtime.try_commit_transaction(&StoreJournal::new(store), &events),
         StoreCommitResult::Committed
     );
-    let transported = Diagnostic::from_transport_value(&logger.values(), &transported)
-        .expect("logger service should decode the retained diagnostic");
     assert_eq!(
-        transported.message(),
+        Diagnostic::message_text_for_test(&logger.values(), &transported),
         "preserved across passive finalization"
     );
 

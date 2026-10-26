@@ -800,7 +800,7 @@ impl Machine<'_, '_> {
                 let message = self.pop()?;
                 let values = self.runtime.assembler.values();
                 let diagnostic = Diagnostic::from_emission(&values, severity, message)?;
-                self.push(diagnostic.transport_value(&values)?);
+                self.push(diagnostic.enrich(&values)?);
                 self.port_write(DIAGNOSTICS.clone(), 1)?;
                 self.unit_push();
             }

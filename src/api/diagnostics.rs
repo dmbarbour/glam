@@ -209,8 +209,9 @@ impl Diagnostic {
     }
 
     /// Encodes this Rust envelope as one runtime-local value for buffered
-    /// transport. The configured logger decodes the envelope before applying
-    /// its own enrichment and viewing policy.
+    /// transport, which the configured logger's host uses for its own
+    /// outputs. A diagnostics port carries the enriched message instead
+    /// ([`Self::enrich`]).
     #[doc(hidden)]
     pub fn transport_value(&self, values: &Values) -> Result<Value, Error> {
         self.emission.require_runtime(values.runtime)?;
@@ -323,8 +324,15 @@ impl Diagnostic {
     /// diagnostic built from a value summarizes statically.
     #[cfg(test)]
     pub(crate) fn rendered_text_for_test(&self, values: &Values) -> String {
+        Self::message_text_for_test(values, &self.emission)
+    }
+
+    /// The text a renderer shows of `message`, a diagnostic's value, such as
+    /// a diagnostics port carries: its `msg.text`, evaluated.
+    #[cfg(test)]
+    pub(crate) fn message_text_for_test(values: &Values, message: &Value) -> String {
         let text = values
-            .access_names(&self.emission, ["msg", "text"])
+            .access_names(message, ["msg", "text"])
             .expect("a diagnostic's text path should compose");
         let text = crate::evaluation::EvalContext::isolated(values.core().clone())
             .evaluate_root_whnf(text.0)
@@ -335,6 +343,30 @@ impl Diagnostic {
                 _ => panic!("a diagnostic's text should evaluate to text"),
             })
             .expect("a diagnostic's text should belong to its runtime")
+        })
+    }
+
+    /// The severity of `message`, a diagnostic's value such as a
+    /// diagnostics port carries: its `msg.severity`, evaluated.
+    #[cfg(test)]
+    pub(crate) fn message_severity_for_test(values: &Values, message: &Value) -> Severity {
+        let severity = values
+            .access_names(message, ["msg", "severity"])
+            .expect("a diagnostic's severity path should compose");
+        let severity = crate::evaluation::EvalContext::isolated(values.core().clone())
+            .evaluate_root_whnf(severity.0)
+            .unwrap_or_else(|_| panic!("a test diagnostic's severity should evaluate"));
+        values.with_access(|access| {
+            severity
+                .with_core(access.runtime_access(), |severity| {
+                    match access.runtime_access().key_from_value(severity) {
+                        Some(key) if key == *crate::core::keys::INFO => Severity::Info,
+                        Some(key) if key == *crate::core::keys::WARN => Severity::Warning,
+                        Some(key) if key == *crate::core::keys::ERROR => Severity::Error,
+                        _ => panic!("a diagnostic's severity should be a severity"),
+                    }
+                })
+                .expect("a diagnostic's severity should belong to its runtime")
         })
     }
 
@@ -885,8 +917,10 @@ impl DiagnosticIngressInner {
         Ok((event, subscribers))
     }
 
+    /// A diagnostics port carries the enriched message, which glam reads
+    /// and writes (`machines-communicate-through-wired-ports`).
     fn prepare(&self, diagnostic: &Diagnostic) -> Result<RuntimePreparedInput, Error> {
-        let value = diagnostic.transport_value(&self.values)?;
+        let value = diagnostic.enrich(&self.values)?;
         self.sender.prepare(value)
     }
 

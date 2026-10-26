@@ -94,11 +94,13 @@ client-owned rendering. Current flow lives in
   committed count.
 - Assembler, macro, and logger buses remain distinct even when their tasks share
   one runtime.
-- Runtime ingress prepares its transport root before mutation admission. A
-  valid bus publication remains counted if ingress preparation fails; that
-  transport failure remains separately reportable.
-- Diagnostic transport encode/decode requires the matching runtime `Values`
-  service. Do not inspect a transport `Value` without bounded runtime access.
+- Runtime ingress prepares its port message, the enriched diagnostic,
+  before mutation admission. A valid bus publication remains counted if
+  ingress preparation fails; that failure remains separately reportable.
+- A diagnostics port carries enriched messages, which glam reads as
+  `.read_log` gave them. Rust reads one only as a renderer, evaluating its
+  `msg.severity`, `msg.origin.source.file` and `msg.location.line`; never
+  read a severity from a value to count or route it.
 
 ## Logger and Rendering Boundaries
 

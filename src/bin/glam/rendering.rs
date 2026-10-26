@@ -26,9 +26,9 @@ impl DefaultLogger {
         }
     }
 
-    /// The values of the runtime whose diagnostics it renders.
-    pub(super) fn values(&self) -> glam::Values {
-        self.evaluator.values()
+    /// The assembler whose diagnostics it renders, which evaluates them.
+    pub(super) fn assembler(&self) -> &Assembler {
+        &self.evaluator
     }
 
     pub(super) fn emit(&self, diagnostic: &Diagnostic) {
@@ -75,8 +75,8 @@ impl DefaultLogger {
             self.location(diagnostic),
             Self::severity_header(diagnostic.severity(), terminal)
         );
-        let source = diagnostic.source().and_then(|source| {
-            let path = Path::new(source);
+        let source = self.source(diagnostic).and_then(|source| {
+            let path = Path::new(&source);
             path.is_absolute().then(|| self.display_source(path))
         });
         self.terminal_viewer_updates(terminal, 0, header, self.location(diagnostic), source)
@@ -548,12 +548,27 @@ impl DefaultLogger {
         })
     }
 
+    /// The diagnostic's source: its immediate summary or, for a message
+    /// that carries its origin, as one a diagnostics port carries does,
+    /// `msg.origin.source.file` evaluated as a renderer does
+    /// (`senders-never-evaluate-diagnostics`).
+    fn source(&self, diagnostic: &Diagnostic) -> Option<String> {
+        diagnostic.source().map(str::to_owned).or_else(|| {
+            let file = self
+                .evaluator
+                .values()
+                .access_names(diagnostic.emission(), ["msg", "origin", "source", "file"])
+                .ok()?;
+            diagnostic_text(&self.evaluator, &file)
+        })
+    }
+
     fn location(&self, diagnostic: &Diagnostic) -> String {
-        match (diagnostic.source(), self.line(diagnostic)) {
+        match (self.source(diagnostic), self.line(diagnostic)) {
             (Some(source), Some(line)) => {
-                format!("{}:{line}: ", self.display_source(Path::new(source)))
+                format!("{}:{line}: ", self.display_source(Path::new(&source)))
             }
-            (Some(source), None) => format!("{}: ", self.display_source(Path::new(source))),
+            (Some(source), None) => format!("{}: ", self.display_source(Path::new(&source))),
             (None, Some(line)) => format!("line {line}: "),
             (None, None) => String::new(),
         }
@@ -566,6 +581,38 @@ impl DefaultLogger {
             .display()
             .to_string()
     }
+}
+
+/// The diagnostic that `message`, an enriched message as a diagnostics port
+/// carries it (`machines-communicate-through-wired-ports`), renders as: its
+/// severity is `msg.severity`, evaluated as a renderer does
+/// (`senders-never-evaluate-diagnostics`), an error where that fails, and
+/// the renderer reads its source and line from it as it renders.
+pub(crate) fn port_diagnostic(
+    assembler: &Assembler,
+    message: HandleValue,
+) -> Result<Diagnostic, Error> {
+    let values = assembler.values();
+    let severity = values
+        .access_names(&message, ["msg", "severity"])
+        .ok()
+        .and_then(|severity| assembler.evaluator().eval(&severity).ok())
+        .and_then(|severity| {
+            [
+                (Severity::Info, "info"),
+                (Severity::Warning, "warn"),
+                (Severity::Error, "error"),
+            ]
+            .into_iter()
+            .find(|(_, name)| {
+                severity
+                    .same_representation(&values.atom_from_text(name))
+                    .unwrap_or(false)
+            })
+            .map(|(severity, _)| severity)
+        })
+        .unwrap_or(Severity::Error);
+    Diagnostic::from_emission(&values, severity, message)
 }
 
 /// A diagnostic's `msg.text`, evaluated as a renderer does: a diagnostic
@@ -789,6 +836,41 @@ mod tests {
         assert_eq!(
             rendered,
             Bytes::from_static(b"src/test.g:4: warning: first\n    second\n    \n    fourth\n")
+        );
+    }
+
+    #[test]
+    fn a_port_s_enriched_message_renders_as_its_diagnostic_does() {
+        // A diagnostics port carries the enriched message
+        // (`machines-communicate-through-wired-ports`): its severity, source
+        // and line are read from it, evaluated, as a renderer may.
+        let evaluator = Assembler::default();
+        let values = evaluator.values();
+        let logger = DefaultLogger {
+            formatter: evaluator.default_diagnostic_formatter(),
+            evaluator: evaluator.clone(),
+            working_directory: PathBuf::from("/work"),
+        };
+        let diagnostic = Diagnostic::new(&values, Severity::Warning, "first\nsecond")
+            .with_source_location(&values, "/work/src/test.g", 4)
+            .expect("source location should use the diagnostic runtime");
+        let message = diagnostic
+            .enrich(&values)
+            .expect("the diagnostic belongs to the runtime");
+        let carried = port_diagnostic(&evaluator, message).expect("the message decodes");
+        assert_eq!(carried.severity(), Severity::Warning);
+        let terminal = TerminalContext {
+            columns: 80,
+            color: TerminalColor::None,
+            term: None,
+            language: None,
+        };
+        let rendered = logger
+            .format_diagnostic(&carried, &terminal)
+            .expect("the closed Glam formatter should return bytes");
+        assert_eq!(
+            rendered,
+            Bytes::from_static(b"src/test.g:4: warning: first\n    second\n")
         );
     }
 

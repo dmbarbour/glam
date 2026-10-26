@@ -191,11 +191,9 @@ fn read_log(
             .transaction()
             .expect("checked active reflection transaction");
         let (snapshot, journal) = transaction.parts();
+        // The port carries enriched messages.
         if let Some(value) = event_journal(snapshot, journal).read_port(LOGGER, DIAGNOSTICS) {
-            return Diagnostic::from_transport_value(&context.host().resources.values(), &value)
-                .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
-                .map(RequestResult::Return)
-                .map_err(glam::reflection::TaskHalt::from);
+            return Ok(RequestResult::Return(value));
         }
         // Queue reads observe only the host snapshot. Journaled writes remain
         // invisible until commit, just as writes from concurrent tasks do.
@@ -209,9 +207,6 @@ fn read_log(
         let Some(value) = events.read_port(LOGGER, DIAGNOSTICS) else {
             return Ok(RequestResult::Fail);
         };
-        let value = Diagnostic::from_transport_value(&context.host().resources.values(), &value)
-            .and_then(|diagnostic| diagnostic.enrich(&context.host().resources.values()))
-            .map_err(glam::reflection::TaskHalt::from)?;
         let commit = TaskCommit::new(
             glam::reflection::StoreJournal::new(snapshot.store().clone()),
             snapshot.extra().clone(),

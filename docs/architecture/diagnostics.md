@@ -99,15 +99,16 @@ so by default it passes through to the root's input
 (`machines-communicate-through-wired-ports`,
 `machines-inherit-an-environment`). The ingress
 converts
-each structured diagnostic to a runtime-rooted transport value before entering
-runtime mutation admission. Valid bus publication remains counted even if
-transport preparation fails; the ingress retains that terminal transport
-failure and ordinary bus subscribers still receive the event.
-Encoding and decoding both require the matching runtime's `Values` service;
-the transport envelope is projected only inside its bounded value-access
-region and cannot be decoded as a freestanding opaque `Value`.
+each structured diagnostic to its enriched message (`Diagnostic::enrich`), a
+runtime-rooted value composed without evaluation, before entering runtime
+mutation admission: a diagnostics port carries the message glam reads and
+writes, with `msg.severity` and `msg.origin` folded in. Valid bus
+publication remains counted even if that preparation fails; the ingress
+retains that terminal failure and ordinary bus subscribers still receive the
+event. A Rust reader takes a port's message as a renderer does: the CLI's
+fallback evaluates its severity, source and line (`port_diagnostic`).
 
-Each transport value arrives at the root's input as a child's write would,
+Each message arrives at the root's input as a child's write would,
 following the root's wiring. Before configuration compilation, the binary
 wires that input on to its `logger` machine, a direct child of the root, whose
 input buffer holds runtime roots, not a typed Rust diagnostic queue. The
@@ -141,8 +142,10 @@ only after both callbacks return. None of these host callbacks inherits a
 managed mutator.
 
 The event layer transports unrestricted values and neither forces them nor
-uses outer WHNF as an admission policy. `.log` places its possibly lazy message
-inside an immediate transport envelope; `.write_stderr` performs its semantic
+uses outer WHNF as an admission policy. A turn's `.log` writes its possibly
+lazy message, enriched, to its machine's diagnostics output; the configured
+logger's host encodes its own `.log` outputs in an immediate transport
+envelope until the logger is a turn; `.write_stderr` performs its semantic
 binary assertion before committing the output intent. A decoder remains free
 to evaluate its delivered value explicitly. This choice is host policy rather
 than a primitive delivery guarantee, and nested diagnostic fields may remain

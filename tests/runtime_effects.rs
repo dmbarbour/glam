@@ -328,15 +328,22 @@ fn a_log_goes_to_the_machine_s_diagnostics_output() {
         m.discard(1)
     })
     .expect("the turn should succeed");
-    let text = rt
+    let (text, severity) = rt
         .run((), |root| {
             assert_eq!(root.port_available("diagnostics"), before + 1);
             root.port_read("diagnostics", before + 1)?;
-            root.dict_get_path(["emission", "msg", "text"])?;
-            root.text_pop()
+            root.dup(1)?;
+            root.dict_get_path(["msg", "text"])?;
+            let text = root.text_pop()?;
+            root.dict_get_path(["msg", "severity"])?;
+            Ok((text, root.atom_pop()?))
         })
         .expect("the root reads its diagnostics input");
-    assert_eq!(text, "careful");
+    assert_eq!(
+        (text.as_str(), severity.as_str()),
+        ("careful", "warn"),
+        "the port carries the enriched message"
+    );
 }
 
 #[test]

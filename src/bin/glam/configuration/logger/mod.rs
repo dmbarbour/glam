@@ -11,7 +11,7 @@ use glam::{
 
 use crate::DiagnosticBusLocal;
 use crate::configuration::{CLI, entry_context, select_entry, selects_nothing};
-use crate::rendering::DefaultLogger;
+use crate::rendering::{DefaultLogger, port_diagnostic};
 
 mod effects;
 mod reports;
@@ -198,10 +198,11 @@ fn hand_over(logger: &mut Machine<'_, '_>) -> Result<(), Error> {
     })
 }
 
-/// Takes the diagnostics waiting at the logger's fallback, in order.
+/// Takes the diagnostics waiting at the logger's fallback, in order, as its
+/// renderer, `assembler`'s, reads them.
 pub(crate) fn take_fallback(
     logger: &mut Machine<'_, '_>,
-    values: &Values,
+    assembler: &Assembler,
 ) -> Result<Vec<Diagnostic>, Error> {
     let held = logger.run(FALLBACK, |fallback| {
         let count = fallback.port_available(DIAGNOSTICS);
@@ -212,8 +213,8 @@ pub(crate) fn take_fallback(
         held.reverse();
         Ok(held)
     })?;
-    held.iter()
-        .map(|value| Diagnostic::from_transport_value(values, value))
+    held.into_iter()
+        .map(|message| port_diagnostic(assembler, message))
         .collect()
 }
 
@@ -222,7 +223,7 @@ pub(crate) fn drain_fallback(
     logger: &mut Machine<'_, '_>,
     renderer: &DefaultLogger,
 ) -> Result<(), Error> {
-    for diagnostic in take_fallback(logger, &renderer.values())? {
+    for diagnostic in take_fallback(logger, renderer.assembler())? {
         renderer.emit(&diagnostic);
     }
     Ok(())
@@ -294,9 +295,9 @@ pub(crate) mod test_support {
 
     /// Takes the diagnostics waiting at the logger's fallback.
     pub(crate) fn take_from_fallback(runtime: &mut Runtime) -> Vec<Diagnostic> {
-        let values = glam::transition::assembler(runtime).values();
+        let assembler = glam::transition::assembler(runtime).clone();
         runtime
-            .run(LOGGER, |logger| take_fallback(logger, &values))
+            .run(LOGGER, |logger| take_fallback(logger, &assembler))
             .expect("the fallback holds diagnostics")
     }
 
@@ -315,6 +316,7 @@ mod tests {
         hand_over_logger, held_by_logger, logger_runtime, take_from_fallback, take_unread,
     };
     use crate::DiagnosticBusLocal;
+    use crate::rendering::rendered_text_for_test;
 
     #[test]
     fn the_logger_keeps_diagnostics_and_its_hand_over_keeps_their_order() {
@@ -335,7 +337,10 @@ mod tests {
         publish("third");
         let taken = take_from_fallback(&mut runtime);
         assert_eq!(
-            taken.iter().map(Diagnostic::message).collect::<Vec<_>>(),
+            taken
+                .iter()
+                .map(|diagnostic| rendered_text_for_test(&assembler, diagnostic))
+                .collect::<Vec<_>>(),
             ["first", "second", "third"],
             "what the logger held, then what arrived after"
         );

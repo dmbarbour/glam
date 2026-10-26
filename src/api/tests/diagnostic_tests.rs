@@ -371,12 +371,7 @@ fn diagnostic_ingress_admits_in_bus_sequence_order() {
     let mut journal = RuntimeEventJournal::new(snapshot);
     let mut received = Vec::new();
     while let Some(value) = journal.read_port((), "diagnostics") {
-        received.push(
-            Diagnostic::from_transport_value(&runtime.values(), &value)
-                .expect("ingress should retain diagnostic envelopes")
-                .message()
-                .to_owned(),
-        );
+        received.push(Diagnostic::message_text_for_test(&runtime.values(), &value));
     }
     assert_eq!(
         received,
@@ -409,9 +404,7 @@ fn runtime_retains_the_installed_diagnostic_ingress() {
         .read_port((), "diagnostics")
         .expect("publication should reach the stable ingress");
     assert_eq!(
-        Diagnostic::from_transport_value(&runtime.values(), &value)
-            .expect("ingress should retain a diagnostic envelope")
-            .message(),
+        Diagnostic::message_text_for_test(&runtime.values(), &value),
         "still routed"
     );
 }
