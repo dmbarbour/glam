@@ -165,8 +165,10 @@ construct one dormant assembler, wire diagnostics to the logger machine,
   -> pump all runtime work to quiescence, rendering the logger's fallback
      between pumps when no configured logger's fork holds it
   -> service any MaintenanceRequired collection, then pump again
-  -> analyze the runtime (`quiescence-is-analyzed`); where conf.log's input
-     holds unread diagnostics, halt it, saying so, for the fallback
+  -> analyze the runtime (`quiescence-is-analyzed`); before judging a
+     quiescence with issues, collect once and pump again, so a promise whose
+     resolver was lost breaks first; where conf.log's input holds unread
+     diagnostics, halt it, saying so, for the fallback
   -> publish each issue not yet published through the bus, and so the logger,
      then repump; nothing is killed or settled
   -> once an analysis finds nothing new, end: stop an idle conf.log, which
@@ -183,7 +185,10 @@ are independent of what ports hold, reads, and rendering.
 
 The quiescence loop is the CLI's only collection point. A stable pump may
 promote collector pressure to `MaintenanceRequired`; the loop services it and
-pumps again. A failed service other than a stale snapshot fails the batch, and
+pumps again. Before it judges a quiescence with issues, the loop collects
+once, since only a collection acts on death notices, and a lost resolver's
+promise breaks then (`opaque-resources-reclaimed-when-unreachable`); it
+collects again only after it has published. A failed service other than a stale snapshot fails the batch, and
 so does any maintenance failure an analysis finds, even if a later retry
 succeeded, because the runtime keeps the durable failure history. Readiness
 `MaintenanceFailed` (heap poison) or `Poisoned` (runtime-core poison) ends

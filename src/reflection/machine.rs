@@ -4320,8 +4320,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             EvaluationWaitPoll::Complete(_)
             | EvaluationWaitPoll::Failed(_)
             | EvaluationWaitPoll::Cancelled
-            | EvaluationWaitPoll::Abandoned
-            | EvaluationWaitPoll::Killed(_) => {
+            | EvaluationWaitPoll::Abandoned => {
                 self.blocked = None;
                 None
             }

@@ -167,7 +167,8 @@ Embedders and tests use the API.
    Not checked: dropping a cleared root from settlement's pending
    reports, a list `settlement-retires` removes.
 
-Then `settlement-retires`, which these options unblock.
+Then `settlement-retires`, which these options unblock, built 2026-10-26
+(see the Quiescence note).
 
 ## Decisions (maintainer, 2026-10-25)
 

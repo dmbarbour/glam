@@ -1,14 +1,10 @@
 use std::fmt;
 use std::sync::Arc;
 
-use rpds::RedBlackTreeMapSync;
-
-use super::{EvaluationRuntime, RuntimeDeliveryFailureSnapshot};
+use super::EvaluationRuntime;
 use crate::api::{Diagnostic, MachinePath, Value, Values};
-use crate::core::{CoreValueFactory, Dict, EvaluationFailure, Key, Value as CoreValue};
+use crate::core::{CoreValueFactory, Key};
 use crate::diagnostic::Severity;
-#[cfg(test)]
-use crate::evaluation::ValidatedRuntimeSettlementPlan;
 use crate::evaluation::{
     EvaluationTaskId, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
     RuntimeObservationEpoch, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
@@ -35,8 +31,8 @@ pub(super) fn reasoning_diagnostic(
 /// A reflection machine in error (`reflection-tasks-are-machine-tasks`): a
 /// child a task on which failed or was interrupted, flagged until its parent
 /// recovers or clears it, or an annotation task's anonymous root, which its
-/// failure flagged for good. Until settlement reports machines' errors in
-/// general, a failed machine fails a batch.
+/// failure flagged for good. An analysis lists each
+/// (`quiescence-is-analyzed`).
 #[derive(Clone)]
 pub struct FailedMachine {
     runtime: EvaluationRuntimeId,
@@ -101,7 +97,7 @@ pub enum RuntimeReadiness {
     MaintenanceFailed(RuntimeMaintenanceSnapshot),
     Ready(QuiescenceSnapshot),
     Deadlocked(DeadlockSnapshot),
-    /// A panic tore the runtime's scheduler, transaction, or settlement
+    /// A panic tore the runtime's scheduler, transaction, or exclusive-admission
     /// state. That is a runtime implementation error, never Glam semantics.
     /// The runtime accepts no further work, but dropping it remains safe, and
     /// the client may build a new runtime.
@@ -342,80 +338,14 @@ impl RuntimeMaintenanceReport {
     }
 }
 
-/// One work disposition proposed by a stable readiness snapshot.
-#[derive(Clone, Debug)]
-pub struct RuntimeDisposition {
-    work_id: u64,
-    session_id: Option<u64>,
-    task_id: Option<u64>,
-    kind: RuntimeDispositionKind,
-}
-
-impl RuntimeDisposition {
-    pub fn work_id(&self) -> u64 {
-        self.work_id
-    }
-
-    pub fn session_id(&self) -> Option<u64> {
-        self.session_id
-    }
-
-    pub fn task_id(&self) -> Option<u64> {
-        self.task_id
-    }
-
-    pub fn kind(&self) -> &RuntimeDispositionKind {
-        &self.kind
-    }
-}
-
-/// Payload of one proposed runtime disposition.
-#[derive(Clone, Debug)]
-pub enum RuntimeDispositionKind {
-    Killed(RuntimeKillReason),
-}
-
-/// Host-selected reason for forcefully settling stable unfinished work.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RuntimeKillReason {
-    Deadlock,
-}
-
-#[derive(Clone)]
-pub(super) enum RuntimeSettlementSnapshot {
-    Ready,
-    KilledDeadlock {
-        unfinished: Vec<RuntimeDeadlockWorkSnapshot>,
-        reason: RuntimeKillReason,
-    },
-}
-
-impl RuntimeSettlementSnapshot {
-    pub(super) fn kills(&self) -> &[RuntimeDeadlockWorkSnapshot] {
-        match self {
-            Self::Ready => &[],
-            Self::KilledDeadlock { unfinished, .. } => unfinished,
-        }
-    }
-
-    pub(super) fn kill_reason(&self) -> Option<RuntimeKillReason> {
-        match self {
-            Self::Ready => None,
-            Self::KilledDeadlock { reason, .. } => Some(*reason),
-        }
-    }
-}
-
-/// Retained proposal for settling a stable runtime, or forcefully settling a
-/// retained deadlock.
+/// A stable runtime with no unfinished work, as a readiness probe found it:
+/// its stamp and its reflection store. What the runtime holds, an analysis
+/// says (`quiescence-is-analyzed`).
 #[derive(Clone)]
 pub struct QuiescenceSnapshot {
     pub(super) runtime: EvaluationRuntime,
     pub(super) stamp: RuntimeReadinessStamp,
-    pub(super) dispositions: Vec<RuntimeDisposition>,
     pub(super) reflection: crate::reflection::StoreSnapshot,
-    pub(super) settlement: RuntimeSettlementSnapshot,
-    pub(super) killed_work: Vec<RuntimeDeadlockWork>,
 }
 
 impl fmt::Debug for QuiescenceSnapshot {
@@ -424,8 +354,6 @@ impl fmt::Debug for QuiescenceSnapshot {
             .debug_struct("QuiescenceSnapshot")
             .field("runtime", &self.runtime.id())
             .field("stamp", &self.stamp)
-            .field("dispositions", &self.dispositions)
-            .field("killed_work", &self.killed_work.len())
             .finish_non_exhaustive()
     }
 }
@@ -439,153 +367,8 @@ impl QuiescenceSnapshot {
         self.stamp
     }
 
-    pub fn dispositions(&self) -> &[RuntimeDisposition] {
-        &self.dispositions
-    }
-
     pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
         &self.reflection
-    }
-
-    /// Revalidates and accepts every proposed disposition, then returns a
-    /// retained report of the settled runtime instant.
-    pub fn settle(&self) -> Result<QuiescenceReport, RuntimeSettlementError> {
-        self.runtime.settle_quiescence_snapshot(self, None)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn validate_without_settling(
-        &self,
-    ) -> Result<ValidatedRuntimeSettlementPlan, RuntimeSettlementError> {
-        self.runtime.validate_quiescence_snapshot(self)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn settle_after_validation(
-        &self,
-        plan: &ValidatedRuntimeSettlementPlan,
-    ) -> Result<QuiescenceReport, RuntimeSettlementError> {
-        self.runtime.settle_quiescence_snapshot(self, Some(plan))
-    }
-}
-
-/// Failure to accept a readiness snapshot because its runtime changed.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum RuntimeSettlementError {
-    RuntimeChanged,
-}
-
-impl fmt::Display for RuntimeSettlementError {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter.write_str("runtime changed after its readiness snapshot")
-    }
-}
-
-impl std::error::Error for RuntimeSettlementError {}
-
-/// Retained evidence collected when a stable runtime snapshot is settled.
-pub struct QuiescenceReport {
-    pub(super) runtime: EvaluationRuntime,
-    pub(super) stamp: RuntimeReadinessStamp,
-    pub(super) dispositions: Vec<RuntimeDisposition>,
-    pub(super) failed_machines: Vec<FailedMachine>,
-    pub(super) delivery_failures: RuntimeDeliveryFailureSnapshot,
-    pub(super) reflection: crate::reflection::StoreSnapshot,
-    pub(super) killed_work: Vec<RuntimeDeadlockWork>,
-    pub(super) maintenance_failures: Vec<RuntimeMaintenanceFailure>,
-    pub(super) pending_failed_machine_reports: Vec<FailedMachine>,
-    pub(super) pending_delivery_failure_reports: RuntimeDeliveryFailureSnapshot,
-    pub(super) pending_killed_work_reports: Vec<RuntimeDeadlockWork>,
-    pub(super) pending_maintenance_failure_reports: Vec<RuntimeMaintenanceFailure>,
-}
-
-impl fmt::Debug for QuiescenceReport {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("QuiescenceReport")
-            .field("runtime", &self.runtime.id())
-            .field("stamp", &self.stamp)
-            .field("dispositions", &self.dispositions)
-            .field("failed_machines", &self.failed_machines)
-            .field("killed_work", &self.killed_work.len())
-            .field("maintenance_failures", &self.maintenance_failures)
-            .field(
-                "delivery_failures",
-                &self.delivery_failures.failures().len(),
-            )
-            .finish_non_exhaustive()
-    }
-}
-
-impl QuiescenceReport {
-    pub fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.runtime.id()
-    }
-
-    pub fn stamp(&self) -> RuntimeReadinessStamp {
-        self.stamp
-    }
-
-    pub fn dispositions(&self) -> &[RuntimeDisposition] {
-        &self.dispositions
-    }
-
-    /// The child machines in error as the runtime settled, in path order.
-    pub fn failed_machines(&self) -> &[FailedMachine] {
-        &self.failed_machines
-    }
-
-    pub fn delivery_failures(&self) -> &RuntimeDeliveryFailureSnapshot {
-        &self.delivery_failures
-    }
-
-    pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
-        &self.reflection
-    }
-
-    /// Typed blocked work forcefully retired by this settlement.
-    pub fn killed_work(&self) -> &[RuntimeDeadlockWork] {
-        &self.killed_work
-    }
-
-    pub fn maintenance_failures(&self) -> &[RuntimeMaintenanceFailure] {
-        &self.maintenance_failures
-    }
-
-    /// Failed machines whose reporting responsibility was committed to this
-    /// settlement rather than an earlier one.
-    #[doc(hidden)]
-    pub fn pending_failed_machine_reports(&self) -> &[FailedMachine] {
-        &self.pending_failed_machine_reports
-    }
-
-    /// Delivery failures whose reporting responsibility was committed to this
-    /// settlement rather than an earlier one.
-    #[doc(hidden)]
-    pub fn pending_delivery_failure_reports(&self) -> &RuntimeDeliveryFailureSnapshot {
-        &self.pending_delivery_failure_reports
-    }
-
-    /// Killed-work records created by this settlement and not yet committed to
-    /// report transport.
-    #[doc(hidden)]
-    pub fn pending_killed_work_reports(&self) -> &[RuntimeDeadlockWork] {
-        &self.pending_killed_work_reports
-    }
-
-    #[doc(hidden)]
-    pub fn pending_maintenance_failure_reports(&self) -> &[RuntimeMaintenanceFailure] {
-        &self.pending_maintenance_failure_reports
-    }
-
-    /// Records that every pending report entry was accepted by the selected
-    /// transport. What persists, failed machines among it, is unaffected.
-    #[doc(hidden)]
-    pub fn mark_reports_enqueued(&mut self) {
-        self.pending_failed_machine_reports.clear();
-        self.pending_delivery_failure_reports.failures = RedBlackTreeMapSync::new_sync();
-        self.pending_killed_work_reports.clear();
-        self.pending_maintenance_failure_reports.clear();
     }
 }
 
@@ -710,10 +493,8 @@ impl RuntimeDeadlockWork {
 pub struct DeadlockSnapshot {
     pub(super) runtime: EvaluationRuntime,
     pub(super) stamp: RuntimeReadinessStamp,
-    pub(super) dispositions: Vec<RuntimeDisposition>,
     pub(super) unfinished: Vec<RuntimeDeadlockWork>,
     pub(super) reflection: crate::reflection::StoreSnapshot,
-    pub(super) settlement_unfinished: Vec<RuntimeDeadlockWorkSnapshot>,
 }
 
 impl fmt::Debug for DeadlockSnapshot {
@@ -722,7 +503,6 @@ impl fmt::Debug for DeadlockSnapshot {
             .debug_struct("DeadlockSnapshot")
             .field("runtime", &self.runtime.id())
             .field("stamp", &self.stamp)
-            .field("dispositions", &self.dispositions)
             .field("unfinished", &self.unfinished)
             .finish_non_exhaustive()
     }
@@ -737,10 +517,6 @@ impl DeadlockSnapshot {
         self.stamp
     }
 
-    pub fn dispositions(&self) -> &[RuntimeDisposition] {
-        &self.dispositions
-    }
-
     pub fn unfinished(&self) -> &[RuntimeDeadlockWork] {
         &self.unfinished
     }
@@ -748,62 +524,6 @@ impl DeadlockSnapshot {
     pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
         &self.reflection
     }
-
-    /// Derives a forced settlement proposal from this retained deadlock.
-    /// The proposal remains observational until [`QuiescenceSnapshot::settle`]
-    /// revalidates and accepts it.
-    pub fn kill(&self, reason: RuntimeKillReason) -> QuiescenceSnapshot {
-        let mut dispositions = self.dispositions.clone();
-        dispositions.extend(self.unfinished.iter().map(|work| RuntimeDisposition {
-            work_id: work.work_id,
-            session_id: work.session_id,
-            task_id: work.task_id,
-            kind: RuntimeDispositionKind::Killed(reason),
-        }));
-        QuiescenceSnapshot {
-            runtime: self.runtime.clone(),
-            stamp: self.stamp,
-            dispositions,
-            reflection: self.reflection.clone(),
-            settlement: RuntimeSettlementSnapshot::KilledDeadlock {
-                unfinished: self.settlement_unfinished.clone(),
-                reason,
-            },
-            killed_work: self.unfinished.clone(),
-        }
-    }
-}
-
-pub(super) fn runtime_killed_failure(
-    values: &CoreValueFactory,
-    reason: RuntimeKillReason,
-) -> RuntimeFailureRoot {
-    values.with_boundary_access(|access| {
-        let reason = match reason {
-            RuntimeKillReason::Deadlock => access.key_value(&Key::atom_from_text("deadlock")),
-        };
-        let args = Dict::new_sync().insert(Key::atom_from_text("reason"), reason);
-        let detail = Dict::new_sync()
-            .insert(
-                Key::atom_from_text("op"),
-                access.key_value(&Key::atom_from_text("kill")),
-            )
-            .insert(Key::atom_from_text("args"), CoreValue::Dict(args));
-        let message = Dict::new_sync()
-            .insert(
-                (*crate::core::keys::TEXT).clone(),
-                CoreValue::binary_from_text("runtime killed work in a deadlocked settlement"),
-            )
-            .insert((*crate::core::keys::SEVERITY).clone(), access.error());
-        access.root_runtime_failure(Arc::new(EvaluationFailure::emission_in(
-            &access,
-            CoreValue::Dict(
-                Dict::new_sync()
-                    .insert((*crate::core::keys::MSG).clone(), CoreValue::Dict(message))
-                    .insert(Key::atom_from_text("runtime"), CoreValue::Dict(detail)),
-            ),
-        )))
-    })
 }
 
 fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> RuntimeDependency {
@@ -868,7 +588,7 @@ mod tests {
     use super::*;
 
     /// Ownership latch for the host-visible blocked-work failure retained by
-    /// readiness snapshots and settlement reports: only its composed
+    /// readiness snapshots and analyses: only its composed
     /// diagnostic, never a raw failure.
     fn assert_runtime_deadlock_work_failure_boundary(work: &RuntimeDeadlockWork) {
         let RuntimeDeadlockWork {

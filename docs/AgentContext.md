@@ -203,7 +203,7 @@ schedules. A target too slow for Miri is recorded as a performance exclusion
 with the matrix in `crates/glam-gc/VERIFY.md`, never counted as a pass.
 
 Aggressive-GC verification treats any allocation as pressure. It collects
-wherever production does: at each stable settlement cycle, and whenever
+wherever production does: at each stable pump, and whenever
 claimed work releases after allocating. It never collects at entry or
 allocation, so a test that needs a collection at a specific boundary requests
 it explicitly. Test fixtures that hold raw values across evaluation must root

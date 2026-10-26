@@ -30,7 +30,7 @@ not define language semantics or collect subsystem invariants.
 | `core/managed.rs`, `core/managed/` | Private managed-family and opaque-payload admission, scoped allocation/access, production managed value nodes, and exact compatibility semantic-edge adapters |
 | `api/diagnostics.rs` | Diagnostic values, buses, subscriptions, enrichment, and runtime ingress |
 | `api/turn.rs` | The affine `Runtime` and turns on a tree of machines: a stack, a stash, local state of glam values and children; cuts and forks (`runtime-api-turns-on-machines`, `machines-form-a-tree`) |
-| `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, deadlock reports, settlement, authoritative explicit GC maintenance activity/failure reporting, and stable pressure promotion |
+| `api/runtime.rs`, `api/runtime/` | Runtime ownership, transactional events, delivery, readiness, the analysis and a host's options on machines, authoritative explicit GC maintenance activity/failure reporting, and stable pressure promotion |
 | `api/assembly.rs` | Assembler/reasoning construction, protected volumes, sources, imports, and module builds |
 | `g_source.rs` | Non-evaluating public `.g` inspection summary |
 | `compiler.rs` | Per-source compiler capabilities and hidden provenance |
@@ -69,7 +69,7 @@ not define language semantics or collect subsystem invariants.
 | `interaction_net/profiling.rs` | `glam-prof` only: net rewrite and driver counters |
 | `evaluation.rs`, `evaluation/session.rs`, `evaluation/pump.rs` | Shared demand/profile contracts, session admission, reflection completion-promise reservations, one-use activation permits, cooperative pumping, and runtime pumping |
 | `evaluation/access.rs` | Scoped evaluator authority, thread-bound mutator-free poll and evaluator-step contexts, claim/direct-owner poll admission, scoped wait-completion projection, and post-scope reflection activation; the step context has one poll-derived access route and no direct evaluator compatibility gate |
-| `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and settlement lifecycles; activated reflection machines own transferred effect roots, completed wait observations retain disposition-specific roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |
+| `evaluation/coordinator.rs`, `evaluation/coordinator/` | Authoritative work registry/queues plus task, completion, client-demand, spark, reflection, deferred, and readiness lifecycles; activated reflection machines own transferred effect roots, completed wait observations retain disposition-specific roots, parked demand routing is weak, and detached claims temporarily upgrade the exact registered session/domain |
 | `evaluation/observation.rs`, `evaluation/executor.rs` | Semantic observation epochs and worker lifecycle |
 | `evaluation/whnf.rs` | Narrow translation from semantic WHNF dependencies to coordinator work dependencies |
 | `eval/value.rs`, `application.rs`, `operator.rs`, `net.rs`, `lazy_checkpoint.rs` | Value forcing and semantic execution; lazy net-WHNF progress lives in a traced managed checkpoint whose edge-owned driver excludes concurrent semantic handoffs and uses registered net roots only for post-access execution |

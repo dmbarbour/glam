@@ -42,12 +42,11 @@ pub(crate) use coordinator::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake, EvaluationMachinePoll,
     EvaluationSessionId, EvaluationTaskBlock, EvaluationTaskHandle, EvaluationTaskId,
     EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll, EvaluationWaitToken,
-    EvaluationWorkCoordinator, ExactDemandRoute, FailedRoots, PreparedEvaluationTask,
-    PromiseProducerObligation, PromiseProducerPublication, ReflectionTaskResultPolicy,
-    RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
-    RuntimeWaitFamilySnapshot, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
-    TaskStatusPublisher, TaskStatusWake, ValidatedRuntimeSettlementPlan, WaitMachineSnapshot,
-    WakeRegistration, WorkDependency,
+    EvaluationWorkCoordinator, ExactDemandRoute, PreparedEvaluationTask, PromiseProducerObligation,
+    PromiseProducerPublication, ReflectionTaskResultPolicy, RuntimeCoordinatorReadiness,
+    RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot, RuntimeWaitFamilySnapshot,
+    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, TaskStatusPublisher, TaskStatusWake,
+    WaitMachineSnapshot, WakeRegistration, WorkDependency,
 };
 pub(crate) use executor::EvaluationExecutor;
 #[cfg(test)]

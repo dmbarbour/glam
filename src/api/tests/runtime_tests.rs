@@ -874,11 +874,6 @@ fn gc_activity_invalidates_readiness_and_remains_busy_until_retired() {
         .begin_gc_activity();
 
     assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
-    assert_eq!(
-        before.validate_without_settling(),
-        Err(RuntimeSettlementError::RuntimeChanged),
-        "a lease admitted after observation must stale the earlier snapshot"
-    );
 
     let heap = runtime.values().core().managed_maintenance_snapshot();
     lease.finish(crate::runtime::RuntimeGcLeaseOutcome::success(heap));
@@ -913,10 +908,6 @@ fn explicit_managed_collection_request_is_actionable_runtime_state() {
     assert_eq!(maintenance.state(), RuntimeMaintenanceState::Requested);
     assert_eq!(maintenance.runtime_id(), runtime.id());
     assert!(maintenance.revision() > before.stamp().gc_maintenance_revision());
-    assert_eq!(
-        before.validate_without_settling(),
-        Err(RuntimeSettlementError::RuntimeChanged)
-    );
 
     let report = maintenance
         .service()
@@ -978,90 +969,6 @@ fn one_readiness_snapshot_admits_exactly_one_maintenance_service() {
         1
     );
     assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
-}
-
-#[test]
-fn quiescence_validation_rejects_observation_and_delivery_changes() {
-    let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let RuntimeReadiness::Ready(no_op_snapshot) = runtime.readiness() else {
-        panic!("new runtime should be ready")
-    };
-    let (_, store) = runtime.reflection_snapshot();
-    assert_eq!(
-        runtime.commit_reflection(&crate::reflection::StoreJournal::new(store)),
-        crate::reflection::StoreCommitResult::Committed
-    );
-    no_op_snapshot
-        .validate_without_settling()
-        .expect("a semantic no-op must preserve readiness");
-
-    let RuntimeReadiness::Ready(observation_snapshot) = runtime.readiness() else {
-        panic!("new runtime should be ready")
-    };
-    let admission = runtime.mutation_guard();
-    let blocked_snapshot = observation_snapshot.clone();
-    let (started, validation_started) = std::sync::mpsc::channel();
-    let (finished, validation_finished) = std::sync::mpsc::channel();
-    let validator = std::thread::spawn(move || {
-        started
-            .send(())
-            .expect("validation observer should remain live");
-        let result = blocked_snapshot.validate_without_settling();
-        finished
-            .send(result)
-            .expect("validation receiver should remain live");
-    });
-    validation_started
-        .recv()
-        .expect("validator should begin before admission is released");
-    assert!(
-        validation_finished
-            .recv_timeout(std::time::Duration::from_millis(25))
-            .is_err(),
-        "settlement validation should wait for in-flight mutation admission"
-    );
-    drop(admission);
-    validation_finished
-        .recv_timeout(std::time::Duration::from_secs(2))
-        .expect("released admission should unblock validation")
-        .expect("unchanged validation should pass after admission");
-    validator.join().expect("validator should finish cleanly");
-
-    let (_, store_snapshot) = runtime.reflection_snapshot();
-    let mut journal = crate::reflection::StoreJournal::new(store_snapshot);
-    journal.write(
-        vec![Key::atom_from_text("settlement_stale")],
-        runtime.values().integer(1),
-    );
-    assert_eq!(
-        runtime.commit_reflection(&journal),
-        crate::reflection::StoreCommitResult::Committed
-    );
-    assert!(matches!(
-        observation_snapshot.validate_without_settling(),
-        Err(RuntimeSettlementError::RuntimeChanged)
-    ));
-
-    let RuntimeReadiness::Ready(delivery_snapshot) = runtime.readiness() else {
-        panic!("heap state without work should remain ready")
-    };
-    let endpoint = runtime
-        .output_endpoint(decode_test_integer(runtime.values()), |_: i64| Ok(()))
-        .expect("output endpoint should register");
-    let (store, mut events) = input_transaction(&runtime);
-    events
-        .write(&endpoint.writer(), runtime.values().integer(2))
-        .expect("delivery should reserve");
-    assert_eq!(
-        runtime.try_commit_transaction(&store, &events),
-        crate::reflection::StoreCommitResult::Committed
-    );
-    assert!(matches!(
-        delivery_snapshot.validate_without_settling(),
-        Err(RuntimeSettlementError::RuntimeChanged)
-    ));
-    assert!(matches!(runtime.readiness(), RuntimeReadiness::Busy));
-    assert!(endpoint.delivery().deliver_next().unwrap().is_some());
 }
 
 pub(super) fn decode_test_integer(
@@ -1199,6 +1106,10 @@ fn an_analysis_counts_a_pending_delivery_as_work() {
     assert!(
         !runtime.analysis().unwrap().quiescent(),
         "a delivery is pending"
+    );
+    assert!(
+        matches!(runtime.readiness(), RuntimeReadiness::Busy),
+        "a pending delivery keeps readiness busy"
     );
     endpoint
         .delivery()
@@ -1664,7 +1575,7 @@ fn output_callback_response_reenters_as_later_admitted_input() {
 /// activity changes, which releasing that guard must change: two pumps at
 /// once, as two waiting cuts make, otherwise leave one parked for good.
 #[test]
-fn releasing_a_settlement_wakes_a_pump_that_found_it_held() {
+fn releasing_the_exclusive_gate_wakes_a_pump_that_found_it_held() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     let admission = runtime.state.shared_resources.mutation_admission.clone();
     let activity = admission.activity();
@@ -1672,14 +1583,14 @@ fn releasing_a_settlement_wakes_a_pump_that_found_it_held() {
     let (held, holding) = std::sync::mpsc::channel();
     let (release, released) = std::sync::mpsc::channel::<()>();
     // Just as the pump tries the guard, another thread takes it.
-    admission.set_settlement_probe_for_test(move || {
+    admission.set_exclusive_probe_for_test(move || {
         want.send(()).expect("the holder waits for the pump");
         holding.recv().expect("the holder takes the guard");
     });
     let holder_admission = admission.clone();
     let holder = std::thread::spawn(move || {
         wanted.recv().expect("the pump reaches the guard");
-        let guard = holder_admission.settlement_guard();
+        let guard = holder_admission.exclusive_guard();
         held.send(()).expect("the pump waits for the holder");
         released.recv().expect("the test releases the guard");
         drop(guard);
@@ -1727,12 +1638,7 @@ fn output_payload_is_retained_through_callback_and_dropped_after_locks() {
     impl Drop for DeliveryLease {
         fn drop(&mut self) {
             if let Some(resources) = self.resources.upgrade() {
-                assert!(
-                    resources
-                        .mutation_admission
-                        .try_settlement_guard()
-                        .is_some()
-                );
+                assert!(resources.mutation_admission.try_exclusive_guard().is_some());
             }
             self.dropped.store(true, Ordering::Release);
         }
@@ -2413,8 +2319,8 @@ tasked = anno refl:(.child.task 'p (.cut (.child.call 'a (.child.call 'b (.set [
 }
 
 #[test]
-fn settlement_reports_the_children_left_in_error() {
-    // A flagged child fails settlement, with what flagged it, until its
+fn an_analysis_reports_the_children_left_in_error() {
+    // A flagged child is a machine in error, with what flagged it, until its
     // parent recovers it: a failed task's diagnostic, or an interrupt's
     // reason.
     let source = r#"language g0
@@ -2434,11 +2340,11 @@ stopped = anno refl:(.child.task 's (.heap.set ['s_started] () =>> .cut (.heap.t
             .evaluate(&assembler.get(module.value(), name).unwrap())
             .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
-    let RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+    let RuntimeReadiness::Ready(_) = assembler.drain_reasoning() else {
         panic!("the children should leave the runtime ready")
     };
-    let report = snapshot.settle().expect("the runtime should settle");
-    let failed: Vec<(Key, String)> = report
+    let analysis = assembler.evaluation_runtime().analysis().unwrap();
+    let failed: Vec<(Key, String)> = analysis
         .failed_machines()
         .iter()
         .map(|machine| {
@@ -2461,7 +2367,7 @@ stopped = anno refl:(.child.task 's (.heap.set ['s_started] () =>> .cut (.heap.t
 #[test]
 fn an_annotation_task_s_failure_flags_its_anonymous_root() {
     // `reflection-tasks-are-machine-tasks`: an annotation task's failure
-    // flags its anonymous root, which no parent recovers, so settlement
+    // flags its anonymous root, which no parent recovers, so an analysis
     // reports it even though the failure reached the demander.
     let source = r#"language g0
 import 'std
@@ -2477,12 +2383,12 @@ observed = anno refl:(.fail) "never"
         .get(module.value(), "observed")
         .and_then(|value| assembler.evaluate(&value));
     assert!(observed.is_err(), "the demander observes the failure");
-    let RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+    let RuntimeReadiness::Ready(_) = assembler.drain_reasoning() else {
         panic!("the failed annotation should leave the runtime ready")
     };
-    let report = snapshot.settle().expect("the runtime should settle");
-    let [failed] = report.failed_machines() else {
-        panic!("one root should fail: {:?}", report.failed_machines())
+    let analysis = assembler.evaluation_runtime().analysis().unwrap();
+    let [failed] = analysis.failed_machines() else {
+        panic!("one root should fail: {:?}", analysis.failed_machines())
     };
     let path = failed.path().keys();
     assert_eq!(path.len(), 2, "{path:?}");

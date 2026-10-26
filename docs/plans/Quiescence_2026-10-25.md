@@ -249,6 +249,26 @@ final diagnostics through it).
    `settlement-retires` — `QuiescenceSnapshot::settle`, the deadlock
    kill, `QuiescenceReport` and its pending lists, with the tests that
    settle, each judged for whether the analysis's tests serve it.
+   Built 2026-10-26: gone are `settle` and its validation, the report and
+   its pending lists (a flag's reported mark, the coordinator's unreported
+   roots, the pending delivery and maintenance reports), dispositions and
+   the deadlock kill, the coordinator's settlement plan and publication,
+   `RuntimeSettlementError`, and the `Killed` terminals of waits, task
+   statuses, client demands and lifecycles, which only the kill produced,
+   with the `stage_settlement` profiling count. Readiness keeps its
+   `Ready` and `Deadlocked` snapshots, a stamp, the store and the
+   unfinished work, as observations nothing validates later. The
+   exclusive gate keeps its use, readiness probes and pressure promotion,
+   under a name of its own (`RuntimeExclusiveGuard`), and the coordinator's
+   `settlement` child is `readiness`. Settlement collected before it
+   reported, so that a lost resolver's promise broke rather than being
+   reported awaited; the batch had dropped that with `quiescence-batch`,
+   and now collects once before it judges a quiescence with issues, and
+   again only after it publishes (a CLI test, mutation-checked). Tests:
+   the public, managed-collection, failed-machine and retention tests read
+   the analysis or the snapshot instead; the validation tests, the forced
+   kills, the client demand kill, and the turn test of settlement's
+   collection retire with what they tested.
 
 **Decided on the end design** (maintainer, 2026-10-25: yes to both, "this
 aligns nicely with my thinking"): a backlog is unresolved by default, its

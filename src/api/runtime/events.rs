@@ -95,8 +95,6 @@ pub(in crate::api) struct RuntimeOutputState {
         BTreeMap<RuntimeOutputEndpointId, std::collections::VecDeque<RuntimeDeliveryId>>,
     pub(in crate::api) failures:
         RedBlackTreeMapSync<RuntimeDeliveryId, Arc<RuntimeDeliveryFailure>>,
-    pub(in crate::api) pending_failure_reports:
-        RedBlackTreeMapSync<RuntimeDeliveryId, Arc<RuntimeDeliveryFailure>>,
 }
 
 /// Stage of external output delivery which failed after semantic commit.
@@ -1200,11 +1198,6 @@ fn terminalize_runtime_delivery(
                     .events
                     .outputs
                     .failures
-                    .insert_mut(delivery, failure.clone());
-                state
-                    .events
-                    .outputs
-                    .pending_failure_reports
                     .insert_mut(delivery, failure.clone());
             }
             retired

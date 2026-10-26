@@ -65,9 +65,9 @@ pub(crate) fn aggressive_gc_verification() -> bool {
 /// Shared admission boundary for runtime-owned state publication.
 ///
 /// Ordinary component transitions hold a shared guard through their complete
-/// authoritative publication sequence. A future readiness snapshot or
-/// settlement takes the exclusive guard, so it cannot observe only part of a
-/// transition. Component locks are still acquired and released separately.
+/// authoritative publication sequence. A readiness probe, or a stable pump
+/// promoting collector pressure, takes the exclusive guard, so it cannot
+/// observe only part of a transition. Component locks are still acquired and released separately.
 pub(crate) struct RuntimeMutationAdmission {
     gate: RwLock<()>,
     activity: Arc<RuntimeActivityState>,
@@ -79,10 +79,10 @@ pub(crate) struct RuntimeMutationAdmission {
     /// evaluation. See `gc_pressure_requested`.
     #[cfg(any(test, feature = "aggressive-gc-verification"))]
     aggressive_promoted_allocations: AtomicU64,
-    /// Runs once, at the next attempt to take the settlement guard without
+    /// Runs once, at the next attempt to take the exclusive guard without
     /// waiting, so a test can hold the guard just then.
     #[cfg(test)]
-    settlement_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    exclusive_probe: Mutex<Option<Box<dyn FnOnce() + Send>>>,
 }
 
 impl RuntimeMutationAdmission {
@@ -93,7 +93,7 @@ impl RuntimeMutationAdmission {
             poisoned: AtomicBool::new(false),
             cores: Mutex::new(Vec::new()),
             #[cfg(test)]
-            settlement_probe: Mutex::new(None),
+            exclusive_probe: Mutex::new(None),
             #[cfg(any(test, feature = "aggressive-gc-verification"))]
             aggressive_promoted_allocations: AtomicU64::new(0),
         })
@@ -124,10 +124,10 @@ impl RuntimeMutationAdmission {
         }
     }
 
-    pub(crate) fn try_settlement_guard(&self) -> Option<RuntimeSettlementGuard<'_>> {
+    pub(crate) fn try_exclusive_guard(&self) -> Option<RuntimeExclusiveGuard<'_>> {
         #[cfg(test)]
         if let Some(probe) = self
-            .settlement_probe
+            .exclusive_probe
             .lock()
             .unwrap_or_else(PoisonError::into_inner)
             .take()
@@ -137,17 +137,17 @@ impl RuntimeMutationAdmission {
         let guard = self.gate.try_write().ok()?;
         #[cfg(debug_assertions)]
         self.record_gate_held();
-        Some(RuntimeSettlementGuard {
+        Some(RuntimeExclusiveGuard {
             guard: Some(guard),
             admission: self,
         })
     }
 
     /// Panics if this thread already holds the gate. A thread never takes it
-    /// twice: a second read waits behind any queued settlement, which waits
-    /// for the first, so nothing evaluates under the gate. Unwinding skips the
-    /// check, so a destructor that settles does not turn one report into an
-    /// abort.
+    /// twice: a second read waits behind any queued exclusive hold, which
+    /// waits for the first, so nothing evaluates under the gate. Unwinding
+    /// skips the check, so a destructor that takes the gate does not turn one
+    /// report into an abort.
     #[cfg(debug_assertions)]
     fn assert_gate_not_held(&self) {
         if std::thread::panicking() {
@@ -158,7 +158,7 @@ impl RuntimeMutationAdmission {
             assert!(
                 !held.contains(&gate),
                 "this thread already holds the runtime mutation gate, and taking it again \
-                 deadlocks behind a queued settlement; taken again at:\n{}",
+                 deadlocks behind a queued exclusive hold; taken again at:\n{}",
                 std::backtrace::Backtrace::force_capture()
             );
         });
@@ -181,23 +181,24 @@ impl RuntimeMutationAdmission {
         });
     }
 
-    /// Runs `probe` once, at the next attempt to take the settlement guard
+    /// Runs `probe` once, at the next attempt to take the exclusive guard
     /// without waiting.
     #[cfg(test)]
-    pub(crate) fn set_settlement_probe_for_test(&self, probe: impl FnOnce() + Send + 'static) {
+    pub(crate) fn set_exclusive_probe_for_test(&self, probe: impl FnOnce() + Send + 'static) {
         *self
-            .settlement_probe
+            .exclusive_probe
             .lock()
             .unwrap_or_else(PoisonError::into_inner) = Some(Box::new(probe));
     }
 
-    pub(crate) fn settlement_guard(&self) -> RuntimeSettlementGuard<'_> {
+    #[cfg(test)]
+    pub(crate) fn exclusive_guard(&self) -> RuntimeExclusiveGuard<'_> {
         #[cfg(debug_assertions)]
         self.assert_gate_not_held();
         let guard = self.gate.write().expect(RUNTIME_POISONED);
         #[cfg(debug_assertions)]
         self.record_gate_held();
-        RuntimeSettlementGuard {
+        RuntimeExclusiveGuard {
             guard: Some(guard),
             admission: self,
         }
@@ -283,7 +284,7 @@ impl RuntimeMutationAdmission {
 
     pub(crate) fn gc_maintenance_snapshot(
         &self,
-        _settlement: &RuntimeSettlementGuard<'_>,
+        _exclusive: &RuntimeExclusiveGuard<'_>,
     ) -> RuntimeGcMaintenanceSnapshot {
         self.activity.gc_maintenance_snapshot()
     }
@@ -293,13 +294,13 @@ impl RuntimeMutationAdmission {
     }
 
     /// Promotes collector-local pressure into one authoritative runtime
-    /// maintenance request while exclusive settlement admission is held.
+    /// maintenance request while exclusive admission is held.
     ///
     /// The heap remains permanently `NoAuto`; this publication only makes an
     /// already-latched collector request visible to runtime readiness.
     pub(crate) fn promote_gc_pressure_request(
         &self,
-        _settlement: &RuntimeSettlementGuard<'_>,
+        _exclusive: &RuntimeExclusiveGuard<'_>,
         values: &CoreValueFactory,
     ) -> bool {
         self.gc_pressure_requested(values) && self.activity.promote_gc_pressure_request()
@@ -422,25 +423,14 @@ impl RuntimeMutationAdmission {
         self.activity.retained_gc_failures()
     }
 
-    pub(crate) fn gc_failure_ledgers_for_settlement(
-        &self,
-        _settlement: &RuntimeSettlementGuard<'_>,
-    ) -> (
-        Vec<RuntimeGcMaintenanceFailure>,
-        Vec<RuntimeGcMaintenanceFailure>,
-        u64,
-    ) {
-        self.activity.gc_failure_ledgers_for_settlement()
-    }
-
     fn finish_gc_activity(&self, outcome: RuntimeGcLeaseOutcome) {
         let mutation = self.mutation_guard();
         self.activity.finish_gc_activity(outcome);
         drop(mutation);
     }
 
-    /// Wakes runtime clients after an exclusive settlement publication.
-    pub(crate) fn notify_settlement(&self) {
+    /// Wakes runtime clients after a publication under exclusive admission.
+    pub(crate) fn notify_exclusive_release(&self) {
         self.activity.advance();
     }
 }
@@ -450,13 +440,12 @@ pub(crate) struct RuntimeMutationGuard<'a> {
     admission: &'a RuntimeMutationAdmission,
 }
 
-pub(crate) struct RuntimeSettlementGuard<'a> {
+pub(crate) struct RuntimeExclusiveGuard<'a> {
     guard: Option<RwLockWriteGuard<'a, ()>>,
     admission: &'a RuntimeMutationAdmission,
 }
 
-const RUNTIME_POISONED: &str =
-    "evaluation runtime is poisoned: a panic tore its scheduler, transaction, or settlement state";
+const RUNTIME_POISONED: &str = "evaluation runtime is poisoned: a panic tore its scheduler, transaction, or exclusive-admission state";
 
 /// Runtime-wide state whose poisoning faults the whole runtime.
 ///
@@ -499,7 +488,7 @@ pub(crate) struct RuntimeGcMaintenanceFailure {
     pub(crate) message: Arc<str>,
 }
 
-/// Authoritative GC state observed only while settlement admission is held.
+/// Authoritative GC state observed only while exclusive admission is held.
 #[derive(Clone, Debug)]
 pub(crate) struct RuntimeGcMaintenanceSnapshot {
     pub(crate) active_leases: usize,
@@ -651,17 +640,17 @@ mod mutation_authority {
 }
 
 /// Proof that the caller owns either shared mutation admission or exclusive
-/// settlement admission for this runtime.
+/// admission for this runtime.
 ///
 /// Publication APIs use this sealed trait only as an authority token. They do
-/// not acquire admission themselves, which lets ordinary commits and atomic
-/// settlement share the same terminal-publication paths.
+/// not acquire admission themselves, which lets every holder share the same
+/// terminal-publication paths.
 pub(crate) trait RuntimeMutationAuthority: mutation_authority::Sealed {}
 
 impl mutation_authority::Sealed for RuntimeMutationGuard<'_> {}
 impl RuntimeMutationAuthority for RuntimeMutationGuard<'_> {}
-impl mutation_authority::Sealed for RuntimeSettlementGuard<'_> {}
-impl RuntimeMutationAuthority for RuntimeSettlementGuard<'_> {}
+impl mutation_authority::Sealed for RuntimeExclusiveGuard<'_> {}
+impl RuntimeMutationAuthority for RuntimeExclusiveGuard<'_> {}
 
 #[cfg(debug_assertions)]
 thread_local! {
@@ -689,7 +678,7 @@ impl Drop for RuntimeMutationGuard<'_> {
     }
 }
 
-impl Drop for RuntimeSettlementGuard<'_> {
+impl Drop for RuntimeExclusiveGuard<'_> {
     fn drop(&mut self) {
         drop(self.guard.take());
         #[cfg(debug_assertions)]
@@ -733,7 +722,6 @@ struct RuntimeGcMaintenanceState {
     next_failure_id: u64,
     completed_collection_epoch: u64,
     failures: Vec<RuntimeGcMaintenanceFailure>,
-    pending_failure_reports: Vec<RuntimeGcMaintenanceFailure>,
 }
 
 impl RuntimeActivityState {
@@ -850,21 +838,6 @@ impl RuntimeActivityState {
         state.gc.failures.clone()
     }
 
-    fn gc_failure_ledgers_for_settlement(
-        &self,
-    ) -> (
-        Vec<RuntimeGcMaintenanceFailure>,
-        Vec<RuntimeGcMaintenanceFailure>,
-        u64,
-    ) {
-        let mut state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
-        let pending = std::mem::take(&mut state.gc.pending_failure_reports);
-        if !pending.is_empty() {
-            state.gc.advance_revision();
-        }
-        (state.gc.failures.clone(), pending, state.gc.revision)
-    }
-
     fn gc_maintenance_snapshot(&self) -> RuntimeGcMaintenanceSnapshot {
         let state = self.state.lock().unwrap_or_else(PoisonError::into_inner);
         state.gc.snapshot()
@@ -937,8 +910,7 @@ impl RuntimeGcMaintenanceState {
             kind,
             message,
         };
-        self.failures.push(failure.clone());
-        self.pending_failure_reports.push(failure);
+        self.failures.push(failure);
     }
 
     fn snapshot(&self) -> RuntimeGcMaintenanceSnapshot {
@@ -1406,22 +1378,22 @@ mod tests {
         let first = admission.begin_gc_activity();
         let second = admission.begin_gc_activity();
 
-        let settlement = admission.settlement_guard();
-        let active = admission.gc_maintenance_snapshot(&settlement);
+        let exclusive = admission.exclusive_guard();
+        let active = admission.gc_maintenance_snapshot(&exclusive);
         assert_eq!(active.active_leases, 2);
         assert_eq!(active.revision, 2);
-        drop(settlement);
+        drop(exclusive);
 
         first.finish(RuntimeGcLeaseOutcome::success(usable_empty_heap()));
-        let settlement = admission.settlement_guard();
-        let one_left = admission.gc_maintenance_snapshot(&settlement);
+        let exclusive = admission.exclusive_guard();
+        let one_left = admission.gc_maintenance_snapshot(&exclusive);
         assert_eq!(one_left.active_leases, 1);
         assert_eq!(one_left.revision, 3);
-        drop(settlement);
+        drop(exclusive);
 
         second.finish(RuntimeGcLeaseOutcome::success(usable_empty_heap()));
-        let settlement = admission.settlement_guard();
-        let idle = admission.gc_maintenance_snapshot(&settlement);
+        let exclusive = admission.exclusive_guard();
+        let idle = admission.gc_maintenance_snapshot(&exclusive);
         assert_eq!(idle.active_leases, 0);
         assert_eq!(idle.revision, 4);
         assert_eq!(idle.disposition, RuntimeGcMaintenanceDisposition::Idle);
@@ -1430,7 +1402,7 @@ mod tests {
     #[test]
     fn exclusive_readiness_admission_orders_before_gc_lease_registration() {
         let admission = RuntimeMutationAdmission::new();
-        let settlement = admission.settlement_guard();
+        let exclusive = admission.exclusive_guard();
         let worker_admission = admission.clone();
         let (registered_tx, registered_rx) = std::sync::mpsc::channel();
         let worker = std::thread::spawn(move || {
@@ -1445,21 +1417,21 @@ mod tests {
             "exclusive readiness admission must exclude lease publication"
         );
         assert_eq!(
-            admission.gc_maintenance_snapshot(&settlement).active_leases,
+            admission.gc_maintenance_snapshot(&exclusive).active_leases,
             0
         );
 
-        drop(settlement);
+        drop(exclusive);
         registered_rx
             .recv_timeout(Duration::from_secs(2))
             .expect("lease should register after readiness releases admission");
         let lease = worker.join().unwrap();
-        let settlement = admission.settlement_guard();
+        let exclusive = admission.exclusive_guard();
         assert_eq!(
-            admission.gc_maintenance_snapshot(&settlement).active_leases,
+            admission.gc_maintenance_snapshot(&exclusive).active_leases,
             1
         );
-        drop(settlement);
+        drop(exclusive);
         lease.finish(RuntimeGcLeaseOutcome::success(usable_empty_heap()));
     }
 
@@ -1481,8 +1453,8 @@ mod tests {
             .recv_timeout(Duration::from_secs(2))
             .expect("lease retirement must wake a parked runtime observer");
         waiter.join().unwrap();
-        let settlement = admission.settlement_guard();
-        let snapshot = admission.gc_maintenance_snapshot(&settlement);
+        let exclusive = admission.exclusive_guard();
+        let snapshot = admission.gc_maintenance_snapshot(&exclusive);
         assert_eq!(snapshot.active_leases, 0);
         assert_eq!(
             snapshot.disposition,

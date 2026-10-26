@@ -188,7 +188,6 @@ impl RuntimeProfileSnapshot {
                 ("session_closure", kinds.session_closure),
                 ("terminal_settlement", kinds.terminal_settlement),
                 ("work_retirement", kinds.work_retirement),
-                ("stage_settlement", kinds.stage_settlement),
             ],
         );
         out.push_str(",\"exact_routes\":");

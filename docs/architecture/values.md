@@ -273,18 +273,18 @@ derived from the last collection's survivors; pressure is advisory, while an
 explicit request is authoritative. Why: automatic election would wrap every
 access in lease traffic and pause wherever a region happened to open.
 
-1. **Promote.** At a stable instant under exclusive settlement admission,
+1. **Promote.** At a stable instant under exclusive admission,
    `pump_until_stable` turns pressure into the explicit request, then returns.
 2. **Request.** `request_managed_collection` sets the same request.
 3. **Observe.** `readiness` precedence: runtime `Poisoned`; `Busy` (no
-   settlement admission, or a GC lease live); `MaintenanceFailed` (heap
+   exclusive admission, or a GC lease live); `MaintenanceFailed` (heap
    poisoned); `MaintenanceRequired` (request or retry); then work and events.
 4. **Service.** `RuntimeMaintenanceSnapshot::service` rechecks the revision
    (else `RuntimeChanged`), publishes a `RuntimeGcActivityLease` under shared
    admission, runs `collect_full` outside runtime locks, and publishes the
    outcome.
 
-- The revision serves only service; settlement checks for no lease, no
+- The revision serves only service; readiness checks for no lease, no
   request and an `Idle` disposition.
 - Late pressure stays latched for the next pump: a race may add an attempt,
   never lose a request.
@@ -296,7 +296,7 @@ access in lease traffic and pause wherever a region happened to open.
 - `aggressive-gc-verification` swaps only the pressure input (any allocation
   since the last stable pump) and lets the pump service its own request.
   There is no per-entry hook.
-- The CLI writes its output before its first settle loop, so assembly never
+- The CLI writes its output before its quiescence loop, so assembly never
   collects: peak memory equals total allocation.
 
 ## Invariants and Verification
@@ -325,8 +325,8 @@ is in [`VERIFY.md`](../../crates/glam-gc/VERIFY.md).
   pressure thresholds.
 - [Concurrent Garbage Collection](../plans/ConcurrentGarbageCollection_2026-08-28.md):
   concurrent marking; work that stays inside one access region cannot
-  collect until its driver's next quantum boundary; settlement's reliance on
-  non-moving collection.
+  collect until its driver's next quantum boundary; how readiness probes
+  compose with collection outside a stable boundary.
 - [Scoped Pointer Safety](../plans/GarbageCollectorScopedPointerSafety_2026-09-09.md):
   likely deprecated, since branded views landed as `GcRef`
   (`owned-mutator-views`); Glam's `Value` stays unbranded.

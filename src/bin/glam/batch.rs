@@ -296,8 +296,11 @@ impl BatchLogger for RootLogger<'_, '_, '_> {
 /// analysis has nothing new: there the batch ends, an atomic transition
 /// that kills nothing (`quiescence-is-analyzed`). A configured logger whose
 /// input holds unread diagnostics at quiescence is not reading, so it is
-/// halted, and the fallback renders them. Returns whether the batch failed:
-/// any issue fails it, as rendering may itself start work and report.
+/// halted, and the fallback renders them. Before it judges a quiescence
+/// with issues, the batch collects, so that a promise whose resolver was
+/// lost breaks first (`opaque-resources-reclaimed-when-unreachable`).
+/// Returns whether the batch failed: any issue fails it, as rendering may
+/// itself start work and report.
 pub(super) fn quiesce_batch(
     runtime: &EvaluationRuntime,
     values: &Values,
@@ -307,6 +310,10 @@ pub(super) fn quiesce_batch(
     let logger_input = [Key::atom_from_text(LOGGER)];
     let mut published = PublishedIssues::default();
     let mut failed = false;
+    // Whether a collection ran since the batch last published, which it
+    // runs once a quiescence has issues: only a collection acts on death
+    // notices, and a lost resolver's promise breaks then.
+    let mut collected = false;
     loop {
         runtime.pump_until_stable();
         if let Err(error) = logger.drain() {
@@ -353,6 +360,15 @@ pub(super) fn quiesce_batch(
         if !analysis.quiescent() {
             continue;
         }
+        if !collected && !analysis.issues().is_empty() {
+            collected = true;
+            if let Err(error) = runtime.service_managed_collection()
+                && error.kind() != glam::RuntimeMaintenanceErrorKind::RuntimeChanged
+            {
+                failed = true;
+            }
+            continue;
+        }
         // Halted, the logger hands its input to the fallback, so its
         // backlog never reaches the issues.
         if let Some(unread) = analysis
@@ -379,6 +395,7 @@ pub(super) fn quiesce_batch(
             return failed;
         }
         failed = true;
+        collected = false;
         for diagnostic in diagnostics {
             publish(diagnostic);
         }

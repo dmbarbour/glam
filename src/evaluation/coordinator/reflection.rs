@@ -124,8 +124,7 @@ impl EvaluationWorkCoordinator {
             }
             reflection.flags_root = false;
             let task = reflection.task;
-            state.failed_roots.insert_mut(task, failure.clone());
-            state.pending_failed_root_reports.insert_mut(task, failure);
+            state.failed_roots.insert_mut(task, failure);
         }
         let _ = self.cancel_reflection(work);
         true
@@ -147,7 +146,6 @@ impl EvaluationWorkCoordinator {
             .collect();
         for task in tasks {
             state.failed_roots.remove_mut(&task);
-            state.pending_failed_root_reports.remove_mut(&task);
         }
     }
 

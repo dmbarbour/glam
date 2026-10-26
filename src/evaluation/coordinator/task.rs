@@ -68,7 +68,6 @@ pub(crate) enum EvaluationWaitPoll {
     Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
-    Killed(RuntimeFailureRoot),
     /// The producer was interrupted by a panic. Waiters halt instead of
     /// reinstalling work, and never treat this as a semantic failure.
     Panicked(EvaluationPanic),
@@ -132,7 +131,6 @@ pub(crate) enum EvaluationTaskStatus {
     Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
-    Killed(RuntimeFailureRoot),
     Panicked(EvaluationPanic),
 }
 
@@ -228,7 +226,6 @@ pub(super) fn terminal_task_status(terminal: &EvaluationWaitTerminal) -> Evaluat
         EvaluationWaitTerminal::Failed(error) => EvaluationTaskStatus::Failed(error.clone()),
         EvaluationWaitTerminal::Cancelled => EvaluationTaskStatus::Cancelled,
         EvaluationWaitTerminal::Abandoned => EvaluationTaskStatus::Abandoned,
-        EvaluationWaitTerminal::Killed(error) => EvaluationTaskStatus::Killed(error.clone()),
         EvaluationWaitTerminal::Panicked(report) => EvaluationTaskStatus::Panicked(report.clone()),
     }
 }
@@ -315,8 +312,8 @@ pub(crate) enum ReflectionTaskResultPolicy {
 
 /// The failures of the reflection tasks whose failure flags their anonymous
 /// roots, annotation tasks, by task (`reflection-tasks-are-machine-tasks`).
-/// An anonymous root is unrecoverable, so its failure stands, and
-/// settlement reports each as a failed machine.
+/// An anonymous root is unrecoverable, so its failure stands, until a host
+/// clears the root, and an analysis reports each as a machine in error.
 pub(crate) type FailedRoots = RedBlackTreeMapSync<EvaluationTaskId, RuntimeFailureRoot>;
 
 struct EvaluationWaitState {
@@ -332,7 +329,6 @@ pub(crate) enum EvaluationWaitTerminal {
     Failed(RuntimeFailureRoot),
     Cancelled,
     Abandoned,
-    Killed(RuntimeFailureRoot),
     /// The producer was interrupted by a panic: task-layer state, never a
     /// semantic result.
     Panicked(EvaluationPanic),
@@ -432,7 +428,7 @@ impl EvaluationWaitToken {
             EvaluationWaitTerminal::Complete(value) => {
                 debug_assert_eq!(value.runtime_id(), self.runtime_id());
             }
-            EvaluationWaitTerminal::Failed(failure) | EvaluationWaitTerminal::Killed(failure) => {
+            EvaluationWaitTerminal::Failed(failure) => {
                 debug_assert_eq!(failure.runtime_id(), self.runtime_id());
             }
             EvaluationWaitTerminal::Cancelled
@@ -553,7 +549,6 @@ impl EvaluationWaitTerminal {
             Self::Failed(error) => EvaluationWaitPoll::Failed(error.clone()),
             Self::Cancelled => EvaluationWaitPoll::Cancelled,
             Self::Abandoned => EvaluationWaitPoll::Abandoned,
-            Self::Killed(error) => EvaluationWaitPoll::Killed(error.clone()),
             Self::Panicked(report) => EvaluationWaitPoll::Panicked(report.clone()),
         }
     }

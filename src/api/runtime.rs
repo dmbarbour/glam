@@ -5,25 +5,22 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc;
 use std::sync::{Arc, Mutex, Weak};
 
-use rpds::RedBlackTreeMapSync;
-
 use super::diagnostics::DiagnosticIngressInner;
 use super::{Error, Value, Values};
 use crate::core::CoreValueFactory;
 use crate::evaluation::{
     EvaluationExecutor, EvaluationSession, EvaluationWorkCoordinator, ReflectionTaskProfile,
     RuntimeCoordinatorReadiness, RuntimeObservationEpoch, RuntimeObservationState,
-    ValidatedRuntimeSettlementPlan,
 };
 use crate::reflection::{
     ConflictAnalysisStrategy, ExactConflictAnalysis, ReasoningSessionId, ReflectionStore,
     Resolution, RuntimeInputEndpointId, StoreCommitResult, VolumeId,
 };
 use crate::runtime::{
-    EvaluationRuntimeId, RuntimeCoreState, RuntimeGcLeaseOutcome, RuntimeGcMaintenanceDisposition,
-    RuntimeGcMaintenanceFailure, RuntimeGcMaintenanceFailureKind, RuntimeIds,
-    RuntimeMutationAdmission, RuntimeMutationAuthority, RuntimeMutationGuard,
-    RuntimeSettlementGuard, RuntimeValueRoot, allocate_evaluation_runtime_id,
+    EvaluationRuntimeId, RuntimeCoreState, RuntimeExclusiveGuard, RuntimeGcLeaseOutcome,
+    RuntimeGcMaintenanceDisposition, RuntimeGcMaintenanceFailure, RuntimeGcMaintenanceFailureKind,
+    RuntimeIds, RuntimeMutationAdmission, RuntimeMutationAuthority, RuntimeMutationGuard,
+    RuntimeValueRoot, allocate_evaluation_runtime_id,
 };
 
 mod accepted;
@@ -52,10 +49,8 @@ pub(crate) use machines::{
     break_replies, clear_child_machines, machine_diagnostic, reason_diagnostic,
 };
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire, WireEnd};
+use readiness::runtime_deadlock_work_from_snapshot;
 pub use readiness::*;
-use readiness::{
-    RuntimeSettlementSnapshot, runtime_deadlock_work_from_snapshot, runtime_killed_failure,
-};
 pub(in crate::api) use shares::ShareJournal;
 
 fn maintenance_failure_kind(
@@ -106,8 +101,8 @@ pub struct EvaluationRuntime {
 
 /// Runtime-visible background work remaining after one bounded pump call.
 ///
-/// This is an instantaneous scheduler observation, not a readiness or
-/// settlement result: another worker may change it immediately.
+/// This is an instantaneous scheduler observation, not a readiness result:
+/// another worker may change it immediately.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackgroundPumpState {
     /// At least one authorized background machine remains claimable.
@@ -925,20 +920,20 @@ impl EvaluationRuntime {
         self.state.work.poison_scheduler_for_test(with_authority);
     }
 
-    /// Simulates a panic while exclusive settlement admission is held.
+    /// Simulates a panic while exclusive admission is held.
     #[cfg(test)]
-    pub(crate) fn poison_settlement_for_test(&self) {
+    pub(crate) fn poison_exclusive_hold_for_test(&self) {
         let admission = &self.state.shared_resources.mutation_admission;
         let panicked = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _settlement = admission.settlement_guard();
-            panic!("forced settlement panic");
+            let _exclusive = admission.exclusive_guard();
+            panic!("forced panic under the exclusive gate");
         }));
         assert!(panicked.is_err());
         assert!(admission.poison_marked());
     }
 
     /// A poisoned runtime admits no GC lease: its scheduler, transaction, or
-    /// settlement state is torn, so no collection may start.
+    /// exclusive-admission state is torn, so no collection may start.
     fn refuse_maintenance_if_poisoned(&self) -> Result<(), RuntimeMaintenanceError> {
         if self.state.shared_resources.mutation_admission.is_poisoned() {
             return Err(RuntimeMaintenanceError::new(
@@ -966,26 +961,6 @@ impl EvaluationRuntime {
             ));
         };
         self.service_managed_collection_with_lease(lease)
-    }
-
-    /// Collects, acting on the death notices, before settlement reports
-    /// (`opaque-resources-reclaimed-when-unreachable`), so a wait on a lost
-    /// promise is not reported unresolved: a notice that changes anything
-    /// changes the runtime, and the settlement's validation sends its caller
-    /// back to pump. A failed collection stays in maintenance state, which
-    /// validation and readiness report.
-    fn collect_for_settlement(&self) {
-        #[cfg(test)]
-        if self
-            .state
-            .shared_resources
-            .values
-            .core()
-            .is_shared_test_domain()
-        {
-            return;
-        }
-        let _ = self.service_managed_collection();
     }
 
     fn service_managed_collection_with_lease(
@@ -1245,11 +1220,6 @@ impl EvaluationRuntime {
             let removed = state.events.outputs.failures.get(&delivery).cloned();
             if removed.is_some() {
                 state.events.outputs.failures.remove_mut(&delivery);
-                state
-                    .events
-                    .outputs
-                    .pending_failure_reports
-                    .remove_mut(&delivery);
             }
             removed
         };
@@ -1341,11 +1311,11 @@ impl EvaluationRuntime {
             }
 
             let observed_activity = activity.current();
-            let Some(settlement) = admission.try_settlement_guard() else {
+            let Some(exclusive) = admission.try_exclusive_guard() else {
                 activity.wait_for_change(observed_activity);
                 continue;
             };
-            let maintenance = admission.gc_maintenance_snapshot(&settlement);
+            let maintenance = admission.gc_maintenance_snapshot(&exclusive);
             let work = self.state.work.runtime_pump_snapshot();
             let running_delivery = self.state.shared_resources.has_running_delivery();
             let stable = maintenance.active_leases == 0
@@ -1356,14 +1326,14 @@ impl EvaluationRuntime {
                 && !running_delivery;
             let pressure_promoted = stable
                 && admission.promote_gc_pressure_request(
-                    &settlement,
+                    &exclusive,
                     self.state.shared_resources.values.core(),
                 );
-            drop(settlement);
+            drop(exclusive);
 
             if pressure_promoted {
-                admission.notify_settlement();
-                // The settlement guard is released and the runtime is stable,
+                admission.notify_exclusive_release();
+                // The exclusive guard is released and the runtime is stable,
                 // so this is the same boundary at which a client would service
                 // the request. A failed service is retained by maintenance
                 // state and later reported by readiness, and it blocks further
@@ -1400,20 +1370,20 @@ impl EvaluationRuntime {
         if self.state.shared_resources.mutation_admission.is_poisoned() {
             return RuntimeReadiness::Poisoned;
         }
-        let Some(settlement) = self.try_settlement_guard() else {
+        let Some(exclusive) = self.try_exclusive_guard() else {
             return RuntimeReadiness::Busy;
         };
         let maintenance = self
             .state
             .shared_resources
             .mutation_admission
-            .gc_maintenance_snapshot(&settlement);
+            .gc_maintenance_snapshot(&exclusive);
         if maintenance.active_leases != 0 {
-            drop(settlement);
+            drop(exclusive);
             return RuntimeReadiness::Busy;
         }
         if maintenance.disposition == RuntimeGcMaintenanceDisposition::Poisoned {
-            drop(settlement);
+            drop(exclusive);
             return RuntimeReadiness::MaintenanceFailed(RuntimeMaintenanceSnapshot {
                 runtime: self.clone(),
                 revision: maintenance.revision,
@@ -1430,7 +1400,7 @@ impl EvaluationRuntime {
             } else {
                 RuntimeMaintenanceState::Requested
             };
-            drop(settlement);
+            drop(exclusive);
             return RuntimeReadiness::MaintenanceRequired(RuntimeMaintenanceSnapshot {
                 runtime: self.clone(),
                 revision: maintenance.revision,
@@ -1440,7 +1410,7 @@ impl EvaluationRuntime {
         }
         let coordinator = self.state.work.runtime_readiness_snapshot();
         if matches!(coordinator, RuntimeCoordinatorReadiness::Busy) {
-            drop(settlement);
+            drop(exclusive);
             return RuntimeReadiness::Busy;
         }
 
@@ -1454,13 +1424,13 @@ impl EvaluationRuntime {
                 .expect("runtime transaction mutex should not be poisoned");
             if !state.events.outputs.records.is_empty() {
                 drop(state);
-                drop(settlement);
+                drop(exclusive);
                 return RuntimeReadiness::Busy;
             }
             state.reflection.snapshot()
         };
         let observation_epoch = self.state.shared_resources.observations.current().get();
-        drop(settlement);
+        drop(exclusive);
 
         match coordinator {
             RuntimeCoordinatorReadiness::Busy => unreachable!("handled above"),
@@ -1472,10 +1442,7 @@ impl EvaluationRuntime {
                         observation_epoch,
                         gc_maintenance_revision: maintenance.revision,
                     },
-                    dispositions: Vec::new(),
                     reflection,
-                    settlement: RuntimeSettlementSnapshot::Ready,
-                    killed_work: Vec::new(),
                 })
             }
             RuntimeCoordinatorReadiness::Deadlocked {
@@ -1488,206 +1455,13 @@ impl EvaluationRuntime {
                     observation_epoch,
                     gc_maintenance_revision: maintenance.revision,
                 },
-                dispositions: Vec::new(),
                 unfinished: unfinished
-                    .iter()
-                    .cloned()
+                    .into_iter()
                     .map(|work| runtime_deadlock_work_from_snapshot(self.values().core(), work))
                     .collect(),
                 reflection,
-                settlement_unfinished: unfinished,
             }),
         }
-    }
-
-    #[cfg(test)]
-    fn validate_quiescence_snapshot(
-        &self,
-        snapshot: &QuiescenceSnapshot,
-    ) -> Result<ValidatedRuntimeSettlementPlan, RuntimeSettlementError> {
-        let settlement = self.settlement_guard();
-        let validated = self.validate_quiescence_guarded(snapshot, &settlement);
-        drop(settlement);
-        validated.ok_or(RuntimeSettlementError::RuntimeChanged)
-    }
-
-    fn validate_quiescence_guarded(
-        &self,
-        snapshot: &QuiescenceSnapshot,
-        settlement: &RuntimeSettlementGuard<'_>,
-    ) -> Option<ValidatedRuntimeSettlementPlan> {
-        if snapshot.runtime.id() != self.id() {
-            return None;
-        }
-        let state_matches = {
-            let state = self
-                .state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            state.events.outputs.records.is_empty()
-        };
-        let maintenance = self
-            .state
-            .shared_resources
-            .mutation_admission
-            .gc_maintenance_snapshot(settlement);
-        // Settlement does not consult the raw GC maintenance revision. The
-        // collector is non-moving and preserves every registered root, so a
-        // collection that ran between probe and commit cannot change the
-        // settlement-relevant instant: pure-evaluation work, observations, and
-        // retained roots are identical before and after. The clauses above
-        // observe that instant directly -- quiescent work generation and kills
-        // (below), observation epoch, empty outputs, and a clean GC disposition
-        // with no in-flight lease. A collection that *failed* surfaces through
-        // `disposition`/`explicit_request`, and an in-flight collection through
-        // `active_leases`, so a transparent collection is correctly invisible
-        // here. The revision remains the compare-and-swap token for the
-        // explicit-service path (`begin_gc_activity_for_snapshot`), which needs
-        // to admit exactly one of several racing services; settlement is
-        // serialized by the exclusive guard and does not.
-        if !state_matches
-            || self.state.shared_resources.observations.current().get()
-                != snapshot.stamp.observation_epoch
-            || maintenance.active_leases != 0
-            || maintenance.explicit_request
-            || maintenance.disposition != RuntimeGcMaintenanceDisposition::Idle
-        {
-            return None;
-        }
-        self.state.work.validate_runtime_settlement(
-            snapshot.stamp.work_generation,
-            snapshot.settlement.kills(),
-        )
-    }
-
-    fn settle_quiescence_snapshot(
-        &self,
-        snapshot: &QuiescenceSnapshot,
-        previously_validated: Option<&ValidatedRuntimeSettlementPlan>,
-    ) -> Result<QuiescenceReport, RuntimeSettlementError> {
-        self.collect_for_settlement();
-        let settlement = self.settlement_guard();
-        let Some(current) = self.validate_quiescence_guarded(snapshot, &settlement) else {
-            drop(settlement);
-            return Err(RuntimeSettlementError::RuntimeChanged);
-        };
-        if previously_validated.is_some_and(|validated| validated != &current) {
-            drop(settlement);
-            return Err(RuntimeSettlementError::RuntimeChanged);
-        }
-        let kill_failure = snapshot
-            .settlement
-            .kill_reason()
-            .map(|reason| runtime_killed_failure(self.values().core(), reason));
-        let Some(release) =
-            self.state
-                .work
-                .publish_runtime_settlement(&settlement, &current, kill_failure)
-        else {
-            drop(settlement);
-            return Err(RuntimeSettlementError::RuntimeChanged);
-        };
-
-        let work_generation = match self.state.work.runtime_readiness_snapshot() {
-            RuntimeCoordinatorReadiness::Ready { work_generation } => work_generation,
-            RuntimeCoordinatorReadiness::Busy | RuntimeCoordinatorReadiness::Deadlocked { .. } => {
-                unreachable!("exclusive settlement must leave no unfinished work")
-            }
-        };
-        let (failed_roots, pending_failed_roots) = self.state.work.failed_roots_for_settlement();
-        let (maintenance_failures, pending_maintenance_reports, gc_maintenance_revision) = self
-            .state
-            .shared_resources
-            .mutation_admission
-            .gc_failure_ledgers_for_settlement(&settlement);
-        let (reflection, delivery_failures, pending_delivery_reports, flags, pending_flags) = {
-            let mut state = self
-                .state
-                .shared_resources
-                .transactions
-                .state
-                .lock()
-                .expect("runtime transaction mutex should not be poisoned");
-            let pending_delivery_reports = std::mem::replace(
-                &mut state.events.outputs.pending_failure_reports,
-                RedBlackTreeMapSync::new_sync(),
-            );
-            let pending_flags = state.events.flags.take_unreported();
-            (
-                state.reflection.snapshot(),
-                RuntimeDeliveryFailureSnapshot {
-                    runtime: self.id(),
-                    failures: state.events.outputs.failures.clone(),
-                },
-                RuntimeDeliveryFailureSnapshot {
-                    runtime: self.id(),
-                    failures: pending_delivery_reports,
-                },
-                state.events.flags.standing(),
-                pending_flags,
-            )
-        };
-        let failed_machines = |flags: Vec<(Vec<crate::core::Key>, RuntimeValueRoot)>| {
-            flags
-                .into_iter()
-                .map(|(path, diagnostic)| {
-                    FailedMachine::new(self.id(), self.values().core(), path, &diagnostic)
-                })
-                .collect::<Vec<_>>()
-        };
-        let observation_epoch = self.state.shared_resources.observations.current().get();
-        drop(settlement);
-        release.finish();
-
-        // An annotation task's failure flags its anonymous root, which no
-        // parent recovers (`reflection-tasks-are-machine-tasks`).
-        let roots = |roots: crate::evaluation::FailedRoots| {
-            roots
-                .iter()
-                .map(|(task, failure)| {
-                    (
-                        crate::reflection::anonymous_root(*task),
-                        failure.diagnostic(self.values().core()),
-                    )
-                })
-                .collect::<Vec<_>>()
-        };
-        let with_roots = |mut flags: Vec<(Vec<crate::core::Key>, RuntimeValueRoot)>,
-                          failed: crate::evaluation::FailedRoots| {
-            flags.extend(roots(failed));
-            flags.sort_by(|left, right| left.0.cmp(&right.0));
-            flags
-        };
-        Ok(QuiescenceReport {
-            runtime: self.clone(),
-            stamp: RuntimeReadinessStamp {
-                work_generation,
-                observation_epoch,
-                gc_maintenance_revision,
-            },
-            dispositions: snapshot.dispositions.clone(),
-            failed_machines: failed_machines(with_roots(flags, failed_roots)),
-            delivery_failures,
-            reflection,
-            killed_work: snapshot.killed_work.clone(),
-            maintenance_failures: maintenance_failures
-                .into_iter()
-                .map(maintenance_failure)
-                .collect(),
-            pending_failed_machine_reports: failed_machines(with_roots(
-                pending_flags,
-                pending_failed_roots,
-            )),
-            pending_delivery_failure_reports: pending_delivery_reports,
-            pending_killed_work_reports: snapshot.killed_work.clone(),
-            pending_maintenance_failure_reports: pending_maintenance_reports
-                .into_iter()
-                .map(maintenance_failure)
-                .collect(),
-        })
     }
 
     /// Internal activity inspection for the scheduler pump. Retained failures
@@ -1749,23 +1523,16 @@ impl EvaluationRuntime {
             .mutation_guard()
     }
 
-    fn try_settlement_guard(&self) -> Option<RuntimeSettlementGuard<'_>> {
+    fn try_exclusive_guard(&self) -> Option<RuntimeExclusiveGuard<'_>> {
         self.state
             .shared_resources
             .mutation_admission
-            .try_settlement_guard()
-    }
-
-    fn settlement_guard(&self) -> RuntimeSettlementGuard<'_> {
-        self.state
-            .shared_resources
-            .mutation_admission
-            .settlement_guard()
+            .try_exclusive_guard()
     }
 
     #[cfg(test)]
     pub(crate) fn exclusive_admission_available(&self) -> bool {
-        self.try_settlement_guard().is_some()
+        self.try_exclusive_guard().is_some()
     }
 
     #[cfg(test)]

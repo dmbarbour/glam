@@ -2721,9 +2721,9 @@ fn scheduler_panic_poisons_the_runtime_without_hanging_waiters() {
 }
 
 #[test]
-fn settlement_panic_poisons_the_runtime() {
+fn a_panic_under_the_exclusive_gate_poisons_the_runtime() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    runtime.poison_settlement_for_test();
+    runtime.poison_exclusive_hold_for_test();
     assert!(matches!(runtime.readiness(), RuntimeReadiness::Poisoned));
     runtime.pump_until_stable();
     drop(runtime);

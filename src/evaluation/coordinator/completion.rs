@@ -289,7 +289,7 @@ impl EvaluationWorkCoordinator {
     /// Queues registrations which still describe the work's current blocked
     /// dependency. The caller already owns this runtime's mutation admission;
     /// dependency publication and the scheduler transition therefore form one
-    /// settlement-visible update without nesting component mutexes.
+    /// readiness-visible update without nesting component mutexes.
     pub(super) fn wake_dependency_batch_guarded(
         &self,
         _mutation: &dyn RuntimeMutationAuthority,

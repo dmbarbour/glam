@@ -54,7 +54,7 @@ crate-private paths for consumers without becoming another scheduler.
 - `evaluation/coordinator.rs` owns the common work registry, indexes, ready
   queues, dependency representation, and generation/condition variable.
   Its `completion`, `task`, `client_demand`, `spark`, `reflection`, `deferred`,
-  and `settlement` children keep each lifecycle's state and transitions
+  `readiness` and `analysis` children keep each lifecycle's state and transitions
   together without introducing separate registries.
 
 The coordinator owns work records, their indexes, and ready state. It is not
@@ -88,7 +88,7 @@ already use registered roots over managed outer value nodes, but collection
 remains `NoAuto`. Controlled fixtures exercise serial, worker, and finalizer
 schedules, while runtime maintenance exposes explicit request and service
 without changing heap policy. Once `pump_until_stable` has drained useful
-background work and obtained exclusive settlement admission, it promotes a
+background work and obtained exclusive admission, it promotes a
 pending collector pressure latch into that same explicit maintenance protocol.
 The pump does not collect: the next stable readiness observation returns
 `MaintenanceRequired`, whose revision-checked service performs collection.
@@ -98,8 +98,7 @@ Drivers also service pressure themselves (decision
   lock-free pressure latch after the poll and before releasing the claim.
   That covers workers, the client-demand loop and the background pump. The
   poll's access region has closed and its result is rooted. The work is still
-  claimed, so readiness stays `Busy` through a collection and a settlement
-  snapshot is never invalidated by one;
+  claimed, so readiness stays `Busy` through a collection;
 - idle drivers never check, so an idle runtime's value domain still drops as
   soon as its last handle does;
 - under pressure they collect through
@@ -121,17 +120,15 @@ path as production. Readiness observed after a pump matches ordinary mode,
 and heap policy remains `NoAuto`. Tests that need a collection at a
 particular boundary request it explicitly.
 
-Settlement validation rechecks the probe's work generation and kills, its
-observation epoch, empty outputs, and a clean maintenance state: no active
-lease, no pending request, and an `Idle` disposition. It does not compare the
-maintenance revision. The collector is non-moving and preserves registered
-roots, so a completed collection cannot change the settled instant; a failed
-or in-flight collection surfaces through disposition or leases. The revision
-remains the compare-and-swap token that admits exactly one service of a
-maintenance snapshot. A settled report records the maintenance revision
-current at commit. This treatment of settlement is a known hazard for
-concurrent collection; the concurrent-collector plan's Open Design Gate 9 owns
-it.
+A readiness snapshot or an analysis is an observation: nothing validates it
+against later state (`quiescence-is-analyzed`). The collector is non-moving
+and preserves registered roots, so a collection after an observation leaves
+what it holds intact; a failed or in-flight collection surfaces through
+disposition or leases. The maintenance revision is the compare-and-swap token
+that admits exactly one service of a maintenance snapshot. Settlement, which
+validated its snapshot without the revision, a known hazard for concurrent
+collection, retired with its staging step; the concurrent-collector plan's
+Open Design Gate 9 records what that leaves.
 
 The `NoAuto` policy deliberately separates pressure detection from collection.
 Allocation records pressure on the value domain. Two places act on that latch:
@@ -141,7 +138,7 @@ Allocation records pressure on the value domain. Two places act on that latch:
 
 Either service publishes a GC
 activity lease while holding *shared* runtime mutation admission only briefly
-(`begin_gc_activity`); it never takes the exclusive settlement gate. It then
+(`begin_gc_activity`); it never takes the exclusive gate. It then
 calls `Heap::collect_full`, whose own admission coordinator waits for every
 active outer mutator to exit and holds the heap `Exclusive` for marking and
 sweep, blocking new mutator entry. Finalizers then run in the heap's
@@ -420,11 +417,10 @@ caller's access rather than held as permanent roots.
 ### Maintenance Admission
 
 The runtime mutation-admission gate is a non-reentrant `RwLock`. Ordinary
-publication takes it shared; readiness, settlement, and pressure promotion
-take it exclusively. Settlement holds it exclusively while it constructs
-managed values (kill failures and report roots), so no allocation or
-value-domain entry may take the gate: settlement would deadlock on its own
-thread. Collection obeys this. A service publishes its GC lease under shared
+publication takes it shared; a readiness probe and pressure promotion take it
+exclusively (`RuntimeExclusiveGuard`), constructing no managed value under
+it. No allocation or value-domain entry may take the gate: an exclusive
+holder on the same thread would deadlock. Collection obeys this. A service publishes its GC lease under shared
 admission, releases the gate, collects, and publishes the outcome under shared
 admission again.
 
@@ -437,7 +433,7 @@ A race can therefore cause one redundant collection but never loses a request.
 
 Under `aggressive-gc-verification`, pressure means "allocated since the
 previous evaluation" (the heap's class-cache hits plus misses). A constant
-`true` would livelock any client loop shaped like the CLI's settlement loop,
+`true` would livelock any client loop shaped like the CLI's quiescence loop,
 because each pump after a service would promote again. Rejected alternatives
 are in `aggressive-gc-via-stable-pump` in [`Decisions.md`](../Decisions.md).
 
@@ -632,7 +628,7 @@ ordinary members of the launching task's flat demand set: parent completion
 does not close them, while final owner drop reaches every unfinished
 descendant.
 
-Coordinator mutations participate in the runtime settlement-admission gate
+Coordinator mutations participate in the runtime's mutation-admission gate
 and advance the coordinator's work generation before external wakes. They do
 not advance `RuntimeObservationEpoch`: ready-queue churn is not a semantic
 heap/input disturbance and must not cause a task to invalidate its own prior
@@ -752,8 +748,8 @@ interruption:
   record it in that lazy, then resumes unwinding to the boundary, which
   records it in the route's own lazy.
 - A panic that tears runtime-core state poisons the whole runtime. Core state
-  means the scheduler, the transactions, or the settlement gate. The mutation
-  and settlement authorities detect it while unwinding, and the worker loop
+  means the scheduler, the transactions, or the exclusive gate. The mutation
+  and exclusive authorities detect it while unwinding, and the worker loop
   catches scheduler panics that escape the poll boundaries. A poisoned
   runtime wakes its parked threads, refuses further mutation and GC leases,
   turns core-reaching destructors into no-ops, and reports
@@ -828,13 +824,12 @@ publication of that exact wait can requeue them; unrelated session task
 progress does not.
 A failed annotation task's terminal transition records its failure in the
 coordinator's failed roots (`FailedRoots`, by task) before publishing the
-wait terminal under the same runtime mutation admission;
-`failed_roots_for_settlement` hands settlement every failed root and those no
-earlier settlement reported. A task on a child machine, as the compiler's
+wait terminal under the same runtime mutation admission, until a host clears
+the root (`EvaluationRuntime::clear`). A task on a child machine, as the compiler's
 reflection boundaries queue, flags its machine instead, in the transactional
 flag record (`api/runtime/flags.rs`). A Rust-scheduled root's failure
 (`EffectRun`, `schedule_task`) goes only to its Rust caller and is not
-recorded. `QuiescenceReport::failed_machines()` lists flagged machines and
+recorded. `RuntimeAnalysis::failed_machines()` lists flagged machines and
 failed roots alike as `FailedMachine`s, in path order
 (`reflection-tasks-are-machine-tasks`).
 
@@ -855,7 +850,7 @@ state:
 | failed anonymous roots, and those not yet reported | runtime work coordinator `FailedRoots` |
 | task wait, current published status, optional host lifecycle publisher, and test-only status observer | coordinator `TaskTerminalPublisher` obligation |
 | task/wait lookup and retirement indexes | runtime work coordinator |
-| completed, failed, cancelled, abandoned, killed, or panicked outcome | shared `EvaluationWaitToken` cell |
+| completed, failed, cancelled, abandoned, or panicked outcome | shared `EvaluationWaitToken` cell |
 | a child machine's error flag | transactional flag record (`api/runtime/flags.rs`) |
 
 Terminal publication precedes coordinator record removal. `poll_wait` checks

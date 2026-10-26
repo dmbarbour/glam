@@ -44,7 +44,6 @@ pub enum EffectLifecycleStatus {
     Failed(TaskHalt),
     Cancelled,
     Abandoned,
-    Killed(TaskHalt),
     /// The effect root was interrupted by a panic.
     Panicked(TaskHalt),
 }
@@ -165,9 +164,6 @@ impl EffectLifecycleState {
             }
             EvaluationTaskStatus::Cancelled => EffectLifecycleStatus::Cancelled,
             EvaluationTaskStatus::Abandoned => EffectLifecycleStatus::Abandoned,
-            EvaluationTaskStatus::Killed(error) => {
-                EffectLifecycleStatus::Killed(TaskHalt::rooted_failure(error))
-            }
             EvaluationTaskStatus::Panicked(report) => {
                 EffectLifecycleStatus::Panicked(TaskHalt::panicked(report))
             }
@@ -240,13 +236,6 @@ impl ScheduledEffectRun {
                     return combine_composed_result(
                         &values,
                         Err(TaskHalt::new("scheduled effect root was abandoned")),
-                        children,
-                    );
-                }
-                EvaluationWaitPoll::Killed(error) => {
-                    return combine_composed_result(
-                        &values,
-                        Err(TaskHalt::rooted_failure(error)),
                         children,
                     );
                 }
@@ -550,7 +539,7 @@ fn composed_child_error(run: EvaluationSessionRun) -> Option<TaskHalt> {
             (true, report)
         }
     };
-    // A child's failure is its machine's, which settlement reports
+    // A child's failure is its machine's, which an analysis reports
     // (`reflection-tasks-are-machine-tasks`); a composed run reports only a
     // deadlock among the work it left.
     if !quiescent {
@@ -647,9 +636,7 @@ mod root_inventory_tests {
             EffectLifecycleStatus::Complete(value) => {
                 let _: &PublicValue = value;
             }
-            EffectLifecycleStatus::Failed(failure)
-            | EffectLifecycleStatus::Killed(failure)
-            | EffectLifecycleStatus::Panicked(failure) => {
+            EffectLifecycleStatus::Failed(failure) | EffectLifecycleStatus::Panicked(failure) => {
                 let _: &TaskHalt = failure;
             }
         }
@@ -715,7 +702,7 @@ mod root_inventory_tests {
             changed: CountedCondvar::new(),
         };
 
-        for failed in [true, false] {
+        {
             let payload = Arc::new(());
             let retained = Arc::downgrade(&payload);
             let emission = public_values
@@ -726,13 +713,9 @@ mod root_inventory_tests {
                     &access, emission,
                 )))
             });
-            let status = if failed {
-                EvaluationTaskStatus::Failed(failure.clone())
-            } else {
-                EvaluationTaskStatus::Killed(failure.clone())
-            };
+            let status = EvaluationTaskStatus::Failed(failure.clone());
             let halt = match state.public_status(status) {
-                EffectLifecycleStatus::Failed(halt) | EffectLifecycleStatus::Killed(halt) => halt,
+                EffectLifecycleStatus::Failed(halt) => halt,
                 _ => panic!("a terminal failure should remain a failure"),
             };
             let published = halt

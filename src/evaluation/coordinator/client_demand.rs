@@ -4,8 +4,6 @@ use std::sync::{Arc, Mutex, PoisonError, Weak};
 
 use crate::counted_condvar::CountedCondvar;
 
-#[cfg(test)]
-use crate::core::EvaluationFailure;
 use crate::core::{EvaluationPanic, RuntimeValueMutator};
 use crate::eval::whnf::WhnfComputation;
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
@@ -47,7 +45,6 @@ pub(crate) enum ClientDemandResult {
     Complete(RuntimeValueRoot),
     Failed(RuntimeFailureRoot),
     Abandoned,
-    Killed(RuntimeFailureRoot),
     /// The demand was interrupted by a panic, its own or a dependency's.
     Panicked(EvaluationPanic),
 }
@@ -803,43 +800,6 @@ impl EvaluationWorkCoordinator {
         retirement.finish();
         self.notify_all(CoordinatorMutationKind::Cancellation);
         Some(dependency)
-    }
-
-    #[cfg(test)]
-    pub(in crate::evaluation) fn kill_client_demand(
-        &self,
-        id: EvaluationWorkId,
-        failure: Arc<EvaluationFailure>,
-    ) -> bool {
-        let mutation = self.admission.mutation_guard();
-        let retirement = {
-            let mut state = self
-                .state
-                .lock()
-                .expect("evaluation work coordinator was poisoned");
-            let Some(record) = state.client_demands.get(&id) else {
-                return false;
-            };
-            if matches!(record.state, WorkState::Running | WorkState::Terminalizing) {
-                return false;
-            }
-            let retirement = detach_client_demand(
-                &mut state,
-                id,
-                None,
-                None,
-                ClientDemandResult::Killed(RuntimeFailureRoot::from_observer(
-                    &self.values,
-                    failure,
-                )),
-            );
-            state.advance_work_generation(CoordinatorMutationKind::Cancellation, RouteHazard::All);
-            retirement
-        };
-        drop(mutation);
-        retirement.finish();
-        self.notify_all(CoordinatorMutationKind::Cancellation);
-        true
     }
 }
 

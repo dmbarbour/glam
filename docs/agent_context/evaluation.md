@@ -105,12 +105,12 @@ control-flow overview.
   the quanta in flight (`gc-bounded-collection-wait`). A new driver loop
   must keep this boundary.
 - Shared runtime mutation admission may be taken inside a managed-access
-  region; promise publication does. This cannot deadlock because settlement
-  never collects, and a pending collection blocks no mutator entry: the
+  region; promise publication does. This cannot deadlock because no
+  exclusive holder collects, and a pending collection blocks no mutator entry: the
   collector takes heap exclusivity only after every mutator has left, and
   holds no runtime gate while it collects. The converse is forbidden. No
   allocation or value-domain entry may take the gate, a non-reentrant
-  `RwLock` that settlement holds exclusively while it constructs values.
+  `RwLock` that a readiness probe or pressure promotion holds exclusively.
 - Glam heaps use immutable `CollectionPolicy::NoAuto`. Pressure is acted on
   in two places only:
   - after a claimed task, spark or client demand is polled and before it is
@@ -418,12 +418,11 @@ control-flow overview.
   use of the result-producing form; its result remains hidden behind
   metadata carriers.
 - An annotation task has no machine of its own: it is an anonymous root,
-  `refl/<abstract task id>`. Activation marks its record
-  (`flag_root_on_failure`), so its failure flags that root for good, since no
-  parent can recover it, even when WHNF propagates the failed completion
-  promise to a demander (`reflection-tasks-are-machine-tasks`). Settlement
-  takes the failed roots (`failed_roots_for_settlement`) and reports each
-  among `failed_machines`. A Rust-scheduled root's failure (`EffectRun`,
+  `refl/<abstract task id>`. Activation marks its record (`record_launch`),
+  so its failure flags that root until a host clears it, since no parent can
+  recover it, even when WHNF propagates the failed completion promise to a
+  demander (`reflection-tasks-are-machine-tasks`). An analysis reports each
+  among its machines in error (`RuntimeAnalysis::failed_machines`). A Rust-scheduled root's failure (`EffectRun`,
   `schedule_task`) goes only to its Rust caller and is not recorded.
 - An annotation task belongs to the runtime's background demand domain and
   uses the runtime-default profile, whichever session observes the gate
@@ -440,9 +439,9 @@ control-flow overview.
   mutation admission, or a mutator. Task status itself is published under the
   guard; notifications and destruction happen after it is released.
 - Never evaluate or start a driver while holding runtime mutation admission:
-  a second read of the gate on one thread waits behind any queued
-  settlement, which waits for the first. Debug builds panic when a thread
-  takes the gate twice. Settlement never evaluates: a failed machine's
+  a second read of the gate on one thread waits behind any queued exclusive
+  hold, which waits for the first. Debug builds panic when a thread takes
+  the gate twice. An analysis never evaluates: a failed machine's
   diagnostic is composed, not evaluated
   (`senders-never-evaluate-diagnostics`).
 

@@ -1047,6 +1047,33 @@ fn configured_logger_rejects_removed_log_status() {
 }
 
 #[test]
+fn a_lost_resolver_breaks_its_promise_before_the_batch_judges_it() {
+    // The batch collects before it judges a quiescence with issues
+    // (`opaque-resources-reclaimed-when-unreachable`): a task awaiting a
+    // promise whose resolver it dropped fails of the break, rather than
+    // being reported waiting on a value nothing will produce.
+    let output = glam_command()
+        .env("GLAM_CONF", "")
+        .arg("--script.g")
+        .arg(concat!(
+            "language g0\n",
+            "import 'std\n",
+            "refl.lost = .promise.new >>= (\\pr -> .r pr.promise) >>= (\\p -> seq p (.r ()))\n",
+            "asm.result = \"ok\"\n",
+        ))
+        .output()
+        .expect("failed to run glam");
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(!output.status.success(), "the task fails: {stderr}");
+    assert_eq!(output.stdout, b"ok");
+    assert!(stderr.contains("resolver lost"), "{stderr}");
+    assert!(
+        !stderr.contains("nothing in progress will produce"),
+        "{stderr}"
+    );
+}
+
+#[test]
 fn configured_logger_can_drain_until_the_batch_ends() {
     let dir = unique_temp_dir("glam-conf-log-drain");
     fs::create_dir_all(&dir)

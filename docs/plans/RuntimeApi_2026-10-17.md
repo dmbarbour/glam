@@ -1069,7 +1069,8 @@ handle API goes.
     follows; [Quiescence](Quiescence_2026-10-25.md) holds the end state
     and the transition, whose first step, `quiescence-analysis`, was built
     2026-10-25, and whose host options, `quiescence-options`, interrupt and
-    clear, 2026-10-26. The text below is the step as first planned (maintainer,
+    clear, 2026-10-26, after which settlement retired
+    (`settlement-retires`, 2026-10-26). The text below is the step as first planned (maintainer,
     2026-10-19), in place of exit votes. It follows
     `api-reflection-machines` (moved 2026-10-21), so it meets reflection
     tasks as machines and no exit votes, rather than building on both. The runtime is

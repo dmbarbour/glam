@@ -2,8 +2,7 @@ use std::sync::Arc;
 use std::thread;
 
 use glam::reflection::{
-    EffectLifecycle, EffectLifecycleStatus, EffectRun, EffectRunStop, ScheduledEffectRun,
-    TaskOutcome,
+    EffectLifecycle, EffectRun, EffectRunStop, ScheduledEffectRun, TaskOutcome,
 };
 use glam::{
     Assembler, Diagnostic, DiagnosticBus, DiagnosticSubscription, Endpoint, Error, Fork,
@@ -111,7 +110,7 @@ pub(crate) fn start_logger<'scope>(
                 .requiring_unit_result()
                 .schedule(&lifecycle)
         }) {
-            Ok(task) => Some((lifecycle, task, host)),
+            Ok(task) => Some((task, host)),
             Err(error) => {
                 task_diagnostics.publish_local(
                     error
@@ -126,7 +125,7 @@ pub(crate) fn start_logger<'scope>(
             }
         }
     });
-    let Some((lifecycle, task, host)) = scheduled else {
+    let Some((task, host)) = scheduled else {
         root.run(LOGGER, hand_over)?;
         return Ok(LoggerRun {
             thread: None,
@@ -147,7 +146,7 @@ pub(crate) fn start_logger<'scope>(
         // platform's smaller default child-thread stack in the meantime.
         .stack_size(8 * 1024 * 1024);
     let thread = root.fork_with(builder, LOGGER, move |logger| {
-        run_configured_logger(task, &host, &lifecycle, &task_diagnostics, &task_values);
+        run_configured_logger(task, &host, &task_diagnostics, &task_values);
         // What the configured logger left, and what arrives later, is the
         // fallback's.
         hand_over(logger)?;
@@ -168,7 +167,6 @@ pub(crate) fn start_logger<'scope>(
 fn run_configured_logger(
     task: ScheduledEffectRun,
     host: &LoggerTaskHost,
-    lifecycle: &EffectLifecycle,
     diagnostics: &DiagnosticBus,
     values: &Values,
 ) {
@@ -177,12 +175,9 @@ fn run_configured_logger(
         // waits on its input, idle, or halting it, with a diagnostic of its
         // own, for leaving its input unread (`quiescence-is-analyzed`).
         Ok(TaskOutcome::Complete(_) | TaskOutcome::Cancelled) => {}
-        // A failure is the logger's own, which its caller reports; a kill
-        // settlement reports.
+        // A failure is the logger's own, which its caller reports.
         Err(error) => {
-            if !matches!(lifecycle.status(), EffectLifecycleStatus::Killed(_)) {
-                diagnostics.publish_local(error.diagnostic(values));
-            }
+            diagnostics.publish_local(error.diagnostic(values));
         }
     }
 }

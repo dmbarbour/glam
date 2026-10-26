@@ -35,10 +35,10 @@ mod completion;
 mod deferred;
 #[cfg(test)]
 mod generation_inventory;
+mod readiness;
 mod reflection;
 #[cfg(test)]
 mod registry_inventory;
-mod settlement;
 mod spark;
 mod task;
 pub(crate) use analysis::{RuntimeWaitFamilySnapshot, WaitMachineSnapshot};
@@ -63,6 +63,10 @@ use deferred::{
     DeferredIndexes, DeferredWork, LazyRouteWork, begin_deferred_abandonment, claim_deferred,
     claim_lazy_route, deferred_work_mut,
 };
+pub(crate) use readiness::{
+    RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
+    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
+};
 #[cfg(test)]
 use reflection::ReflectionCancellation;
 #[cfg(test)]
@@ -74,10 +78,6 @@ use reflection::{
     reflection_work_mut, remove_ready_reflection,
 };
 pub(super) use reflection::{ClaimedReflectionWork, ReflectionWorkPoll, ReflectionWorkState};
-pub(crate) use settlement::{
-    RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
-    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, ValidatedRuntimeSettlementPlan,
-};
 #[cfg(test)]
 use spark::spark_work_mut;
 pub(crate) use spark::{ClaimedSparkWork, SparkWork, SparkWorkPoll};
@@ -213,7 +213,7 @@ impl TaskPromiseTerminalMapper {
                 Self::ReflectionGate { target } => Ok(target.clone_core_with(access)),
                 Self::UnresolvedFailure => unreachable!("handled above"),
             },
-            EvaluationWaitTerminal::Failed(failure) | EvaluationWaitTerminal::Killed(failure) => {
+            EvaluationWaitTerminal::Failed(failure) => {
                 Err(Arc::new(failure.as_failure().with_context_in(
                     access,
                     crate::diagnostic::evaluation_context_frame_in(access, operation),
@@ -657,9 +657,8 @@ impl ClaimedClientDemand {
 #[derive(Default)]
 struct WorkCoordinatorState {
     demand_sessions: TrustedHashMap<EvaluationSessionId, Weak<EvaluationDemandState>>,
-    /// The failed anonymous roots, and those no settlement has reported.
+    /// The failed anonymous roots.
     failed_roots: FailedRoots,
-    pending_failed_root_reports: FailedRoots,
     work: TrustedHashMap<EvaluationWorkId, WorkRecord>,
     work_by_session: TrustedHashMap<EvaluationSessionId, TrustedHashSet<EvaluationWorkId>>,
     client_demands: TrustedHashMap<EvaluationWorkId, ClientDemandRecord>,
@@ -716,7 +715,6 @@ enum CoordinatorMutationKind {
     TerminalSettlement,
     WorkRetirement,
     FailedRoot,
-    StageSettlement,
     /// A panic tore runtime-core state; parked waiters must observe it.
     RuntimePoison,
     #[cfg(test)]
@@ -737,8 +735,7 @@ impl CoordinatorMutationKind {
             | Self::Cancellation
             | Self::SessionClosure
             | Self::TerminalSettlement
-            | Self::WorkRetirement
-            | Self::StageSettlement => true,
+            | Self::WorkRetirement => true,
             #[cfg(test)]
             Self::WorkPark | Self::TestTransition => true,
             _ => false,
@@ -1020,7 +1017,6 @@ fn mutation_counts_from_array(
         terminal_settlement: counts[CoordinatorMutationKind::TerminalSettlement as usize],
         work_retirement: counts[CoordinatorMutationKind::WorkRetirement as usize],
         failed_root: counts[CoordinatorMutationKind::FailedRoot as usize],
-        stage_settlement: counts[CoordinatorMutationKind::StageSettlement as usize],
     }
 }
 
@@ -1521,7 +1517,7 @@ impl EvaluationWorkCoordinator {
 
     #[cfg(test)]
     pub(super) fn runtime_locks_are_free(&self) -> bool {
-        self.state.try_lock().is_ok() && self.admission.try_settlement_guard().is_some()
+        self.state.try_lock().is_ok() && self.admission.try_exclusive_guard().is_some()
     }
 
     #[cfg(any(test, feature = "glam-prof"))]
@@ -1742,7 +1738,7 @@ impl EvaluationWorkCoordinator {
 
     #[cfg(test)]
     pub(super) fn settlement_admission_is_free(&self) -> bool {
-        self.admission.try_settlement_guard().is_some()
+        self.admission.try_exclusive_guard().is_some()
     }
 
     #[cfg(test)]
@@ -1814,9 +1810,6 @@ impl EvaluationWorkCoordinator {
         self.observations.current()
     }
 
-    /// The failed anonymous roots, every one, and those no earlier
-    /// settlement reported, whose reporting moves to the current settlement,
-    /// so a presentation layer need not remember what it rendered.
     /// The anonymous roots their annotation tasks' failures flagged, as they
     /// stand, for an analysis, which changes nothing.
     pub(crate) fn failed_roots(&self) -> FailedRoots {
@@ -1825,18 +1818,6 @@ impl EvaluationWorkCoordinator {
             .expect("evaluation work coordinator was poisoned")
             .failed_roots
             .clone()
-    }
-
-    pub(crate) fn failed_roots_for_settlement(&self) -> (FailedRoots, FailedRoots) {
-        let mut state = self
-            .state
-            .lock()
-            .expect("evaluation work coordinator was poisoned");
-        let pending = std::mem::replace(
-            &mut state.pending_failed_root_reports,
-            FailedRoots::new_sync(),
-        );
-        (state.failed_roots.clone(), pending)
     }
 
     #[cfg(test)]
@@ -2957,8 +2938,7 @@ impl EvaluationWorkCoordinator {
                     !state.failed_roots.contains_key(&task),
                     "a task's root may fail only once"
                 );
-                state.failed_roots.insert_mut(task, failure.clone());
-                state.pending_failed_root_reports.insert_mut(task, failure);
+                state.failed_roots.insert_mut(task, failure);
                 state.advance_work_generation(
                     CoordinatorMutationKind::FailedRoot,
                     RouteHazard::None,

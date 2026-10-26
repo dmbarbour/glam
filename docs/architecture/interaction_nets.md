@@ -220,8 +220,8 @@ remains.
   error. Saturated work comes back as lazy `Data`, so core operators never
   wait.
 - **Blocked retries** poll their exact wait. A pending wait returns
-  `EvaluationHalt::blocked(wait)`. A checkpoint whose dependency failed or
-  was killed fails its pair. Otherwise the checkpoint pair becomes `Ready`
+  `EvaluationHalt::blocked(wait)`. A checkpoint whose dependency failed
+  fails its pair. Otherwise the checkpoint pair becomes `Ready`
   for the next pass.
 
 ## Blocking and Failure
@@ -231,7 +231,7 @@ remains.
 | no rule | `Stuck(NoRule)` | permanent failure naming the pair |
 | callable or operator failure | `Stuck(Specialization(halt))` | that `halt`, cached as the lazy's failure |
 | callable dependency | `BlockedCallableCheckpoint` | `Blocked` on the exact wait, on the next pass |
-| failed or killed dependency | checkpoint dropped, `Stuck` | permanent failure |
+| failed dependency | checkpoint dropped, `Stuck` | permanent failure |
 | pair, cursor or batch claimed elsewhere | unchanged | wait for disturbance, then yield |
 | stale observation | unchanged | progress; re-derived from the root |
 | step budget spent | nothing claimed | yield |

@@ -1005,9 +1005,7 @@ impl EvalContext {
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"
             ),
-            ClientDemandResult::Failed(_)
-            | ClientDemandResult::Killed(_)
-            | ClientDemandResult::Panicked(_) => {
+            ClientDemandResult::Failed(_) | ClientDemandResult::Panicked(_) => {
                 unreachable!("client failures and panics are returned by drive_client_demand")
             }
         }
@@ -1030,9 +1028,7 @@ impl EvalContext {
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"
             ),
-            ClientDemandResult::Failed(_)
-            | ClientDemandResult::Killed(_)
-            | ClientDemandResult::Panicked(_) => {
+            ClientDemandResult::Failed(_) | ClientDemandResult::Panicked(_) => {
                 unreachable!("client failures and panics are returned by drive_client_demand")
             }
         }
@@ -1070,9 +1066,7 @@ impl EvalContext {
             ClientDemandResult::Abandoned => unreachable!(
                 "WHNF client demand must return a value or a propagated evaluation failure"
             ),
-            ClientDemandResult::Failed(_)
-            | ClientDemandResult::Killed(_)
-            | ClientDemandResult::Panicked(_) => {
+            ClientDemandResult::Failed(_) | ClientDemandResult::Panicked(_) => {
                 unreachable!("client failures and panics are returned by drive_client_demand")
             }
         }
@@ -1339,9 +1333,7 @@ impl EvalContext {
             ClientDemandResult::Abandoned => {
                 unreachable!("an explicitly driven client demand remains owned by its caller")
             }
-            ClientDemandResult::Failed(_)
-            | ClientDemandResult::Killed(_)
-            | ClientDemandResult::Panicked(_) => {
+            ClientDemandResult::Failed(_) | ClientDemandResult::Panicked(_) => {
                 unreachable!("client failures and panics are returned by drive_client_demand")
             }
         }
@@ -2518,7 +2510,7 @@ fn terminal_client_demand_result(
     result: ClientDemandResult,
 ) -> Result<ClientDemandResult, crate::core::EvaluationHalt> {
     match result {
-        ClientDemandResult::Failed(failure) | ClientDemandResult::Killed(failure) => {
+        ClientDemandResult::Failed(failure) => {
             Err(crate::core::EvaluationHalt::failure(failure.into_failure()))
         }
         ClientDemandResult::Abandoned => Err(crate::core::EvaluationHalt::new(

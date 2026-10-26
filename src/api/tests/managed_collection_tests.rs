@@ -263,12 +263,6 @@ fn production_collection_preserves_each_serial_boundary() {
                 .gc_maintenance_revision(),
         "collection advances the GC maintenance revision"
     );
-    // The collector is root-preserving, so a collection that ran after this
-    // snapshot leaves its settlement-relevant instant unchanged: the snapshot
-    // still validates even though the maintenance revision advanced.
-    before_quiescent_collection
-        .validate_without_settling()
-        .expect("a root-preserving collection must not invalidate an earlier settlement snapshot");
     let retained_reflection = access_path(
         &assembler,
         &after_quiescent_collection.reflection().root(),
@@ -346,43 +340,22 @@ fn production_collection_preserves_each_serial_boundary() {
     assert_eq!(transported.message(), "preserved diagnostic");
 
     runtime.pump_until_stable();
-    let RuntimeReadiness::Ready(settlement) = runtime.readiness() else {
+    let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
         panic!("delivered output should leave the runtime ready")
     };
-    runtime
-        .collect_managed_for_maintenance()
-        .expect("the pre-settlement serial boundary should collect");
-    // The collection is root-preserving, so the snapshot taken before it still
-    // settles the same quiescent instant rather than reporting RuntimeChanged.
-    let report = settlement
-        .settle()
-        .expect("a root-preserving collection must not invalidate an earlier settlement snapshot");
-    // The report records the committed instant: the snapshot's work and
-    // observations, with the maintenance revision current at commit.
-    assert_eq!(
-        report.stamp().work_generation(),
-        settlement.stamp().work_generation()
-    );
-    assert_eq!(
-        report.stamp().observation_epoch(),
-        settlement.stamp().observation_epoch()
-    );
-    assert!(
-        report.stamp().gc_maintenance_revision() > settlement.stamp().gc_maintenance_revision()
-    );
-    assert_eq!(report.reflection().root().runtime_id(), runtime.id());
+    assert_eq!(snapshot.reflection().root().runtime_id(), runtime.id());
     assert_eq!(net_topology_revision(&runtime, &net), net_revision);
 
     runtime
         .collect_managed_for_maintenance()
-        .expect("retained settlement report should survive later collection");
-    let reported_result = access_path(&assembler, &report.reflection().root(), "i11b_result")
-        .expect("settled reflection data should remain retained");
+        .expect("a retained readiness snapshot should survive later collection");
+    let reported_result = access_path(&assembler, &snapshot.reflection().root(), "i11b_result")
+        .expect("the snapshot's reflection data should remain retained");
     assert_eq!(
         assembler
             .evaluator()
             .eval(&reported_result)
-            .expect("settlement report should retain an evaluable root")
+            .expect("the snapshot should retain an evaluable root")
             .as_bytes()
             .expect("reported result extraction should succeed")
             .as_deref(),
@@ -1051,29 +1024,27 @@ fn recoverable_trace_panic_becomes_retryable_maintenance_and_durable_failure() {
     retry
         .service()
         .expect("the trace fixture should succeed on its second attempt");
-    let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
-        panic!("a successful retry should restore ordinary readiness")
-    };
-    let mut report = snapshot.settle().expect("retry result should settle");
-    assert_eq!(report.maintenance_failures().len(), 1);
-    assert_eq!(
-        report.maintenance_failures()[0].kind(),
-        RuntimeMaintenanceFailureKind::CollectorPanic
+    assert!(
+        matches!(runtime.readiness(), RuntimeReadiness::Ready(_)),
+        "a successful retry should restore ordinary readiness"
     );
-    assert_eq!(report.pending_maintenance_failure_reports().len(), 1);
-    report.mark_reports_enqueued();
-    assert!(report.pending_maintenance_failure_reports().is_empty());
-    let RuntimeReadiness::Ready(repeated) = runtime.readiness() else {
-        panic!("reported maintenance failure should remain retained state")
-    };
-    let repeated = repeated
-        .settle()
-        .expect("retained maintenance failure should settle repeatedly");
-    assert_eq!(repeated.maintenance_failures().len(), 1);
-    assert!(repeated.pending_maintenance_failure_reports().is_empty());
-    // `quiescence-is-analyzed`: an analysis lists the retained failure.
+    // `quiescence-is-analyzed`: an analysis lists the retained failure, and
+    // again, since analyzing changes nothing.
     let analysis = runtime.analysis().expect("the runtime is not poisoned");
     assert_eq!(analysis.maintenance_failures().len(), 1);
+    assert_eq!(
+        analysis.maintenance_failures()[0].kind(),
+        RuntimeMaintenanceFailureKind::CollectorPanic
+    );
+    assert_eq!(
+        runtime
+            .analysis()
+            .expect("the runtime is not poisoned")
+            .maintenance_failures()
+            .len(),
+        1,
+        "the failure stays retained"
+    );
     assert!(
         analysis
             .issues()
@@ -1104,13 +1075,14 @@ fn recoverable_finalizer_panic_retains_retry_work_and_failure_history() {
         .service()
         .expect("the untouched finalizer suffix should retry successfully");
     assert_eq!(completed.pending_finalizers(), 0);
-    let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
-        panic!("successful finalizer retry should restore readiness")
-    };
-    let report = snapshot.settle().expect("finalizer retry should settle");
-    assert_eq!(report.maintenance_failures().len(), 1);
+    assert!(
+        matches!(runtime.readiness(), RuntimeReadiness::Ready(_)),
+        "successful finalizer retry should restore readiness"
+    );
+    let analysis = runtime.analysis().expect("the runtime is not poisoned");
+    assert_eq!(analysis.maintenance_failures().len(), 1);
     assert_eq!(
-        report.maintenance_failures()[0].kind(),
+        analysis.maintenance_failures()[0].kind(),
         RuntimeMaintenanceFailureKind::FinalizerPanic
     );
 }

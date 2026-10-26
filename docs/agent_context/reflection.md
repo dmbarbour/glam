@@ -223,8 +223,8 @@ and control flow.
   call's error.
 - Test builds register `.TEST_ONLY.*` effects for ordering what Glam alone
   cannot: `.TEST_ONLY.queue_now Key Op` queues on a child and commits at
-  once even within a transaction, as another writer (a Rust turn,
-  settlement) would, so a test forces a commit between a cut's read and
+  once even within a transaction, as another writer (a Rust turn, a host's
+  option) would, so a test forces a commit between a cut's read and
   its commit; `.TEST_ONLY.accept_now Resolver Diagnostic` accepts at once
   likewise. Prefer such an effect to testing journals by hand; a cut that
   awaits the reply of a task `queue_now` committed lets that task commit
@@ -290,9 +290,9 @@ and control flow.
   task launches), its backlogs, and its issues, unresolved by
   default, among them every machine in error as a `FailedMachine` (path and
   diagnostic), flagged child machines and failed anonymous roots, in path
-  order. Until `settlement-retires`, a deadlock snapshot still retains known
-  dependencies and structured retryable failures for a client that chooses
-  to kill them.
+  order. A host acts on an analysis with turns, or by a machine's path
+  (`EvaluationRuntime::interrupt`, `EvaluationRuntime::clear`); nothing
+  kills.
 
 ## Front-End and Logger Integration
 

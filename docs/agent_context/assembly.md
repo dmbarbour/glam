@@ -98,7 +98,9 @@ load configuration on dormant runtime
   -> demand and write valid asm.result
   -> finalize source tracking and optional manifest
   -> pump runtime to quiescence, rendering the logger's fallback
-  -> analyze; halt a configured logger that left its input unread
+  -> analyze; collect once before judging a quiescence with issues, so a
+     lost resolver's promise breaks; halt a configured logger that left its
+     input unread
   -> publish each new issue through the bus, and repump (`quiesce_batch`)
   -> once nothing is new, stop an idle configured logger and render what it
      left

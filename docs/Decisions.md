@@ -2672,7 +2672,8 @@ maps the short names used here to file names.
   a batch.
 - **Consequences:** exit votes, settlement's publication and its pending
   report lists, the CLI's settlement loops and its automatic kills
-  retire; clearing machines in error becomes a host's option after an
+  retire (built through 2026-10-26; supersedes
+  `settlement-ignores-maintenance-revision`); clearing machines in error becomes a host's option after an
   analysis (`settlement-clears-machines` folds into the options).
 - **Recorded in:** Quiescence note (`Quiescence_2026-10-25.md`); runtime
   API plan, `api-quiescence`.
@@ -3844,7 +3845,7 @@ maps the short names used here to file names.
 - **Recorded in:** readiness review; explicit-maintenance review.
 
 ### Settlement validation ignores the collector's maintenance revision
-`settlement-ignores-maintenance-revision` · 2026-10-03 · agent · accepted
+`settlement-ignores-maintenance-revision` · 2026-10-03 · agent · superseded
 - **Context:** revision churn from no-op leases rejected valid settlements.
 - **Decision:** settlement rechecks work generation and exits, the
   observation epoch, empty outputs and a clean maintenance state, but not
@@ -3856,6 +3857,9 @@ maps the short names used here to file names.
   Design Gate 9 must revisit settlement.
 - **Rule lives in:** `architecture/evaluation.md` "Context and Session".
 - **Recorded in:** aggressive-GC regression plan D2 and D3.
+- **Superseded by:** `quiescence-is-analyzed`: settlement retired, and
+  nothing validates a readiness snapshot or an analysis against later
+  state.
 
 ### Aggressive-GC verification reuses the `NoAuto` stable-pump decision
 `aggressive-gc-via-stable-pump` · 2026-10-03 to 2026-10-04 · maintainer and agent · accepted

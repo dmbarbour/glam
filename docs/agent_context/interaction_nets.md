@@ -458,8 +458,8 @@ mutex.
     finishes into a copy or operator as above, or fails the pair. At a
     dependency, the claim publishes the complete state and ends, the
     dependency is admitted outside managed access, and the pair blocks only if
-    the same pair and generation are still current. A failed or killed
-    dependency also fails the pair. A stale generation is rejected quietly and
+    the same pair and generation are still current. A failed dependency
+    also fails the pair. A stale generation is rejected quietly and
     never publishes a competing result.
   - The payload needs `Send`, not `Sync`: the runtime mutex and the exact
     claim exclude shared access. A claimed state is bound to its non-`Send`

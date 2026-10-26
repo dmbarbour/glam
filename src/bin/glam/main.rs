@@ -533,7 +533,7 @@ mod tests {
     }
 
     /// Commits a value to an output whose adapter fails, and delivers it,
-    /// leaving a delivery failure for settlement to report.
+    /// leaving a delivery failure for an analysis to report.
     fn fail_a_delivery(runtime: &EvaluationRuntime, message: &'static str) {
         let failed_output = runtime
             .output_endpoint(Ok::<HandleValue, Error>, move |_value| {

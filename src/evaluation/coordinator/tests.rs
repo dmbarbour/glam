@@ -117,8 +117,6 @@ fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
     let gate_target = RuntimeValueRoot::new(&values, crate::core::Value::Number(7.into()));
     let failure = Arc::new(EvaluationFailure::message("reflection task failed"));
     let failure_root = crate::runtime::RuntimeFailureRoot::new(&values, failure.clone());
-    let killed = Arc::new(EvaluationFailure::message("reflection task was killed"));
-    let killed_root = crate::runtime::RuntimeFailureRoot::new(&values, killed.clone());
     let unresolved = Arc::new(EvaluationFailure::message("unresolved task promise"));
 
     values.with_boundary_access(|access| {
@@ -147,10 +145,6 @@ fn reflection_promise_terminal_mapper_covers_every_terminal_disposition() {
             (
                 EvaluationWaitTerminal::Failed(failure_root),
                 "reflection task failed",
-            ),
-            (
-                EvaluationWaitTerminal::Killed(killed_root),
-                "reflection task was killed",
             ),
             (
                 EvaluationWaitTerminal::Cancelled,
@@ -590,7 +584,7 @@ impl Drop for CheckDeferredDropLocks {
     fn drop(&mut self) {
         let unlocked = self.coordinator.upgrade().is_none_or(|coordinator| {
             let state_unlocked = coordinator.state.try_lock().is_ok();
-            let admission_unlocked = coordinator.admission.try_settlement_guard().is_some();
+            let admission_unlocked = coordinator.admission.try_exclusive_guard().is_some();
             state_unlocked && admission_unlocked
         });
         self.dropped_without_runtime_locks
@@ -618,7 +612,7 @@ impl Drop for CountDeferredDropLocks {
     fn drop(&mut self) {
         let unlocked = self.coordinator.upgrade().is_none_or(|coordinator| {
             let state_unlocked = coordinator.state.try_lock().is_ok();
-            let admission_unlocked = coordinator.admission.try_settlement_guard().is_some();
+            let admission_unlocked = coordinator.admission.try_exclusive_guard().is_some();
             state_unlocked && admission_unlocked
         });
         self.all_drops_unlocked
@@ -1628,7 +1622,7 @@ fn foreground_exact_selection_holds_mutation_and_state_through_claim() {
             "the coordinator-state lock must span exact probing and claiming"
         );
         assert!(
-            coordinator.admission.try_settlement_guard().is_none(),
+            coordinator.admission.try_exclusive_guard().is_none(),
             "runtime mutation admission must span exact probing and claiming"
         );
         probe_observed.store(true, Ordering::Release);

@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use crate::core::Key;
 
-use super::settlement::unfinished_work_snapshot_locked;
+use super::readiness::unfinished_work_snapshot_locked;
 use super::{
     DependencyEdge, EvaluationTaskId, EvaluationWorkCoordinator, EvaluationWorkId,
     RuntimeDeadlockWorkSnapshot, WorkCoordinatorState, WorkKind, WorkState, dependency_edge_locked,

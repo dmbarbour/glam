@@ -4322,14 +4322,11 @@ ordinary = "ordinary"
         &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
         &Value::binary_from_text("ordinary"),
     );
-    let crate::api::RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+    let crate::api::RuntimeReadiness::Ready(_) = assembler.drain_reasoning() else {
         panic!("successful host choices should leave the runtime ready")
     };
-    let report = snapshot
-        .settle()
-        .expect("unchanged runtime readiness should settle");
-    assert!(report.failed_machines().is_empty());
-    assert!(report.killed_work().is_empty());
+    let analysis = assembler.evaluation_runtime().analysis().unwrap();
+    assert!(analysis.issues().is_empty(), "nothing is left unresolved");
     assert!(
         take_reflection_diagnostics(&diagnostics).is_empty(),
         "successful host choices must not emit diagnostics"
@@ -4337,8 +4334,8 @@ ordinary = "ordinary"
 }
 
 /// A failing `refl.*` task flags its own child machine, keyed by its name
-/// under the scanner, the annotation task's child `'scanner`; settlement
-/// reports the machine failed while the flag stands, rendering it once
+/// under the scanner, the annotation task's child `'scanner`; an analysis
+/// reports the machine in error while the flag stands
 /// (`reflection-tasks-are-machine-tasks`).
 #[test]
 fn a_failing_reflection_task_leaves_its_machine_failed() {
@@ -4355,17 +4352,15 @@ ordinary = "ordinary"
         &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
         &Value::binary_from_text("ordinary"),
     );
-    let settle = || {
-        let crate::api::RuntimeReadiness::Ready(snapshot) = assembler.drain_reasoning() else {
+    let analyze = || {
+        let crate::api::RuntimeReadiness::Ready(_) = assembler.drain_reasoning() else {
             panic!("a failed reflection task should leave the runtime ready")
         };
-        snapshot
-            .settle()
-            .expect("unchanged runtime readiness should settle")
+        assembler.evaluation_runtime().analysis().unwrap()
     };
-    let report = settle();
-    let [failed] = report.failed_machines() else {
-        panic!("one machine should fail: {:?}", report.failed_machines())
+    let analysis = analyze();
+    let [failed] = analysis.failed_machines() else {
+        panic!("one machine should fail: {:?}", analysis.failed_machines())
     };
     let path = failed.path().keys();
     assert_eq!(path.len(), 4, "{path:?}");
@@ -4375,13 +4370,7 @@ ordinary = "ordinary"
         path[2..],
         [Key::atom_from_text("scanner"), Key::atom_from_text("bad")]
     );
-    assert_eq!(report.pending_failed_machine_reports().len(), 1);
-    let again = settle();
-    assert_eq!(again.failed_machines().len(), 1, "the flag stands");
-    assert!(
-        again.pending_failed_machine_reports().is_empty(),
-        "a failed machine is reported once"
-    );
+    assert_eq!(analyze().failed_machines().len(), 1, "the flag stands");
 }
 
 #[test]

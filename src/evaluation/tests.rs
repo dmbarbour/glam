@@ -155,7 +155,7 @@ fn assert_client_demand_boundary_inventory(poll: &ClientDemandPoll, result: &Cli
         ClientDemandResult::Complete(value) => {
             let _: &RuntimeValueRoot = value;
         }
-        ClientDemandResult::Failed(failure) | ClientDemandResult::Killed(failure) => {
+        ClientDemandResult::Failed(failure) => {
             let _: &RuntimeFailureRoot = failure;
         }
         ClientDemandResult::Abandoned => {}
@@ -420,21 +420,6 @@ fn client_demand_retirement_publishes_after_runtime_unlock() {
             .is_some()
     );
     assert_client_demand_published_after_unlock(&blocked_probe);
-
-    let (promise, _promise_root) = rooted_promise(context.values());
-    let killed = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            Value::Promised(promise),
-        ))
-        .expect("killable demand should be admitted");
-    assert!(poll_one_runtime_work(&coordinator));
-    let killed_probe = client_demand_publish_lock_probe(&coordinator, &killed);
-    assert!(coordinator.kill_client_demand(
-        killed.work(),
-        Arc::new(EvaluationFailure::message("forced client disposition")),
-    ));
-    assert_client_demand_published_after_unlock(&killed_probe);
 }
 
 #[test]
@@ -1184,7 +1169,7 @@ fn client_failure_root_survives_work_and_owner_session_retirement() {
 }
 
 #[test]
-fn client_demand_owner_close_and_forced_kill_answer_once() {
+fn client_demand_owner_close_answers_abandoned() {
     let fixture = SameRuntimeFixture::new();
     let (closed_handle, closed_promise, _closed_promise_root) = {
         let owner = fixture.context();
@@ -1206,25 +1191,6 @@ fn client_demand_owner_close_and_forced_kill_answer_once() {
         0
     );
     assert_eq!(closed_handle.poll(), Some(ClientDemandResult::Abandoned));
-
-    let context = fixture.context();
-    let coordinator = context.coordinator().expect("coordinator should be live");
-    let (promise, _promise_root) = rooted_promise(context.values());
-    let handle = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            Value::Promised(promise.duplicate_for_test(context.values())),
-        ))
-        .expect("killable demand should be admitted");
-    assert!(poll_one_runtime_work(&coordinator));
-    let failure = Arc::new(EvaluationFailure::message("forced client disposition"));
-    assert!(coordinator.kill_client_demand(handle.work(), failure.clone()));
-    assert!(!coordinator.kill_client_demand(handle.work(), failure.clone()));
-    assert_eq!(promise.exact_subscription_count(context.values()), 0);
-    assert!(matches!(
-        handle.poll(),
-        Some(ClientDemandResult::Killed(actual)) if Arc::ptr_eq(actual.as_failure(), &failure)
-    ));
 }
 
 #[test]
@@ -2140,7 +2106,6 @@ impl EvaluationTaskMachine for Await {
             EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
                 poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
             ),
-            EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
         }
     }
 }
@@ -2173,7 +2138,6 @@ impl EvaluationTaskMachine for AwaitWithObservation {
             EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
                 poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
             ),
-            EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
         }
     }
 }
@@ -2246,7 +2210,6 @@ impl EvaluationTaskMachine for AwaitCell {
             EvaluationWaitPoll::Abandoned => EvaluationMachinePoll::Failed(
                 poll_context.root_failure(evaluation_failure("waited-on task was abandoned")),
             ),
-            EvaluationWaitPoll::Killed(error) => EvaluationMachinePoll::Failed(error),
         }
     }
 }
@@ -3096,20 +3059,6 @@ fn terminal_wait_dispositions_retain_only_their_documented_runtime_roots() {
     );
     exercise(EvaluationWaitTerminal::Cancelled, false);
     exercise(EvaluationWaitTerminal::Abandoned, false);
-    exercise(
-        EvaluationWaitTerminal::Killed(RuntimeFailureRoot::new(
-            context.values(),
-            Arc::new(EvaluationFailure::message("plain killed reflection result")),
-        )),
-        false,
-    );
-    exercise(
-        EvaluationWaitTerminal::Killed(RuntimeFailureRoot::new(
-            context.values(),
-            structured_failure(&context, "structured killed reflection result"),
-        )),
-        true,
-    );
 }
 
 #[test]
@@ -4410,7 +4359,7 @@ fn block_on(wait: EvaluationWaitToken) -> ReflectionWorkPoll {
 /// thread claims and completes it meanwhile, dropping the block. The
 /// release's own clone of the wait is then the last lease, and releasing a
 /// lease takes the mutation gate: the release must drop it after ending its
-/// own guard. Taken twice, the gate deadlocks behind a queued settlement;
+/// own guard. Taken twice, the gate deadlocks behind a queued exclusive hold;
 /// debug builds report it.
 #[test]
 fn a_release_drops_the_last_route_lease_after_its_guard() {
@@ -7182,7 +7131,6 @@ fn runtime_readiness_is_ready_when_no_work_is_retained() {
         panic!("an unchanged runtime should remain ready")
     };
 
-    assert!(first.dispositions().is_empty());
     assert_eq!(first.stamp(), second.stamp());
     assert!(
         fixture
@@ -7231,20 +7179,14 @@ fn runtime_deadlock_readiness_with_error_is_observational() {
         generation,
         "projecting the blocked diagnostic must not create evaluation work"
     );
-
-    let report = first
-        .kill(crate::api::RuntimeKillReason::Deadlock)
-        .settle()
-        .expect("an unchanged deadlock snapshot should settle");
-    assert_eq!(report.killed_work().len(), 1);
 }
 
-/// A settled deadlock report keeps the blocked failure's one diagnostic,
-/// shared with the snapshot it came from, after the work, its context and
-/// its fixture retire: once collected, the diagnostic still renders the
+/// An analysis keeps the blocked failure's one diagnostic, shared with a
+/// readiness snapshot of the same wait, after the work, its context and its
+/// fixture retire: once collected, the diagnostic still renders the
 /// failure's payload.
 #[test]
-fn settled_deadlock_report_retains_one_blocked_diagnostic_after_origin_retirement() {
+fn an_analysis_retains_one_blocked_diagnostic_after_origin_retirement() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let values = context.values().clone();
@@ -7270,15 +7212,12 @@ fn settled_deadlock_report_retains_one_blocked_diagnostic_after_origin_retiremen
         .expect("the deadlock snapshot should retain the blocked diagnostic")
         .clone();
 
-    let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
+    let analysis = fixture.runtime.analysis().unwrap();
     drop(deadlock);
-    let report = forced
-        .settle()
-        .expect("the unchanged structured deadlock should settle");
-    drop(forced);
-    let report_diagnostic = report.killed_work()[0]
+    let report_diagnostic = analysis.waits()[0]
+        .work()
         .blocked_diagnostic()
-        .expect("the settled report should retain the blocked diagnostic");
+        .expect("the analysis should retain the blocked diagnostic");
     values.assert_same_representation_for_test(
         &report_diagnostic.emission().clone_core_for_test(),
         &snapshot_diagnostic.emission().clone_core_for_test(),
@@ -7291,7 +7230,7 @@ fn settled_deadlock_report_retains_one_blocked_diagnostic_after_origin_retiremen
     drop(fixture);
     values
         .collect_managed_for_test()
-        .expect("the retained report should survive a collection");
+        .expect("the retained analysis should survive a collection");
 
     let public_values = crate::api::Values::from_core_factory(values.clone());
     let payload = public_values
@@ -7344,373 +7283,42 @@ fn deadlock_snapshot_diagnostic_survives_after_coordinator_record_retirement() {
 }
 
 #[test]
-fn killed_work_report_diagnostic_survives_after_settlement_owners_retire() {
+fn an_analysis_diagnostic_survives_its_owners_until_dropped() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let values = context.values().clone();
-    let failure = structured_failure(&context, "killed work report root");
+    let failure = structured_failure(&context, "analysis root");
     let task = context
         .schedule_task({
             let failure = failure.clone();
             move |_| Ok(Box::new(BlockedWithFailure(failure)))
         })
-        .expect("the killed-work fixture should schedule");
+        .expect("the analysis fixture should schedule");
 
     fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
-        panic!("the blocked task should produce a deadlock snapshot")
-    };
-    let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
-    drop(deadlock);
-    let report = forced
-        .settle()
-        .expect("the unchanged deadlock should settle");
-    drop(forced);
+    let analysis = fixture.runtime.analysis().unwrap();
+    assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
     drop(task);
     drop(failure);
 
-    let report_live = values
+    let analysis_live = values
         .collect_managed_for_test()
-        .expect("the settled killed-work report should retain its blocked diagnostic");
-    let retained = report.killed_work()[0]
+        .expect("the analysis should retain its blocked diagnostic");
+    let retained = analysis.waits()[0]
+        .work()
         .blocked_diagnostic()
-        .expect("the settled report should preserve the blocked diagnostic");
+        .expect("the analysis should preserve the blocked diagnostic");
     assert_eq!(
         retained.rendered_text_for_test(&crate::api::Values::from_core_factory(values.clone())),
-        "killed work report root"
+        "analysis root"
     );
 
-    drop(report);
+    drop(analysis);
     let reclaimed = values
         .collect_managed_for_test()
-        .expect("dropping the settled report should release its managed roots");
-    assert!(reclaimed.root_entries() < report_live.root_entries());
+        .expect("dropping the analysis should release its managed roots");
+    assert!(reclaimed.root_entries() < analysis_live.root_entries());
     assert!(reclaimed.finalized_slots() >= 1);
-}
-
-#[test]
-fn quiescence_validation_is_observational_and_rejects_stale_state() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let crate::api::RuntimeReadiness::Ready(snapshot) = fixture.runtime.readiness() else {
-        panic!("idle runtime should produce a ready snapshot")
-    };
-    let generation = context
-        .coordinator()
-        .expect("fixture coordinator should remain live")
-        .work_generation();
-    let validated = snapshot
-        .validate_without_settling()
-        .expect("unchanged readiness should validate");
-    assert_eq!(validated.work_generation, generation);
-    assert_eq!(
-        context
-            .coordinator()
-            .expect("fixture coordinator should remain live")
-            .work_generation(),
-        generation,
-        "validation must not mutate coordinator state"
-    );
-
-    context
-        .schedule_task(|_| Ok(Box::new(Complete)))
-        .expect("new work should schedule");
-    assert_eq!(
-        snapshot.validate_without_settling(),
-        Err(crate::api::RuntimeSettlementError::RuntimeChanged)
-    );
-    assert!(matches!(
-        snapshot.settle_after_validation(&validated),
-        Err(crate::api::RuntimeSettlementError::RuntimeChanged)
-    ));
-}
-
-#[test]
-fn forced_deadlock_settlement_kills_every_participant() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let child = context
-        .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
-        .expect("blocked child should schedule");
-    let child_wait = child.wait().clone();
-    let parent = context
-        .schedule_task(move |task_context| {
-            Ok(Box::new(Await {
-                context: task_context,
-                dependency: child_wait,
-            }))
-        })
-        .expect("strict parent should schedule");
-    let (promise, _promise_root) = rooted_promise(context.values());
-    let client = context
-        .demand_whnf(RuntimeValueRoot::new(
-            context.values(),
-            Value::Promised(promise),
-        ))
-        .expect("client demand should admit");
-
-    assert!(poll_one_runtime_work(
-        &context
-            .coordinator()
-            .expect("coordinator should remain live")
-    ));
-    fixture.runtime.pump_until_stable();
-    assert!(matches!(
-        fixture.runtime.readiness(),
-        crate::api::RuntimeReadiness::Busy
-    ));
-    drop(client);
-    let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
-        panic!("the strict join should deadlock after external demand retires")
-    };
-    let killed_details = deadlock.unfinished().to_vec();
-    let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
-    assert_eq!(forced.dispositions().len(), 2);
-    for task in [child.id(), parent.id()] {
-        assert!(forced.dispositions().iter().any(|disposition| {
-            disposition.task_id() == Some(task.get())
-                && matches!(
-                    disposition.kind(),
-                    crate::api::RuntimeDispositionKind::Killed(
-                        crate::api::RuntimeKillReason::Deadlock
-                    )
-                )
-        }));
-    }
-    let report = forced
-        .settle()
-        .expect("unchanged forced deadlock should settle");
-    assert_eq!(report.killed_work().len(), killed_details.len());
-    assert!(
-        report
-            .killed_work()
-            .iter()
-            .zip(&killed_details)
-            .all(|(left, right)| left.work_id() == right.work_id()
-                && left.session_id() == right.session_id()
-                && left.task_id() == right.task_id())
-    );
-    assert!(report.failed_machines().is_empty());
-    assert!(matches!(
-        context.poll_reflection_task(&child),
-        EvaluationWaitPoll::Killed(_)
-    ));
-    let EvaluationWaitPoll::Killed(parent_failure) = context.poll_reflection_task(&parent) else {
-        panic!("forced parent should publish a killed terminal")
-    };
-    assert!(matches!(
-        parent_failure.as_failure().emission_value(),
-        Some(Value::Dict(_))
-    ));
-    assert_eq!(parent_failure.to_string(), "evaluation failed");
-    context.values().with_boundary_access(|access| {
-        let Some(Value::Dict(diagnostic)) = parent_failure.as_failure().emission_value_in(&access)
-        else {
-            panic!("the killed terminal should retain a structured diagnostic")
-        };
-        let Some(Value::Dict(message)) = diagnostic.get(&*crate::core::keys::MSG) else {
-            panic!("the killed diagnostic should define msg")
-        };
-        access.assert_same_representation_for_test(
-            message
-                .get(&*crate::core::keys::TEXT)
-                .expect("the killed diagnostic should define msg.text"),
-            &Value::binary_from_text("runtime killed work in a deadlocked settlement"),
-        );
-    });
-    assert!(matches!(
-        fixture.runtime.readiness(),
-        crate::api::RuntimeReadiness::Ready(_)
-    ));
-
-    let later = context
-        .schedule_task(|_| Ok(Box::new(Complete)))
-        .expect("settlement must not seal the runtime");
-    fixture.runtime.pump_until_stable();
-    assert!(matches!(
-        context.poll_reflection_task(&later),
-        EvaluationWaitPoll::Complete(_)
-    ));
-    assert_eq!(report.killed_work().len(), killed_details.len());
-    assert!(
-        report
-            .killed_work()
-            .iter()
-            .zip(&killed_details)
-            .all(|(left, right)| left.work_id() == right.work_id()
-                && left.session_id() == right.session_id()
-                && left.task_id() == right.task_id())
-    );
-}
-
-#[test]
-fn forced_kill_abandons_a_deferred_lazy_claim_without_poisoning_the_lazy() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let expected = unit(&context);
-    let (lazy, _lazy_root) = rooted_semantic_lazy_value(context.values(), {
-        let values = context.values().clone();
-        let expected = expected.duplicate_for_test(&values);
-        move |context| Ok(expected.duplicate_for_test(context))
-    });
-    let wait = context
-        .lazy_task(&lazy, |_, _| Box::new(AlwaysBlocked))
-        .expect("dormant deferred claim should register");
-
-    let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
-        panic!("dormant deferred work should be a stable anomaly")
-    };
-    assert!(deadlock.unfinished().iter().any(|work| {
-        work.kind() == crate::api::RuntimeWorkKind::DeferredEvaluation
-            && work.state() == crate::api::RuntimeWorkState::Dormant
-    }));
-    let report = deadlock
-        .kill(crate::api::RuntimeKillReason::Deadlock)
-        .settle()
-        .expect("dormant deferred work should be killable");
-    assert_eq!(report.killed_work().len(), 1);
-    assert!(matches!(
-        context.poll_wait(&wait),
-        EvaluationWaitPoll::Killed(_)
-    ));
-    assert!(lazy.cached(context.values()).is_none());
-    assert_deferred_task_retired(&context, &lazy);
-    let actual = crate::evaluation::EvalContext::evaluate_compatibility_whnf(
-        &context,
-        &Value::Lazy(lazy.duplicate_for_test(context.values())),
-    )
-    .expect("a later demand should reclaim the lazy source");
-    context
-        .values()
-        .assert_same_representation_for_test(&actual, &expected);
-    assert!(
-        lazy.cached(context.values())
-            .is_some_and(|result| result.is_ok())
-    );
-}
-
-#[test]
-fn forced_kill_publishes_task_status_and_fails_owned_promises() {
-    struct BlockedWithDropCheck {
-        coordinator: Weak<EvaluationWorkCoordinator>,
-        dropped_without_runtime_locks: Arc<AtomicBool>,
-    }
-
-    impl EvaluationTaskMachine for BlockedWithDropCheck {
-        fn poll(
-            &mut self,
-            _context: &mut crate::evaluation::EvaluationPollContext,
-            _step_budget: &mut crate::evaluation::EvaluationStepBudget,
-        ) -> EvaluationMachinePoll {
-            EvaluationMachinePoll::Blocked(EvaluationTaskBlock {
-                dependency: None,
-                observed_epoch: Some(RuntimeObservationEpoch::from_raw(7)),
-                error: None,
-            })
-        }
-    }
-
-    impl Drop for BlockedWithDropCheck {
-        fn drop(&mut self) {
-            let unlocked = self
-                .coordinator
-                .upgrade()
-                .is_none_or(|coordinator| coordinator.runtime_locks_are_free());
-            self.dropped_without_runtime_locks
-                .store(unlocked, Ordering::Release);
-        }
-    }
-
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let coordinator = context
-        .coordinator()
-        .expect("coordinator should remain live");
-    let dropped_without_runtime_locks = Arc::new(AtomicBool::new(false));
-    let drop_check = dropped_without_runtime_locks.clone();
-    let weak_coordinator = Arc::downgrade(&coordinator);
-    let promise_output = Arc::new(Mutex::new(None));
-    let output = promise_output.clone();
-    let task = context
-        .schedule_task(move |task_context| {
-            let promise = task_context
-                .values()
-                .with_boundary_access(|access| PromisedValue::fixpoint(&access, &task_context))?;
-            *output.lock().expect("promise output was poisoned") = Some(promise);
-            Ok(Box::new(BlockedWithDropCheck {
-                coordinator: weak_coordinator,
-                dropped_without_runtime_locks: drop_check,
-            }))
-        })
-        .expect("blocked promise owner should schedule");
-    let promise = promise_output
-        .lock()
-        .expect("promise output was poisoned")
-        .take()
-        .expect("task construction should expose its promise");
-    let _promise_root = root_promise(context.values(), &promise);
-    let statuses = Arc::new(RecordedStatuses::default());
-    assert!(context.attach_task_status_publisher(&task, RecordedStatuses::publisher(&statuses),));
-
-    fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
-        panic!("blocked promise owner should deadlock")
-    };
-    deadlock
-        .kill(crate::api::RuntimeKillReason::Deadlock)
-        .settle()
-        .expect("blocked promise owner should settle as killed");
-
-    let EvaluationWaitPoll::Killed(task_failure) = context.poll_reflection_task(&task) else {
-        panic!("task wait should expose the killed terminal")
-    };
-    let promise_failure = promise
-        .assignment(context.values())
-        .expect("owned promise should receive a terminal assignment")
-        .expect_err_without_debug("owned promise should fail when its producer is killed");
-    context.values().assert_same_representation_for_test(
-        promise_failure.as_ref(),
-        task_failure.as_failure().as_ref(),
-    );
-    assert!(matches!(
-        statuses
-            .0
-            .lock()
-            .expect("recorded statuses were poisoned")
-            .last(),
-        Some(EvaluationTaskStatus::Killed(failure)) if failure == &task_failure
-    ));
-    assert!(dropped_without_runtime_locks.load(Ordering::Acquire));
-}
-
-#[test]
-fn forced_deadlock_settlement_rejects_a_stale_busy_runtime() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let blocked = context
-        .schedule_task(|_| Ok(Box::new(AlwaysBlocked)))
-        .expect("blocked task should schedule");
-    fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
-        panic!("blocked task should deadlock")
-    };
-    let forced = deadlock.kill(crate::api::RuntimeKillReason::Deadlock);
-
-    context
-        .schedule_task(|_| Ok(Box::new(Complete)))
-        .expect("new runnable work should disturb the deadlock");
-    assert!(matches!(
-        fixture.runtime.readiness(),
-        crate::api::RuntimeReadiness::Busy
-    ));
-    assert!(matches!(
-        forced.settle(),
-        Err(crate::api::RuntimeSettlementError::RuntimeChanged)
-    ));
-    assert!(matches!(
-        context.poll_reflection_task(&blocked),
-        EvaluationWaitPoll::Pending(_)
-    ));
 }
 
 #[test]
@@ -7760,7 +7368,6 @@ fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
         panic!("blocked task and strict join should remain a scheduler deadlock")
     };
 
-    assert!(snapshot.dispositions().is_empty());
     assert_eq!(snapshot.unfinished().len(), 2);
     let parent_work = snapshot
         .unfinished()
@@ -7818,19 +7425,7 @@ fn dormant_and_reserved_work_are_reported_as_deadlock_anomalies() {
             && work.kind() == crate::api::RuntimeWorkKind::ReflectionTask
             && work.state() == crate::api::RuntimeWorkState::Reserved
     }));
-    let report = snapshot
-        .kill(crate::api::RuntimeKillReason::Deadlock)
-        .settle()
-        .expect("anomalous dormant and reserved work should be forcefully settleable");
-    assert_eq!(report.killed_work().len(), 2);
-    assert!(matches!(
-        context.poll_wait(&deferred_wait),
-        EvaluationWaitPoll::Killed(_)
-    ));
-    assert!(matches!(
-        context.poll_wait(&wait),
-        EvaluationWaitPoll::Killed(_)
-    ));
+    drop(deferred_wait);
 }
 
 #[test]
@@ -7930,13 +7525,13 @@ fn an_analysis_follows_a_wait_to_work_in_progress() {
             .map(crate::api::RuntimeWait::family),
         Some(crate::api::RuntimeWaitFamily::InProgress)
     );
-    let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
-        panic!("the reserved task never launches")
-    };
-    snapshot
-        .kill(crate::api::RuntimeKillReason::Deadlock)
-        .settle()
-        .expect("the orphaned reservation should settle");
+    assert!(
+        matches!(
+            fixture.runtime.readiness(),
+            crate::api::RuntimeReadiness::Deadlocked(_)
+        ),
+        "the reserved task never launches"
+    );
 }
 
 #[test]

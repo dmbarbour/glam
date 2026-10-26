@@ -1,6 +1,6 @@
 //! Audit: coordinator publication passes through its classified boundaries.
 //!
-//! Waiters and settlement observe the coordinator's work generation, and idle
+//! Waiters and readiness observe the coordinator's work generation, and idle
 //! executors wake on its shared condition variable. Each production change to
 //! either goes through one function that classifies it by
 //! `CoordinatorMutationKind`, so new coordinator work cannot silently escape

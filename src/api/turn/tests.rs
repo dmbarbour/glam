@@ -420,42 +420,6 @@ fn a_volume_reaching_its_own_handle_is_collected() {
     .expect("the turn should succeed");
 }
 
-#[test]
-fn settlement_collects_and_acts_on_death_notices_first() {
-    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
-    let volume = rt
-        .run("m", |m| {
-            m.int_push(7);
-            m.volume_new()?;
-            let volume = m.volume_at(1)?;
-            m.discard(1)?;
-            assert!(holds(m, volume), "nothing has collected yet");
-            Ok(volume)
-        })
-        .expect("the turn should succeed");
-    let runtime = rt.assembler().evaluation_runtime();
-    loop {
-        runtime.pump_until_stable();
-        match runtime.readiness() {
-            crate::api::RuntimeReadiness::Ready(snapshot) => {
-                if snapshot.settle().is_ok() {
-                    break;
-                }
-            }
-            crate::api::RuntimeReadiness::Busy => {}
-            crate::api::RuntimeReadiness::MaintenanceRequired(maintenance) => {
-                let _ = maintenance.service();
-            }
-            _ => panic!("the runtime should settle"),
-        }
-    }
-    rt.run("m", |m| {
-        assert!(!holds(m, volume), "settlement reclaimed it");
-        Ok(())
-    })
-    .expect("the turn should succeed");
-}
-
 /// Whether a cut waiting on a promised value wakes to its fulfillment alone.
 /// The waiter's cut reads the value with `read` and finds it pending; the
 /// parent's resolving commit wakes it before the value publishes, and it

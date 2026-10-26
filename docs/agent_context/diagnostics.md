@@ -57,8 +57,8 @@ client-owned rendering. Current flow lives in
   context frame: a nested message that renderers show with its own context.
   The headline states only the boundary's own finding and never repeats the
   cause's text. Without a structured cause, such as a wait or a genuinely new
-  validation error, the headline keeps the reason. Macro failures and the
-  CLI's killed-work reports follow this rule.
+  validation error, the headline keeps the reason. Macro failures follow this
+  rule.
 
 ## Origins and Privilege
 

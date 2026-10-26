@@ -768,12 +768,19 @@ it in [`Decisions.md`](../Decisions.md).
      settled instant unchanged. Re-examine that premise for collection that
      overlaps a readiness probe and its later commit, including snapshot-held
      roots, maintenance-failure ledgers, and finalization.
-   - The runtime mutation-admission gate is not reentrant. Settlement holds
+   - The runtime mutation-admission gate is not reentrant. Settlement held
      it exclusively while constructing managed values (kill failures and
      report roots). Any allocation path that takes the gate, or initiates
-     collection that needs it, deadlocks settlement. Either allocation must
+     collection that needs it, deadlocked settlement. Either allocation must
      never require the gate, or settlement must stop constructing values
      under its exclusive hold.
+   - Resolved 2026-10-26 by settlement's retirement
+     (`quiescence-is-analyzed`): nothing validates a readiness snapshot or
+     an analysis against later state, and the gate's exclusive holders, a
+     readiness probe and pressure promotion, construct no managed value
+     under it. What remains for this gate is the premise both rest on:
+     that a collection overlapping a probe leaves snapshot-held roots,
+     maintenance-failure ledgers and finalization intact.
    - Added 2026-10-15: Glam takes the coordinator lock and the runtime gate
      under a mutator (`boundary-release-under-mutator`), and promise
      publication takes shared admission inside managed access. Both are

@@ -970,8 +970,7 @@ pub(in crate::eval) fn drive_net_semantic_action(
                 | crate::evaluation::EvaluationWaitPoll::Panicked(_) => {
                     return Err(EvaluationHalt::blocked(blocked.wait));
                 }
-                crate::evaluation::EvaluationWaitPoll::Failed(failure)
-                | crate::evaluation::EvaluationWaitPoll::Killed(failure) => {
+                crate::evaluation::EvaluationWaitPoll::Failed(failure) => {
                     return fail_blocked_callable_checkpoint(context, &runtime, &blocked, failure);
                 }
                 crate::evaluation::EvaluationWaitPoll::Complete(_)

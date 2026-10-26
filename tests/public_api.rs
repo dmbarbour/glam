@@ -6,7 +6,7 @@ use bytes::Bytes;
 use glam::{
     Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, Diagnostic,
     DiagnosticEvent, EvaluatedValue, EvaluationRuntime, HandleValue, ImportResolver, ModuleInput,
-    QuiescenceReport, RelativeSourcePath, RuntimeReadiness, Severity, SourceArtifact, SourceError,
+    RelativeSourcePath, RuntimeAnalysis, RuntimeReadiness, Severity, SourceArtifact, SourceError,
     SourceIdentity, SourceSystem, ValueKind,
 };
 
@@ -157,11 +157,14 @@ fn custom_conflict_analysis_remains_available_through_the_public_facade() {
     assert_eq!(assembler.conflict_analysis().name(), "public-test");
 }
 
-fn settle_ready_reasoning(assembler: &Assembler) -> QuiescenceReport {
+/// The analysis of a runtime that reasoning left ready
+/// (`quiescence-is-analyzed`).
+fn ready_analysis(assembler: &Assembler) -> RuntimeAnalysis {
     match assembler.drain_reasoning() {
-        RuntimeReadiness::Ready(snapshot) => snapshot
-            .settle()
-            .expect("unchanged runtime readiness should settle"),
+        RuntimeReadiness::Ready(_) => assembler
+            .evaluation_runtime()
+            .analysis()
+            .expect("a ready runtime is not poisoned"),
         RuntimeReadiness::Busy => panic!("draining should return a stable readiness snapshot"),
         RuntimeReadiness::MaintenanceRequired(maintenance)
         | RuntimeReadiness::MaintenanceFailed(maintenance) => panic!(
@@ -358,10 +361,9 @@ fn public_evaluation_errors_preserve_their_structured_diagnostic() {
 #[test]
 fn public_api_reports_an_empty_reasoning_session_as_complete() {
     let assembler = Assembler::default();
-    let report = settle_ready_reasoning(&assembler);
+    let analysis = ready_analysis(&assembler);
 
-    assert!(report.failed_machines().is_empty());
-    assert!(report.killed_work().is_empty());
+    assert!(analysis.issues().is_empty());
 }
 
 #[test]
@@ -524,9 +526,8 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
         .expect("resolver should escape environment construction")
         .resolve(values.text("ready"))
         .expect("host completion should succeed");
-    let resumed = settle_ready_reasoning(&assembler);
-    assert!(resumed.failed_machines().is_empty());
-    assert!(resumed.killed_work().is_empty());
+    let resumed = ready_analysis(&assembler);
+    assert!(resumed.issues().is_empty());
 
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
@@ -1265,8 +1266,8 @@ fn public_evaluation_leaves_automatic_reflection_tasks_for_explicit_drain() {
     );
     assert!(take_diagnostics(&diagnostics).is_empty());
 
-    let report = settle_ready_reasoning(&assembler);
-    assert!(report.failed_machines().is_empty());
+    let analysis = ready_analysis(&assembler);
+    assert!(analysis.failed_machines().is_empty());
 
     let diagnostics = take_diagnostics(&diagnostics);
     assert_eq!(diagnostics.len(), 1);
@@ -1338,11 +1339,7 @@ fn replacing_retained_diagnostic_subscriber_preserves_scheduled_reasoning() {
             .expect("callback collection mutex should not be poisoned")
             .push(event);
     });
-    assert!(
-        settle_ready_reasoning(&assembler)
-            .failed_machines()
-            .is_empty()
-    );
+    assert!(ready_analysis(&assembler).failed_machines().is_empty());
 
     let received = received
         .lock()

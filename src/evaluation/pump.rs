@@ -450,9 +450,7 @@ fn release_lazy_route(
             coordinator.retire_lazy_route(work);
             return (None, route);
         }
-        EvaluationWaitTerminal::Cancelled
-        | EvaluationWaitTerminal::Abandoned
-        | EvaluationWaitTerminal::Killed(_) => {
+        EvaluationWaitTerminal::Cancelled | EvaluationWaitTerminal::Abandoned => {
             unreachable!("lazy route terminal is complete, failed, or panicked")
         }
     };
@@ -826,7 +824,6 @@ fn release_reflection_task(
         EvaluationWaitTerminal::Abandoned => Some(evaluation_failure(
             "reflection fixpoint producer was abandoned",
         )),
-        EvaluationWaitTerminal::Killed(error) => Some(error.as_failure().clone()),
         EvaluationWaitTerminal::Panicked(_) => None,
     };
     match (terminal, promise_failure) {
@@ -942,7 +939,6 @@ fn release_deferred_task(
         EvaluationWaitTerminal::Abandoned => Some(evaluation_failure(
             "evaluation fixpoint producer was abandoned",
         )),
-        EvaluationWaitTerminal::Killed(error) => Some(error.as_failure().clone()),
         EvaluationWaitTerminal::Panicked(_) => None,
     };
     match (terminal, promise_failure) {

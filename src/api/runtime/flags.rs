@@ -6,8 +6,8 @@
 //! awaiting a status runs again when the flag changes: the journal keeps the
 //! machines whose flags it read, and validation fails where one changed.
 //!
-//! Each flag keeps the diagnostic of what raised it, which settlement
-//! reports: every standing flag fails a batch, and each is rendered once.
+//! Each flag keeps the diagnostic of what raised it, which an analysis
+//! reports as a machine in error (`quiescence-is-analyzed`).
 
 use std::collections::BTreeSet;
 use std::sync::{Arc, Mutex, PoisonError};
@@ -17,14 +17,8 @@ use rpds::RedBlackTreeMapSync;
 use crate::core::Key;
 use crate::runtime::RuntimeValueRoot;
 
-type Flagged = RedBlackTreeMapSync<Vec<Key>, Flag>;
-
-/// Why a machine is flagged, and whether a settlement has reported it.
-#[derive(Clone)]
-struct Flag {
-    diagnostic: RuntimeValueRoot,
-    reported: bool,
-}
+/// Each flagged machine, with the diagnostic of what flagged it.
+type Flagged = RedBlackTreeMapSync<Vec<Key>, RuntimeValueRoot>;
 
 /// The flagged machines, by path, as committed.
 #[derive(Clone)]
@@ -40,13 +34,9 @@ enum FlagEdit {
 
 fn apply(flagged: &mut Flagged, edit: &FlagEdit) {
     match edit {
-        FlagEdit::Set(machine, diagnostic) => flagged.insert_mut(
-            machine.clone(),
-            Flag {
-                diagnostic: diagnostic.clone(),
-                reported: false,
-            },
-        ),
+        FlagEdit::Set(machine, diagnostic) => {
+            flagged.insert_mut(machine.clone(), diagnostic.clone())
+        }
         FlagEdit::Clear(machine) => {
             flagged.remove_mut(machine);
         }
@@ -89,29 +79,8 @@ impl FlagRecord {
     pub(in crate::api) fn standing(&self) -> Vec<(Vec<Key>, RuntimeValueRoot)> {
         self.flagged
             .iter()
-            .map(|(machine, flag)| (machine.clone(), flag.diagnostic.clone()))
+            .map(|(machine, diagnostic)| (machine.clone(), diagnostic.clone()))
             .collect()
-    }
-
-    /// The flagged machines no settlement has reported, as `standing` lists
-    /// them, which it now marks reported.
-    pub(in crate::api) fn take_unreported(&mut self) -> Vec<(Vec<Key>, RuntimeValueRoot)> {
-        let unreported: Vec<(Vec<Key>, RuntimeValueRoot)> = self
-            .flagged
-            .iter()
-            .filter(|(_, flag)| !flag.reported)
-            .map(|(machine, flag)| (machine.clone(), flag.diagnostic.clone()))
-            .collect();
-        for (machine, diagnostic) in &unreported {
-            self.flagged.insert_mut(
-                machine.clone(),
-                Flag {
-                    diagnostic: diagnostic.clone(),
-                    reported: true,
-                },
-            );
-        }
-        unreported
     }
 }
 
@@ -148,7 +117,7 @@ impl FlagJournal {
     }
 
     /// Flags the machine at `machine`, keeping `diagnostic`, what raised the
-    /// flag, for settlement to report.
+    /// flag, for an analysis to report.
     pub(in crate::api) fn set(&mut self, machine: Vec<Key>, diagnostic: RuntimeValueRoot) {
         self.edit(FlagEdit::Set(machine, diagnostic));
     }
