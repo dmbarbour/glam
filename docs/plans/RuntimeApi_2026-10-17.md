@@ -2538,6 +2538,34 @@ fixes force the bad interleaving in a test; repeated runs are not proof
 (`docs/AgentContext.md`, "Working Rules"). Public behavior is tested through
 the public API, in `tests/`.
 
+### Tests to revisit
+
+Behavior built without a test that pins it, each to take up when the
+means to test it is ready (recorded 2026-10-26, maintainer's request):
+
+- `interrupt-root-race` — an annotation root's interrupt
+  (`EvaluationWorkCoordinator::interrupt_root`) records the root's failure,
+  then requests the task's cancellation, under two acquisitions of the
+  coordinator lock. It clears the task's `flags_root` with the first, so
+  a task whose running quantum ends failed between the two flags nothing
+  again, where the coordinator asserts that a root fails once; and a
+  second interrupt of the same root answers that nothing was there. Both
+  need a forced interleaving: a task held in a running quantum, the
+  interrupt run, then the quantum ended failed; and two interrupts
+  ordered across the lock.
+- `interrupt-mid-quantum` — a run interrupted while its task runs a
+  quantum, its reflection machine held by its worker rather than the
+  coordinator, flags only its own machine, its calls unflagged, and stops
+  at the quantum's end (`MachineHost::run_calls`,
+  `EvaluationWorkCoordinator::waiting_calls`). Needs a task held mid-quantum
+  within a call while the interrupt commits.
+- `rust-run-callees` — a host's interrupt takes only annotation tasks as
+  roots to stop (`annotation_tasks`), leaving a Rust-scheduled run to its
+  host. No test tells the two apart today, since only the assembler's
+  reflection host has machines, so a Rust-scheduled run never calls a
+  child; revisit when a Rust host gains machines, as the logger may as a
+  turn's fork (`api-hosts-as-machines`).
+
 ## Open Questions (2026-10-18)
 
 - A promise resolves only outside a cut, since a resolution cannot be
