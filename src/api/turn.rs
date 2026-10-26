@@ -2944,6 +2944,30 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         self.read_port(port.into(), n, true)
     }
 
+    /// Pops `n` values and puts them back at the head of this machine's
+    /// input `port`, in order, ahead of what it holds, so that the next read
+    /// takes them first: a putback. A read of `n` values followed by a
+    /// putback of them leaves the input as it was. Within a cut, the cut's
+    /// own reads see what it put back, and the input takes them when the
+    /// cut commits; outside one, at once. A putback reads nothing.
+    pub fn port_unread(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {
+        let depth = self.require(n)?;
+        let values = self.state.stack[depth - n..].to_vec();
+        for value in &values {
+            self.runtime.assembler.values().require(value)?;
+        }
+        let address = PortAddress {
+            machine: self.path.clone(),
+            port: port.into(),
+        };
+        self.transact(|_, events| {
+            events.ports.put_back(address.clone(), &values);
+            Ok(())
+        })?;
+        self.state.stack.truncate(depth - n);
+        Ok(())
+    }
+
     /// As [`Self::port_read`], but returns [`ErrorKind::Retry`] outside a cut too,
     /// rather than waiting.
     pub fn port_try_read(&mut self, port: impl Into<Key>, n: usize) -> Result<(), Error> {

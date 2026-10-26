@@ -2376,7 +2376,10 @@ maps the short names used here to file names.
     intent, which outside every cut, or where the branch observed nothing
     that could change it, is a permanent divergence, an error; and a
     machine may put values back at the head of its input, `.port.unread`,
-    to be read first, a putback often convenient.) An evaluation that
+    to be read first, a putback often convenient; built the same day,
+    a transaction's own reads take its putbacks first, and its commit
+    renumbers the buffer, so a transaction that claimed from the old
+    head conflicts.) An evaluation that
     waits on what is not known yet, such as an unresolved promise, is
     pushback too (the same day, at `api-machine-environment`). Outside a cut, `read`
     and `write` block, and `try_read` returns `Retry`. A

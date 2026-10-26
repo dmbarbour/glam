@@ -3123,6 +3123,40 @@ unwired = anno refl:(.child.task 'u (.port.write 'nowhere [1]) >>= (\p -> .try (
 }
 
 #[test]
+fn a_task_puts_back_what_it_read() {
+    // `machines-communicate-through-wired-ports`: `.port.unread` puts values
+    // back at the head of the machine's own input, in order, for the next
+    // read; a cut's reads take what it put back. A putback reads nothing,
+    // so a cut that only put back and retries diverges for good.
+    let source = r#"language g0
+import 'std
+put = anno refl:(.child.task 'k (.wire.add (out:'x) (in:'x) =>> .port.write 'x [1, 2] =>> .port.read 'x 1 >>= (\one -> .port.unread 'x [0, list.head one] =>> .cut (.port.unread 'x [9] =>> .port.read 'x 1) >>= (\nine -> .port.read 'x 3 >>= (\rest -> .r [nine, rest])))) >>= (\p -> seq p (.heap.set ['put] (if p == [[9], [0, 1, 2]] then "put back" else "lost")))) ()
+unobserved = anno refl:(.child.task 'u (.cut (.port.unread 'y [1] =>> .retry)) >>= (\p -> .try (seq p (.r ())) >>= (\r -> .heap.set ['unobserved] (if dict.defines ['err] r then "diverged" else "returned")))) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["putback"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    for name in ["put", "unobserved"] {
+        let value = assembler.get(module.value(), name).unwrap();
+        assembler
+            .evaluate(&value)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    let _ = assembler.drain_reasoning();
+    let heap = assembler.test_reflection_heap();
+    let text = |name: &str| {
+        assembler.get(&heap, name).ok().map(|value| {
+            String::from_utf8_lossy(&assembler.to_binary(&value).unwrap()).into_owned()
+        })
+    };
+    assert_eq!(text("put").as_deref(), Some("put back"));
+    assert_eq!(text("unobserved").as_deref(), Some("diverged"));
+}
+
+#[test]
 fn a_retry_waits_for_what_its_cut_observed() {
     // `machines-communicate-through-wired-ports`: `.retry` is pushback by
     // intent. No alternative takes it: the outermost cut waits, idle, for

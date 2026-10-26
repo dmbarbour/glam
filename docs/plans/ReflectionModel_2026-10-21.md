@@ -139,7 +139,7 @@ boundary task's child, and each `refl.*` entry as the scanner's.
 | `.log Sev Msg` | A convenience that writes an enriched diagnostic to the machine's `diagnostics` output. |
 | `.read_log` (logger) | `.port.read 'diagnostics N`, the logger machine's input. |
 | `.write_stderr Bin` (logger) | `.port.write 'stderr [Bin]`, on a port the CLI wires to a machine that writes stderr. |
-| — | Ports: `.port.read Port N` (a list of `N` values; pushback while fewer are buffered), `.port.write Port List`, `.port.available Port` (an observed count), `.port.pending` (inputs holding values), `.port.ask Port Request` (writes `{request, reply}`, returns the reply's promise). |
+| — | Ports: `.port.read Port N` (a list of `N` values; pushback while fewer are buffered), `.port.unread Port List` (a putback at the input's head, read first; maintainer, 2026-10-26), `.port.write Port List`, `.port.available Port` (an observed count), `.port.pending` (inputs holding values), `.port.ask Port Request` (writes `{request, reply}`, returns the reply's promise). |
 | — | Wiring: `.wire.add Source Destination`, `.wire.del Source Destination`, `.wire.list`, `.wire.defaults Bool`, over the machine's own ports and its children's; endpoints `in:Port`, `out:Port`, `child:{key:Key, port:Port}`. |
 | `.task.new Eff` | `.child.task Key Op`, returning the result's promise. |
 | `.task.join H`, `.task.value H` | Awaiting the promise. |

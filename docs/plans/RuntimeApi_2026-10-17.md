@@ -1072,7 +1072,20 @@ handle API goes.
         paths raw where its writes canonicalize them, so a lookup missed
         what an overlay wrote; reads now canonicalize too.
         Each rule mutation-checked); `.port.unread Port List`, a
-        putback at the head of the machine's input, for tasks and turns;
+        putback at the head of the machine's input, for tasks and turns
+        (built 2026-10-26, `refl-port-unread`: `.port.unread` and
+        `m.port_unread(port, n)`, which pops `n` values as
+        `m.port_write` does. Choices of the implementer: a transaction's
+        own reads, counts and `.port.pending` see its putbacks, ahead of
+        the buffer, unlike its appends, which no read of its own sees,
+        since a putback undoes a read and the next read must find it; a
+        putback reads nothing, so `.retry` after one alone diverges for
+        good; its commit gives the buffer sequences beyond all it held,
+        so any transaction that claimed from the old head conflicts. A
+        fork's putbacks merge at its join, conflicting where its cut
+        changed the same input's putbacks, a rule no turn can reach yet,
+        since a fork's subtree is out of its cut's reach until the join.
+        Each rule mutation-checked);
         then the logger, `api-refl-cli-log`, whose machine runs `conf.log`
         through its turn's `effect_run`, ports passing through to the
         turn's machine, so `.read_log` and `.write_stderr` become

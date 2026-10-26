@@ -391,6 +391,7 @@ foo <| .bar         # equivalent alternative without parentheses
 .promise.accept R {msg:{text:"owed"}}  # this machine owes R's promise; .promise.abandon R
 .promise.accepted R # unit where any machine accepted it; .fail otherwise
 .port.read 'in 2     # the next 2 values as a list; too few is pushback
+.port.unread 'in [x] # putback: x stands at the input's head, read next
 .port.write 'out [1, 2]  # along every wire from the output; unwired is an ERROR
 .port.ask 'q Req     # writes {request, reply}; returns the reply's promise
 .port.available 'in  # a count, observed; .port.pending: {port: count}

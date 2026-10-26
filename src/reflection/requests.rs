@@ -42,6 +42,7 @@ pub enum ReflectionRequest {
     PromiseAbandon,
     PromiseAccepted,
     PortRead,
+    PortUnread,
     PortWrite,
     PortAvailable,
     PortPending,
@@ -337,6 +338,9 @@ impl ReflectionRequestWork {
             ReflectionRequest::PortRead => {
                 ReflectionRequestOperation::Port(PortRequestWork::new(PortRequest::Read, arguments))
             }
+            ReflectionRequest::PortUnread => ReflectionRequestOperation::Port(
+                PortRequestWork::new(PortRequest::Unread, arguments),
+            ),
             ReflectionRequest::PortWrite => ReflectionRequestOperation::Port(PortRequestWork::new(
                 PortRequest::Write,
                 arguments,
@@ -2147,6 +2151,7 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             port_spec("env", "overlay", 1, ReflectionRequest::EnvironmentOverlay),
             port_spec("env", "clear", 0, ReflectionRequest::EnvironmentClear),
             port_spec("port", "read", 2, ReflectionRequest::PortRead),
+            port_spec("port", "unread", 2, ReflectionRequest::PortUnread),
             port_spec("port", "write", 2, ReflectionRequest::PortWrite),
             port_spec("port", "available", 1, ReflectionRequest::PortAvailable),
             port_spec("port", "pending", 0, ReflectionRequest::PortPending),
@@ -2259,6 +2264,7 @@ mod tests {
             | ReflectionRequest::PromiseAbandon
             | ReflectionRequest::PromiseAccepted
             | ReflectionRequest::PortRead
+            | ReflectionRequest::PortUnread
             | ReflectionRequest::PortWrite
             | ReflectionRequest::PortAvailable
             | ReflectionRequest::PortPending

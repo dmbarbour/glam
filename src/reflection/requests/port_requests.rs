@@ -28,6 +28,9 @@ use super::{
 pub(super) enum PortRequest {
     /// `.port.read Port N`: the next `N` values of the input, as a list.
     Read,
+    /// `.port.unread Port List`: puts the list's values back at the
+    /// input's head, in order, for the next read.
+    Unread,
     /// `.port.write Port List`: sends the list's values, in order.
     Write,
     /// `.port.available Port`: how many values the input holds, observed.
@@ -51,6 +54,7 @@ impl PortRequest {
     pub(super) fn name(self) -> &'static str {
         match self {
             Self::Read => ".port.read",
+            Self::Unread => ".port.unread",
             Self::Write => ".port.write",
             Self::Available => ".port.available",
             Self::Pending => ".port.pending",
@@ -67,7 +71,7 @@ impl PortRequest {
     fn keys(self) -> usize {
         match self {
             Self::Read | Self::WireAdd | Self::WireDel => 2,
-            Self::Write | Self::Available | Self::Ask | Self::WireDefaults => 1,
+            Self::Unread | Self::Write | Self::Available | Self::Ask | Self::WireDefaults => 1,
             Self::Pending | Self::WireList => 0,
         }
     }
@@ -75,7 +79,7 @@ impl PortRequest {
     /// The operand after the keys, where the request takes one.
     fn operand(self) -> Option<Operand> {
         match self {
-            Self::Write => Some(Operand::List),
+            Self::Unread | Self::Write => Some(Operand::List),
             Self::Ask => Some(Operand::Value),
             _ => None,
         }
@@ -244,14 +248,25 @@ enum PortOutcome<T> {
     Cancelled,
 }
 
+/// What a port action does with the ports.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PortAccess {
+    /// Reads them.
+    Observe,
+    /// Reads and edits them.
+    Edit,
+    /// Edits them, reading nothing: a putback.
+    Put,
+}
+
 /// Runs `action` on the event journal: within the current transaction, or,
 /// outside one, in a transaction of its own that commits at once, again on a
-/// conflict, where it `edits`. Within a transaction the action is observed,
-/// so a cut that fails after it waits for what it read to change.
+/// conflict, where it edits. Within a transaction an action that reads is
+/// observed, so a cut that fails after it waits for what it read to change.
 fn act_on_ports<S, T>(
     name: &str,
     context: &mut RequestContext<'_, S>,
-    edits: bool,
+    access: PortAccess,
     mut action: impl FnMut(&mut RuntimeEventJournal) -> Result<PortAct<T>, TaskHalt>,
 ) -> Result<PortOutcome<T>, TaskHalt>
 where
@@ -274,7 +289,9 @@ where
                 .ok_or_else(no_machines)?;
             action(events)?
         };
-        context.observe_host_generation(generation);
+        if access != PortAccess::Put {
+            context.observe_host_generation(generation);
+        }
         return Ok(match acted {
             PortAct::Done(value) => PortOutcome::Done(value),
             PortAct::Pushback => PortOutcome::Pushback(generation),
@@ -294,7 +311,7 @@ where
             PortAct::Done(value) => value,
             PortAct::Pushback => return Ok(PortOutcome::Pushback(generation)),
         };
-        if !edits {
+        if access == PortAccess::Observe {
             return Ok(PortOutcome::Done(value));
         }
         match context
@@ -341,7 +358,7 @@ where
         PortRequest::Read => {
             let port = key();
             let count = count(name, &key())?;
-            act_on_ports(name, context, true, |events| {
+            act_on_ports(name, context, PortAccess::Edit, |events| {
                 Ok(match events.take_from_port(&machine, port.clone(), count) {
                     Some(read) => PortAct::Done(read),
                     None => PortAct::Pushback,
@@ -351,12 +368,12 @@ where
         }
         PortRequest::Available => {
             let port = key();
-            act_on_ports(name, context, false, |events| {
+            act_on_ports(name, context, PortAccess::Observe, |events| {
                 Ok(PortAct::Done(events.port_count(&machine, port.clone())))
             })?
             .map(|count| Ok(integer(&values, count)))
         }
-        PortRequest::Pending => act_on_ports(name, context, false, |events| {
+        PortRequest::Pending => act_on_ports(name, context, PortAccess::Observe, |events| {
             Ok(PortAct::Done(events.ports_pending(&machine)))
         })?
         .map(|pending| {
@@ -366,9 +383,17 @@ where
                     .map(|(port, count)| (values.key(&port), integer(&values, count))),
             )
         }),
+        PortRequest::Unread => {
+            let port = key();
+            act_on_ports(name, context, PortAccess::Put, |events| {
+                events.put_back_to_port(&machine, port.clone(), &list);
+                Ok(PortAct::Done(()))
+            })?
+            .map(|()| Ok(values.unit()))
+        }
         PortRequest::Write => {
             let port = key();
-            act_on_ports(name, context, true, |events| {
+            act_on_ports(name, context, PortAccess::Edit, |events| {
                 events
                     .send_from_port(&machine, &port, &list)
                     .map_err(|error| TaskHalt::new(format!("`{name}`: {error}")))?;
@@ -381,13 +406,13 @@ where
             let source = endpoint(name, &key())?;
             let destination = endpoint(name, &key())?;
             let present = matches!(request, PortRequest::WireAdd);
-            act_on_ports(name, context, true, |events| {
+            act_on_ports(name, context, PortAccess::Edit, |events| {
                 events.set_wire(&machine, source.clone(), destination.clone(), present);
                 Ok(PortAct::Done(()))
             })?
             .map(|()| Ok(values.unit()))
         }
-        PortRequest::WireList => act_on_ports(name, context, false, |events| {
+        PortRequest::WireList => act_on_ports(name, context, PortAccess::Observe, |events| {
             Ok(PortAct::Done(events.owned_wiring(&machine)))
         })?
         .map(|owned| {
@@ -412,7 +437,7 @@ where
         }),
         PortRequest::WireDefaults => {
             let enabled = setting(name, &key())?;
-            act_on_ports(name, context, true, |events| {
+            act_on_ports(name, context, PortAccess::Edit, |events| {
                 events.set_wire_defaults(&machine, enabled);
                 Ok(PortAct::Done(()))
             })?
@@ -467,7 +492,7 @@ where
         .record([("request", request), ("reply", resolver)])
         .map_err(|error| TaskHalt::new(error.to_string()))
         .and_then(|posted| {
-            act_on_ports(name, context, true, |events| {
+            act_on_ports(name, context, PortAccess::Edit, |events| {
                 events
                     .send_from_port(machine, &port, std::slice::from_ref(&posted))
                     .map_err(|error| TaskHalt::new(format!("`{name}`: {error}")))?;

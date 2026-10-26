@@ -611,6 +611,18 @@ impl RuntimeEventJournal {
         self.ports.pending(machine)
     }
 
+    /// Puts `values` back at the head of the input `port` of the machine at
+    /// `machine`, in order, so that its next read takes them first.
+    pub(crate) fn put_back_to_port(&mut self, machine: &[Key], port: Key, values: &[Value]) {
+        self.ports.put_back(
+            PortAddress {
+                machine: machine.to_vec(),
+                port,
+            },
+            values,
+        );
+    }
+
     /// Sends `values`, in order, from the output `port` of the machine at
     /// `machine` to every buffer its wiring reaches. An output with no wire
     /// is an error, which sends nothing.

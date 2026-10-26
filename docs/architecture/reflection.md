@@ -412,7 +412,9 @@ volume to retry. Dropping the Rust owner does not revoke it.
   (`machines-communicate-through-wired-ports`; `requests/port_requests.rs`):
   `.port.read Port N` answers a list, `.port.write Port List`,
   `.port.available Port` and `.port.pending` (a dict from port to count)
-  read and send through the event journal, and `.port.ask Port Request`
+  read and send through the event journal, `.port.unread Port List` puts
+  values back at the head of the machine's own input, reading nothing,
+  and `.port.ask Port Request`
   writes `{request, reply}` and answers the reply's promise; `.wire.add`
   and `.wire.del` take endpoints `in:Port`, `out:Port` or
   `child:{key:Key, port:Port}`, `.wire.list` answers `{wires, defaults,

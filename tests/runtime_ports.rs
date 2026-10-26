@@ -695,3 +695,116 @@ fn a_cut_that_counts_items_it_leaves_commits() {
     })
     .expect("the turn should succeed");
 }
+
+#[test]
+fn a_putback_stands_at_the_head_of_its_input() {
+    // A putback puts values back at the head of the machine's own input, in
+    // order, ahead of what it holds, so the next read takes them first.
+    // Within a cut, the cut's own reads see what it put back, and a failed
+    // cut puts nothing back.
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire_add(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+        send(p, "a", "out", &[1, 2, 3])?;
+        p.run("b", |b| {
+            b.port_read("in", 1)?;
+            b.int_push(10);
+            b.port_unread("in", 2)?;
+            assert_eq!(b.depth(), 0, "the putback popped its values");
+            Ok(())
+        })?;
+        assert_eq!(
+            receive(p, "b", "in", 2)?,
+            [1, 10],
+            "in order, ahead of what the input held"
+        );
+        p.run("b", |b| {
+            b.cut(|b| {
+                b.int_push(20);
+                b.port_unread("in", 1)?;
+                assert_eq!(b.port_available("in"), 3, "counted with what it held");
+                assert_eq!(b.port_pending(), [("in".into(), 3)]);
+                b.port_read("in", 1)?;
+                assert_eq!(b.int_pop()?, 20, "the cut's read takes its own putback");
+                b.int_push(21);
+                b.port_unread("in", 1)
+            })?;
+            let failed: Result<(), Error> = b.cut(|b| {
+                b.int_push(30);
+                b.port_unread("in", 1)?;
+                Err(Error::new("the cut errs"))
+            });
+            assert!(failed.is_err());
+            Ok(())
+        })?;
+        assert_eq!(
+            receive(p, "b", "in", 3)?,
+            [21, 2, 3],
+            "the committed cut's putback, not the failed one's"
+        );
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_fork_s_putbacks_merge_into_its_cut() {
+    // A fork works on a branch of its cut's transaction, which sees what the
+    // cut put back before the fork; what the fork takes or puts back merges
+    // at the join. A machine holding a putback is present.
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.cut(|p| {
+            p.run("b", |b| {
+                b.int_push(5);
+                b.port_unread("in", 1)
+            })?;
+            let present: Vec<_> = p.machines(())?.map(|(path, _)| path).collect();
+            assert_eq!(present, [glam::MachinePath::from(["b"])]);
+            let reader = p.fork("b", |b| b.port_read("in", 1))?;
+            p.join(reader)?;
+            p.take("b", 1)?;
+            assert_eq!(p.int_pop()?, 5);
+            assert_eq!(
+                p.run("b", |b| Ok(b.port_available("in")))?,
+                0,
+                "the fork took it"
+            );
+            let putter = p.fork("b", |b| {
+                b.int_push(6);
+                b.port_unread("in", 1)
+            })?;
+            p.join(putter)?;
+            assert_eq!(
+                p.run("b", |b| Ok(b.port_available("in")))?,
+                1,
+                "the fork put it back"
+            );
+            Ok(())
+        })?;
+        assert_eq!(receive(p, "b", "in", 1)?, [6], "once the cut commits");
+        Ok(())
+    })
+    .expect("the turn should succeed");
+}
+
+#[test]
+fn a_clear_drops_what_its_cut_put_back_and_what_its_input_held() {
+    let mut rt = runtime();
+    rt.run("p", |p| {
+        p.wire_add(Endpoint::child("a", "out"), Endpoint::child("b", "in"))?;
+        send(p, "a", "out", &[1])?;
+        p.run("b", |b| {
+            let available = b.cut(|b| {
+                b.int_push(5);
+                b.port_unread("in", 1)?;
+                b.clear()?;
+                Ok(b.port_available("in"))
+            })?;
+            assert_eq!(available, 0);
+            assert_eq!(b.port_available("in"), 0, "once the cut commits");
+            Ok(())
+        })
+    })
+    .expect("the turn should succeed");
+}

@@ -4,9 +4,10 @@
 //!
 //! Buffers and wiring are Rust structures with glam values as payloads, so
 //! nothing here forces a value. A transaction claims from buffers through
-//! FIFO cursors, appends to them, and edits the wiring. It reads committed
-//! buffers only, never its own appends, as glam's log reads do, while its
-//! routing follows its own wiring edits.
+//! FIFO cursors, appends to them, puts values back at their heads, and
+//! edits the wiring. It reads committed buffers only, never its own
+//! appends, as glam's log reads do, but its own putbacks, which stand ahead
+//! of what it reads; its routing follows its own wiring edits.
 //!
 //! A machine wires its own ports and its direct children's. A value that
 //! reaches a machine's output follows every wire from it: those its parent
@@ -244,6 +245,22 @@ impl PortState {
             buffer.items.drain(..count as usize);
             buffer.head += count;
         }
+        for (address, put_back) in &journal.put_back {
+            if put_back.items.is_empty() {
+                continue;
+            }
+            changed = true;
+            let mut buffer = self.buffers.get(address).cloned().unwrap_or_default();
+            let buffer_mut = Arc::make_mut(&mut buffer);
+            // The buffer takes sequences beyond all it held, so that every
+            // transaction that read it conflicts: what stands at its head
+            // changed.
+            buffer_mut.head = buffer_mut.next();
+            for value in put_back.items.iter().rev() {
+                buffer_mut.items.push_front(value.clone());
+            }
+            self.buffers.insert_mut(address.clone(), buffer);
+        }
         for (address, value) in &journal.appends {
             changed = true;
             let mut buffer = self.buffers.get(address).cloned().unwrap_or_default();
@@ -378,6 +395,8 @@ struct PortObservations {
 #[derive(Clone)]
 struct PortBranch {
     cursors: BTreeMap<PortAddress, u64>,
+    /// The changes to each address's putbacks at the fork.
+    put_back: BTreeMap<PortAddress, u64>,
     edits: usize,
     appends: usize,
     reads: Arc<Mutex<BranchReads>>,
@@ -389,7 +408,17 @@ struct BranchReads {
     wiring: bool,
 }
 
-/// One transaction's port actions: claims, appends and wiring edits.
+/// The values a transaction put back at the head of a buffer, which it
+/// reads before the buffer, and how many times it changed them, which a
+/// fork's merge compares.
+#[derive(Clone, Default)]
+struct PutBack {
+    changes: u64,
+    items: VecDeque<RuntimeValueRoot>,
+}
+
+/// One transaction's port actions: claims, putbacks, appends and wiring
+/// edits.
 #[derive(Clone)]
 pub(in crate::api) struct PortJournal {
     snapshot: PortState,
@@ -397,6 +426,7 @@ pub(in crate::api) struct PortJournal {
     wiring: Wiring,
     edits: Vec<WiringEdit>,
     cursors: BTreeMap<PortAddress, PortCursor>,
+    put_back: BTreeMap<PortAddress, PutBack>,
     appends: Vec<(PortAddress, RuntimeValueRoot)>,
     observations: Arc<Mutex<PortObservations>>,
     branch: Option<PortBranch>,
@@ -417,16 +447,61 @@ impl PortJournal {
             snapshot,
             edits: Vec::new(),
             cursors: BTreeMap::new(),
+            put_back: BTreeMap::new(),
             appends: Vec::new(),
             observations: Arc::new(Mutex::new(PortObservations::default())),
             branch: None,
         }
     }
 
-    /// Claims the next `n` items of the buffer at `address`, or returns
-    /// `None`, claiming nothing, when it holds fewer. Either way the read is
-    /// observed: a short read waits for an item to arrive.
+    /// Claims the next `n` items at `address`: those this journal put back
+    /// first, then the buffer's, or returns `None`, claiming nothing, when
+    /// there are fewer. A claim the putbacks cover reads nothing of the
+    /// buffer; otherwise the read is observed: a short read waits for an
+    /// item to arrive.
     pub(in crate::api) fn claim(&mut self, address: &PortAddress, n: usize) -> Option<Vec<Value>> {
+        let held = self.put_back.get(address).map_or(0, |put| put.items.len());
+        if held > 0 {
+            self.note_branch_read(address);
+            if held >= n {
+                return Some(self.take_put_back(address, n));
+            }
+            let mut rest = self.claim_buffer(address, n - held)?;
+            let mut claimed = self.take_put_back(address, held);
+            claimed.append(&mut rest);
+            return Some(claimed);
+        }
+        self.claim_buffer(address, n)
+    }
+
+    /// Takes the first `n` values this journal put back at `address`.
+    fn take_put_back(&mut self, address: &PortAddress, n: usize) -> Vec<Value> {
+        if n == 0 {
+            return Vec::new();
+        }
+        let put = self
+            .put_back
+            .get_mut(address)
+            .expect("only held putbacks are taken");
+        put.changes += 1;
+        put.items.drain(..n).map(Value::from_runtime_root).collect()
+    }
+
+    /// Puts `values` back at the head of the input at `address`, in order,
+    /// ahead of what it holds and of what this journal put back before, so
+    /// that the next claim takes them first. It reads nothing.
+    pub(in crate::api) fn put_back(&mut self, address: PortAddress, values: &[Value]) {
+        if values.is_empty() {
+            return;
+        }
+        let put = self.put_back.entry(address).or_default();
+        put.changes += 1;
+        for value in values.iter().rev() {
+            put.items.push_front(value.clone().into_runtime_root());
+        }
+    }
+
+    fn claim_buffer(&mut self, address: &PortAddress, n: usize) -> Option<Vec<Value>> {
         let buffer = self.snapshot.buffers.get(address).cloned();
         let head = buffer.as_ref().map_or(0, |buffer| buffer.head);
         let end = buffer.as_ref().map_or(0, |buffer| buffer.next());
@@ -500,9 +575,17 @@ impl PortJournal {
             .collect()
     }
 
-    /// How many items the buffer at `address` holds beyond this journal's
-    /// claims, observing its end.
+    /// How many items are at `address` beyond this journal's claims: those
+    /// it put back, and the buffer's, observing its end.
     pub(in crate::api) fn available(&mut self, address: &PortAddress) -> usize {
+        let held = self.put_back.get(address).map_or(0, |put| put.items.len());
+        if held > 0 {
+            self.note_branch_read(address);
+        }
+        held + self.available_in_buffer(address)
+    }
+
+    fn available_in_buffer(&mut self, address: &PortAddress) -> usize {
         let (head, end) = self
             .snapshot
             .buffers
@@ -522,19 +605,31 @@ impl PortJournal {
     /// port that held none, invalidates it.
     pub(in crate::api) fn pending(&mut self, machine: &[Key]) -> Vec<(Key, usize)> {
         lock(&self.observations).surveys.insert(machine.to_vec());
-        machine_buffers(&self.snapshot.buffers, machine)
+        let mut pending = BTreeMap::new();
+        for (port, head, end) in machine_buffers(&self.snapshot.buffers, machine) {
+            let address = PortAddress {
+                machine: machine.to_vec(),
+                port: port.clone(),
+            };
+            let claimed = self
+                .cursors
+                .get(&address)
+                .map_or(head, |cursor| cursor.next);
+            *pending.entry(port).or_default() += (end - claimed) as usize;
+        }
+        let put_back: Vec<(PortAddress, usize)> = self
+            .put_back
+            .iter()
+            .filter(|(address, put)| address.machine == machine && !put.items.is_empty())
+            .map(|(address, put)| (address.clone(), put.items.len()))
+            .collect();
+        for (address, held) in put_back {
+            self.note_branch_read(&address);
+            *pending.entry(address.port).or_default() += held;
+        }
+        pending
             .into_iter()
-            .filter_map(|(port, head, end)| {
-                let address = PortAddress {
-                    machine: machine.to_vec(),
-                    port: port.clone(),
-                };
-                let claimed = self
-                    .cursors
-                    .get(&address)
-                    .map_or(head, |cursor| cursor.next);
-                (end > claimed).then(|| (port, (end - claimed) as usize))
-            })
+            .filter(|(_, count)| *count > 0)
             .collect()
     }
 
@@ -563,6 +658,14 @@ impl PortJournal {
         }
     }
 
+    /// Records, for a fork's merge, that this branch read what it put back
+    /// at `address`.
+    fn note_branch_read(&self, address: &PortAddress) {
+        if let Some(branch) = &self.branch {
+            lock(&branch.reads).buffers.insert(address.clone());
+        }
+    }
+
     fn observe_wiring(&mut self) {
         lock(&self.observations).wiring = true;
         if let Some(branch) = &self.branch {
@@ -573,8 +676,8 @@ impl PortJournal {
     /// Returns the machine at `machine` and its descendants to their initial
     /// port state: claims everything their input buffers hold, so that what
     /// arrives after this journal's snapshot stays, drops what this journal
-    /// was to append to them, and returns the wiring they own to the
-    /// defaults. It observes the wiring, which a concurrent change then
+    /// put back or was to append there, and returns the wiring they own to
+    /// the defaults. It observes the wiring, which a concurrent change then
     /// conflicts with.
     pub(in crate::api) fn clear_below(&mut self, machine: &[Key]) {
         self.observe_wiring();
@@ -593,7 +696,13 @@ impl PortJournal {
                 .get(&address)
                 .map_or((0, 0), |buffer| (buffer.head, buffer.next()));
             let held = end - self.cursor(&address, head).next;
-            self.claim(&address, held as usize);
+            self.claim_buffer(&address, held as usize);
+        }
+        for (address, put) in &mut self.put_back {
+            if address.machine.starts_with(machine) && !put.items.is_empty() {
+                put.changes += 1;
+                put.items.clear();
+            }
         }
         self.appends
             .retain(|(address, _)| !address.machine.starts_with(machine));
@@ -624,12 +733,17 @@ impl PortJournal {
                 (address.machine.starts_with(machine) && buffer.next() > claimed)
                     .then(|| address.machine.clone())
             });
+        let put_back = self
+            .put_back
+            .iter()
+            .filter(|(address, put)| address.machine.starts_with(machine) && !put.items.is_empty())
+            .map(|(address, _)| address.machine.clone());
         let wiring = self
             .wiring
             .keys()
             .filter(|owner| owner.starts_with(machine))
             .cloned();
-        waiting.chain(wiring).collect()
+        waiting.chain(put_back).chain(wiring).collect()
     }
 
     /// Appends `value` to the buffer at `address`, when this journal commits.
@@ -866,6 +980,11 @@ impl PortJournal {
                 .iter()
                 .map(|(address, cursor)| (address.clone(), cursor.next))
                 .collect(),
+            put_back: self
+                .put_back
+                .iter()
+                .map(|(address, put)| (address.clone(), put.changes))
+                .collect(),
             edits: self.edits.len(),
             appends: self.appends.len(),
             reads: Arc::new(Mutex::new(BranchReads::default())),
@@ -875,7 +994,8 @@ impl PortJournal {
 
     /// Whether `branch`, a branch of this journal, cannot merge in a serial
     /// order: since the fork, this journal claimed from a buffer the branch
-    /// read, or changed wiring the branch followed.
+    /// read, changed its putbacks at an address the branch read or put
+    /// back at, or changed wiring the branch followed.
     pub(in crate::api) fn conflicts_with(&self, branch: &PortJournal) -> bool {
         let base = branch
             .branch
@@ -888,7 +1008,20 @@ impl PortJournal {
                 cursor.next > base.cursors.get(address).copied().unwrap_or(cursor.start)
             }
         };
-        reads.buffers.iter().any(claimed_since) || (reads.wiring && self.edits.len() > base.edits)
+        let put_back_since = |journal: &PortJournal, address: &PortAddress| {
+            journal.put_back.get(address).map_or(0, |put| put.changes)
+                != base.put_back.get(address).copied().unwrap_or(0)
+        };
+        reads.buffers.iter().any(claimed_since)
+            || reads
+                .buffers
+                .iter()
+                .any(|address| put_back_since(self, address))
+            || branch
+                .put_back
+                .keys()
+                .any(|address| put_back_since(branch, address) && put_back_since(self, address))
+            || (reads.wiring && self.edits.len() > base.edits)
     }
 
     /// Merges `branch`, which [`Self::conflicts_with`] admitted, as if its
@@ -901,6 +1034,11 @@ impl PortJournal {
         for (address, cursor) in &branch.cursors {
             if base.cursors.get(address) != Some(&cursor.next) {
                 self.cursors.insert(address.clone(), cursor.clone());
+            }
+        }
+        for (address, put) in &branch.put_back {
+            if base.put_back.get(address) != Some(&put.changes) {
+                self.put_back.insert(address.clone(), put.clone());
             }
         }
         self.appends
@@ -920,4 +1058,81 @@ impl PortJournal {
 
 fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api::EvaluationRuntime;
+    use crate::api::runtime::events::RuntimeEventJournal;
+    use crate::reflection::{StoreCommitResult, StoreJournal};
+
+    #[test]
+    fn a_putback_conflicts_with_a_claim_from_the_head_it_changed() {
+        // `machines-communicate-through-wired-ports`: a putback changes what
+        // stands at an input's head, so a transaction that claimed from the
+        // head meanwhile conflicts; committed, its claim would take what was
+        // put back and leave what it read.
+        let runtime = EvaluationRuntime::new(0).expect("the runtime should open");
+        let resources = runtime.state.shared_resources.clone();
+        let values = runtime.values();
+        let machine = vec![Key::atom_from_text("m")];
+        let port = Key::atom_from_text("in");
+        let journal = || {
+            let (_, store, events) = resources.transaction_snapshot();
+            (StoreJournal::new(store), RuntimeEventJournal::new(events))
+        };
+        let commit = |(store, events): &(StoreJournal, RuntimeEventJournal)| {
+            resources.try_commit_transaction(store, events)
+        };
+        let integers = |read: Option<Vec<Value>>| {
+            read.map(|read| {
+                read.into_iter()
+                    .map(|value| {
+                        let root = value.into_runtime_root();
+                        (0..2)
+                            .find(|n| {
+                                root.same_representation_for_test(
+                                    values.core(),
+                                    &crate::core::Value::Number((*n).into()),
+                                )
+                            })
+                            .expect("only 0 and 1 travel")
+                    })
+                    .collect::<Vec<i64>>()
+            })
+        };
+
+        let mut writer = journal();
+        writer.1.ports.append(
+            PortAddress {
+                machine: machine.clone(),
+                port: port.clone(),
+            },
+            values.integer(1),
+        );
+        assert!(matches!(commit(&writer), StoreCommitResult::Committed));
+
+        let mut reader = journal();
+        assert_eq!(
+            integers(reader.1.take_from_port(&machine, port.clone(), 1)),
+            Some(vec![1])
+        );
+        let mut putter = journal();
+        putter
+            .1
+            .put_back_to_port(&machine, port.clone(), &[values.integer(0)]);
+        assert!(matches!(commit(&putter), StoreCommitResult::Committed));
+        assert!(
+            matches!(commit(&reader), StoreCommitResult::Conflict),
+            "the claim read a head that changed"
+        );
+
+        let mut reader = journal();
+        assert_eq!(
+            integers(reader.1.take_from_port(&machine, port.clone(), 2)),
+            Some(vec![0, 1]),
+            "what was put back stands first"
+        );
+    }
 }
