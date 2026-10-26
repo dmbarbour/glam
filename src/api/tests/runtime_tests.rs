@@ -3177,6 +3177,51 @@ unobserved = anno refl:(.child.task 'v (.cut (.retry)) >>= (\p -> .try (seq p (.
     assert_eq!(text("unobserved").as_deref(), Some("refused"));
 }
 
+#[test]
+fn a_task_overlays_the_environment_its_children_look_up() {
+    // `machines-inherit-an-environment`: a machine overlays its
+    // environment, overlays stacking as objects compose, a later one
+    // overriding with `:=` what an earlier one bound, and its children look
+    // up the composition along
+    // their machines; a cut that retried on what it looked up runs again
+    // when an overlay above it changes, and clearing takes the overlays
+    // away.
+    let source = r#"language g0
+import 'std
+object first with
+    a = 1
+    ready = "not yet"
+object second with
+    b = 2
+object third with
+    ready := "ready"
+envs = anno refl:(.child.task 'p (.env.overlay first =>> .env.overlay second =>> .child.task 'c (.cut (.env.lookup ['ready] >>= (\r -> if r == "ready" then .env.lookup ['a] >>= (\a -> .env.lookup ['b] >>= (\b -> .r [a, b, r])) else .retry))) >>= (\seen -> .cut (.heap.try_get ['go]) =>> .env.overlay third =>> seq seen (.env.clear =>> .try (.env.lookup ['a]) >>= (\cleared -> .heap.set ['envs] (if seen == [1, 2, "ready"] then (if dict.defines ['err] cleared then "overlaid" else "uncleared") else "unseen"))))) >>= (\_ -> .r ())) ()
+go = anno refl:(.heap.set ['go] ()) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["overlaid"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    let run = |name: &str| {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let _ = assembler.drain_reasoning();
+    };
+    let text = |name: &str| {
+        let heap = assembler.test_reflection_heap();
+        assembler.get(&heap, name).ok().map(|value| {
+            String::from_utf8_lossy(&assembler.to_binary(&value).unwrap()).into_owned()
+        })
+    };
+    run("envs");
+    assert_eq!(text("envs"), None, "the child waits for its overlay");
+    run("go");
+    assert_eq!(text("envs").as_deref(), Some("overlaid"));
+}
+
 /// The anonymous root `path` lies under, and the keys below it.
 fn below_root(path: &[Key]) -> usize {
     path.len().saturating_sub(2)

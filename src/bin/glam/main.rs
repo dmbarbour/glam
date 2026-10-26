@@ -378,7 +378,7 @@ mod tests {
                 concat!(
                     "language g0\n",
                     "import 'std\n",
-                    "refl.effect = .env ['gate] >>= (\\gate -> .cut (.alt ",
+                    "refl.effect = .env.lookup ['gate] >>= (\\gate -> .cut (.alt ",
                     "(.write_stderr gate =>> .fail) ",
                     "(.read_log >>= (\\_message -> .r ()))))\n",
                 ),

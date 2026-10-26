@@ -352,11 +352,48 @@ fn the_environment_passes_through_to_the_machine_s() {
             )?;
             m.dict_get("share")?;
             m.env_mixin_set()?;
-            run(m, ".env ['greeting]", &mut Standard)?;
+            run(m, ".env.lookup ['greeting]", &mut Standard)?;
             m.text_pop()
         })
         .expect("the turn should succeed");
     assert_eq!(greeting, "hello");
+}
+
+#[test]
+fn an_effect_overlays_and_clears_the_turn_machine_s_environment() {
+    // `machines-inherit-an-environment`: an effect a turn runs overlays its
+    // machine's environment, stacked on the machine's share, and clears it,
+    // as a task does its machine's.
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let (greeting, farewell, cleared) = rt
+        .run("m", |m| {
+            m.dict_pack(Vec::<&str>::new())?;
+            m.script_object(
+                ["shares"],
+                "g",
+                "language g0\nobject share with\n    greeting = \"hello\"\n",
+            )?;
+            m.dict_get("share")?;
+            m.env_mixin_set()?;
+            run(
+                m,
+                ".env.overlay (std.object_from_dict {farewell:\"bye\"}) =>> .env.lookup ['greeting] >>= (\\g -> .env.lookup ['farewell] >>= (\\f -> .r [g, f]))",
+                &mut Standard,
+            )?;
+            m.list_unpack(2)?;
+            let farewell = m.text_pop()?;
+            let greeting = m.text_pop()?;
+            // A lookup is lazy: what is undefined is an error once forced.
+            let cleared = run(m, ".env.clear =>> .env.lookup ['greeting]", &mut Standard)
+                .and_then(|()| m.text_pop())
+                .is_err();
+            Ok((greeting, farewell, cleared))
+        })
+        .expect("the turn should succeed");
+    assert_eq!(
+        (greeting.as_str(), farewell.as_str(), cleared),
+        ("hello", "bye", true)
+    );
 }
 
 /// Answers `.mark` by marking the machine's local state, and `.choose n`

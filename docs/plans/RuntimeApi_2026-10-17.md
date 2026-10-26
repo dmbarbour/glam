@@ -1062,7 +1062,16 @@ handle API goes.
         the environment as `.env.lookup Path`, `.env.overlay Mixin`, whose
         overlays stack, and `.env.clear`, composed along the task's own
         machine, `.env Path` and `.env.mine` going
-        (`machines-inherit-an-environment`); `.port.unread Port List`, a
+        (`machines-inherit-an-environment`; built 2026-10-26,
+        `refl-env-overlays`: a lookup composes the shares along the
+        branch's machine over the host's sealed environment within the
+        transaction, observed in a cut; turns gained `env.overlay` and
+        `env.clear` effects and `m.env_overlay()`. Overlays compose as
+        objects, so an overlay overrides an inherited name with `:=`, as
+        any mixin does. Building it found the store's reads keyed abstract
+        paths raw where its writes canonicalize them, so a lookup missed
+        what an overlay wrote; reads now canonicalize too.
+        Each rule mutation-checked); `.port.unread Port List`, a
         putback at the head of the machine's input, for tasks and turns;
         then the logger, `api-refl-cli-log`, whose machine runs `conf.log`
         through its turn's `effect_run`, ports passing through to the
@@ -1293,12 +1302,13 @@ named:
   the route to the `refl` machine's diagnostics input, and the reflection
   model's implementation retires it, when reflection tasks are machines
   whose writes fail as any machine's do.
-- Reflection's hosts reading the `refl` machine's environment as the
-  shares stand, outside any transaction, over the role's sealed
-  environment, so a change to a share wakes no task that read it, and the
-  CLI's logger host taking its environment once, through
-  `glam::transition::reflection_environment`: the reflection model's
-  implementation.
+- The environment taken once, outside any transaction, as the shares
+  stand over the role's sealed environment, so a change to a share wakes
+  nothing that read it: by `Assembler::reflection_environment`, which the
+  CLI's parser search reads, and by the CLI's logger host, through
+  `glam::transition::reflection_environment`. Reflection tasks look
+  theirs up within their transactions (`refl-env-overlays`); the rest is
+  the reflection model's implementation.
 - The process environment's variables, which the CLI builds with the
   handle API and pushes onto the root's stack
   (`glam::transition::push_value`), since a machine's dicts are keyed by

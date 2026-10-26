@@ -135,7 +135,7 @@ boundary task's child, and each `refl.*` entry as the scanner's.
 | `.r`, `.seq`, `.alt`, `.fail`, `.cut`, `.fix`, `.reset`, `.shift` | Unchanged; `.cut` is the machine's cut, `.fail` its `Backtrack`, pushback its `Retry`. |
 | `.get`, `.set` | The machine's local state, which persists across its tasks. |
 | `.heap.*`, `.vol.*`, `.promise.*` | Unchanged: shared-state operations. |
-| `.env Path` | The machine's composed environment, observed. New: `.env.set`, `.env.mine`, `.env.clear` for its own share, as `set_env_mixin`, `get_env_mixin` and `clear_env_mixin`. |
+| `.env Path` | `.env.lookup Path`: the machine's composed environment, observed. New: `.env.overlay Mixin`, stacking on its own share, and `.env.clear` (maintainer, 2026-10-26; built the same day, `refl-env-overlays`). |
 | `.log Sev Msg` | A convenience that writes an enriched diagnostic to the machine's `diagnostics` output. |
 | `.read_log` (logger) | `.port.read 'diagnostics N`, the logger machine's input. |
 | `.write_stderr Bin` (logger) | `.port.write 'stderr [Bin]`, on a port the CLI wires to a machine that writes stderr. |

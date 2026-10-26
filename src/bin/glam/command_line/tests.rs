@@ -806,7 +806,7 @@ fn token_regex_is_anchored_grouped_and_leftmost_first() {
 #[test]
 fn token_parser_rejects_outer_cli_and_host_effects() {
     let effects = [
-        ".env []",
+        ".env.lookup []",
         ".log 'info {msg:{text:\"not emitted\"}}",
         ".read.text \"nested argument\"",
         ".write.script \"g\" \"not emitted\"",
@@ -896,7 +896,7 @@ fn configured_cli_reads_its_immutable_environment() {
         .module(["configuration"])
         .script(
             "g",
-            "language g0\nimport 'std\nconf.cli = .env ['process,'cli,'args] >>= (\\args -> (args == [\"build\"]) =>> .read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"asm.result = 1\")\n",
+            "language g0\nimport 'std\nconf.cli = .env.lookup ['process,'cli,'args] >>= (\\args -> (args == [\"build\"]) =>> .read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"asm.result = 1\")\n",
         )
         .build()
         .expect("CLI configuration should compile");
@@ -927,7 +927,7 @@ fn configured_cli_cannot_observe_canonical_arguments_before_selection() {
         .module(["configuration"])
         .script(
             "g",
-            "language g0\nimport 'std\nconf.cli = .env ['process,'args] >>= (\\args -> (args == [\"canonical\"]) =>> .read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"asm.result = 1\")\n",
+            "language g0\nimport 'std\nconf.cli = .env.lookup ['process,'args] >>= (\\args -> (args == [\"canonical\"]) =>> .read.keyword \"build\" =>> .read.end =>> .write.script \"g\" \"asm.result = 1\")\n",
         )
         .build()
         .expect("CLI configuration should compile");

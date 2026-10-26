@@ -5335,7 +5335,7 @@ fn metadata_inspection_returns_hidden_values_without_forcing_them() {
 #[test]
 fn effectful_metadata_update_observes_environment_and_commits_log_once() {
     let (assembler, effect) = compile_effect(&format!(
-        ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .env ['glam,'version] >>= (\\version -> .log 'info {{msg:{{text:\"metadata update ran\"}}}} =>> .r [version])) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"{}\") =>> .r metadata)",
+        ".meta.inspect (list.at 0 (anno meta_refl:(\\_priors -> .env.lookup ['glam,'version] >>= (\\version -> .log 'info {{msg:{{text:\"metadata update ran\"}}}} =>> .r [version])) [anno 'meta_init ()])) >>= (\\metadata -> (metadata == \"{}\") =>> .r metadata)",
         env!("CARGO_PKG_VERSION")
     ));
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
@@ -6165,7 +6165,7 @@ fn effect_map_runs_left_to_right_and_preserves_result_order() {
 
 #[test]
 fn reads_of_what_is_undefined_are_errors_at_the_read() {
-    // `.get`, `.heap.get`, `.vol.get` and `.env` are errors at the read where
+    // `.get`, `.heap.get`, `.vol.get` and `.env.lookup` are errors at the read where
     // their paths are undefined, so nothing after the read runs, `.try`
     // answers `err`, and the error names its path, in its text and as data
     // (`dict-empty-is-a-value`).
@@ -6207,9 +6207,9 @@ fn reads_of_what_is_undefined_are_errors_at_the_read() {
         );
     }
 
-    // `.env` reads the reflection environment, which a composed task has.
+    // `.env.lookup` reads the reflection environment, which a composed task has.
     let (assembler, effect) = compile_effect(
-        ".try (.env ['glam, 'missing] =>> .heap.set ['after] 1) >>= (\\r -> .r (if r.err.undefined == ['glam, 'missing] then r.err.msg.text else \"unnamed\"))",
+        ".try (.env.lookup ['glam, 'missing] =>> .heap.set ['after] 1) >>= (\\r -> .r (if r.err.undefined == ['glam, 'missing] then r.err.msg.text else \"unnamed\"))",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (context, task) = schedule_composed_test_task(&assembler, &effect, host.clone());
@@ -6225,7 +6225,7 @@ fn reads_of_what_is_undefined_are_errors_at_the_read() {
 
 #[test]
 fn reflection_environment_is_available_as_plain_data() {
-    let (assembler, version) = compile_effect(".env ['glam,'version]");
+    let (assembler, version) = compile_effect(".env.lookup ['glam,'version]");
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (context, task) = schedule_composed_test_task(&assembler, &version, host.clone());
     let EvaluationWaitPoll::Complete(version) = pump_composed_test_task(&context, &task) else {
@@ -6240,7 +6240,7 @@ fn reflection_environment_is_available_as_plain_data() {
 
     let (_, environment) = compile_effect_with_runtime(
         &assembler.evaluation_runtime(),
-        ".env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_ENV\"] == \"present\") =>> .r \"environment\")",
+        ".env.lookup ['process,'env] >>= (\\environment -> (environment.[\"GLAM_TEST_ENV\"] == \"present\") =>> .r \"environment\")",
     );
     let (context, task) = schedule_composed_test_task(&assembler, &environment, host.clone());
     let environment_poll = pump_composed_test_task(&context, &task);
@@ -6249,8 +6249,10 @@ fn reflection_environment_is_available_as_plain_data() {
         "process environment lookup should complete, got {environment_poll:?}"
     );
 
-    let (_, arguments) =
-        compile_effect_with_runtime(&assembler.evaluation_runtime(), ".env ['process,'args]");
+    let (_, arguments) = compile_effect_with_runtime(
+        &assembler.evaluation_runtime(),
+        ".env.lookup ['process,'args]",
+    );
     let (context, task) = schedule_composed_test_task(&assembler, &arguments, host.clone());
     let poll = pump_composed_test_task(&context, &task);
     let EvaluationWaitPoll::Complete(arguments) = poll else {
@@ -6269,7 +6271,7 @@ fn reflection_environment_is_available_as_plain_data() {
 
     let (_, missing) = compile_effect_with_runtime(
         &assembler.evaluation_runtime(),
-        ".env ['process,'env] >>= (\\environment -> not (dict.defines [\"GLAM_TEST_MISSING\"] environment) =>> .r \"missing\")",
+        ".env.lookup ['process,'env] >>= (\\environment -> not (dict.defines [\"GLAM_TEST_MISSING\"] environment) =>> .r \"missing\")",
     );
     let (context, task) = schedule_composed_test_task(&assembler, &missing, host);
     assert!(matches!(
@@ -6281,7 +6283,7 @@ fn reflection_environment_is_available_as_plain_data() {
 #[test]
 fn reflection_environment_resumes_each_lazy_key_path_segment() {
     let (assembler, effect) = compile_effect(
-        ".env (anno {refl:(.r ())} [anno {refl:(.r ())} 'glam, anno {refl:(.r ())} 'version])",
+        ".env.lookup (anno {refl:(.r ())} [anno {refl:(.r ())} 'glam, anno {refl:(.r ())} 'version])",
     );
     let host = Arc::new(TestHost::with_values(assembler.core_values()));
     let (context, task) = schedule_composed_test_task(&assembler, &effect, host);

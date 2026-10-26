@@ -224,6 +224,10 @@ impl ReflectionServices for AssemblerReflectionHost {
         Some(crate::reflection::Machines(self.resources.clone()))
     }
 
+    fn environment_base(&self) -> Option<Value> {
+        Some(self.sealed_environment().value(self.resources.id))
+    }
+
     fn emit_diagnostic(&self, diagnostic: Diagnostic) {
         self.diagnostics.publish_local(diagnostic);
     }

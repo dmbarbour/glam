@@ -10,6 +10,8 @@ mod error;
 mod evaluator;
 mod runtime;
 mod turn;
+
+pub(crate) use turn::environment::{clear_environment, journal_environment, overlay_environment};
 mod value;
 
 #[cfg(feature = "glam-prof")]

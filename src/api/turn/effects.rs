@@ -55,7 +55,7 @@ impl EffectFamilies {
     pub const PROMISES: Self = Self(1 << 1);
     /// `.log severity message`, to the machine's diagnostics output.
     pub const LOG: Self = Self(1 << 2);
-    /// `.env path`, from the machine's environment.
+    /// `.env.lookup path`, from the machine's environment.
     pub const ENV: Self = Self(1 << 3);
     /// Every family.
     pub const ALL: Self = Self(Self::HEAP.0 | Self::PROMISES.0 | Self::LOG.0 | Self::ENV.0);
@@ -136,7 +136,9 @@ enum Standard {
     PromiseFulfill,
     PromiseBreak,
     Log,
-    Env,
+    EnvLookup,
+    EnvOverlay,
+    EnvClear,
 }
 
 /// A standard request's family, its name in the effect's API, its arity,
@@ -149,7 +151,7 @@ struct Shape {
 }
 
 impl Standard {
-    const ALL: [Self; 18] = [
+    const ALL: [Self; 20] = [
         Self::HeapGet,
         Self::HeapSet,
         Self::HeapRewrite,
@@ -167,7 +169,9 @@ impl Standard {
         Self::PromiseFulfill,
         Self::PromiseBreak,
         Self::Log,
-        Self::Env,
+        Self::EnvLookup,
+        Self::EnvOverlay,
+        Self::EnvClear,
     ];
 
     fn shape(self) -> Shape {
@@ -196,7 +200,9 @@ impl Standard {
             Self::PromiseFulfill => shape(F::PROMISES, &["promise", "fulfill"], 2, None),
             Self::PromiseBreak => shape(F::PROMISES, &["promise", "break"], 2, None),
             Self::Log => shape(F::LOG, &["log"], 2, None),
-            Self::Env => shape(F::ENV, &["env"], 1, Some(0)),
+            Self::EnvLookup => shape(F::ENV, &["env", "lookup"], 1, Some(0)),
+            Self::EnvOverlay => shape(F::ENV, &["env", "overlay"], 1, None),
+            Self::EnvClear => shape(F::ENV, &["env", "clear"], 0, None),
         }
     }
 
@@ -796,11 +802,19 @@ impl Machine<'_, '_> {
                 self.port_write(DIAGNOSTICS.clone(), 1)?;
                 self.unit_push();
             }
-            Standard::Env => {
+            Standard::EnvLookup => {
                 self.env_get();
                 if !path.is_empty() {
                     self.dict_get_path(path.iter().cloned())?;
                 }
+            }
+            Standard::EnvOverlay => {
+                self.env_overlay()?;
+                self.unit_push();
+            }
+            Standard::EnvClear => {
+                self.env_mixin_clear()?;
+                self.unit_push();
             }
         }
         Ok(())

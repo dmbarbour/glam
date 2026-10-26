@@ -1281,7 +1281,7 @@ opaque value in manual frames.
 Opaque origins are not implicitly rendered or searched for inside
 `msg.context`. A reflection observer that recognizes this convention may
 select the value while iterating the context dictionaries and explicitly
-apply the capability returned by `.env '.glam.origin.inspect`. That projection
+apply the capability returned by `.env.lookup '.glam.origin.inspect`. That projection
 produces ordinary assembler provenance for the observer's own view.
 
 Other conventional annotations include `anno 'TBD Expr` for incomplete

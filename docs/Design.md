@@ -370,7 +370,8 @@ Tentative, deferred:
 
 - `.with Mixin Op` - apply mixin to `api` in scope of `Op`
 - `.score Value` - for soft searches of `.alt` paths, preferences
-- `.env Path` - like `.get` but controlled externally
+- `.env.lookup Path` - like `.get` but controlled externally
+- `.env.overlay Mixin`, `.env.clear` - stack or drop overlays on what a machine and its children look up
 - `.commit` - drop `.alt` paths except this one, scoped by `.cut`
   - it might be feasible to model via shift-reset and cut
 - *constraints* - for reasoning and search across problem domains

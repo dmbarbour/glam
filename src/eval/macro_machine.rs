@@ -587,7 +587,7 @@ impl MacroOperation {
             Self::WriteAnchor => "macro `.write.anchor`",
             Self::WriteLayoutOpen | Self::WriteLayoutClose => "macro `.write.layout`",
             Self::CaseOpen | Self::CaseClose => "macro `.case`",
-            Self::Env => "macro `.env`",
+            Self::Env => "macro `.env.lookup`",
             Self::Log => "macro `.log`",
         }
     }
@@ -664,7 +664,13 @@ pub(crate) fn macro_api_in(access: &RuntimeValueAccess<'_>) -> Value {
         ("read", read),
         ("write", write),
         ("case", scoped(MacroScope::Case, None)),
-        ("env", MacroOperation::Env.request_unapplied(access)),
+        (
+            "env",
+            dict(vec![(
+                "lookup",
+                MacroOperation::Env.request_unapplied(access),
+            )]),
+        ),
         ("log", Value::Builtin(Builtin::MacroLog)),
     ])
 }
@@ -851,7 +857,10 @@ impl RegionalMacroMachine {
             // state: an error naming the path where the environment leaves
             // it undefined, and otherwise lazily, without the rest of the
             // state (`dict-empty-is-a-value`).
-            let path = self.argument.as_ref().expect("`.env` takes its path");
+            let path = self
+                .argument
+                .as_ref()
+                .expect("`.env.lookup` takes its path");
             let value = Value::Lazy(LazyValue::from_access_in(
                 values,
                 Arc::from([
@@ -1131,7 +1140,7 @@ impl RegionalMacroMachine {
                 )
             }
             MacroOperation::Log => (Some(values.unit()), vec![push(&keys::LOGS, argument())?]),
-            MacroOperation::Env => unreachable!("`.env` answers before reading the state"),
+            MacroOperation::Env => unreachable!("`.env.lookup` answers before reading the state"),
         };
 
         let state = self

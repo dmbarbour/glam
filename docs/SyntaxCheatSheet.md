@@ -396,6 +396,9 @@ foo <| .bar         # equivalent alternative without parentheses
 .port.available 'in  # a count, observed; .port.pending: {port: count}
 .wire.add (out:'o) (child:{key:'k, port:'in})  # also .wire.del, .wire.list,
                      #   .wire.defaults 'on/'off; ends in:P, out:P, child:{key, port}
+.env.lookup '.style  # the machine's environment: overlays over the host's
+.env.overlay {style := "wide"}  # stacks on this machine's share (:= overrides);
+                     #   children look it up too; .env.clear drops the share
 .retry              # pushback by intent: the outermost cut waits on what it read;
                      #   an ERROR outside every cut or with nothing observed
 .movl 'eax 42       # applied effect: eff:(\api -> api.movl 'eax 42)
@@ -667,7 +670,7 @@ using Dict do Body          # sugar for: using Dict in do Body
 @grammar input              # object/dict may expose its primary effect as `eff`
 @outer @inner input         # inner expands first; each original call runs once
 
-meta.macro.env = {          # immutable parameters available through macro .env
+meta.macro.env = {          # immutable parameters available through macro .env.lookup
     style:"compact"
 }
 ```
@@ -695,7 +698,7 @@ anno refl:(.log Msg) Term   # reflection effect before returning Term
 # Manual source context may use the same opaque token:
 anno context:{origin:module_origin} Expr
 # Reflection may explicitly inspect that token with:
-.env '.glam.origin.inspect
+.env.lookup '.glam.origin.inspect
 
 # Conventions:
 type_of.foo = ...           # associated names: '_of' dicts

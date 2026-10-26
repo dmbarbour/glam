@@ -1527,10 +1527,20 @@ fn lazy_core_value_path(
         access,
         Arc::from(
             path.iter()
-                .cloned()
-                .map(CoreDataKey::Key)
+                .map(|key| CoreDataKey::Key(stored_key(key)))
                 .collect::<Vec<_>>(),
         ),
         Arc::from([value]),
     ))
+}
+
+/// The key that a dict the store's writes build holds for `key`: a write
+/// inserts through values (`path_list_in`), where an abstract path, such as
+/// an anonymous root's key, becomes an atom of itself, so a read must look
+/// it up so too.
+fn stored_key(key: &Key) -> Key {
+    match key {
+        Key::AbstractGlobalPath(_) => Key::atom_from_key(key),
+        _ => key.clone(),
+    }
 }

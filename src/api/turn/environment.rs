@@ -5,8 +5,9 @@
 
 use std::sync::LazyLock;
 
-use crate::api::Value;
-use crate::core::Key;
+use crate::api::{RuntimeEventJournal, Value};
+use crate::core::{CoreValueFactory, Key};
+use crate::reflection::StoreJournal;
 use crate::runtime::RuntimeValueRoot;
 
 use super::super::runtime::{RuntimeSharedResources, ShareJournal};
@@ -82,4 +83,72 @@ pub(in crate::api) fn committed_environment(
         })
         .collect();
     crate::g_syntax::composed_environment_root(resources.values.core(), mixins, Some(base))
+}
+
+/// The environment of the machine at `machine` as `store` and `events` show
+/// it, over `base`: the overlays on it and its ancestors, the most specific
+/// first, or `base` itself where none applies
+/// (`machines-inherit-an-environment`). It reads each share's place in the
+/// store, observed, so a cut that read it runs again when an overlay above
+/// it changes, and answers whether it observed anything.
+pub(crate) fn journal_environment(
+    store: &mut StoreJournal,
+    events: &RuntimeEventJournal,
+    values: &CoreValueFactory,
+    machine: &[Key],
+    base: &RuntimeValueRoot,
+) -> (RuntimeValueRoot, bool) {
+    let mut observed = false;
+    let mut overlays = Vec::new();
+    for machine in environment_chain(machine) {
+        let path = environment_share(&machine);
+        observed |= store.observe_environment_read(&path);
+        if events.shares.is_set(&machine) {
+            overlays.push(store.environment_value(&path).into_runtime_root());
+        }
+    }
+    let environment = if overlays.is_empty() {
+        base.clone()
+    } else {
+        crate::g_syntax::composed_environment_root(values, overlays, Some(base))
+    };
+    (environment, observed)
+}
+
+/// Overlays `overlay` on the environment of the machine at `machine`,
+/// stacked on what its share holds: the share becomes the overlay over what
+/// it was (`machines-inherit-an-environment`). The share's place is read,
+/// observed, so that overlays made at once conflict.
+pub(crate) fn overlay_environment(
+    store: &mut StoreJournal,
+    events: &mut RuntimeEventJournal,
+    values: &CoreValueFactory,
+    machine: &[Key],
+    overlay: Value,
+) {
+    let path = environment_share(machine);
+    store.observe_environment_read(&path);
+    let share = if events.shares.is_set(machine) {
+        let below = store.environment_value(&path).into_runtime_root();
+        Value::from_runtime_root(crate::g_syntax::composed_environment_root(
+            values,
+            vec![overlay.into_runtime_root(), below],
+            None,
+        ))
+    } else {
+        overlay
+    };
+    store.write_environment(path, share);
+    events.shares.set(machine.to_vec());
+}
+
+/// Clears the overlays on the environment of the machine at `machine`, so
+/// that its environment is its ancestors' alone.
+pub(crate) fn clear_environment(
+    store: &mut StoreJournal,
+    events: &mut RuntimeEventJournal,
+    machine: &[Key],
+) {
+    store.remove_environment(environment_share(machine));
+    events.shares.clear(machine.to_vec());
 }

@@ -66,7 +66,7 @@ client-owned rendering. Current flow lives in
   They do not observe its fields.
 - Evaluation and rendering never recursively search messages for opaque
   origins. A reflection task explicitly invokes
-  `.env '.glam.origin.inspect`; Rust clients use `Assembler::reflection`.
+  `.env.lookup '.glam.origin.inspect`; Rust clients use `Assembler::reflection`.
 - Assembler-authored import frames may carry ordinary projected provenance
   because they are constructed outside the compiler capability boundary.
 - Origin records must not retain module values, compilation environments, or

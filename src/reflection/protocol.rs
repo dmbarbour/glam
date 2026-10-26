@@ -458,7 +458,8 @@ pub enum ValidationResult {
 }
 
 /// Supplies the immutable environment owned by a task's reasoning host.
-/// Reflection code can read it through `.env`, but cannot replace it.
+/// Reflection code can read it through `.env.lookup`, but cannot replace
+/// it; a machine's overlays extend it.
 pub trait TaskEnvironment: Send + Sync {
     fn reflection_environment(&self) -> PublicValue;
 }

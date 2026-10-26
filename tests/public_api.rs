@@ -506,7 +506,7 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
         .module(["promise_wakeup"])
         .script(
             "g",
-            "language g0\nimport 'std\nrefl.wait = .env ['client,'late] >>= (\\input -> (input == \"ready\") =>> .log 'info {msg:{text:\"promise resumed\"}})\nvalue = ()\n",
+            "language g0\nimport 'std\nrefl.wait = .env.lookup ['client,'late] >>= (\\input -> (input == \"ready\") =>> .log 'info {msg:{text:\"promise resumed\"}})\nvalue = ()\n",
         )
         .build()
         .expect("reflection fixture should compile");
@@ -1429,7 +1429,7 @@ fn client_reflection_environment_is_visible_to_reflection_annotations() {
         .module(["reflection_host"])
         .script(
             "g",
-            "language g0\nimport 'std\nvalue = anno {refl:(.env ['process,'env] >>= (\\environment -> (environment.[\"GLAM_PUBLIC_API_TEST\"] == \"HOST VALUE\") =>> .log 'info { msg:{ text:\"HOST VALUE\" } }))} \"done\"\n",
+            "language g0\nimport 'std\nvalue = anno {refl:(.env.lookup ['process,'env] >>= (\\environment -> (environment.[\"GLAM_PUBLIC_API_TEST\"] == \"HOST VALUE\") =>> .log 'info { msg:{ text:\"HOST VALUE\" } }))} \"done\"\n",
         )
         .build()
         .expect("reflection host fixture should build");

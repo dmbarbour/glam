@@ -94,7 +94,7 @@ effect value
   -> preserve frames in the coordinator-owned work record
 ```
 
-Standard effects include `r`, `seq`, `alt`, `fail`, `cut`, `fix`, indexed
+Standard effects include `r`, `seq`, `alt`, `fail`, `retry`, `cut`, `fix`, indexed
 task-local `get`/`set`/`try_get`/`del`, shared
 `heap.get`/`heap.set`/`heap.rewrite`/`heap.try_get`/`heap.del`, volume
 handles' `heap.vol` and
@@ -338,8 +338,17 @@ volume to retry. Dropping the Rust owner does not revoke it.
 
 ## Reusable Reflection Requests
 
-- `.env Path` reads the active task host's immutable reasoning environment.
-  The authoritative `glam.origin.inspect` capability projects assembler-created
+- `.env.lookup Path` reads the environment of the branch's machine: the
+  overlays along its path, nearest first, composed as objects over the host's
+  sealed environment. Within a cut the lookup observes each share on that
+  path, so the cut runs again when an overlay above it changes.
+- `.env.overlay Overlay` stacks an object over the machine's environment:
+  its share becomes the overlay composed over what the share held, so an
+  overlay overrides a name it inherits with `:=`. `.env.clear` drops the
+  machine's overlays, leaving its ancestors' environment. Both edit within
+  the transaction, or at once outside a cut. Turns reach the same edits
+  through `env.lookup`, `env.overlay`, and `env.clear`.
+- The authoritative `glam.origin.inspect` capability projects assembler-created
   opaque compilation-origin values into ordinary provenance. It rejects other
   opaque values; callers choose which context value to inspect.
 - `.log Severity Message` stages a diagnostic in the current transaction and
@@ -422,7 +431,7 @@ volume to retry. Dropping the Rust owner does not revoke it.
   observed nothing that could change it, nothing would run it again, so
   it is a permanent divergence, an error.
 
-The immutable environment conventionally contains assembler-owned `glam`
+The host's sealed environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,
 logger, and future service sessions. `main` adds process arguments,
 reflection-only arguments, and binary-preserving OS environment data. This is

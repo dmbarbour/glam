@@ -178,7 +178,7 @@ fn return_effect(_values: &impl crate::core::TestAccess, value: Value) -> Value 
 #[test]
 fn macro_runner_exposes_environment_log_and_scoped_cases() {
     let (assembler, effect) = compile_effects(
-        ".env '.flag >>= (\\_ -> .case \"flag case\" (.log 'info { msg:{ text:\"visible\" } } =>> .r ()))",
+        ".env.lookup '.flag >>= (\\_ -> .case \"flag case\" (.log 'info { msg:{ text:\"visible\" } } =>> .r ()))",
     );
     let execution = assembler.test_compilation_execution();
     let environment = Value::Dict(Dict::new_sync().insert(
@@ -200,7 +200,7 @@ fn macro_env_is_an_error_at_the_read_where_undefined() {
     // As `.get` is (`dict-empty-is-a-value`): the macro stops at the read,
     // naming the path, though the rest ignores the value it would read.
     let (assembler, effect) = compile_effects(
-        ".env '.missing >>= (\\_ -> .log 'info { msg:{ text:\"ran on\" } } =>> .r ())",
+        ".env.lookup '.missing >>= (\\_ -> .log 'info { msg:{ text:\"ran on\" } } =>> .r ())",
     );
     let execution = assembler.test_compilation_execution();
     let error = run(&execution, &effect, Value::Dict(Dict::new_sync()))
@@ -340,7 +340,7 @@ fn unstarted_reflection_gate_runs_inside_the_macro_session() {
 
 #[test]
 fn unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand() {
-    let (assembler, reflection) = compile_effects(".env ['glam,'reasoning,'role]");
+    let (assembler, reflection) = compile_effects(".env.lookup ['glam,'reasoning,'role]");
     let execution = assembler.test_compilation_execution();
     let values = assembler.core_values();
     let result = values.construct_runtime_value_root(|access| {
@@ -370,8 +370,8 @@ fn unstarted_reflection_result_uses_runtime_default_profile_from_macro_demand() 
 #[test]
 fn reflection_annotations_use_runtime_default_profile_from_macro_demand() {
     for source in [
-        "anno refl:(.env ['glam,'reasoning,'role] >>= (\\role -> (role == 'assembler) =>> .r ())) (.r ())",
-        "anno seq:(list.at 0 (anno meta_refl:(\\_ -> .env ['glam,'reasoning,'role] >>= (\\role -> (role == 'assembler) =>> .r [()])) [anno 'meta_init ()])) (.r ())",
+        "anno refl:(.env.lookup ['glam,'reasoning,'role] >>= (\\role -> (role == 'assembler) =>> .r ())) (.r ())",
+        "anno seq:(list.at 0 (anno meta_refl:(\\_ -> .env.lookup ['glam,'reasoning,'role] >>= (\\role -> (role == 'assembler) =>> .r [()])) [anno 'meta_init ()])) (.r ())",
     ] {
         let (assembler, effect) = compile_effects(source);
         let execution = assembler.test_compilation_execution();
@@ -674,7 +674,7 @@ meta.macro.env = {}
 meta.consume = .read.sep =>> .read.data >>= (\value -> .write.data value =>> .r ())
 meta.rollback = .alt (.write.data 0 =>> .read.text "missing") (.read.sep =>> .read.data >>= (\value -> .write.data value =>> .r ()))
 meta.prefix = .write.text "40" =>> .write.sep =>> .write.text "+"
-meta.language = .env '.language.base >>= (\base -> .write.data base =>> .r ())
+meta.language = .env.lookup '.language.base >>= (\base -> .write.data base =>> .r ())
 meta.delete = .r ()
 consumed = @meta.consume 41
 rolled_back = @meta.rollback 42

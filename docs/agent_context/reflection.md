@@ -42,9 +42,12 @@ and control flow.
   environment, diagnostic destination, and host resources. Annotation tasks
   begin with the runtime default profile, so the tasks they queue inherit
   that default.
-- `.env Path` reads the active task host's immutable reasoning environment
-  using `.get` path and missing-as-`{}` conventions. There is no reflection
-  write. The assembler reserves and replaces the complete `glam` subtree and
+- `.env.lookup Path` reads the branch machine's environment with `.get`
+  path conventions: a missing path is an error at the read. The environment
+  is the overlays along the machine's path, composed as objects over the
+  host's sealed environment. `.env.overlay Overlay` stacks an object on the
+  machine's share (override with `:=`), `.env.clear` drops the share. The
+  sealed environment itself has no reflection write. The assembler reserves and replaces the complete `glam` subtree and
   supplies authoritative metadata (version, role, etc.) plus
   `glam.origin.inspect`. That capability only projects assembler-created
   opaque compilation origins. Nothing scans diagnostic contexts or invokes it

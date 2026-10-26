@@ -93,11 +93,11 @@ file's required declaration, including extension order. For example,
 {base:'g0, extensions:['utf8, 'demo]}
 ```
 
-Macros select values with `.env Path`:
+Macros select values with `.env.lookup Path`:
 
 ```g
-.env '.style
-.env '.language.base
+.env.lookup '.style
+.env.lookup '.language.base
 ```
 
 A missing path is an error at the read, naming the path, as `.get` is for

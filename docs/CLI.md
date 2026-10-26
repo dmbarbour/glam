@@ -341,9 +341,9 @@ can build their own higher-level case and help functions.
 from the selected branch are published; logs from abandoned branches are not.
 Logging does not itself make a parse branch fail.
 
-### Read-only environment
+### Environment
 
-`.env Path` reads immutable host-provided environment data. During CLI parsing,
+`.env.lookup Path` reads host-provided environment data. During CLI parsing,
 the useful paths include:
 
 | Path | Value |
@@ -351,7 +351,7 @@ the useful paths include:
 | `'.process.cli.args` | Original user-provided argument binaries. |
 | `'.process.env.[NAME]` | One operating-system environment value; `NAME` is text. |
 
-For example, `.env '.process.env.["HOME"]` reads the platform bytes of
+For example, `.env.lookup '.process.env.["HOME"]` reads the platform bytes of
 `HOME`. The latent `process.args` and `process.refl_args` values depend on the
 CLI parser's final output and should not be observed during CLI parsing.
 

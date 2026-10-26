@@ -2302,6 +2302,25 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
+    /// Overlays the top value, an object, on this machine's environment,
+    /// popping it: it stacks on the machine's share, which becomes the
+    /// overlay over what it was, so the environments of the machine and its
+    /// descendants see it first (`machines-inherit-an-environment`). Outside
+    /// a cut, it commits at once; within one, with the outermost cut.
+    pub fn env_overlay(&mut self) -> Result<(), Error> {
+        let overlay = self.peek()?.clone();
+        let values = self.runtime.assembler.values();
+        values.require(&overlay)?;
+        let core = values.core().clone();
+        let machine = self.path.clone();
+        self.transact(|store, events| {
+            crate::api::overlay_environment(store, events, &core, &machine, overlay.clone());
+            Ok(())
+        })?;
+        self.pop()?;
+        Ok(())
+    }
+
     /// Pushes this machine's own mixin of the environment, to extend and
     /// set again, or an empty object where it has none. Within a cut, the
     /// read joins the cut's transaction, as [`Self::env_get`]'s does.

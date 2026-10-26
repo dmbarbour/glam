@@ -25,6 +25,8 @@ use port_requests::{PortRequest, PortRequestWork};
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReflectionRequest {
     Environment,
+    EnvironmentOverlay,
+    EnvironmentClear,
     DictItems,
     MetadataInspect,
     Log,
@@ -77,6 +79,11 @@ enum ReflectionRequestOperation {
     ChildCallLeave,
     Acceptance(AcceptanceRequestWork),
     Port(PortRequestWork),
+    /// `.env.overlay Overlay`, with its argument, or `.env.clear`.
+    EnvironmentEdit {
+        overlay: bool,
+        arguments: Vec<Value>,
+    },
     Poisoned,
 }
 
@@ -257,6 +264,14 @@ impl ReflectionRequestWork {
             ReflectionRequest::Environment => {
                 ReflectionRequestOperation::Environment(EnvironmentRequestWork::Start(arguments))
             }
+            ReflectionRequest::EnvironmentOverlay => ReflectionRequestOperation::EnvironmentEdit {
+                overlay: true,
+                arguments,
+            },
+            ReflectionRequest::EnvironmentClear => ReflectionRequestOperation::EnvironmentEdit {
+                overlay: false,
+                arguments,
+            },
             ReflectionRequest::DictItems => {
                 ReflectionRequestOperation::Inspection(InspectionRequestWork::Start {
                     request: InspectionRequest::DictItems,
@@ -471,10 +486,13 @@ where
                 }
             },
             ReflectionRequestOperation::Environment(EnvironmentRequestWork::Start(arguments)) => {
-                assert!(input.is_none(), "new `.env` work cannot have demand input");
-                let [path]: [Value; 1] = arguments
-                    .try_into()
-                    .map_err(|_| TaskHalt::new("`.env` received the wrong number of arguments"))?;
+                assert!(
+                    input.is_none(),
+                    "new `.env.lookup` work cannot have demand input"
+                );
+                let [path]: [Value; 1] = arguments.try_into().map_err(|_| {
+                    TaskHalt::new("`.env.lookup` received the wrong number of arguments")
+                })?;
                 self.operation = ReflectionRequestOperation::Environment(
                     EnvironmentRequestWork::KeyPath(KeyListRequestWork::new(path)),
                 );
@@ -497,7 +515,7 @@ where
                     PreparationPoll::Ready(path) => {
                         self.operation = ReflectionRequestOperation::Environment(
                             EnvironmentRequestWork::ValuePath(ValuePathRequestWork::new(
-                                context.host().reflection_environment(),
+                                machine_environment(context)?,
                                 path,
                             )),
                         );
@@ -674,6 +692,24 @@ where
                 let poll = work.poll(input, context)?;
                 self.operation = ReflectionRequestOperation::Port(work);
                 Ok(poll)
+            }
+            ReflectionRequestOperation::EnvironmentEdit { overlay, arguments } => {
+                assert!(input.is_none(), "environment edits demand nothing");
+                let mut arguments = arguments.into_iter();
+                let given = arguments.next();
+                if arguments.next().is_some() || given.is_some() != overlay {
+                    return Err(TaskHalt::new(format!(
+                        "`{}` received the wrong number of arguments",
+                        if overlay {
+                            ".env.overlay"
+                        } else {
+                            ".env.clear"
+                        }
+                    )));
+                }
+                Ok(SpecializationRequestPoll::Complete(edit_environment(
+                    given, context,
+                )?))
             }
             ReflectionRequestOperation::Poisoned => {
                 panic!("completed reflection request work was polled again")
@@ -1007,6 +1043,85 @@ where
     Ok(RequestResult::Return(
         context.values().atom_from_text(status),
     ))
+}
+
+/// The environment `.env.lookup` reads: where the host has machines, the
+/// overlays along the branch's machine composed over the host's base,
+/// observed within a cut, so a cut that read it runs again when an overlay
+/// above it changes (`machines-inherit-an-environment`); elsewhere, the
+/// host's environment.
+fn machine_environment<S>(context: &mut RequestContext<'_, S>) -> Result<Value, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let (Some(_), Some(base)) = (context.host().machines(), context.host().environment_base())
+    else {
+        return Ok(context.host().reflection_environment());
+    };
+    let machine = branch_machine(context)?;
+    let values = context.eval_context().values().clone();
+    let no_machines = || TaskHalt::new("`.env.lookup` needs a host with machines");
+    if let Some(generation) = context.transaction_generation() {
+        let (environment, observed) = {
+            let mut transaction = context
+                .transaction()
+                .expect("a transaction has a generation");
+            let (store, journal) = transaction.journals();
+            let events = journal
+                .reflection_journal()
+                .events
+                .as_mut()
+                .ok_or_else(no_machines)?;
+            crate::api::journal_environment(store, events, &values, &machine, base.runtime_root())
+        };
+        if observed {
+            context.observe_host_generation(generation);
+        }
+        return Ok(Value::from_runtime_root(environment));
+    }
+    let snapshot = context.host().snapshot();
+    let mut store = StoreJournal::new(snapshot.store().clone());
+    let mut journal = S::begin_journal(snapshot.extra());
+    let events = journal
+        .reflection_journal()
+        .events
+        .as_mut()
+        .ok_or_else(no_machines)?;
+    let (environment, _) =
+        crate::api::journal_environment(&mut store, events, &values, &machine, base.runtime_root());
+    Ok(Value::from_runtime_root(environment))
+}
+
+/// `.env.overlay Overlay` and `.env.clear`: stack an overlay on the
+/// environment of the branch's machine, or clear its overlays, within the
+/// transaction or, outside one, at once (`machines-inherit-an-environment`).
+fn edit_environment<S>(
+    overlay: Option<Value>,
+    context: &mut RequestContext<'_, S>,
+) -> Result<RequestResult, TaskHalt>
+where
+    S: TaskSpecialization,
+    S::Host: ReflectionHost<S>,
+    S::Journal: ReflectionTransaction,
+{
+    let name = if overlay.is_some() {
+        ".env.overlay"
+    } else {
+        ".env.clear"
+    };
+    let machine = branch_machine(context)?;
+    let values = context.eval_context().values().clone();
+    transact_on_machines(name, context, |store, events, _| {
+        match &overlay {
+            Some(overlay) => {
+                crate::api::overlay_environment(store, events, &values, &machine, overlay.clone())
+            }
+            None => crate::api::clear_environment(store, events, &machine),
+        }
+        Ok(())
+    })
 }
 
 /// The child an edit acts on is busy, so the edit waits, as `.child.call`
@@ -1930,6 +2045,14 @@ pub trait ReflectionServices: Send + Sync {
     fn machines(&self) -> Option<Machines> {
         None
     }
+
+    /// The environment that machines' overlays extend, where the host has
+    /// machines: `.env.lookup` composes the overlays along a task's machine
+    /// over it (`machines-inherit-an-environment`).
+    #[doc(hidden)]
+    fn environment_base(&self) -> Option<Value> {
+        None
+    }
 }
 
 /// A host's child machines, which only the runtime makes.
@@ -2021,6 +2144,8 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 1,
                 ReflectionRequest::PromiseAccepted,
             ),
+            port_spec("env", "overlay", 1, ReflectionRequest::EnvironmentOverlay),
+            port_spec("env", "clear", 0, ReflectionRequest::EnvironmentClear),
             port_spec("port", "read", 2, ReflectionRequest::PortRead),
             port_spec("port", "write", 2, ReflectionRequest::PortWrite),
             port_spec("port", "available", 1, ReflectionRequest::PortAvailable),
@@ -2060,7 +2185,8 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
         .collect()
 }
 
-/// A request of the port family, at `.family.name`.
+/// A request at `.family.name`, of the port family or the environment's
+/// edits.
 fn port_spec(
     family: &'static str,
     name: &'static str,
@@ -2075,12 +2201,13 @@ fn port_spec(
     )
 }
 
-/// Reusable `.env` and `.log` request subset for isolated host interpreters.
+/// Reusable `.env.lookup` and `.log` request subset for isolated host
+/// interpreters.
 pub fn environment_diagnostic_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
     vec![
-        EffectRequestSpec::new(
-            "env",
-            ["reflection_runtime", "v0", "request", "env"],
+        EffectRequestSpec::at_path(
+            ["env", "lookup"],
+            ["reflection_runtime", "v0", "request", "env", "lookup"],
             1,
             ReflectionRequest::Environment,
         ),
@@ -2116,6 +2243,8 @@ mod tests {
     fn assert_reflection_request_inventory(request: &ReflectionRequest) {
         match request {
             ReflectionRequest::Environment
+            | ReflectionRequest::EnvironmentOverlay
+            | ReflectionRequest::EnvironmentClear
             | ReflectionRequest::DictItems
             | ReflectionRequest::MetadataInspect
             | ReflectionRequest::Log
@@ -2186,6 +2315,7 @@ mod tests {
             | ReflectionRequestOperation::Log(_)
             | ReflectionRequestOperation::ChildCallLeave
             | ReflectionRequestOperation::Port(_)
+            | ReflectionRequestOperation::EnvironmentEdit { .. }
             | ReflectionRequestOperation::Poisoned => {}
             ReflectionRequestOperation::Acceptance(work) => match work {
                 AcceptanceRequestWork::Start {

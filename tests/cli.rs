@@ -806,7 +806,7 @@ fn configured_logger_can_read_the_process_reflection_environment() {
     let invalid = dir.join("invalid.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env ['process,'env] >>= (\\environment -> .write_stderr (environment.[\"GLAM_TEST_REFLECTION_ENV\"] ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env.lookup ['process,'env] >>= (\\environment -> .write_stderr (environment.[\"GLAM_TEST_REFLECTION_ENV\"] ++ [10]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&invalid, b"language g0\nvalue = \xff\n")
@@ -837,7 +837,7 @@ fn configured_logger_observes_its_own_reasoning_role() {
     let assembly = dir.join("assembly.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env ['glam,'reasoning,'role] >>= (\\role -> (role == 'logger) =>> .write_stderr (\"LOGGER ROLE\" ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env.lookup ['glam,'reasoning,'role] >>= (\\role -> (role == 'logger) =>> .write_stderr (\"LOGGER ROLE\" ++ [10]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&assembly, "language g0\nasm.result = \"\"\n")
@@ -899,7 +899,7 @@ fn reflection_arguments_are_ordered_and_do_not_enter_assembly_arguments() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env ['process,'refl_args] >>= (\\arguments -> (arguments == [\"quick\",\"thorough\"]) =>> .write_stderr (\"REFLECTION ARGS\" ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env.lookup ['process,'refl_args] >>= (\\arguments -> (arguments == [\"quick\",\"thorough\"]) =>> .write_stderr (\"REFLECTION ARGS\" ++ [10]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
@@ -932,7 +932,7 @@ fn bootstrap_cli_arguments_are_exposed_as_user_and_canonical_views() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env ['process] >>= (\\process -> (process.args == process.cli.args) =>> .write_stderr (\"CLI ARGS\" ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env.lookup ['process] >>= (\\process -> (process.args == process.cli.args) =>> .write_stderr (\"CLI ARGS\" ++ [10]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
