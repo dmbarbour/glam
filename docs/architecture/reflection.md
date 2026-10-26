@@ -416,7 +416,11 @@ volume to retry. Dropping the Rust owner does not revoke it.
   is still the request, blocks until the host's generation passes the one
   the request read, then runs the request again. A cut's attempt resets
   its pushback, so a rerun that fails for real falls back as any failure
-  does. A write to an output with no wire is an error.
+  does. A write to an output with no wire is an error. `.retry`, a core
+  effect beside `.fail`, is pushback by intent, at the branch's
+  transaction's generation; outside every cut, or where the branch
+  observed nothing that could change it, nothing would run it again, so
+  it is a permanent divergence, an error.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,

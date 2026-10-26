@@ -1055,7 +1055,10 @@ handle API goes.
         rerun and a fallback consumed by a pushback, both fixed and
         mutation-checked.
         Decided after (maintainer, 2026-10-26), in the order built: `.retry`
-        (`api-refl-retry`, no longer a candidate), on the pushback outcome;
+        (`api-refl-retry`, no longer a candidate), on the pushback outcome,
+        a permanent divergence error outside every cut or with nothing
+        observed (built 2026-10-26: a core effect beside `.fail`; its test
+        and each rule mutation-checked);
         the environment as `.env.lookup Path`, `.env.overlay Mixin`, whose
         overlays stack, and `.env.clear`, composed along the task's own
         machine, `.env Path` and `.env.mine` going

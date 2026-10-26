@@ -390,6 +390,14 @@ foo <| .bar         # equivalent alternative without parentheses
 .promise.status R   # 'pending, 'fulfilled or 'broken, from resolver R
 .promise.accept R {msg:{text:"owed"}}  # this machine owes R's promise; .promise.abandon R
 .promise.accepted R # unit where any machine accepted it; .fail otherwise
+.port.read 'in 2     # the next 2 values as a list; too few is pushback
+.port.write 'out [1, 2]  # along every wire from the output; unwired is an ERROR
+.port.ask 'q Req     # writes {request, reply}; returns the reply's promise
+.port.available 'in  # a count, observed; .port.pending: {port: count}
+.wire.add (out:'o) (child:{key:'k, port:'in})  # also .wire.del, .wire.list,
+                     #   .wire.defaults 'on/'off; ends in:P, out:P, child:{key, port}
+.retry              # pushback by intent: the outermost cut waits on what it read;
+                     #   an ERROR outside every cut or with nothing observed
 .movl 'eax 42       # applied effect: eff:(\api -> api.movl 'eax 42)
 
 my_proc = do

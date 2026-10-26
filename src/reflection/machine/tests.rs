@@ -1775,6 +1775,7 @@ fn assert_request_selection_inventory(selection: &RequestSelection<TestRequest>)
         | RequestSelection::Seq
         | RequestSelection::Alt
         | RequestSelection::Fail
+        | RequestSelection::Retry
         | RequestSelection::Cut
         | RequestSelection::Try
         | RequestSelection::Eval
@@ -3283,7 +3284,7 @@ fn assert_request_inventory<V>(request: &Request<TestRequest, V>) {
             let _: &TestRequest = request;
             let _: &Vec<V> = values;
         }
-        Request::Fail | Request::HeapVolume | Request::PromiseNew => {}
+        Request::Fail | Request::Retry | Request::HeapVolume | Request::PromiseNew => {}
     }
 }
 

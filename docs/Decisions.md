@@ -2373,8 +2373,10 @@ maps the short names used here to file names.
     error kind `Retry`, which a cut recognizes by waiting and running
     again, while `Backtrack` stays for alternatives. (Decided by the
     maintainer, 2026-10-26: glam says it too, with `.retry`, pushback by
-    intent; and a machine may put values back at the head of its input,
-    `.port.unread`, to be read first, a putback often convenient.) An evaluation that
+    intent, which outside every cut, or where the branch observed nothing
+    that could change it, is a permanent divergence, an error; and a
+    machine may put values back at the head of its input, `.port.unread`,
+    to be read first, a putback often convenient.) An evaluation that
     waits on what is not known yet, such as an unresolved promise, is
     pushback too (the same day, at `api-machine-environment`). Outside a cut, `read`
     and `write` block, and `try_read` returns `Retry`. A

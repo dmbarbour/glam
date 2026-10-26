@@ -3122,6 +3122,61 @@ unwired = anno refl:(.child.task 'u (.port.write 'nowhere [1]) >>= (\p -> .try (
     assert_eq!(text("unwired").as_deref(), Some("refused"));
 }
 
+#[test]
+fn a_retry_waits_for_what_its_cut_observed() {
+    // `machines-communicate-through-wired-ports`: `.retry` is pushback by
+    // intent. No alternative takes it: the outermost cut waits, idle, for
+    // what it observed to change, and runs again; a `.try` answers its
+    // wait. Outside every cut, or where the branch observed nothing that
+    // could change it, it is a permanent divergence, an error.
+    let source = r#"language g0
+import 'std
+retried = anno refl:(.heap.set ['flag] 0 =>> .child.task 'r (.try (.heap.get ['flag] >>= (\_ -> .retry)) >>= (\tried -> .cut (.alt (.heap.get ['flag] >>= (\f -> if f == 1 then .r "one" else .retry)) (.r "an alternative")) >>= (\got -> .heap.set ['retried] (if dict.defines ['wait] tried then got else "tried without waiting")))) >>= (\_ -> .r ())) ()
+flip = anno refl:(.heap.set ['flag] 1) ()
+uncut = anno refl:(.child.task 'u (.retry) >>= (\p -> .try (seq p (.r ())) >>= (\r -> .heap.set ['uncut] (if dict.defines ['err] r then "refused" else "waited")))) ()
+unobserved = anno refl:(.child.task 'v (.cut (.retry)) >>= (\p -> .try (seq p (.r ())) >>= (\r -> .heap.set ['unobserved] (if dict.defines ['err] r then "refused" else "waited")))) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["retried"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    let run = |name: &str| {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+        let _ = assembler.drain_reasoning();
+    };
+    let text = |name: &str| {
+        let heap = assembler.test_reflection_heap();
+        assembler.get(&heap, name).ok().map(|value| {
+            String::from_utf8_lossy(&assembler.to_binary(&value).unwrap()).into_owned()
+        })
+    };
+    run("retried");
+    run("uncut");
+    run("unobserved");
+    assert_eq!(text("retried"), None, "the cut waits");
+    let analysis = assembler.evaluation_runtime().analysis().unwrap();
+    assert!(analysis.quiescent());
+    let r = Key::atom_from_text("r");
+    assert!(
+        analysis
+            .waits()
+            .iter()
+            .filter(|wait| wait
+                .machine()
+                .is_some_and(|machine| machine.keys().last() == Some(&r)))
+            .all(|wait| wait.family() == RuntimeWaitFamily::Idle),
+        "a retry is an idle wait"
+    );
+    run("flip");
+    assert_eq!(text("retried").as_deref(), Some("one"));
+    assert_eq!(text("uncut").as_deref(), Some("refused"));
+    assert_eq!(text("unobserved").as_deref(), Some("refused"));
+}
+
 /// The anonymous root `path` lies under, and the keys below it.
 fn below_root(path: &[Key]) -> usize {
     path.len().saturating_sub(2)

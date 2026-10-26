@@ -346,6 +346,10 @@ It is very convenient to assume a standard effects API for generic extensions. P
   - ordered and deterministic: if `A` blocks on a lazy value, suspend rather
     than allowing readiness to select `B`
 - `.fail` - failure for `.alt`, does not continue
+- `.retry` - pushback by intent: no alternative takes it, and the outermost
+  cut waits for what it observed to change, then runs again; outside every
+  cut, or where the branch observed nothing that could change it, a
+  permanent divergence, an error
 - `.cut op` - scope for `.alt`, selects first success
 - `.fix fn` - `fn` receives result as input but hides `.reset` scope
 - `.get Path` - copy data from state; where `Path` is undefined, an error

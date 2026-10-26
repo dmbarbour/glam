@@ -52,6 +52,7 @@ struct Tags {
     seq: Key,
     alt: Key,
     fail: Key,
+    retry: Key,
     cut: Key,
     trying: Key,
     eval: Key,
@@ -97,6 +98,7 @@ impl Tags {
             seq: tag("seq"),
             alt: tag("alt"),
             fail: tag("fail"),
+            retry: tag("retry"),
             cut: tag("cut"),
             trying: tag("try"),
             eval: tag("eval"),
@@ -2771,6 +2773,27 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 outcome: branch.into_failure(),
                 scope_depth,
             },
+            // Pushback by intent (`machines-communicate-through-wired-ports`):
+            // the outermost cut waits for what it observed to change. Outside
+            // every cut, or where the branch observed nothing that could
+            // change it, nothing would ever run it again: a permanent
+            // divergence, an error (maintainer, 2026-10-26).
+            Request::Retry => {
+                let generation = branch
+                    .transaction
+                    .as_ref()
+                    .filter(|transaction| transaction.observed)
+                    .map(|transaction| transaction.snapshot.generation())
+                    .ok_or_else(|| {
+                        TaskHalt::new(
+                            "`.retry` diverges for good: no cut, or nothing it observed can change",
+                        )
+                    })?;
+                MachineWork::Outcome {
+                    outcome: BranchOutcome::Pushback(branch, generation),
+                    scope_depth,
+                }
+            }
             Request::Cut(operation) => {
                 return Ok(MachineStep::Continue(self.enter_cut(
                     context,
@@ -6302,6 +6325,7 @@ enum Request<R, V = RuntimeValueRoot> {
     Seq(V, V),
     Alt(V, V),
     Fail,
+    Retry,
     Cut(V),
     Try(V),
     Eval(V),
@@ -6504,6 +6528,7 @@ enum RequestSelection<R> {
     Seq,
     Alt,
     Fail,
+    Retry,
     Cut,
     Try,
     Eval,
@@ -6531,7 +6556,7 @@ enum RequestSelection<R> {
 impl<R> RequestSelection<R> {
     fn arity(&self) -> usize {
         match self {
-            Self::Fail | Self::HeapVolume | Self::PromiseNew => 0,
+            Self::Fail | Self::Retry | Self::HeapVolume | Self::PromiseNew => 0,
             Self::Return
             | Self::Cut
             | Self::Try
@@ -6586,6 +6611,7 @@ impl<R> RequestSelection<R> {
             Self::Seq => Request::Seq(next(), next()),
             Self::Alt => Request::Alt(next(), next()),
             Self::Fail => Request::Fail,
+            Self::Retry => Request::Retry,
             Self::Cut => Request::Cut(next()),
             Self::Try => Request::Try(next()),
             Self::Eval => Request::Eval(next()),
@@ -6984,6 +7010,7 @@ fn select_request_from_whnf<R: Clone>(
     select!(&tags.seq, RequestSelection::Seq);
     select!(&tags.alt, RequestSelection::Alt);
     select!(&tags.fail, RequestSelection::Fail);
+    select!(&tags.retry, RequestSelection::Retry);
     select!(&tags.cut, RequestSelection::Cut);
     select!(&tags.trying, RequestSelection::Try);
     select!(&tags.eval, RequestSelection::Eval);
@@ -7274,6 +7301,7 @@ fn effect_api<R: Clone>(
                 request_function_in(access, tags.alt.clone(), 2, Vec::new(), false),
             ),
             entry("fail", nullary_request(access, tags.fail.clone())),
+            entry("retry", nullary_request(access, tags.retry.clone())),
             entry(
                 "cut",
                 request_function_in(access, tags.cut.clone(), 1, Vec::new(), false),
