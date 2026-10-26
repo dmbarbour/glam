@@ -384,6 +384,14 @@ volume to retry. Dropping the Rust owner does not revoke it.
   end claims nothing. A host interrupts by a machine's path, an
   annotation task's root among them (`EvaluationRuntime::interrupt`), and
   clears an idle subtree by its path (`EvaluationRuntime::clear`).
+  The host's interrupt reaches turns too (`api/runtime/turns.rs`): each
+  run a turn enters is registered, a fork's before its thread starts, and
+  a turn checks, where a cut waits, a read blocks and between an effect's
+  quanta, for an interrupt posted after one of its runs entered, on that
+  run's machine or an ancestor. It fails there with
+  `ErrorKind::Interrupted`, and its result decides whether its machine is
+  in error. Posting one publishes a change, which wakes the turns
+  waiting.
   Recovering a busy child, or clearing a subtree with a busy machine,
   fails having observed it (`ChildBusy`), so it waits as `.child.call`
   does.

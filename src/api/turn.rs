@@ -34,7 +34,7 @@ use bytes::Bytes;
 
 use super::runtime::{
     DIAGNOSTICS, PortAddress, PortJournal, RuntimeEventJournal, RuntimeSharedResources,
-    ShareJournal, Wire, WireEnd,
+    ShareJournal, TurnRun, Wire, WireEnd,
 };
 use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value as HandleValue,
@@ -572,7 +572,7 @@ impl Runtime {
         state.failed &= reach != Reach::Recover;
         let shared: &'env Shared = shared;
         let (state, outcome) = thread::scope(|scope| {
-            let mut machine = Machine::new(shared, scope, path.keys().to_vec(), state);
+            let mut machine = Machine::new(shared, scope, path.keys().to_vec(), state, Vec::new());
             let outcome = machine.take_turn(turn);
             (machine.state, outcome)
         });
@@ -664,6 +664,9 @@ pub struct Machine<'scope, 'env: 'scope> {
     cut_offset: Vec<Key>,
     /// Forks not yet joined, oldest first.
     forks: Vec<PendingFork<'scope>>,
+    /// The runs this turn is within, from the outermost in: a host's
+    /// interrupt reaches the turn through any of them.
+    runs: Vec<Arc<TurnRun>>,
 }
 
 /// A fork's thread, and where its machine returns.
@@ -754,11 +757,28 @@ pub struct Fork<'scope> {
 static NEXT_FORK: AtomicU64 = AtomicU64::new(0);
 
 impl<'scope, 'env> Machine<'scope, 'env> {
+    /// A turn on the machine at `path`, within `runs`, the runs of the turn
+    /// that takes it, if any, to which it adds its own.
     fn new(
         runtime: &'scope Shared,
         scope: &'scope Scope<'scope, 'env>,
         path: Vec<Key>,
         state: MachineState,
+        mut runs: Vec<Arc<TurnRun>>,
+    ) -> Self {
+        let resources = runtime.assembler.evaluation_runtime().shared_resources();
+        runs.push(Arc::new(resources.enter_turn(path.clone())));
+        Self::fork_turn(runtime, scope, path, state, runs)
+    }
+
+    /// A turn on the machine at `path` within `runs`, its own run among
+    /// them, as a fork's is, entered before its thread starts.
+    fn fork_turn(
+        runtime: &'scope Shared,
+        scope: &'scope Scope<'scope, 'env>,
+        path: Vec<Key>,
+        state: MachineState,
+        runs: Vec<Arc<TurnRun>>,
     ) -> Self {
         Self {
             runtime,
@@ -768,6 +788,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             cut: None,
             cut_offset: Vec::new(),
             forks: Vec::new(),
+            runs,
         }
     }
 
@@ -814,6 +835,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 cut: self.cut.take(),
                 cut_offset: std::mem::take(&mut self.cut_offset),
                 forks: Vec::new(),
+                runs: self.runs.clone(),
             };
             let outcome = catch_unwind(AssertUnwindSafe(|| body(&mut inner)));
             let (fork_panic, fork_error) = inner.join_forks();
@@ -880,8 +902,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             None => Vec::new(),
         };
         let child_path = self.path.iter().chain(&path).cloned().collect();
+        let runs = self.runs.clone();
         let (state, cut, outcome) = thread::scope(|scope| {
-            let mut child = Machine::new(runtime, scope, child_path, state);
+            let mut child = Machine::new(runtime, scope, child_path, state, runs);
             child.cut = cut;
             child.cut_offset = cut_offset;
             let outcome = child.take_turn(turn);
@@ -1025,6 +1048,10 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let id = NEXT_FORK.fetch_add(1, Ordering::Relaxed);
         let runtime = self.runtime;
         let fork_path: Vec<Key> = self.path.iter().chain(&path).cloned().collect();
+        // The fork's run enters here, before its thread starts, so that an
+        // interrupt posted meanwhile reaches it.
+        let mut runs = self.runs.clone();
+        runs.push(Arc::new(self.resources().enter_turn(fork_path.clone())));
         let thread = builder.spawn_scoped(self.scope, move || {
             let (state, branch) = taken
                 .lock()
@@ -1033,7 +1060,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .expect("a fork's thread takes its machine once");
             // The fork's turn is a scope of its own, as every turn is.
             let fork_return = thread::scope(|scope| {
-                let mut machine = Machine::new(runtime, scope, fork_path, state);
+                let mut machine = Machine::fork_turn(runtime, scope, fork_path, state, runs);
                 machine.cut = branch;
                 machine.cut_offset = cut_offset;
                 let (outcome, panic) = match machine.take_turn(turn) {
@@ -2968,7 +2995,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                     }
                     _ => continue,
                 },
-                None if wait => self.await_change(&resources, &store, &events),
+                None if wait => self.await_change(&resources, &store, &events)?,
                 None => return Err(short(&address, n)),
             }
         }
@@ -3366,9 +3393,12 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             CutRetry::Now => {}
             CutRetry::AfterChange(journals) => {
                 let (journal, events) = &*journals;
-                self.await_change(&resources, journal, events)
+                self.await_change(&resources, journal, events)?;
             }
             CutRetry::AfterEvaluation(generation, awaited) => {
+                // An interrupt posted during the wait changes the epoch,
+                // which ends it, and the cut's next wait fails here.
+                self.check_interrupt()?;
                 self.await_evaluation(&resources, generation, &awaited);
             }
             CutRetry::Never(error) => return Err(error),
@@ -3583,7 +3613,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         resources: &RuntimeSharedResources,
         journal: &StoreJournal,
         events: &RuntimeEventJournal,
-    ) {
+    ) -> Result<(), Error> {
         loop {
             self.runtime
                 .assembler
@@ -3591,11 +3621,28 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .pump_until_stable();
             match resources.validate_transaction(journal, events) {
                 (StoreCommitResult::Committed, generation) => {
+                    // After the generation is read: an interrupt posted
+                    // since publishes a change, which the wait sees.
+                    self.check_interrupt()?;
                     resources.wait_for_change(generation);
                 }
-                _ => return,
+                _ => return Ok(()),
             }
         }
+    }
+
+    /// Fails with the reason of a host's interrupt that reaches this turn,
+    /// if one does: a check at the turn's waits (`quiescence-is-analyzed`).
+    pub(crate) fn check_interrupt(&self) -> Result<(), Error> {
+        let Some(reason) = self.resources().turn_interrupted(&self.runs) else {
+            return Ok(());
+        };
+        let diagnostic = Diagnostic::from_emission(
+            &self.runtime.assembler.values(),
+            crate::diagnostic::Severity::Error,
+            HandleValue::from_runtime_root(reason),
+        )?;
+        Err(Error::interrupted(diagnostic))
     }
 
     /// Stages an edit within a cut, or commits it at once outside one.

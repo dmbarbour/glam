@@ -35,6 +35,7 @@ mod ports;
 mod readiness;
 mod shares;
 mod states;
+mod turns;
 
 pub use analysis::*;
 pub use events::*;
@@ -52,6 +53,7 @@ pub(crate) use ports::WireEnd;
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire};
 pub use readiness::*;
 pub(in crate::api) use shares::ShareJournal;
+pub(in crate::api) use turns::TurnRun;
 
 fn maintenance_failure_kind(
     kind: RuntimeGcMaintenanceFailureKind,
@@ -218,6 +220,9 @@ pub(crate) struct RuntimeSharedResources {
     /// The child machines' local state, and whether a task runs on each
     /// (`reflection-tasks-are-machine-tasks`).
     machines: machines::MachineCells,
+    /// The runs that turns have in progress, which a host's interrupt
+    /// reaches (`quiescence-is-analyzed`).
+    turns: Arc<turns::TurnRuns>,
     /// Runs once, at the next fulfillment, before it publishes anything, for
     /// ordering tests.
     #[cfg(test)]
@@ -796,6 +801,7 @@ impl EvaluationRuntime {
             work: Arc::downgrade(&work),
             machine_environment: AtomicBool::new(false),
             machines: machines::MachineCells::default(),
+            turns: Arc::default(),
             #[cfg(test)]
             before_fulfillment: Mutex::new(None),
         });
@@ -1617,6 +1623,7 @@ pub(crate) fn compiler_test_runtime() -> EvaluationRuntime {
             work: Arc::downgrade(&work),
             machine_environment: AtomicBool::new(false),
             machines: machines::MachineCells::default(),
+            turns: Arc::default(),
             #[cfg(test)]
             before_fulfillment: Mutex::new(None),
         });

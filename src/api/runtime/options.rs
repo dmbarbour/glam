@@ -20,9 +20,15 @@ impl EvaluationRuntime {
     /// task of each anonymous root there. Each machine whose work it halts
     /// is flagged with `reason`: the machine of each run it stops, each
     /// child that run waits within by call, and the root of each annotation
-    /// task, as the task's failure would flag it. Idle machines are not, and
-    /// a Rust-scheduled run is its host's to stop. Returns the machines it
-    /// flagged, by path.
+    /// task, as the task's failure would flag it. Idle machines are not.
+    /// Returns the machines it flagged, by path.
+    ///
+    /// It reaches turns too, those with a run in progress there when it is
+    /// posted, and what they run within those runs: each fails its next
+    /// wait, a cut waiting for a change, a blocking read, or an effect it
+    /// runs, between quanta, with an [`crate::ErrorKind::Interrupted`] error
+    /// whose diagnostic is `reason`. A turn's machine is in error only where
+    /// the turn ends with that error, so none is among those returned.
     ///
     /// A run is stopped as it waits; one running a quantum stops at the
     /// quantum's end, flagging only its own machine, since nothing of the
@@ -91,6 +97,7 @@ impl EvaluationRuntime {
                 flagged.push(crate::reflection::anonymous_root(task));
             }
         }
+        resources.interrupt_turns(path, reason);
         flagged.sort();
         flagged.dedup();
         Ok(flagged.into_iter().map(MachinePath::from).collect())

@@ -15,6 +15,7 @@ pub struct Error {
     backtrack: bool,
     retry: bool,
     conflict: bool,
+    interrupted: bool,
     /// What an evaluation that waited was waiting on.
     awaited: Option<Awaited>,
 }
@@ -58,6 +59,13 @@ pub enum ErrorKind {
     /// where after [`ErrorKind::Backtrack`] or [`ErrorKind::Retry`] it would
     /// wait for a change.
     Conflict,
+    /// A host's interrupt (`EvaluationRuntime::interrupt`) reached a turn at
+    /// one of its waits: a cut waiting for a change, a blocking read, or an
+    /// effect it runs, between quanta. It ends the cuts it passes, as a
+    /// failure does, and carries the interrupt's reason as its diagnostic.
+    /// Whether the machine is then in error is the turn's to say: it is
+    /// where the turn ends with this error, as with any other.
+    Interrupted,
 }
 
 impl Error {
@@ -72,6 +80,7 @@ impl Error {
             backtrack: false,
             retry: false,
             conflict: false,
+            interrupted: false,
             awaited: None,
         }
     }
@@ -99,6 +108,7 @@ impl Error {
             // unresolved promise, is pushback.
             retry: error.permanent_failure().is_none(),
             conflict: false,
+            interrupted: false,
             awaited: error
                 .unassigned_promise_root()
                 .map(|root| crate::evaluation::WorkDependency::Promise(root.clone()))
@@ -122,6 +132,7 @@ impl Error {
             backtrack: false,
             retry: false,
             conflict: false,
+            interrupted: false,
             awaited: None,
         }
     }
@@ -129,6 +140,8 @@ impl Error {
     pub fn kind(&self) -> ErrorKind {
         if self.panic.is_some() {
             ErrorKind::Panic
+        } else if self.interrupted {
+            ErrorKind::Interrupted
         } else if self.backtrack {
             ErrorKind::Backtrack
         } else if self.retry {
@@ -172,6 +185,16 @@ impl Error {
         Self {
             conflict: true,
             ..Self::new("the transaction conflicted with another's commit")
+        }
+    }
+
+    /// An interrupt that reached a turn ([`ErrorKind::Interrupted`]), with
+    /// its reason as `diagnostic`.
+    pub(crate) fn interrupted(diagnostic: Diagnostic) -> Self {
+        Self {
+            interrupted: true,
+            diagnostic: Some(Arc::new(diagnostic)),
+            ..Self::new("the turn was interrupted")
         }
     }
 

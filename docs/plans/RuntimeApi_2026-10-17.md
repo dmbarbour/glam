@@ -1102,7 +1102,14 @@ handle API goes.
         `machine-env-names` (built 2026-10-26: `env_lookup(path)`,
         `env_overlay()` and `env_clear()`, `env_mixin_set` and
         `env_mixin_get` retiring, the CLI's process share an overlay),
-        `turn-interrupts`, `diagnostics-enriched`,
+        `turn-interrupts` (built 2026-10-26: a registry of the runs turns
+        have in progress, which a host's interrupt reaches, checked where a
+        cut waits, a read blocks and between an effect's quanta, failing
+        with `ErrorKind::Interrupted`; a fork's run enters before its
+        thread starts, so an interrupt posted meanwhile reaches it. The
+        turn `Runtime` has no host options yet, so its tests interrupt
+        through `glam::transition`, until turns join the analysis),
+        `diagnostics-enriched`,
         `effect-run-ports`, then the logger itself.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
         Designed in [Obligations](Obligations_2026-10-25.md), drafted

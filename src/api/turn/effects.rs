@@ -523,6 +523,8 @@ impl Machine<'_, '_> {
         let context = self.runtime.assembler.eval_context();
         let mut route = ExactDemandRoute::default();
         loop {
+            // Between quanta, the effect learns of an interrupt.
+            self.check_interrupt()?;
             match run.poll(STEP_BUDGET) {
                 HostedPoll::BudgetExhausted => {}
                 HostedPoll::Paused(event) => self.effect_cut_event(run, cuts, event)?,
