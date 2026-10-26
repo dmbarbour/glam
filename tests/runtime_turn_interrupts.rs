@@ -15,10 +15,11 @@ fn runtime() -> Runtime {
     Runtime::open(RuntimeConfig::new()).expect("a runtime should open")
 }
 
-/// A cut that waits until the heap defines `go`. It sends `name` as its
+/// A cut that waits until the heap defines `path`. It sends `name` as its
 /// first attempt is undone, before it waits.
-fn gate(
+fn gate_on(
     m: &mut Machine<'_, '_>,
+    path: &str,
     waiting: &mpsc::Sender<&'static str>,
     name: &'static str,
 ) -> Result<(), Error> {
@@ -30,9 +31,18 @@ fn gate(
                 let _ = waiting.send(name);
             })?;
         }
-        m.heap_try_get(["go"])?;
+        m.heap_try_get([path])?;
         m.discard(1)
     })
+}
+
+/// A cut that waits until the heap defines `go`.
+fn gate(
+    m: &mut Machine<'_, '_>,
+    waiting: &mpsc::Sender<&'static str>,
+    name: &'static str,
+) -> Result<(), Error> {
+    gate_on(m, "go", waiting, name)
 }
 
 #[test]
@@ -51,9 +61,10 @@ fn an_interrupt_reaches_the_runs_in_progress_at_or_below_its_machine() {
         let reached = p.fork(["b", "c"], move |c| {
             let error = gate(c, &reached_waiting, "c").expect_err("the interrupt ends the wait");
             assert_eq!(error.kind(), ErrorKind::Interrupted);
-            // Its signal goes nowhere: the parent waits on others.
+            // It waits on what nothing defines, so only the interrupt ends
+            // it, whenever the parent defines `go`; its signal goes nowhere.
             let (quiet, _) = mpsc::channel();
-            let nested = c.run("x", |x| gate(x, &quiet, "x"));
+            let nested = c.run("x", |x| gate_on(x, "never", &quiet, "x"));
             assert_eq!(
                 nested
                     .expect_err("a run within a reached one is reached")

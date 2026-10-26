@@ -530,7 +530,7 @@ fn count(name: &str, key: &Key) -> Result<usize, TaskHalt> {
 }
 
 /// `'on` or `'off`.
-fn setting(name: &str, key: &Key) -> Result<bool, TaskHalt> {
+pub(crate) fn setting(name: &str, key: &Key) -> Result<bool, TaskHalt> {
     if *key == Key::atom_from_text("on") {
         Ok(true)
     } else if *key == Key::atom_from_text("off") {
@@ -541,7 +541,7 @@ fn setting(name: &str, key: &Key) -> Result<bool, TaskHalt> {
 }
 
 /// A wire's end: `in:Port`, `out:Port` or `child:{key:Key, port:Port}`.
-fn endpoint(name: &str, key: &Key) -> Result<WireEnd, TaskHalt> {
+pub(crate) fn endpoint(name: &str, key: &Key) -> Result<WireEnd, TaskHalt> {
     let wrong = || {
         TaskHalt::new(format!(
             "`{name}` takes `in:Port`, `out:Port` or `child:{{key:Key, port:Port}}`"
@@ -578,7 +578,7 @@ fn endpoint(name: &str, key: &Key) -> Result<WireEnd, TaskHalt> {
 }
 
 /// A wire's end as the key `endpoint` reads.
-fn endpoint_key(end: WireEnd) -> Key {
+pub(crate) fn endpoint_key(end: WireEnd) -> Key {
     let tagged = |tag: &str, value: Key| Key::Dict(Arc::from([(Key::atom_from_text(tag), value)]));
     match end {
         WireEnd::In(port) => tagged("in", port),

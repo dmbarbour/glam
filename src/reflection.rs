@@ -43,7 +43,10 @@ pub use token_parse::{TokenCandidate, TokenExpectation, TokenRun, run_token_pars
 
 pub(crate) use requests::anonymous_root;
 pub(crate) use requests::is_anonymous_key;
-pub(crate) use requests::{KeyListRequestWork, PreparationPoll, parse_evaluated_severity};
+pub(crate) use requests::{
+    KeyConversionRequestWork, KeyListRequestWork, PreparationPoll, endpoint, endpoint_key,
+    parse_evaluated_severity, setting,
+};
 pub use requests::{
     Machines, ReflectionHost, ReflectionJournal, ReflectionRequest, ReflectionRequestWork,
     ReflectionServices, ReflectionTransaction, environment_diagnostic_request_specs,

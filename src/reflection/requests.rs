@@ -20,6 +20,7 @@ use super::store::StoreJournal;
 mod port_requests;
 
 use port_requests::{PortRequest, PortRequestWork};
+pub(crate) use port_requests::{endpoint, endpoint_key, setting};
 
 /// Requests shared by every full reflection task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -215,7 +216,7 @@ pub(crate) struct ValuePathRequestWork {
     awaiting: bool,
 }
 
-struct KeyConversionRequestWork {
+pub(crate) struct KeyConversionRequestWork {
     state: KeyConversionRequestState,
 }
 
@@ -1567,13 +1568,13 @@ impl ValuePathRequestWork {
 }
 
 impl KeyConversionRequestWork {
-    fn new(value: Value) -> Self {
+    pub(crate) fn new(value: Value) -> Self {
         Self {
             state: KeyConversionRequestState::Demand(value),
         }
     }
 
-    fn poll<S: TaskSpecialization>(
+    pub(crate) fn poll<S: TaskSpecialization>(
         &mut self,
         input: Option<SpecializationRequestInput>,
         context: &RequestContext<'_, S>,

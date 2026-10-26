@@ -902,3 +902,74 @@ fn a_cut_that_fails_on_a_try_s_wait_parks_until_the_promise_is_kept() {
         .expect("the turn should succeed");
     assert_eq!(text, "kept");
 }
+
+#[test]
+fn an_effect_reads_writes_and_puts_back_on_the_turn_machine_s_ports() {
+    // `machines-communicate-through-wired-ports`: ports pass through to the
+    // machine of the turn running the effect, as its own methods do.
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let seen = rt
+        .run("p", |p| {
+            p.wire_add(
+                glam::Endpoint::child("a", "out"),
+                glam::Endpoint::child("b", "in"),
+            )?;
+            p.run("a", |a| {
+                run(a, ".port.write 'out [1, 2]", &mut Standard)?;
+                a.discard(1)
+            })?;
+            p.run("b", |b| {
+                run(
+                    b,
+                    ".port.read 'in 1 >>= (\\x -> .port.unread 'in [0] =>> .port.available 'in >>= (\\n -> .port.pending >>= (\\pending -> .port.read 'in 2 >>= (\\rest -> .r (std.list.concat [x, [n, pending.in], rest])))))",
+                    &mut Standard,
+                )?;
+                b.list_unpack(5)?;
+                (0..5).map(|_| b.int_pop()).collect::<Result<Vec<_>, _>>()
+            })
+        })
+        .expect("the turn should succeed");
+    assert_eq!(
+        seen,
+        [2, 0, 2, 2, 1],
+        "read, put back ahead of what was left, counted, read again"
+    );
+}
+
+#[test]
+fn an_effect_wires_and_asks_on_the_turn_machine_s_ports() {
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let (listed, answer, delivered) = rt
+        .run("p", |p| {
+            run(
+                p,
+                ".wire.add (out:'o) (child:{key:'c, port:'i}) =>> .wire.defaults 'off =>> .wire.list >>= (\\w -> .wire.del (out:'o) (child:{key:'c, port:'i}) =>> .wire.list >>= (\\after -> .wire.defaults 'on =>> .r [std.list.len w.wires, std.list.len after.wires, w.defaults]))",
+                &mut Standard,
+            )?;
+            p.list_unpack(3)?;
+            let defaults = p.atom_pop()?;
+            let after = p.int_pop()?;
+            let listed = (p.int_pop()?, after, defaults);
+            run(
+                p,
+                ".wire.add (out:'q) (in:'q) =>> .port.ask 'q 41 >>= (\\reply -> .port.read 'q 1 >>= (\\asked -> .promise.fulfill (std.list.head asked).reply ((std.list.head asked).request + 1) =>> std.seq reply (.r reply)))",
+                &mut Standard,
+            )?;
+            let answer = p.int_pop()?;
+            run(
+                p,
+                ".wire.add (out:'o) (child:{key:'c, port:'i}) =>> .port.write 'o [7]",
+                &mut Standard,
+            )?;
+            p.discard(1)?;
+            let delivered = p.run("c", |c| {
+                c.port_read("i", 1)?;
+                c.int_pop()
+            })?;
+            Ok((listed, answer, delivered))
+        })
+        .expect("the turn should succeed");
+    assert_eq!(listed, (1, 0, "off".to_owned()), "listed, then unwired");
+    assert_eq!(answer, 42, "a request travels with its reply's promise");
+    assert_eq!(delivered, 7);
+}

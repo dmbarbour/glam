@@ -1114,7 +1114,11 @@ handle API goes.
         returns what the port holds, and the CLI's fallback reads a port's
         message as a renderer, evaluating its severity, source and line;
         the logger host's own output transport retires with it),
-        `effect-run-ports`, then the logger itself.
+        `effect-run-ports` (built 2026-10-26: `EffectFamilies::PORTS`,
+        `.port.*` and `.wire.*` passing through to the turn's machine as
+        its own methods serve them; a port, a wire's end or a setting
+        converts to a key before the request parks, by the conversion
+        reflection's port requests use), then the logger itself.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
         Designed in [Obligations](Obligations_2026-10-25.md), drafted
         2026-10-25 for review, decided the same day (acceptance explicit,

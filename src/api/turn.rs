@@ -1418,6 +1418,16 @@ impl<'scope, 'env> Machine<'scope, 'env> {
     /// it with them, the first deepest: `[a1 … an] -- a1 … an`, the twin of
     /// [`Self::list_pack`]. Any other list fails, changing nothing.
     pub fn list_unpack(&mut self, n: usize) -> Result<(), Error> {
+        self.unpack_list(Some(n)).map(|_| ())
+    }
+
+    /// As [`Self::list_unpack`], for a list of any length: returns how many
+    /// items it holds. The items stay as they are, unevaluated.
+    pub(crate) fn list_unpack_all(&mut self) -> Result<usize, Error> {
+        self.unpack_list(None)
+    }
+
+    fn unpack_list(&mut self, n: Option<usize>) -> Result<usize, Error> {
         let values = self.runtime.assembler.values();
         let items = self.peek_evaluated(
             |value| values.anno_array(value),
@@ -1425,7 +1435,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 let items = evaluated
                     .array_items()?
                     .ok_or_else(|| Error::new("the top value is not a list"))?;
-                if items.len() != n {
+                if let Some(n) = n
+                    && items.len() != n
+                {
                     return Err(Error::new(format!(
                         "the list holds {} items, not {n}",
                         items.len()
@@ -1435,8 +1447,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             },
         )?;
         self.pop()?;
+        let count = items.len();
         self.state.stack.extend(items);
-        Ok(())
+        Ok(count)
     }
 
     /// `xs ys -- xs ++ ys`, lazily.
@@ -3619,11 +3632,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .assembler
                 .evaluation_runtime()
                 .pump_until_stable();
+            // The generation is read before the check, which comes before
+            // validation: an interrupt posted before the check ends the
+            // wait, whatever else changed, and one posted after it
+            // publishes a change past the generation, which ends the wait.
+            let generation = resources.observations.current().get();
+            self.check_interrupt()?;
             match resources.validate_transaction(journal, events) {
-                (StoreCommitResult::Committed, generation) => {
-                    // After the generation is read: an interrupt posted
-                    // since publishes a change, which the wait sees.
-                    self.check_interrupt()?;
+                (StoreCommitResult::Committed, _) => {
                     resources.wait_for_change(generation);
                 }
                 _ => return Ok(()),

@@ -8,10 +8,13 @@
 //! and the turn keeps a way back to its state for each alternative the
 //! effect sets aside: its cuts are the turn's transactions.
 
+use std::collections::VecDeque;
 use std::ops::BitOr;
 use std::sync::{Arc, Mutex, PoisonError};
 
-use super::{CutCheckpoint, CutRetry, DIAGNOSTICS, Machine, TransactionStart};
+use super::{
+    CutCheckpoint, CutRetry, DIAGNOSTICS, DiagnosticsWiring, Endpoint, Machine, TransactionStart,
+};
 use crate::api::{Diagnostic, Error, ErrorKind, PromiseResolver, Value as HandleValue};
 use crate::core::{EvaluationHalt, Key};
 use crate::core_net::CoreWaitToken;
@@ -20,9 +23,9 @@ use crate::evaluation::{
 };
 use crate::reflection::{
     EffectRequestSpec, HostControl, HostedEffectRun, HostedPoll, IsolatedTaskHost,
-    KeyListRequestWork, PreparationPoll, RequestContext, RequestResult, SpecializationRequestInput,
-    SpecializationRequestPoll, SpecializationRequestWork, TaskHalt, TaskSpecialization,
-    parse_evaluated_severity,
+    KeyConversionRequestWork, KeyListRequestWork, PreparationPoll, RequestContext, RequestResult,
+    SpecializationRequestInput, SpecializationRequestPoll, SpecializationRequestWork, TaskHalt,
+    TaskSpecialization, parse_evaluated_severity,
 };
 
 /// Steps the effect's evaluation takes between looks at what it asked for.
@@ -57,8 +60,12 @@ impl EffectFamilies {
     pub const LOG: Self = Self(1 << 2);
     /// `.env.lookup path`, from the machine's environment.
     pub const ENV: Self = Self(1 << 3);
+    /// `.port.*` and `.wire.*`, on the machine's ports and the wiring it
+    /// owns (`machines-communicate-through-wired-ports`).
+    pub const PORTS: Self = Self(1 << 4);
     /// Every family.
-    pub const ALL: Self = Self(Self::HEAP.0 | Self::PROMISES.0 | Self::LOG.0 | Self::ENV.0);
+    pub const ALL: Self =
+        Self(Self::HEAP.0 | Self::PROMISES.0 | Self::LOG.0 | Self::ENV.0 | Self::PORTS.0);
 
     /// Whether these families include all of `families`.
     pub const fn contains(self, families: Self) -> bool {
@@ -139,19 +146,41 @@ enum Standard {
     EnvLookup,
     EnvOverlay,
     EnvClear,
+    PortRead,
+    PortUnread,
+    PortWrite,
+    PortAvailable,
+    PortPending,
+    PortAsk,
+    WireAdd,
+    WireDel,
+    WireList,
+    WireDefaults,
+}
+
+/// Which of a standard request's arguments the effect machine converts to
+/// keys before the request parks.
+#[derive(Clone, Copy)]
+enum KeyArguments {
+    None,
+    /// The argument at this index, a path of keys.
+    Path(usize),
+    /// The leading arguments, this many, each one key: a port, a wire's
+    /// end or a setting.
+    Leading(usize),
 }
 
 /// A standard request's family, its name in the effect's API, its arity,
-/// and which of its arguments, if any, is a path of keys.
+/// and which of its arguments are keys.
 struct Shape {
     family: EffectFamilies,
     name: &'static [&'static str],
     arity: usize,
-    path: Option<usize>,
+    keys: KeyArguments,
 }
 
 impl Standard {
-    const ALL: [Self; 20] = [
+    const ALL: [Self; 30] = [
         Self::HeapGet,
         Self::HeapSet,
         Self::HeapRewrite,
@@ -172,14 +201,30 @@ impl Standard {
         Self::EnvLookup,
         Self::EnvOverlay,
         Self::EnvClear,
+        Self::PortRead,
+        Self::PortUnread,
+        Self::PortWrite,
+        Self::PortAvailable,
+        Self::PortPending,
+        Self::PortAsk,
+        Self::WireAdd,
+        Self::WireDel,
+        Self::WireList,
+        Self::WireDefaults,
     ];
 
     fn shape(self) -> Shape {
-        let shape = |family, name, arity, path| Shape {
+        let shape = |family, name, arity, path: Option<usize>| Shape {
             family,
             name,
             arity,
-            path,
+            keys: path.map_or(KeyArguments::None, KeyArguments::Path),
+        };
+        let keyed = |name, arity, leading| Shape {
+            family: EffectFamilies::PORTS,
+            name,
+            arity,
+            keys: KeyArguments::Leading(leading),
         };
         use EffectFamilies as F;
         match self {
@@ -203,6 +248,16 @@ impl Standard {
             Self::EnvLookup => shape(F::ENV, &["env", "lookup"], 1, Some(0)),
             Self::EnvOverlay => shape(F::ENV, &["env", "overlay"], 1, None),
             Self::EnvClear => shape(F::ENV, &["env", "clear"], 0, None),
+            Self::PortRead => keyed(&["port", "read"], 2, 1),
+            Self::PortUnread => keyed(&["port", "unread"], 2, 1),
+            Self::PortWrite => keyed(&["port", "write"], 2, 1),
+            Self::PortAvailable => keyed(&["port", "available"], 1, 1),
+            Self::PortPending => keyed(&["port", "pending"], 0, 0),
+            Self::PortAsk => keyed(&["port", "ask"], 2, 1),
+            Self::WireAdd => keyed(&["wire", "add"], 2, 2),
+            Self::WireDel => keyed(&["wire", "del"], 2, 2),
+            Self::WireList => keyed(&["wire", "list"], 0, 0),
+            Self::WireDefaults => keyed(&["wire", "defaults"], 1, 1),
         }
     }
 
@@ -233,19 +288,19 @@ enum TurnRequest {
 }
 
 impl TurnRequest {
-    /// Which of the request's arguments is a path of keys, which the effect
-    /// machine converts before the request parks.
-    fn path(self) -> Option<usize> {
+    /// Which of the request's arguments are keys, which the effect machine
+    /// converts before the request parks.
+    fn key_arguments(self) -> KeyArguments {
         match self {
-            Self::Standard(standard) => standard.shape().path,
-            Self::Provider(_) => None,
+            Self::Standard(standard) => standard.shape().keys,
+            Self::Provider(_) => KeyArguments::None,
         }
     }
 }
 
 /// A request the effect made, which waits for the turn's answer: its
-/// arguments, with a path argument converted to `path`, and for the
-/// provider's own requests, the branch's state.
+/// arguments, with those that are keys converted to `path`, a path or
+/// leading keys, and for the provider's own requests, the branch's state.
 struct Parked {
     request: TurnRequest,
     state: Option<HandleValue>,
@@ -320,6 +375,15 @@ enum TurnRequestWork {
         path: KeyListRequestWork,
         slot: SharedSlot,
     },
+    /// Converting the request's leading arguments to keys, one each.
+    Keys {
+        request: TurnRequest,
+        pending: VecDeque<HandleValue>,
+        converting: KeyConversionRequestWork,
+        keys: Vec<Key>,
+        arguments: Vec<HandleValue>,
+        slot: SharedSlot,
+    },
     /// Waiting on the promise the turn fulfills once it has answered.
     Parked(SharedSlot),
     /// Evaluating the state the provider answered with, which the branch
@@ -365,8 +429,8 @@ impl SpecializationRequestWork<TurnEffects> for TurnRequestWork {
                 request,
                 mut arguments,
                 slot,
-            } => match request.path() {
-                Some(index) => {
+            } => match request.key_arguments() {
+                KeyArguments::Path(index) => {
                     let path = KeyListRequestWork::new(arguments.remove(index));
                     *self = Self::Path {
                         request,
@@ -376,8 +440,55 @@ impl SpecializationRequestWork<TurnEffects> for TurnRequestWork {
                     };
                     Ok(SpecializationRequestPoll::Continue)
                 }
-                None => Ok(self.park(context, request, Vec::new(), arguments, slot)),
+                KeyArguments::Leading(count) if count > 0 => {
+                    let mut pending: VecDeque<_> = arguments.drain(..count).collect();
+                    let first = pending.pop_front().expect("one key at least");
+                    *self = Self::Keys {
+                        request,
+                        pending,
+                        converting: KeyConversionRequestWork::new(first),
+                        keys: Vec::new(),
+                        arguments,
+                        slot,
+                    };
+                    Ok(SpecializationRequestPoll::Continue)
+                }
+                KeyArguments::Leading(_) | KeyArguments::None => {
+                    Ok(self.park(context, request, Vec::new(), arguments, slot))
+                }
             },
+            Self::Keys {
+                request,
+                mut pending,
+                mut converting,
+                mut keys,
+                arguments,
+                slot,
+            } => {
+                let poll = match converting.poll(input, context)? {
+                    PreparationPoll::Progress => SpecializationRequestPoll::Continue,
+                    PreparationPoll::Demand(value) => SpecializationRequestPoll::Demand(value),
+                    PreparationPoll::Ready(key) => {
+                        keys.push(key);
+                        match pending.pop_front() {
+                            Some(next) => {
+                                converting = KeyConversionRequestWork::new(next);
+                                SpecializationRequestPoll::Continue
+                            }
+                            None => return Ok(self.park(context, request, keys, arguments, slot)),
+                        }
+                    }
+                };
+                *self = Self::Keys {
+                    request,
+                    pending,
+                    converting,
+                    keys,
+                    arguments,
+                    slot,
+                };
+                Ok(poll)
+            }
             Self::Path {
                 request,
                 arguments,
@@ -811,6 +922,80 @@ impl Machine<'_, '_> {
             }
             Standard::EnvClear => {
                 self.env_clear()?;
+                self.unit_push();
+            }
+            Standard::PortRead => {
+                let count = usize::try_from(self.int_pop()?)
+                    .map_err(|_| Error::new("`.port.read` reads a natural number of values"))?;
+                self.port_read(path[0].clone(), count)?;
+                self.list_pack(count)?;
+            }
+            Standard::PortUnread => {
+                let count = self.list_unpack_all()?;
+                self.port_unread(path[0].clone(), count)?;
+                self.unit_push();
+            }
+            Standard::PortWrite => {
+                let count = self.list_unpack_all()?;
+                self.port_write(path[0].clone(), count)?;
+                self.unit_push();
+            }
+            Standard::PortAvailable => {
+                let count = self.port_available(path[0].clone());
+                self.int_push(i64::try_from(count).expect("a port's count fits an integer"));
+            }
+            Standard::PortPending => {
+                let pending = self.port_pending();
+                for (_, count) in &pending {
+                    self.int_push(i64::try_from(*count).expect("a port's count fits an integer"));
+                }
+                self.dict_pack(pending.into_iter().map(|(port, _)| port))?;
+            }
+            Standard::PortAsk => self.port_ask(path[0].clone())?,
+            Standard::WireAdd | Standard::WireDel => {
+                let add = matches!(standard, Standard::WireAdd);
+                let name = if add { ".wire.add" } else { ".wire.del" };
+                let end = |key: &Key| {
+                    crate::reflection::endpoint(name, key)
+                        .map(Endpoint)
+                        .map_err(|halt| Error::new(halt.to_string()))
+                };
+                let (source, destination) = (end(&path[0])?, end(&path[1])?);
+                if add {
+                    self.wire_add(source, destination)?;
+                } else {
+                    self.wire_del(source, destination)?;
+                }
+                self.unit_push();
+            }
+            Standard::WireList => {
+                let wiring = self.wire_list();
+                let values = self.runtime.assembler.values();
+                let wires = |pairs: &[(Endpoint, Endpoint)]| {
+                    let key = |end: &Endpoint| {
+                        values.key(&crate::reflection::endpoint_key(end.0.clone()))
+                    };
+                    let records = pairs
+                        .iter()
+                        .map(|(from, to)| values.record([("from", key(from)), ("to", key(to))]))
+                        .collect::<Result<Vec<_>, _>>()?;
+                    values.list(records)
+                };
+                let defaults = match wiring.default_wiring() {
+                    DiagnosticsWiring::ToRoot => "on",
+                    DiagnosticsWiring::None => "off",
+                };
+                let record = values.record([
+                    ("wires", wires(wiring.wires())?),
+                    ("defaults", values.atom_from_text(defaults)),
+                    ("unwired", wires(wiring.unwired_defaults())?),
+                ])?;
+                self.push(record);
+            }
+            Standard::WireDefaults => {
+                let enabled = crate::reflection::setting(".wire.defaults", &path[0])
+                    .map_err(|halt| Error::new(halt.to_string()))?;
+                self.wire_defaults(enabled)?;
                 self.unit_push();
             }
         }
