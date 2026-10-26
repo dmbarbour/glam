@@ -398,6 +398,25 @@ volume to retry. Dropping the Rust owner does not revoke it.
   journal so a child in error fails it at once, and answers
   `RequestResult::Await` on the reply, which waits for it and fails with
   the task's failure.
+- `.port.*` and `.wire.*` act on the ports of the machine the branch runs
+  on, as a turn's do on its machine
+  (`machines-communicate-through-wired-ports`; `requests/port_requests.rs`):
+  `.port.read Port N` answers a list, `.port.write Port List`,
+  `.port.available Port` and `.port.pending` (a dict from port to count)
+  read and send through the event journal, and `.port.ask Port Request`
+  writes `{request, reply}` and answers the reply's promise; `.wire.add`
+  and `.wire.del` take endpoints `in:Port`, `out:Port` or
+  `child:{key:Key, port:Port}`, `.wire.list` answers `{wires, defaults,
+  unwired}`, and `.wire.defaults` takes `'on` or `'off`, glam's booleans
+  being pass/fail effects. A read of too few values is pushback
+  (`RequestResult::Pushback`), a branch outcome of its own that no
+  alternative or fallback takes: it ends each cut's attempt up to the
+  outermost, which waits for what it observed to change, a `.try`
+  answering `wait` on the way; outside every cut, the branch, whose effect
+  is still the request, blocks until the host's generation passes the one
+  the request read, then runs the request again. A cut's attempt resets
+  its pushback, so a rerun that fails for real falls back as any failure
+  does. A write to an output with no wire is an error.
 
 The immutable environment conventionally contains assembler-owned `glam`
 identity plus client context. `glam.reasoning.role` distinguishes assembler,

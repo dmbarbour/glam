@@ -1501,6 +1501,10 @@ fn assert_execution_root_inventory(
         BranchOutcome::Fail(branch) | BranchOutcome::Retry(branch) => {
             let _: &Branch<TestEffects> = branch;
         }
+        BranchOutcome::Pushback(branch, generation) => {
+            let _: &Branch<TestEffects> = branch;
+            let _: &u64 = generation;
+        }
         BranchOutcome::Cancelled => {}
     }
 
@@ -1516,7 +1520,9 @@ fn assert_execution_root_inventory(
         retry,
         observed_failure,
         trying,
+        pushback,
     } = cut;
+    let _: &Option<u64> = pushback;
     let _: &Option<Branch<TestEffects>> = fallback;
     let _: &RuntimeValueRoot = operation;
     let _ = (
@@ -3535,6 +3541,7 @@ fn execution_work_and_cut_payloads_retain_roots_until_retirement() {
         retry: None,
         observed_failure: false,
         trying: false,
+        pushback: None,
     };
     domain.collect_and_drain_retired_external_owners_for_test();
     assert!(retained.upgrade().is_some());

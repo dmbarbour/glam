@@ -1041,6 +1041,20 @@ handle API goes.
         under `refl`.
       - `api-refl-ports`: `.port.*`, `.wire.*` and `.env.set`, `.env.mine`
         and `.env.clear` for tasks.
+        Ports and wiring built 2026-10-26 (`refl-ports`): the effects the
+        reflection model maps, on the branch's machine, with pushback as
+        the ports ADR decides it, a request result and branch outcome of
+        its own that no alternative or fallback takes, waited out by the
+        outermost cut, answered as `wait` by a `.try`, and blocking a read
+        outside every cut until what it read changes. Choices of the
+        implementer: `.port.pending` answers a dict from port to count,
+        `.wire.list` a record `{wires:[{from, to}], defaults, unwired}`,
+        and `.wire.defaults` takes `'on` or `'off`, since glam's booleans
+        are pass/fail effects. The test forces each wait by a heap gate;
+        building it found two faults, a cut's pushback surviving into its
+        rerun and a fallback consumed by a pushback, both fixed and
+        mutation-checked. The `.env` shares follow; `.retry` stays a
+        candidate (`api-refl-retry`), and would reuse the pushback outcome.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
         Designed in [Obligations](Obligations_2026-10-25.md), drafted
         2026-10-25 for review, decided the same day (acceptance explicit,

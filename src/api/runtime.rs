@@ -48,7 +48,8 @@ pub(in crate::api) use events::{
 pub(crate) use machines::{
     break_replies, clear_child_machines, machine_diagnostic, reason_diagnostic,
 };
-pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire, WireEnd};
+pub(crate) use ports::WireEnd;
+pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire};
 pub use readiness::*;
 pub(in crate::api) use shares::ShareJournal;
 

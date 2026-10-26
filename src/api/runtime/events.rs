@@ -8,7 +8,7 @@ use rpds::RedBlackTreeMapSync;
 
 use super::accepted::{AcceptedJournal, AcceptedRecord};
 use super::flags::{FlagJournal, FlagRecord};
-use super::ports::{IMPORTS, PortAddress, PortJournal, PortState};
+use super::ports::{IMPORTS, PortAddress, PortJournal, PortState, Wire, WireEnd};
 use super::shares::{ShareJournal, ShareRecord};
 use super::states::{StateJournal, StateRecord};
 use super::{RuntimeSharedResources, publish_runtime_observation};
@@ -406,6 +406,14 @@ pub struct RuntimeEventJournal {
     pub(in crate::api) accepted: AcceptedJournal,
 }
 
+/// The wiring a machine owns, as [`RuntimeEventJournal::owned_wiring`]
+/// reads it.
+pub(crate) struct OwnedWires {
+    pub(crate) wires: Vec<(WireEnd, WireEnd)>,
+    pub(crate) defaults: bool,
+    pub(crate) removed_defaults: Vec<(WireEnd, WireEnd)>,
+}
+
 /// A run an interrupt stopped: its machine, its item's sequence in the
 /// machine's queue, its task's record, and the children its task waited
 /// within by call, which the interrupt flagged with it.
@@ -567,6 +575,101 @@ impl RuntimeEventJournal {
         }
         self.flags.clear(machine.to_vec());
         Some(self.ports.claim_all(&task_address(machine.to_vec())))
+    }
+
+    /// Takes the next `n` values of the input `port` of the machine at
+    /// `machine`, in the order they arrived, observing the port; `None`,
+    /// taking nothing, where fewer are there, which is pushback
+    /// (`machines-communicate-through-wired-ports`).
+    pub(crate) fn take_from_port(
+        &mut self,
+        machine: &[Key],
+        port: Key,
+        n: usize,
+    ) -> Option<Vec<Value>> {
+        self.ports.claim(
+            &PortAddress {
+                machine: machine.to_vec(),
+                port,
+            },
+            n,
+        )
+    }
+
+    /// How many values the input `port` of the machine at `machine` holds
+    /// beyond what this journal took, observed.
+    pub(crate) fn port_count(&mut self, machine: &[Key], port: Key) -> usize {
+        self.ports.available(&PortAddress {
+            machine: machine.to_vec(),
+            port,
+        })
+    }
+
+    /// The inputs of the machine at `machine` that hold values beyond what
+    /// this journal took, with how many, in port order, observed.
+    pub(crate) fn ports_pending(&mut self, machine: &[Key]) -> Vec<(Key, usize)> {
+        self.ports.pending(machine)
+    }
+
+    /// Sends `values`, in order, from the output `port` of the machine at
+    /// `machine` to every buffer its wiring reaches. An output with no wire
+    /// is an error, which sends nothing.
+    pub(crate) fn send_from_port(
+        &mut self,
+        machine: &[Key],
+        port: &Key,
+        values: &[Value],
+    ) -> Result<(), String> {
+        let buffers = self.ports.route(machine, port)?;
+        for value in values {
+            for buffer in &buffers {
+                self.ports.append(buffer.clone(), value.clone());
+            }
+        }
+        Ok(())
+    }
+
+    /// Adds, or removes, the wire from `source` to `destination` that the
+    /// machine at `owner` owns.
+    pub(crate) fn set_wire(
+        &mut self,
+        owner: &[Key],
+        source: WireEnd,
+        destination: WireEnd,
+        present: bool,
+    ) {
+        let wire = Wire {
+            source,
+            destination,
+        };
+        if present {
+            self.ports.wire(owner.to_vec(), wire);
+        } else {
+            self.ports.unwire(owner.to_vec(), wire);
+        }
+    }
+
+    /// The wiring the machine at `owner` owns: its wires, whether the
+    /// default rule applies to it, and the default wires it removed.
+    pub(crate) fn owned_wiring(&mut self, owner: &[Key]) -> OwnedWires {
+        let pairs = |wires: Vec<Wire>| {
+            wires
+                .into_iter()
+                .map(|wire| (wire.source, wire.destination))
+                .collect()
+        };
+        let owned = self.ports.owned_wiring(owner);
+        OwnedWires {
+            wires: pairs(owned.wires),
+            defaults: owned.defaults,
+            removed_defaults: pairs(owned.suppressed),
+        }
+    }
+
+    /// Turns the default rule for the wires the machine at `owner` owns on
+    /// or off.
+    pub(crate) fn set_wire_defaults(&mut self, owner: &[Key], enabled: bool) {
+        self.ports.set_defaults(owner.to_vec(), enabled);
     }
 
     /// Returns the child machine at `machine` and its descendants, none of

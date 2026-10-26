@@ -3050,6 +3050,78 @@ gate = anno refl:(.heap.set ['gate] ()) ()
     );
 }
 
+#[test]
+fn a_task_s_ports_carry_what_its_parent_wires() {
+    // `machines-communicate-through-wired-ports`: a parent wires its own
+    // ports and its children's. A read of too few values is pushback: no
+    // alternative takes it, a `.try` answers its wait, the outermost cut
+    // waits for the port, and outside every cut the read waits; a cut that
+    // pushed back, then fails once its read succeeds, falls back. A request
+    // travels with its reply's promise; a write with no wire is an error.
+    let source = r#"language g0
+import 'std
+flow = anno refl:(.child.task 'm (.wire.add (child:{key:'p, port:'out}) (child:{key:'c, port:'in}) =>> .wire.add (out:'o) (child:{key:'r, port:'in}) =>> .wire.add (out:'o) (child:{key:'f, port:'in}) =>> .wire.add (out:'o) (child:{key:'g, port:'in}) =>> .wire.add (out:'q) (child:{key:'s, port:'in}) =>> .child.task 'c (.port.read 'in 2) >>= (\read -> .child.task 'r (.try (.port.read 'in 1) >>= (\tried -> .cut (.alt (.cut (.port.read 'in 1)) (.r ["an alternative"])) >>= (\got -> .r {tried:tried, got:got}))) >>= (\pushed -> .child.task 'f (.alt (.cut (.port.read 'in 1)) (.r ["a fallback"])) >>= (\fell -> .child.task 'g (.alt (.cut (.port.read 'in 1 >>= (\_ -> .fail))) (.r "fell back")) >>= (\failed -> .child.task 's (.port.read 'in 1 >>= (\asked -> .promise.fulfill (list.head asked).reply ((list.head asked).request + 1))) >>= (\_ -> .port.ask 'q 41 >>= (\answer -> .child.task 'p (.cut (.heap.try_get ['go]) =>> .port.write 'out [1, 2]) >>= (\_ -> .cut (.heap.try_get ['go]) =>> .port.write 'o [7] =>> seq read (seq pushed (seq fell (seq failed (seq answer (.heap.set ['flow] (if [read, pushed.got, fell, failed, answer] == [[1, 2], [7], [7], "fell back", 42] then (if dict.defines ['wait] pushed.tried then "carried" else "tried without waiting") else "lost")))))))))))))) >>= (\_ -> .heap.set ['queued] ())) ()
+go = anno refl:(.heap.set ['go] ()) ()
+counted = anno refl:(.child.task 'k (.wire.add (out:'x) (in:'x) =>> .port.write 'x [1, 2, 3] =>> .port.available 'x >>= (\n -> .port.pending >>= (\pending -> .port.read 'x 1 >>= (\_ -> .port.available 'x >>= (\left -> .r [n, pending.x, left]))))) >>= (\p -> seq p (.heap.set ['counted] (if p == [3, 3, 2] then "counted" else "miscounted")))) ()
+wiring = anno refl:(.child.task 'w (.wire.add (out:'a) (child:{key:'z, port:'b}) =>> .wire.defaults 'off =>> .wire.list >>= (\before -> .wire.del (out:'a) (child:{key:'z, port:'b}) =>> .wire.list >>= (\after -> .r [before.defaults, list.len before.wires, list.len after.wires]))) >>= (\p -> seq p (.heap.set ['wiring] (if p == ['off, 1, 0] then "listed" else "unlisted")))) ()
+unwired = anno refl:(.child.task 'u (.port.write 'nowhere [1]) >>= (\p -> .try (seq p (.r ())) >>= (\r -> .heap.set ['unwired] (if dict.defines ['err] r then "refused" else "sent")))) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["ports"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    for name in ["flow", "counted", "wiring", "unwired"] {
+        let value = assembler.get(module.value(), name).unwrap_or_else(|error| {
+            panic!(
+                "{name}: {}",
+                error
+                    .diagnostic(&assembler.values())
+                    .unwrap()
+                    .rendered_text_for_test(&assembler.values())
+            )
+        });
+        assembler
+            .evaluate(&value)
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    let _ = assembler.drain_reasoning();
+    let heap = assembler.test_reflection_heap();
+    let text = |name: &str| {
+        assembler.get(&heap, name).ok().map(|value| {
+            String::from_utf8_lossy(&assembler.to_binary(&value).unwrap()).into_owned()
+        })
+    };
+    assert_eq!(text("flow"), None, "the writer waits for its gate");
+    let analysis = assembler.evaluation_runtime().analysis().unwrap();
+    assert!(analysis.quiescent());
+    assert!(
+        analysis
+            .waits()
+            .iter()
+            .filter(|wait| wait
+                .machine()
+                .is_some_and(|machine| machine.keys().last() == Some(&Key::atom_from_text("r"))))
+            .all(|wait| wait.family() == RuntimeWaitFamily::Idle),
+        "pushback is an idle wait"
+    );
+    assembler
+        .evaluate(&assembler.get(module.value(), "go").unwrap())
+        .unwrap();
+    let _ = assembler.drain_reasoning();
+    let heap = assembler.test_reflection_heap();
+    let text = |name: &str| {
+        assembler.get(&heap, name).ok().map(|value| {
+            String::from_utf8_lossy(&assembler.to_binary(&value).unwrap()).into_owned()
+        })
+    };
+    assert_eq!(text("flow").as_deref(), Some("carried"));
+    assert_eq!(text("counted").as_deref(), Some("counted"));
+    assert_eq!(text("wiring").as_deref(), Some("listed"));
+    assert_eq!(text("unwired").as_deref(), Some("refused"));
+}
+
 /// The anonymous root `path` lies under, and the keys below it.
 fn below_root(path: &[Key]) -> usize {
     path.len().saturating_sub(2)

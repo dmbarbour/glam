@@ -17,6 +17,10 @@ use super::protocol::{
 };
 use super::store::StoreJournal;
 
+mod port_requests;
+
+use port_requests::{PortRequest, PortRequestWork};
+
 /// Requests shared by every full reflection task.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ReflectionRequest {
@@ -35,6 +39,15 @@ pub enum ReflectionRequest {
     PromiseAccept,
     PromiseAbandon,
     PromiseAccepted,
+    PortRead,
+    PortWrite,
+    PortAvailable,
+    PortPending,
+    PortAsk,
+    WireAdd,
+    WireDel,
+    WireList,
+    WireDefaults,
     /// `.TEST_ONLY.queue_now Key Op`: queues `Op` on the child `Key`,
     /// committing at once even within a transaction, as another writer
     /// would, so that a test orders a commit against a transaction.
@@ -63,6 +76,7 @@ enum ReflectionRequestOperation {
     Child(ChildRequestWork),
     ChildCallLeave,
     Acceptance(AcceptanceRequestWork),
+    Port(PortRequestWork),
     Poisoned,
 }
 
@@ -305,6 +319,37 @@ impl ReflectionRequestWork {
                     arguments,
                 })
             }
+            ReflectionRequest::PortRead => {
+                ReflectionRequestOperation::Port(PortRequestWork::new(PortRequest::Read, arguments))
+            }
+            ReflectionRequest::PortWrite => ReflectionRequestOperation::Port(PortRequestWork::new(
+                PortRequest::Write,
+                arguments,
+            )),
+            ReflectionRequest::PortAvailable => ReflectionRequestOperation::Port(
+                PortRequestWork::new(PortRequest::Available, arguments),
+            ),
+            ReflectionRequest::PortPending => ReflectionRequestOperation::Port(
+                PortRequestWork::new(PortRequest::Pending, arguments),
+            ),
+            ReflectionRequest::PortAsk => {
+                ReflectionRequestOperation::Port(PortRequestWork::new(PortRequest::Ask, arguments))
+            }
+            ReflectionRequest::WireAdd => ReflectionRequestOperation::Port(PortRequestWork::new(
+                PortRequest::WireAdd,
+                arguments,
+            )),
+            ReflectionRequest::WireDel => ReflectionRequestOperation::Port(PortRequestWork::new(
+                PortRequest::WireDel,
+                arguments,
+            )),
+            ReflectionRequest::WireList => ReflectionRequestOperation::Port(PortRequestWork::new(
+                PortRequest::WireList,
+                arguments,
+            )),
+            ReflectionRequest::WireDefaults => ReflectionRequestOperation::Port(
+                PortRequestWork::new(PortRequest::WireDefaults, arguments),
+            ),
             #[cfg(test)]
             ReflectionRequest::TestAcceptNow => {
                 ReflectionRequestOperation::Acceptance(AcceptanceRequestWork::Start {
@@ -624,6 +669,11 @@ where
                 Ok(SpecializationRequestPoll::Complete(act_on_acceptance(
                     request, resolver, diagnostic, context,
                 )?))
+            }
+            ReflectionRequestOperation::Port(mut work) => {
+                let poll = work.poll(input, context)?;
+                self.operation = ReflectionRequestOperation::Port(work);
+                Ok(poll)
             }
             ReflectionRequestOperation::Poisoned => {
                 panic!("completed reflection request work was polled again")
@@ -1971,6 +2021,15 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
                 1,
                 ReflectionRequest::PromiseAccepted,
             ),
+            port_spec("port", "read", 2, ReflectionRequest::PortRead),
+            port_spec("port", "write", 2, ReflectionRequest::PortWrite),
+            port_spec("port", "available", 1, ReflectionRequest::PortAvailable),
+            port_spec("port", "pending", 0, ReflectionRequest::PortPending),
+            port_spec("port", "ask", 2, ReflectionRequest::PortAsk),
+            port_spec("wire", "add", 2, ReflectionRequest::WireAdd),
+            port_spec("wire", "del", 2, ReflectionRequest::WireDel),
+            port_spec("wire", "list", 0, ReflectionRequest::WireList),
+            port_spec("wire", "defaults", 1, ReflectionRequest::WireDefaults),
             #[cfg(test)]
             EffectRequestSpec::at_path(
                 ["TEST_ONLY", "queue_now"],
@@ -1999,6 +2058,21 @@ pub fn reflection_request_specs() -> Vec<EffectRequestSpec<ReflectionRequest>> {
             ),
         ])
         .collect()
+}
+
+/// A request of the port family, at `.family.name`.
+fn port_spec(
+    family: &'static str,
+    name: &'static str,
+    arity: usize,
+    request: ReflectionRequest,
+) -> EffectRequestSpec<ReflectionRequest> {
+    EffectRequestSpec::at_path(
+        [family, name],
+        ["reflection_runtime", "v0", "request", family, name],
+        arity,
+        request,
+    )
 }
 
 /// Reusable `.env` and `.log` request subset for isolated host interpreters.
@@ -2055,6 +2129,15 @@ mod tests {
             | ReflectionRequest::PromiseAccept
             | ReflectionRequest::PromiseAbandon
             | ReflectionRequest::PromiseAccepted
+            | ReflectionRequest::PortRead
+            | ReflectionRequest::PortWrite
+            | ReflectionRequest::PortAvailable
+            | ReflectionRequest::PortPending
+            | ReflectionRequest::PortAsk
+            | ReflectionRequest::WireAdd
+            | ReflectionRequest::WireDel
+            | ReflectionRequest::WireList
+            | ReflectionRequest::WireDefaults
             | ReflectionRequest::TestQueueNow
             | ReflectionRequest::TestAcceptNow => {}
         }
@@ -2102,6 +2185,7 @@ mod tests {
             | ReflectionRequestOperation::Inspection(_)
             | ReflectionRequestOperation::Log(_)
             | ReflectionRequestOperation::ChildCallLeave
+            | ReflectionRequestOperation::Port(_)
             | ReflectionRequestOperation::Poisoned => {}
             ReflectionRequestOperation::Acceptance(work) => match work {
                 AcceptanceRequestWork::Start {

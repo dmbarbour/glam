@@ -160,6 +160,15 @@ and control flow.
   while its task input holds a task, queued or running (the head stays in
   the buffer until it finishes), and `'idle` otherwise. Within a cut the
   read is observed, so a failed cut waits for the status to change.
+- `.port.*` and `.wire.*` run on the branch's machine through the event
+  journal (`requests/port_requests.rs`). A short read is pushback
+  (`RequestResult::Pushback`, `BranchOutcome::Pushback`), never `Fail`:
+  it skips alternatives and a choice's fallback, propagates to the
+  outermost cut, which waits, and outside every cut re-drives the request
+  once the host generation passes the one it read, which it carries so no
+  wakeup is lost. `begin_cut_attempt` resets the frame's pushback; take a
+  frame's fallback only after checking it. `.read_log` still fails on an
+  empty input until `api-refl-cli-log` moves the logger onto ports.
 - `.child.interrupt Key Reason` takes the running tasks (the heads of
   unflagged queues) of the child and its descendants, breaks their replies
   with `Reason` and flags their machines, and each child a stopped run

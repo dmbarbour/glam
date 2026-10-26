@@ -3153,6 +3153,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 outcome: branch.into_failure(),
                 scope_depth,
             },
+            RequestResult::Pushback { generation } => MachineWork::Outcome {
+                outcome: BranchOutcome::Pushback(branch, generation),
+                scope_depth,
+            },
             RequestResult::Cancelled => MachineWork::Outcome {
                 outcome: BranchOutcome::Cancelled,
                 scope_depth,
@@ -3175,7 +3179,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 validate(close)
             }
             RequestResult::Await(value) => validate(value),
-            RequestResult::ReturnUnit | RequestResult::Fail | RequestResult::Cancelled => Ok(()),
+            RequestResult::ReturnUnit
+            | RequestResult::Fail
+            | RequestResult::Pushback { .. }
+            | RequestResult::Cancelled => Ok(()),
         }
     }
 
@@ -3308,6 +3315,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
             retry: None,
             observed_failure: false,
             trying: false,
+            pushback: None,
         };
         // Where the host runs the cuts, it owns their transactions.
         frame.owns_transaction = self.hosted.is_none() && frame.outer.transaction.is_none();
@@ -3329,6 +3337,7 @@ impl<S: TaskSpecialization> EffectTask<S> {
         frame.alternatives.clear();
         frame.retry = None;
         frame.observed_failure = false;
+        frame.pushback = None;
         if frame.owns_transaction {
             let snapshot = context.suspend(|| self.host.snapshot());
             frame.outer.transaction = Some(Transaction::new(snapshot));
@@ -3468,6 +3477,19 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 frame.alternatives.push(*left);
                 Ok(MachineStep::Continue(frame.next_alternative()))
             }
+            BranchOutcome::Pushback(failed, generation) => {
+                // No alternative takes it: the attempt ends, and the cut
+                // waits, or its parent's.
+                let frame = self
+                    .execution
+                    .cuts
+                    .last_mut()
+                    .expect("checked nonempty cut stack");
+                frame.observed_failure = true;
+                frame.retry = Some(failed);
+                frame.pushback = Some(generation);
+                self.finish_cut_attempt(context)
+            }
             BranchOutcome::Fail(mut failed) | BranchOutcome::Retry(mut failed) => {
                 if let Some(restarted) =
                     self.restart_fixpoint_at_scope(context, &mut failed, scope_depth)?
@@ -3585,7 +3607,8 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 scope_depth: frame.parent_scope_depth,
             }));
         }
-        // A `.try` answers with its operation's failure.
+        // A `.try` answers with its operation's failure, or, for pushback,
+        // its wait.
         if frame.trying {
             let trace = TryTrace {
                 observed: frame.observed_failure
@@ -3598,16 +3621,30 @@ impl<S: TaskSpecialization> EffectTask<S> {
             if !self.execution.cuts.is_empty() {
                 self.hosted_resume(frame.outer.host_version);
             }
-            return Ok(MachineStep::Continue(self.answer_try(
-                context,
-                frame,
-                TryOutcome::Fail,
-                trace,
-            )));
+            let outcome = if frame.pushback.is_some() {
+                TryOutcome::Wait
+            } else {
+                TryOutcome::Fail
+            };
+            return Ok(MachineStep::Continue(
+                self.answer_try(context, frame, outcome, trace),
+            ));
+        }
+        // Pushback skips the choice's fallback, and reaches the outermost
+        // cut, which waits.
+        if let Some(generation) = frame.pushback
+            && !frame.owns_transaction
+        {
+            return Ok(MachineStep::Continue(MachineWork::Outcome {
+                outcome: BranchOutcome::Pushback(failed, generation),
+                scope_depth: frame.parent_scope_depth,
+            }));
         }
         // A failed cut is a failure, which its choice handles by falling
         // back; only a failure nothing handles waits for a change.
-        if let Some(fallback) = frame.fallback {
+        if frame.pushback.is_none()
+            && let Some(fallback) = frame.fallback.take()
+        {
             return Ok(MachineStep::Continue(MachineWork::Drive {
                 branch: fallback,
                 scope_depth: frame.parent_scope_depth,
@@ -3696,6 +3733,18 @@ impl<S: TaskSpecialization> EffectTask<S> {
                     },
                 )))
             }
+            // Outside every cut, the request runs again once what it read
+            // changed, as a turn's read outside a cut waits.
+            BranchOutcome::Pushback(branch, generation) => Ok(MachineStep::Blocked(
+                BlockedExecution::exhausted(RetryWake {
+                    observed_generation: generation,
+                    validation: None,
+                    action: WakeAction::ReplaceWork(Box::new(MachineWork::Drive {
+                        branch,
+                        scope_depth,
+                    })),
+                }),
+            )),
             BranchOutcome::Cancelled => Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
         }
     }
@@ -3726,6 +3775,13 @@ impl<S: TaskSpecialization> EffectTask<S> {
             }
             BranchOutcome::Fork(_, _) => {
                 return Err(TaskHalt::new("a choice forked outside every cut"));
+            }
+            // Pushback comes from ports, which no task whose host runs its
+            // cuts has.
+            BranchOutcome::Pushback(..) => {
+                return Err(TaskHalt::new(
+                    "pushback reached a task whose host runs its cuts",
+                ));
             }
             BranchOutcome::Cancelled => return Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
         };
@@ -3943,6 +3999,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
                         action: WakeAction::RestartSearch,
                     },
                 )))
+            }
+            // An isolated search's effects have no ports to push back.
+            BranchOutcome::Pushback(..) => {
+                Err(TaskHalt::new("pushback reached an isolated search"))
             }
             BranchOutcome::Cancelled => Ok(MachineStep::Terminal(TaskTerminal::Cancelled)),
         }
@@ -5719,6 +5779,12 @@ enum BranchOutcome<S: TaskSpecialization> {
     Fork(Box<Branch<S>>, Box<Branch<S>>),
     Fail(Branch<S>),
     Retry(Branch<S>),
+    /// What a request needs is not there yet: no alternative takes it, and
+    /// the outermost cut waits for a change. Outside every cut, the branch,
+    /// whose effect is still the request, runs again once the host changed
+    /// since the generation the request read
+    /// (`machines-communicate-through-wired-ports`).
+    Pushback(Branch<S>, u64),
     Cancelled,
 }
 
@@ -5731,7 +5797,10 @@ impl<S: TaskSpecialization> BranchOutcome<S> {
 
     fn branch(&self) -> Option<&Branch<S>> {
         match self {
-            Self::Complete(_, branch) | Self::Fail(branch) | Self::Retry(branch) => Some(branch),
+            Self::Complete(_, branch)
+            | Self::Fail(branch)
+            | Self::Retry(branch)
+            | Self::Pushback(branch, _) => Some(branch),
             Self::Fork(left, _) => Some(left),
             Self::Cancelled => None,
         }
@@ -5739,7 +5808,10 @@ impl<S: TaskSpecialization> BranchOutcome<S> {
 
     fn branch_mut(&mut self) -> Option<&mut Branch<S>> {
         match self {
-            Self::Complete(_, branch) | Self::Fail(branch) | Self::Retry(branch) => Some(branch),
+            Self::Complete(_, branch)
+            | Self::Fail(branch)
+            | Self::Retry(branch)
+            | Self::Pushback(branch, _) => Some(branch),
             Self::Fork(left, _) => Some(left),
             Self::Cancelled => None,
         }
@@ -5763,6 +5835,10 @@ struct CutFrame<S: TaskSpecialization> {
     /// A `.try`'s frame, which returns its operation's outcome as data
     /// rather than retrying it (`api-refl-try`).
     trying: bool,
+    /// Whether the attempt ended in pushback, which no alternative or
+    /// fallback takes, and which reaches the outermost cut, the generation
+    /// its request read.
+    pushback: Option<u64>,
 }
 
 /// What a `.try` answers with, other than its operation's value

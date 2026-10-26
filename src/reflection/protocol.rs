@@ -134,6 +134,15 @@ pub enum RequestResult {
     Await(PublicValue),
     ReturnUnit,
     Fail,
+    /// What the request needs is not there yet, such as values to read: a
+    /// divergence that no alternative takes
+    /// (`machines-communicate-through-wired-ports`). The outermost cut waits
+    /// for what it observed to change and runs again; outside every cut, the
+    /// request runs again once the host has changed since `generation`, the
+    /// state it read.
+    Pushback {
+        generation: u64,
+    },
     Cancelled,
 }
 
@@ -995,6 +1004,9 @@ mod root_inventory_tests {
             }
             RequestResult::Await(value) => {
                 let _: &PublicValue = value;
+            }
+            RequestResult::Pushback { generation } => {
+                let _: &u64 = generation;
             }
             RequestResult::ReturnUnit | RequestResult::Fail | RequestResult::Cancelled => {}
         }

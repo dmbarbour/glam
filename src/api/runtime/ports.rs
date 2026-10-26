@@ -44,7 +44,7 @@ pub(in crate::api) struct PortAddress {
 /// input or output, or a direct child's port, which is the child's output
 /// as a wire's source and its input as a wire's destination.
 #[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
-pub(in crate::api) enum WireEnd {
+pub(crate) enum WireEnd {
     In(Key),
     Out(Key),
     Child(Key, Key),
