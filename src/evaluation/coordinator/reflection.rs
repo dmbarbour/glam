@@ -131,6 +131,26 @@ impl EvaluationWorkCoordinator {
         true
     }
 
+    /// Drops the failure of each anonymous root whose task `cleared`
+    /// selects, as a host's clear of the root does (`quiescence-is-analyzed`).
+    pub(crate) fn clear_failed_roots(&self, cleared: impl Fn(EvaluationTaskId) -> bool) {
+        let _mutation = self.admission.mutation_guard();
+        let mut state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        let tasks: Vec<EvaluationTaskId> = state
+            .failed_roots
+            .keys()
+            .copied()
+            .filter(|task| cleared(*task))
+            .collect();
+        for task in tasks {
+            state.failed_roots.remove_mut(&task);
+            state.pending_failed_root_reports.remove_mut(&task);
+        }
+    }
+
     /// The calls the reflection task at `work` waits within: those of its
     /// machine's current branch, while the coordinator holds the machine. A
     /// task running a quantum holds its own, and waits within none.

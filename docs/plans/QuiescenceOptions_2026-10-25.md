@@ -91,16 +91,19 @@ callee rule.
 
 ### Clear
 
-`EvaluationRuntime::clear(&MachinePath) -> Result<bool, Error>` empties
+`EvaluationRuntime::clear(&MachinePath) -> Result<(), Error>` empties
 the machine at the path and its subtree, in error or not (see question
 1), as `.child.clear` does a child:
 its flags, states, ports, shares and environment; its queues, whose
 tasks never ran, their replies broken; and what it accepted, abandoned.
-For an anonymous root it drops the root's failure too. It answers whether
-anything was there, and fails, changing nothing, where a task runs or
-waits in the subtree: a host interrupts first what it means to stop, as a
-parent does. Clearing below an ended root leaves the root forgotten once
-nothing there owes.
+For an anonymous root it drops the root's failure too. It fails, changing
+nothing, where a task runs or waits in the subtree, an annotation task on
+a root there among them: a host interrupts first what it means to stop,
+as a parent does. A call into the subtree from a run outside it leaves it
+clearable: the caller's cut observed what it called, so it conflicts with
+the clear and runs again over what the clear leaves. Clearing below an
+ended root leaves the root forgotten once nothing there owes. (As
+drafted, it answered whether anything was there; nothing needs that.)
 
 ### The CLI
 
@@ -152,6 +155,17 @@ Embedders and tests use the API.
    root clears; a clear refused while a task waits there, then accepted
    after an interrupt; a cleared queue breaks its replies; an abandoned
    obligation leaves the analysis.
+   Built 2026-10-26: the clear commits `clear_child_machines` over the
+   path where `machines_busy` finds nothing and no annotation task's root
+   lies there, then empties the cells (`MachineHost::clear`), drops the
+   failed roots there (`clear_failed_roots`), and reclaims the ended roots
+   again, which forgets a root whose subtree is gone or whose last debtor
+   was cleared. One test takes every case, a child cleared under a live
+   root, which then reads it idle, among them. Mutation-checked: both
+   busy checks, the broken replies, the cells, the failed roots kept and
+   all taken, the roots' reclamation, and the busy check's direction.
+   Not checked: dropping a cleared root from settlement's pending
+   reports, a list `settlement-retires` removes.
 
 Then `settlement-retires`, which these options unblock.
 

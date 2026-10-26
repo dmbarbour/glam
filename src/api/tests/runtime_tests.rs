@@ -3004,6 +3004,146 @@ go = anno refl:(.heap.set ['go] ()) ()
     );
 }
 
+#[test]
+fn a_host_clear_takes_an_idle_subtree_and_refuses_a_busy_one() {
+    // `quiescence-is-analyzed`: a host clears any machine whose subtree is
+    // not busy, in error or not, under an ended root or a live one, as
+    // `.child.clear` does a child. A machine where a task waits is refused
+    // until interrupted. A clear breaks the replies of the tasks it drops,
+    // which never ran, abandons what the machines accepted, drops a failed
+    // annotation root, and leaves nothing behind the ended roots.
+    let source = r#"language g0
+import 'std
+failed = anno refl:(.child.task 'f (1 / 0) >>= (\p -> .child.task 'f (.r "never") >>= (\q -> .heap.set ['f_later] q =>> .try (seq p (.r ())) >>= (\_ -> .heap.set ['failed] "failed")))) ()
+broken = anno refl:(1 / 0) ()
+owing = anno refl:(.promise.new >>= (\pr -> .heap.set ['r1] pr.resolver =>> .child.task 'o (.promise.accept pr.resolver {msg:{text:"o owes"}}) >>= (\p -> seq p (.heap.set ['owing] "owing")))) ()
+live = anno refl:(.child.task 'w (.cut (.heap.try_get ['never])) >>= (\_ -> .heap.set ['live] "queued")) ()
+parent = anno refl:(.child.task 'e (1 / 0) >>= (\p -> .try (seq p (.r ())) >>= (\_ -> .cut (.heap.try_get ['gate]) =>> .child.status 'e >>= (\s -> .heap.set ['parent] (if s == 'idle then "idle" else "kept"))))) "parent"
+forcing = anno refl:(.child.task 'x (seq parent (.r ())) >>= (\_ -> .heap.set ['forcing] "queued")) ()
+later = anno refl:(.heap.get ['f_later] >>= (\q -> seq q (.r ()))) ()
+gate = anno refl:(.heap.set ['gate] ()) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["cleared"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    for name in ["failed", "owing", "live", "forcing"] {
+        assembler
+            .evaluate(&assembler.get(module.value(), name).unwrap())
+            .unwrap_or_else(|error| panic!("{name}: {error}"));
+    }
+    assert!(
+        assembler
+            .get(module.value(), "broken")
+            .and_then(|broken| assembler.evaluate(&broken))
+            .is_err()
+    );
+    let _ = assembler.drain_reasoning();
+    let runtime = assembler.evaluation_runtime();
+    let resources = &runtime.state.shared_resources;
+    let analysis = runtime.analysis().unwrap();
+    let ends_with =
+        |machine: &MachinePath, key: &str| machine.keys().last() == Some(&Key::atom_from_text(key));
+    let failed = |key: &str| {
+        analysis
+            .failed_machines()
+            .iter()
+            .map(|failed| failed.path().clone())
+            .find(|path| ends_with(path, key))
+            .unwrap_or_else(|| panic!("'{key} is in error"))
+    };
+    let (f, e) = (failed("f"), failed("e"));
+    let broken_root = analysis
+        .failed_machines()
+        .iter()
+        .map(|failed| failed.path().clone())
+        .find(|path| path.keys().len() == 2)
+        .expect("the annotation task's root is in error");
+    let owing = analysis.obligations()[0].acceptors()[0].0.clone();
+    let waiting = analysis
+        .waits()
+        .iter()
+        .filter_map(RuntimeWait::machine)
+        .find(|machine| ends_with(machine, "w"))
+        .cloned()
+        .expect("'w waits");
+    let values = assembler.values();
+
+    let parent_root = analysis
+        .waits()
+        .iter()
+        .filter_map(RuntimeWait::machine)
+        .find(|machine| machine.keys().len() == 2)
+        .cloned()
+        .expect("the parent's annotation task waits");
+
+    let refused = runtime.clear(&waiting).expect_err("a task waits there");
+    assert!(
+        refused.to_string().contains("interrupt it first"),
+        "{refused}"
+    );
+    runtime
+        .clear(&parent_root)
+        .expect_err("an annotation task waits on its root");
+    runtime.interrupt(&waiting, values.text("stop")).unwrap();
+    for machine in [&waiting, &f, &e, &owing] {
+        runtime
+            .clear(machine)
+            .unwrap_or_else(|error| panic!("{machine:?}: {error}"));
+    }
+    assert!(
+        runtime
+            .analysis()
+            .unwrap()
+            .failed_machines()
+            .iter()
+            .any(|failed| failed.path() == &broken_root),
+        "a clear elsewhere leaves a failed root"
+    );
+    runtime.clear(&broken_root).unwrap();
+    let dropped = assembler
+        .get(module.value(), "later")
+        .and_then(|later| assembler.evaluate(&later))
+        .expect_err("the dropped task's reply is broken")
+        .diagnostic(&values)
+        .unwrap()
+        .rendered_text_for_test(&values);
+    assert!(dropped.contains("cleared before the task ran"), "{dropped}");
+    // The probe's own root failed of it, and clears as any failed root.
+    let probe = runtime
+        .analysis()
+        .unwrap()
+        .failed_machines()
+        .iter()
+        .map(|failed| failed.path().clone())
+        .find(|path| path.keys().len() == 2)
+        .expect("the probe's root is in error");
+    runtime.clear(&probe).unwrap();
+    assembler
+        .evaluate(&assembler.get(module.value(), "gate").unwrap())
+        .unwrap();
+    let _ = assembler.drain_reasoning();
+    let heap = assembler.test_reflection_heap();
+    let parent = assembler.get(&heap, "parent").unwrap();
+    assert_eq!(
+        assembler.to_binary(&parent).unwrap().as_ref(),
+        b"idle",
+        "the live parent finds its cleared child idle"
+    );
+    let analysis = runtime.analysis().unwrap();
+    assert!(analysis.failed_machines().is_empty(), "nothing is in error");
+    assert!(analysis.obligations().is_empty(), "nothing is owed");
+    assert!(analysis.backlogs().is_empty(), "nothing waits unread");
+    assert_eq!(resources.ended_roots_for_test(), 0, "no root waits");
+    assert!(
+        resources.anonymous_machines_for_test().is_empty(),
+        "{:?}",
+        resources.anonymous_machines_for_test()
+    );
+}
+
 /// The anonymous root `path` lies under, and the keys below it.
 fn below_root(path: &[Key]) -> usize {
     path.len().saturating_sub(2)

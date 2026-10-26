@@ -169,7 +169,9 @@ and control flow.
   same by path (`EvaluationRuntime::interrupt`), an annotation task's
   anonymous root included, which it flags in `FailedRoots` with the
   reason, clearing the task's `flags_root` so the task's end flags nothing
-  more. `.child.recover Key` clears a
+  more; and a host clears any subtree where no task runs or waits, an
+  annotation task's root included (`EvaluationRuntime::clear`), dropping
+  the failed roots there. `.child.recover Key` clears a
   flagged child's flag and queue, breaking the dropped replies;
   `.child.clear Key` empties the child and its descendants as a turn's
   clear does, breaking every reply it drops. Each is a transactional

@@ -373,7 +373,8 @@ volume to retry. Dropping the Rust owner does not revoke it.
   stops and each child that run waits within by call, stops the runs at
   commit, and a run is named by its item's sequence, so a stopped task's
   end claims nothing. A host interrupts by a machine's path, an
-  annotation task's root among them (`EvaluationRuntime::interrupt`).
+  annotation task's root among them (`EvaluationRuntime::interrupt`), and
+  clears an idle subtree by its path (`EvaluationRuntime::clear`).
   Recovering a busy child, or clearing a subtree with a busy machine,
   fails having observed it (`ChildBusy`), so it waits as `.child.call`
   does.

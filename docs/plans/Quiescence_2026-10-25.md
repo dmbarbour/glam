@@ -132,6 +132,9 @@ the CLI moves onto it.
    clears, can take a flag or an acceptance away. Mutation-checked: the
    root's keeping and release, both commit paths, and the subtree
    test.
+   Built through 2026-10-26: waits name their machines, a host interrupts
+   by path, transitively through calls, and clears an idle subtree; see
+   [Quiescence Options](QuiescenceOptions_2026-10-25.md).
 5. Later: turns counted in quiescence once settlement's runtime and the
    turn runtime meet, as `rt.analysis()`; and the analysis as a
    reflection effect, for a logger's or an IDE's status.
