@@ -408,6 +408,16 @@ pub struct RuntimeEventJournal {
     pub(in crate::api) accepted: AcceptedJournal,
 }
 
+/// A run an interrupt stopped: its machine, its item's sequence in the
+/// machine's queue, its task's record, and the children its task waited
+/// within by call, which the interrupt flagged with it.
+pub(crate) struct StoppedRun {
+    pub(crate) machine: Vec<Key>,
+    pub(crate) sequence: u64,
+    pub(crate) task: Value,
+    pub(crate) callees: Vec<Arc<[Key]>>,
+}
+
 impl RuntimeEventJournal {
     #[doc(hidden)]
     pub fn new(snapshot: RuntimeEventSnapshot) -> Self {
@@ -510,14 +520,17 @@ impl RuntimeEventJournal {
     /// Interrupts the tasks running on the child machine at `machine` and
     /// its descendants, as this journal sees them: takes each from its
     /// queue, whose head it is, and flags its machine with `diagnostic`, the
-    /// interrupt's. Returns each stopped task's machine, its item's sequence
-    /// and its record; where nothing runs, on a flagged or an idle machine,
-    /// it changes nothing. Its reads are observed.
+    /// interrupt's, and each child the task's run waits within by call,
+    /// which `calls` names, since the call is work the interrupt halts
+    /// (`quiescence-is-analyzed`). Returns each run it stopped; where
+    /// nothing runs, on a flagged or an idle machine, it changes nothing.
+    /// Its reads are observed.
     pub(crate) fn interrupt_tasks(
         &mut self,
         machine: &[Key],
         diagnostic: &RuntimeValueRoot,
-    ) -> Vec<(Vec<Key>, u64, Value)> {
+        calls: impl Fn(&[Key], u64) -> Vec<Arc<[Key]>>,
+    ) -> Vec<StoppedRun> {
         let mut stopped = Vec::new();
         for address in self.ports.buffers_below(machine, &TASKS) {
             if self.flags.read(&address.machine) {
@@ -532,7 +545,16 @@ impl RuntimeEventJournal {
                 continue;
             };
             self.flags.set(address.machine.clone(), diagnostic.clone());
-            stopped.push((address.machine, sequence, task));
+            let callees = calls(&address.machine, sequence);
+            for callee in &callees {
+                self.flags.set(callee.to_vec(), diagnostic.clone());
+            }
+            stopped.push(StoppedRun {
+                machine: address.machine,
+                sequence,
+                task,
+                callees,
+            });
         }
         stopped
     }

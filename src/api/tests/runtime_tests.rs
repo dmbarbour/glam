@@ -2796,6 +2796,214 @@ waits = anno refl:(.child.task 'w (.cut (.heap.try_get ['never])) >>= (\_ -> .ch
     );
 }
 
+#[test]
+fn a_host_interrupt_flags_what_it_halts_and_only_that() {
+    // `quiescence-is-analyzed`: a host interrupts by a machine's path, as
+    // the analysis names it. An idle machine has nothing to halt and stays
+    // unflagged; a waiting child's run stops, its machine flagged with the
+    // reason and its reply broken with it; an annotation task stops, its
+    // root flagged with the reason, as its failure would flag it.
+    let source = r#"language g0
+import 'std
+inner = anno refl:(.cut (.heap.try_get ['gate])) "inner"
+roots = anno refl:(.child.task 'i (.r ()) >>= (\q -> seq q (.child.task 'w (.cut (.heap.try_get ['never])) >>= (\p -> .heap.set ['w_reply] p =>> .child.task 'v (seq inner (.r ())) >>= (\_ -> .heap.set ['roots] "queued"))))) ()
+check = anno refl:(.heap.get ['w_reply] >>= (\p -> seq p (.r ()))) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["interrupted"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    assembler
+        .evaluate(&assembler.get(module.value(), "roots").unwrap())
+        .expect("the root queues its children");
+    let _ = assembler.drain_reasoning();
+    let runtime = assembler.evaluation_runtime();
+    let analysis = runtime.analysis().unwrap();
+    let machine_of = |key: &str| {
+        analysis
+            .waits()
+            .iter()
+            .filter_map(RuntimeWait::machine)
+            .find(|machine| machine.keys().last() == Some(&Key::atom_from_text(key)))
+            .cloned()
+            .unwrap_or_else(|| panic!("a wait on '{key}"))
+    };
+    let waiting = machine_of("w");
+    let idle = MachinePath::from([&waiting.keys()[..2], &[Key::atom_from_text("i")]].concat());
+    let inner_root = analysis
+        .waits()
+        .iter()
+        .filter_map(RuntimeWait::machine)
+        .find(|machine| machine.keys().len() == 2)
+        .cloned()
+        .expect("the annotation task waits on its root");
+    let values = assembler.values();
+    assert!(
+        runtime
+            .interrupt(&idle, values.text("idle"))
+            .unwrap()
+            .is_empty(),
+        "an idle machine has nothing to halt"
+    );
+    assert_eq!(
+        runtime
+            .interrupt(&waiting, values.text("host stops w"))
+            .unwrap(),
+        std::slice::from_ref(&waiting)
+    );
+    assert_eq!(
+        runtime
+            .interrupt(&inner_root, values.text("host stops inner"))
+            .unwrap(),
+        std::slice::from_ref(&inner_root)
+    );
+    let broken = assembler
+        .get(module.value(), "check")
+        .and_then(|check| assembler.evaluate(&check))
+        .expect_err("the stopped task's reply is broken");
+    let broken = broken
+        .diagnostic(&values)
+        .unwrap()
+        .rendered_text_for_test(&values);
+    assert!(broken.contains("host stops w"), "{broken}");
+    let _ = assembler.drain_reasoning();
+    let analysis = runtime.analysis().unwrap();
+    let failure = |machine: &MachinePath| {
+        analysis
+            .failed_machines()
+            .iter()
+            .find(|failed| failed.path() == machine)
+            .map(|failed| failed.diagnostic().rendered_text_for_test(&values))
+    };
+    assert!(failure(&idle).is_none(), "the idle machine is unflagged");
+    assert!(
+        failure(&waiting).is_some_and(|text| text.contains("host stops w")),
+        "{:?}",
+        failure(&waiting)
+    );
+    assert!(
+        failure(&inner_root).is_some_and(|text| text.contains("host stops inner")),
+        "{:?}",
+        failure(&inner_root)
+    );
+    assert!(
+        analysis
+            .waits()
+            .iter()
+            .all(|wait| wait.machine() != Some(&waiting) && wait.machine() != Some(&inner_root)),
+        "neither stopped task waits"
+    );
+}
+
+#[test]
+fn an_interrupt_flags_the_children_its_run_waits_within_by_call() {
+    // `quiescence-is-analyzed`: an interrupt is transitive. A run waiting
+    // on a promise within a call into its child halts the call's work too,
+    // so the callee is flagged with the run's machine, whether a host
+    // interrupts the run or its parent does, as is an annotation task's
+    // callee with its root.
+    let source = r#"language g0
+import 'std
+held = anno refl:(.promise.new >>= (\pr -> .heap.set ['held_r] pr.resolver =>> .cut (.child.call 'k (seq pr.promise (.r ()))))) ()
+calls = anno refl:(.promise.new >>= (\pr -> .heap.set ['kept] pr.resolver =>> .child.task 'h (.cut (.child.call 'c (seq pr.promise (.r ())))) >>= (\_ -> .child.task 'm (.child.task 'p (.cut (.child.call 'q (seq pr.promise (.r ())))) >>= (\_ -> .cut (.heap.try_get ['go]) =>> .child.interrupt 'p "the parent stops p" =>> .heap.set ['calls] "interrupted")) >>= (\_ -> .child.task 'f (seq held (.r ())) >>= (\_ -> .heap.set ['queued] "queued"))))) ()
+go = anno refl:(.heap.set ['go] ()) ()
+"#;
+    let assembler = Assembler::default();
+    let module = assembler
+        .module(["called"])
+        .script("g", source)
+        .build()
+        .expect("the fixture should compile");
+    assembler
+        .evaluate(&assembler.get(module.value(), "calls").unwrap())
+        .expect("the root queues its children");
+    let _ = assembler.drain_reasoning();
+    let runtime = assembler.evaluation_runtime();
+    let analysis = runtime.analysis().unwrap();
+    assert!(analysis.quiescent());
+    let caller = analysis
+        .waits()
+        .iter()
+        .filter_map(RuntimeWait::machine)
+        .find(|machine| machine.keys().last() == Some(&Key::atom_from_text("h")))
+        .cloned()
+        .expect("h waits within its call");
+    let child = |machine: &MachinePath, key: &str| {
+        MachinePath::from([machine.keys(), &[Key::atom_from_text(key)]].concat())
+    };
+    let values = assembler.values();
+    let held = analysis
+        .waits()
+        .iter()
+        .filter_map(RuntimeWait::machine)
+        .find(|machine| machine.keys().len() == 2)
+        .cloned()
+        .expect("the annotation task waits within its call");
+    assert_eq!(
+        runtime
+            .interrupt(&caller, values.text("the host stops h"))
+            .unwrap(),
+        [caller.clone(), child(&caller, "c")]
+    );
+    assert_eq!(
+        runtime
+            .interrupt(&held, values.text("the host stops held"))
+            .unwrap(),
+        [held.clone(), child(&held, "k")]
+    );
+    assembler
+        .evaluate(&assembler.get(module.value(), "go").unwrap())
+        .expect("the gate opens");
+    let _ = assembler.drain_reasoning();
+    let heap = assembler.test_reflection_heap();
+    assert!(
+        assembler.get(&heap, "calls").is_ok(),
+        "the parent interrupted p"
+    );
+    let root = MachinePath::from(caller.keys()[..2].to_vec());
+    let analysis = runtime.analysis().unwrap();
+    let failed: Vec<(MachinePath, String)> = analysis
+        .failed_machines()
+        .iter()
+        .map(|failed| {
+            (
+                failed.path().clone(),
+                failed.diagnostic().rendered_text_for_test(&values),
+            )
+        })
+        .collect();
+    for (machine, reason) in [
+        (caller.clone(), "the host stops h"),
+        (child(&caller, "c"), "the host stops h"),
+        (child(&child(&root, "m"), "p"), "the parent stops p"),
+        (
+            child(&child(&child(&root, "m"), "p"), "q"),
+            "the parent stops p",
+        ),
+        (held.clone(), "the host stops held"),
+        (child(&held, "k"), "the host stops held"),
+    ] {
+        assert!(
+            failed
+                .iter()
+                .any(|(path, text)| path == &machine && text.contains(reason)),
+            "{machine:?} with {reason:?}: {failed:?}"
+        );
+    }
+    // The child that awaited the stopped annotation task fails of it.
+    let f = Key::atom_from_text("f");
+    assert_eq!(
+        failed
+            .iter()
+            .filter(|(path, _)| path.keys().last() != Some(&f))
+            .count(),
+        6,
+        "{failed:?}"
+    );
+}
+
 /// The anonymous root `path` lies under, and the keys below it.
 fn below_root(path: &[Key]) -> usize {
     path.len().saturating_sub(2)

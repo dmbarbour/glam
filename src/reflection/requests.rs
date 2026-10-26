@@ -1067,7 +1067,9 @@ where
 /// `.child.interrupt Key Reason`: stops the tasks running on the child and
 /// its descendants, breaks their replies with `Reason`, and flags each
 /// machine it stopped a task on, whose state the task may have left
-/// half-done. Where nothing runs, it changes nothing.
+/// half-done, and each child a stopped task waits within by call, whose
+/// work it halts too (`quiescence-is-analyzed`). Where nothing runs, it
+/// changes nothing.
 fn interrupt_child<S>(
     key: Key,
     reason: Value,
@@ -1088,14 +1090,16 @@ where
         crate::api::reason_diagnostic(scoped.runtime_access(), reason.runtime_root())
     });
     transact_on_machines(".child.interrupt", context, |store, events, updates| {
-        let stopped = events.interrupt_tasks(&machine, &diagnostic);
+        let stopped = events.interrupt_tasks(&machine, &diagnostic, |machine, sequence| {
+            host.run_calls(machine, sequence)
+        });
         let mut tasks = Vec::with_capacity(stopped.len());
-        for (machine, sequence, task) in stopped {
-            tasks.push(task);
+        for run in stopped {
+            tasks.push(run.task);
             updates.push(ReflectionUpdate::Interrupt {
                 host: host.clone(),
-                machine: Arc::from(machine),
-                sequence,
+                machine: Arc::from(run.machine),
+                sequence: run.sequence,
             });
         }
         values.with_access(|scoped| {

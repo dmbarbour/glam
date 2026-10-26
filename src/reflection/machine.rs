@@ -4390,6 +4390,21 @@ impl<S: TaskSpecialization> EffectTask<S> {
         self.execution.work = work;
     }
 
+    /// The child machines the current branch runs within, by call,
+    /// outermost first (`child-call-frame`).
+    pub(super) fn calls(&self) -> Vec<Arc<[Key]>> {
+        self.execution
+            .active_branch()
+            .map(|branch| {
+                branch
+                    .calls
+                    .iter()
+                    .map(|call| call.machine.clone())
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
     /// Cancels this task from teardown, outside any mutator. A task on a
     /// child machine ends its run, as `finish_in` does.
     pub(super) fn cancel(&mut self) {
@@ -4605,6 +4620,10 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ValueEffectTask<S> {
     fn cancel(&mut self) {
         self.0.cancel();
     }
+
+    fn calls(&self) -> Vec<Arc<[Key]>> {
+        self.0.calls()
+    }
 }
 
 impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<S> {
@@ -4631,6 +4650,10 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for ContextualValueEffectTask<
 
     fn cancel(&mut self) {
         self.task.cancel();
+    }
+
+    fn calls(&self) -> Vec<Arc<[Key]>> {
+        self.task.calls()
     }
 }
 
@@ -4727,6 +4750,10 @@ impl<S: TaskSpecialization> EvaluationTaskMachine for UnitEffectTask<S> {
 
     fn cancel(&mut self) {
         self.0.cancel();
+    }
+
+    fn calls(&self) -> Vec<Arc<[Key]>> {
+        self.0.calls()
     }
 }
 

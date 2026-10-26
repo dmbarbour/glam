@@ -162,7 +162,14 @@ and control flow.
   read is observed, so a failed cut waits for the status to change.
 - `.child.interrupt Key Reason` takes the running tasks (the heads of
   unflagged queues) of the child and its descendants, breaks their replies
-  with `Reason` and flags their machines; `.child.recover Key` clears a
+  with `Reason` and flags their machines, and each child a stopped run
+  waits within by call (`MachineHost::run_calls`, read from the machine the
+  coordinator holds while the task waits): an interrupt is transitive, and
+  a callee does the run's work (`quiescence-is-analyzed`). A host does the
+  same by path (`EvaluationRuntime::interrupt`), an annotation task's
+  anonymous root included, which it flags in `FailedRoots` with the
+  reason, clearing the task's `flags_root` so the task's end flags nothing
+  more. `.child.recover Key` clears a
   flagged child's flag and queue, breaking the dropped replies;
   `.child.clear Key` empties the child and its descendants as a turn's
   clear does, breaking every reply it drops. Each is a transactional

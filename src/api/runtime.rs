@@ -33,6 +33,7 @@ mod flags;
 #[cfg(test)]
 mod gc_activity_inventory;
 mod machines;
+mod options;
 mod ports;
 mod readiness;
 mod shares;

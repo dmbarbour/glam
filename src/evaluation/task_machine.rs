@@ -158,6 +158,11 @@ pub(crate) trait MachineHost: Send + Sync {
     /// stays the machine's.
     fn interrupt(&self, machine: &[Key], sequence: u64);
 
+    /// The child machines the task of the machine's run `sequence` waits
+    /// within, by call, which an interrupt of the run flags with it: none
+    /// where the task runs a quantum, or has not launched.
+    fn run_calls(&self, machine: &[Key], sequence: u64) -> Vec<Arc<[Key]>>;
+
     /// Empties the machine and its descendants, as a clear committed: their
     /// local state goes, and so does the state a task still winding down
     /// there, stopped or failed, leaves. It stops nothing: a clear waits for

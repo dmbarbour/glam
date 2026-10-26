@@ -8,7 +8,7 @@
 //! here: only its own tasks read or write them, one at a time.
 
 use std::collections::{BTreeSet, HashMap};
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Arc, Mutex, PoisonError};
 
 use super::RuntimeSharedResources;
 use super::events::{RuntimeEventJournal, TASKS, task_address};
@@ -417,6 +417,16 @@ impl MachineHost for RuntimeSharedResources {
         if let Some(task) = task {
             task.cancel();
         }
+    }
+
+    fn run_calls(&self, machine: &[Key], sequence: u64) -> Vec<Arc<[Key]>> {
+        let task = self
+            .cells()
+            .get(machine)
+            .and_then(|cell| cell.run.as_ref())
+            .filter(|run| run.sequence == sequence)
+            .and_then(|run| run.task.clone());
+        task.map(|task| task.waiting_calls()).unwrap_or_default()
     }
 
     fn root_ended(&self, root: &[Key]) {

@@ -64,6 +64,8 @@ use deferred::{
     claim_lazy_route, deferred_work_mut,
 };
 #[cfg(test)]
+use reflection::ReflectionCancellation;
+#[cfg(test)]
 pub(super) use reflection::ReflectionWorkSnapshot;
 #[cfg(test)]
 use reflection::reflection_work;
@@ -71,9 +73,7 @@ use reflection::{
     AbandonedReflectionWork, ReflectionIndexes, ReflectionWork, claim_reflection,
     reflection_work_mut, remove_ready_reflection,
 };
-pub(super) use reflection::{
-    ClaimedReflectionWork, ReflectionCancellation, ReflectionWorkPoll, ReflectionWorkState,
-};
+pub(super) use reflection::{ClaimedReflectionWork, ReflectionWorkPoll, ReflectionWorkState};
 pub(crate) use settlement::{
     RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
     RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, ValidatedRuntimeSettlementPlan,

@@ -8,7 +8,7 @@ use std::sync::{Arc, Mutex, OnceLock, PoisonError, Weak};
 use rpds::RedBlackTreeMapSync;
 
 use crate::core::{
-    EvaluationFailure, EvaluationPanic, ManagedPromiseRoot, PromiseAssignment, PromiseId,
+    EvaluationFailure, EvaluationPanic, Key, ManagedPromiseRoot, PromiseAssignment, PromiseId,
     RuntimeValueAccess,
 };
 use crate::runtime::{
@@ -18,8 +18,7 @@ use crate::runtime::{
 use super::super::{RuntimeObservationEpoch, evaluation_failure};
 use super::{
     CompletionSubscriptionOutcome, CompletionSubscriptions, CompletionWake,
-    EvaluationWorkCoordinator, EvaluationWorkId, ReflectionCancellation, WakeRegistration,
-    WorkDependency,
+    EvaluationWorkCoordinator, EvaluationWorkId, WakeRegistration, WorkDependency,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -115,6 +114,14 @@ pub(crate) trait EvaluationTaskMachine: Send {
     ) -> EvaluationMachinePoll;
 
     fn cancel(&mut self) {}
+
+    /// The child machines the task's current branch runs within, by call,
+    /// outermost first (`child-call-frame`), which an interrupt flags with
+    /// the task's own (`quiescence-is-analyzed`). Only a reflection task
+    /// calls.
+    fn calls(&self) -> Vec<Arc<[Key]>> {
+        Vec::new()
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -955,6 +962,16 @@ impl EvaluationTaskHandle {
         self.wait.runtime_id()
     }
 
+    /// The calls the task waits within, where it waits: the coordinator
+    /// holds its machine then. A task running a quantum, or ended, waits
+    /// within none.
+    pub(crate) fn waiting_calls(&self) -> Vec<Arc<[Key]>> {
+        self.coordinator
+            .upgrade()
+            .map(|coordinator| coordinator.waiting_calls(self.work))
+            .unwrap_or_default()
+    }
+
     pub(crate) fn cancel(&self) -> EvaluationTaskCancellation {
         if self.wait.terminal_poll().is_some() {
             return EvaluationTaskCancellation::Late;
@@ -963,23 +980,7 @@ impl EvaluationTaskHandle {
             return EvaluationTaskCancellation::Late;
         };
         debug_assert_eq!(coordinator.runtime_id(), self.runtime_id());
-        match coordinator.request_reflection_cancellation(self.work) {
-            ReflectionCancellation::Requested => EvaluationTaskCancellation::Requested,
-            ReflectionCancellation::Late => EvaluationTaskCancellation::Late,
-            ReflectionCancellation::Terminalize => {
-                coordinator.settle_terminal_work(
-                    self.work,
-                    EvaluationWaitTerminal::Cancelled,
-                    evaluation_failure("reflection fixpoint producer was cancelled"),
-                );
-                let mut machine = coordinator.retire_reflection(self.work);
-                if let Some(machine) = &mut machine {
-                    machine.cancel();
-                }
-                drop(machine);
-                EvaluationTaskCancellation::Requested
-            }
-        }
+        coordinator.cancel_reflection(self.work)
     }
 }
 

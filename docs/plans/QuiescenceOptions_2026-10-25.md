@@ -127,6 +127,26 @@ Embedders and tests use the API.
    promise wait inside a call flags caller and callee; an interrupt of
    nothing running changes nothing; a recovery then runs on a flagged
    child, through its parent.
+   Built 2026-10-25: `EvaluationRuntime::interrupt(&MachinePath, Value)`
+   (`api/runtime/options.rs`), answering the machines it flagged. A run's
+   calls come from its task's reflection machine while the coordinator
+   holds it (`EvaluationTaskMachine::calls`, the active branch's frames;
+   `MachineHost::run_calls`), and `interrupt_tasks` flags them in the same
+   commit, for `.child.interrupt` and the host alike. An annotation root's
+   interrupt flags the root in `FailedRoots`, clearing the task's
+   `flags_root` under the coordinator lock, so a failure at the end of a
+   quantum running meanwhile flags nothing twice, then cancels the task
+   (`cancel_reflection`, which the task handle's cancel now uses). The
+   recovery test was left out: interrupting leaves a flag as any failure
+   does, and recovery is tested already. Mutation-checked: the callee
+   flags and each source of the calls, the root's callees, the broken
+   replies, the runs' and the root task's cancellation, the root's flag,
+   and the path's reach. One mutant is equivalent: listing every
+   reflection task, not only annotation tasks, as a root to interrupt
+   changes nothing observable, since only annotation and child tasks run
+   on a host with machines, so a Rust-scheduled run never calls, and a
+   child task's calls are flagged through its run. The guard on
+   `flags_root` needs a forced interleaving to test, and has none.
 4. `quiescence-clears` — `EvaluationRuntime::clear`. Tests: a failed
    child under an ended root clears, leaving nothing; a failed annotation
    root clears; a clear refused while a task waits there, then accepted

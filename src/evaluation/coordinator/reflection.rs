@@ -6,18 +6,20 @@ use crate::trusted_hash::TrustedHashMap;
 use std::sync::Arc;
 
 use crate::core::{EvaluationPanic, Key, RuntimeValueMutator};
-use crate::runtime::{EvaluationRuntimeId, RuntimeMutationAuthority};
+use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeMutationAuthority};
 
-use super::super::{EvaluationDemandState, EvaluationTaskBlock};
+use super::super::{EvaluationDemandState, EvaluationTaskBlock, evaluation_failure};
 use super::deferred::terminalize_lazy_cycle;
+use super::task::EvaluationTaskCancellation;
 use super::{
     ClaimedDemandSession, CoordinatorMutationKind, EvaluationSessionId, EvaluationTaskId,
-    EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitToken, EvaluationWorkCoordinator,
-    EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker, ProducerSettlementObligation,
-    RouteHazard, SettlementObligations, TaskStatusPublisher, TaskStatusUpdate, TaskStatusWake,
-    WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind, WorkRecord, WorkState,
-    demand_session_is_closed, prune_closed_session_registration, publish_task_block_locked,
-    queue_task, register_background_root, remove_ready_task, unregister_background_root,
+    EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitTerminal, EvaluationWaitToken,
+    EvaluationWorkCoordinator, EvaluationWorkId, ExactRouteRelease, ExactRouteReleaseTracker,
+    ProducerSettlementObligation, RouteHazard, SettlementObligations, TaskStatusPublisher,
+    TaskStatusUpdate, TaskStatusWake, WorkCloseReason, WorkControl, WorkCoordinatorState, WorkKind,
+    WorkRecord, WorkState, demand_session_is_closed, prune_closed_session_registration,
+    publish_task_block_locked, queue_task, register_background_root, remove_ready_task,
+    unregister_background_root,
 };
 
 impl EvaluationWorkCoordinator {
@@ -43,6 +45,108 @@ impl EvaluationWorkCoordinator {
                 })
                 .is_some()
         })
+    }
+
+    /// Cancels the reflection work at `work`: a waiting task at once, its
+    /// machine cancelled, and a running one at the end of its quantum.
+    pub(in crate::evaluation) fn cancel_reflection(
+        self: &Arc<Self>,
+        work: EvaluationWorkId,
+    ) -> EvaluationTaskCancellation {
+        match self.request_reflection_cancellation(work) {
+            ReflectionCancellation::Requested => EvaluationTaskCancellation::Requested,
+            ReflectionCancellation::Late => EvaluationTaskCancellation::Late,
+            ReflectionCancellation::Terminalize => {
+                self.settle_terminal_work(
+                    work,
+                    EvaluationWaitTerminal::Cancelled,
+                    evaluation_failure("reflection fixpoint producer was cancelled"),
+                );
+                let mut machine = self.retire_reflection(work);
+                if let Some(machine) = &mut machine {
+                    machine.cancel();
+                }
+                drop(machine);
+                EvaluationTaskCancellation::Requested
+            }
+        }
+    }
+
+    /// The annotation tasks not yet ending, by task and work: the tasks
+    /// whose failure flags their anonymous roots.
+    pub(crate) fn annotation_tasks(&self) -> Vec<(EvaluationTaskId, EvaluationWorkId)> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        state
+            .reflection
+            .by_task
+            .iter()
+            .filter(|(_, work)| {
+                state.work.get(work).is_some_and(|record| {
+                    !matches!(record.state, WorkState::Terminalizing)
+                        && matches!(&record.kind,
+                            WorkKind::Reflection(reflection) if reflection.flags_root)
+                })
+            })
+            .map(|(task, work)| (*task, *work))
+            .collect()
+    }
+
+    /// Flags the anonymous root of the annotation task at `work` with
+    /// `failure`, an interrupt's, as the task's own failure would, and
+    /// cancels the task (`quiescence-is-analyzed`). The interrupt's failure
+    /// stands for the task's, so the task's end flags nothing more. Returns
+    /// whether the task was there to stop.
+    pub(crate) fn interrupt_root(
+        self: &Arc<Self>,
+        work: EvaluationWorkId,
+        failure: RuntimeFailureRoot,
+    ) -> bool {
+        {
+            let _mutation = self.admission.mutation_guard();
+            let mut state = self
+                .state
+                .lock()
+                .expect("evaluation work coordinator was poisoned");
+            let Some(record) = state.work.get_mut(&work) else {
+                return false;
+            };
+            if matches!(record.state, WorkState::Terminalizing) {
+                return false;
+            }
+            let WorkKind::Reflection(reflection) = &mut record.kind else {
+                return false;
+            };
+            if !reflection.flags_root {
+                return false;
+            }
+            reflection.flags_root = false;
+            let task = reflection.task;
+            state.failed_roots.insert_mut(task, failure.clone());
+            state.pending_failed_root_reports.insert_mut(task, failure);
+        }
+        let _ = self.cancel_reflection(work);
+        true
+    }
+
+    /// The calls the reflection task at `work` waits within: those of its
+    /// machine's current branch, while the coordinator holds the machine. A
+    /// task running a quantum holds its own, and waits within none.
+    pub(crate) fn waiting_calls(&self, work: EvaluationWorkId) -> Vec<Arc<[Key]>> {
+        let state = self
+            .state
+            .lock()
+            .expect("evaluation work coordinator was poisoned");
+        match state.work.get(&work).map(|record| &record.kind) {
+            Some(WorkKind::Reflection(reflection)) => reflection
+                .machine
+                .as_ref()
+                .map(|machine| machine.calls())
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        }
     }
 
     /// Records how the reflection work at `work` launches, as it activates
