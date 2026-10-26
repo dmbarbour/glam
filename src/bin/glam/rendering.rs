@@ -37,13 +37,17 @@ impl DefaultLogger {
     }
 
     fn emit_to(&self, diagnostic: &Diagnostic, writer: &mut impl Write) -> io::Result<()> {
+        writer.write_all(&self.rendered(diagnostic))
+    }
+
+    /// The bytes `diagnostic` renders as, for a terminal like the process's
+    /// standard error.
+    pub(super) fn rendered(&self, diagnostic: &Diagnostic) -> Bytes {
         let terminal = TerminalContext::snapshot();
-        let rendered = self
-            .format_diagnostic(diagnostic, &terminal)
+        self.format_diagnostic(diagnostic, &terminal)
             .unwrap_or_else(|_| {
                 Bytes::from(self.render(diagnostic, diagnostic.message(), &terminal))
-            });
-        writer.write_all(&rendered)
+            })
     }
 
     fn format_diagnostic(

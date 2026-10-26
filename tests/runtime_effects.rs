@@ -979,3 +979,53 @@ fn an_effect_wires_and_asks_on_the_turn_machine_s_ports() {
     assert_eq!(answer, 42, "a request travels with its reply's promise");
     assert_eq!(delivered, 7);
 }
+
+/// Answers `.signal` with unit, sending on its channel.
+struct Signaller(std::sync::mpsc::Sender<()>);
+
+impl EffectProvider for Signaller {
+    type Request = ();
+
+    fn requests(&self) -> Vec<EffectRequestSpec<()>> {
+        vec![EffectRequestSpec::new(
+            "signal",
+            ["signal_test", "request", "signal"],
+            0,
+            (),
+        )]
+    }
+
+    fn answer(&mut self, m: &mut Machine<'_, '_>, (): &()) -> Result<Answer, Error> {
+        let _ = self.0.send(());
+        m.unit_push();
+        Ok(Answer::Return)
+    }
+}
+
+#[test]
+fn an_effect_s_failed_cut_waits_for_what_it_observed_and_runs_again() {
+    // As the turn's own cut does, the effect's outermost cut, failing after
+    // it observed the heap, waits for that to change and runs again
+    // (`HostControl::CutFailed`). It signals once its read has failed, so
+    // the write that wakes it comes after the read.
+    let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
+    let (signal, signalled) = std::sync::mpsc::channel();
+    let got = rt
+        .run("p", |p| {
+            let reader = p.fork("r", move |r| {
+                run(
+                    r,
+                    ".cut (.alt (.heap.try_get ['go]) (.signal =>> .fail))",
+                    &mut Signaller(signal),
+                )
+            })?;
+            signalled.recv().expect("the first attempt fails");
+            p.int_push(7);
+            p.heap_set(["go"])?;
+            p.join(reader)?;
+            p.take("r", 1)?;
+            p.int_pop()
+        })
+        .expect("the turn should succeed");
+    assert_eq!(got, 7, "the cut ran again once the heap changed");
+}

@@ -332,7 +332,6 @@ fn diagnostic_value_operations_reject_foreign_runtime_views() {
             .with_context(&owner.values(), foreign.values().text("foreign context"))
             .is_err()
     );
-    assert!(diagnostic.transport_value(&foreign.values()).is_err());
     assert!(
         Diagnostic::apply_updates(
             &owner.values(),

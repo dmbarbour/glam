@@ -53,7 +53,7 @@ pub(crate) use ports::WireEnd;
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire};
 pub use readiness::*;
 pub(in crate::api) use shares::ShareJournal;
-pub(in crate::api) use turns::TurnRun;
+pub(in crate::api) use turns::{TurnActivity, TurnRun};
 
 fn maintenance_failure_kind(
     kind: RuntimeGcMaintenanceFailureKind,

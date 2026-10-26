@@ -2428,7 +2428,10 @@ maps the short names used here to file names.
   logger under the root, since a machine wires and clears its direct
   children and a configured logger runs on the logger machine. The
   hand-over stays the logger's own rewiring, of its input onto an output
-  the root wires to the fallback.)
+  the root wires to the fallback. The fallback, named `default_logger`
+  for debug reports, runs continuously, and a configured logger's `.log`
+  goes to it, so a configured logger may focus on enrichment, maintainer,
+  the same day.)
 - **Recorded in:** runtime API plan, `api-ports`.
 
 ### Machines inherit an environment that each binds a share of
@@ -2458,7 +2461,9 @@ maps the short names used here to file names.
   - Reflection tasks are logical children of a `refl` machine under the
     root, which supplies their environment and through whose diagnostics
     output their logs pass, so a host may intervene there. Each role's
-    machine binds its `glam` entry.
+    machine binds its `glam` entry. (Amended by the maintainer,
+    2026-10-26: a user-defined logger, which runs on its machine as a
+    turn, manages its own environment; the CLI binds nothing there.)
   - Shares live in a store of the runtime, keyed by machine path, so
     reflection tasks read them through their hosts until they are machines.
   - (Decided by the maintainer, 2026-10-26, for tasks: get and set connote
@@ -2699,6 +2704,15 @@ maps the short names used here to file names.
     turn's result's to say, as for any error a turn may handle. Reason:
     the batch ends a logger that runs as a turn, waiting on its input, as
     it ends any idle wait, and a turn's errors are its own to handle.)
+  - (Decided by the maintainer, 2026-10-26: turns join the analysis now,
+    ahead of the turn runtime's host options. A turn waiting where a cut
+    waits or a read blocks is idle while what it observed holds; one whose
+    observations changed, or that runs, is in progress; one joining its
+    forks defers to them; and the turn that asks for the analysis is its
+    observer, so its own runs are left out. Reason: a logger that runs as
+    a turn, woken by input, must not read as idle, or the batch halts it
+    or ends before it renders, where a reflection task's wake was the
+    coordinator's to see. Built the same day, with the logger as a turn.)
   - (Decided by the maintainer, 2026-10-26: readiness presents no
     judgement. `Ready` and `Deadlocked` fold into one `Stable` snapshot,
     and the distinction is the analysis's; "deadlock" leaves the names of

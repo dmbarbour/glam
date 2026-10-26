@@ -35,8 +35,7 @@ request and transaction contexts remain bounded to one interpreter callback.
 
 The reusable `ReflectionEffects` family adds environment lookup, diagnostic
 emission, dictionary iteration, lazy-shell value observation, and child-task
-operations. `main` defines a broader logger specialization with diagnostic
-stream reads and stderr output. Tasks queued on child machines through
+operations. Tasks queued on child machines through
 `.child.task` inherit their parent's complete profile, including its
 additional operations, role environment, and diagnostic destination.
 

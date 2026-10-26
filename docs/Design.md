@@ -742,8 +742,8 @@ visible only when the surrounding transaction commits; failed alternatives
 discard it. Queue reads observe committed host state only, never writes from
 their own transaction. Input claims roll back per alternative, while the
 observed FIFO prefix or empty tail remains cut-wide. An empty read fails the
-current attempt; an API such as `.read_log` may define that absence as a
-retryable wait on the observed tail rather than as permission to advance an
+current attempt; a port read defines that absence as pushback, a
+retryable wait on the observed tail, rather than as permission to advance an
 unrelated alternative.
 Ordering between concurrently produced messages is host policy and must not
 influence pure assembly results.

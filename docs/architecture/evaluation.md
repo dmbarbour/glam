@@ -32,7 +32,18 @@ once, at the head of its chain, leaving out the links another work awaits.
 Beside the waits, the analysis lists the pending obligations, the backlogs
 (input a machine's buffer holds unread, and queued tasks not yet started), the
 machines in error, and the retained delivery and maintenance failures, each
-an issue family a client may mask.
+an issue family a client may mask. Turns count too (`api/runtime/turns.rs`):
+each run a turn enters records its thread and what it does, and the analysis
+reads each thread's innermost run but the asking thread's, whose turn is the
+observer. A run that runs is in progress; one waiting where a cut waits or a
+read blocks is idle while its journals still validate, and in progress once
+what it observed changes; one awaiting evaluation is idle until the
+observation epoch passes; one joining its forks defers to them
+(`RuntimeAnalysis::busy_turns`). A host whose analysis finds turns busy waits
+for them with `EvaluationRuntime::wait_for_turns`. A turn's effect run pauses
+where a failure reaches its outermost cut (`HostControl::CutFailed`), and the
+turn, which holds what the cut observed, waits it out and runs the cut
+again, as its own cut would, or lets the failure through.
 
 ## Module Ownership
 

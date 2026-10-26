@@ -28,13 +28,9 @@ use configuration::{CLI, select_entry, selects_nothing};
 use batch::{BatchLogger, finish_local_files, quiesce_batch};
 
 #[cfg(test)]
-use configuration::logger::test_support::{
-    hand_over_logger, held_by_logger, logger_runtime, take_from_fallback, take_unread,
-};
+use configuration::logger::PublishedIssues;
 #[cfg(test)]
-use configuration::logger::{LoggerTaskHost, MainEffects, PublishedIssues};
-#[cfg(test)]
-use glam::reflection::{EffectLifecycle, EffectRun, TaskOutcome};
+use configuration::logger::test_support::{logger_runtime, take_unread};
 #[cfg(test)]
 use glam::{
     EvaluationRuntime, FileSourceSystem, RuntimeDeliveryOutcome, RuntimeEventJournal,
@@ -285,8 +281,9 @@ fn inspect_g_source_command(path: &Path, verbosity: command_line::ParseVerbosity
 #[cfg(test)]
 mod tests {
     use super::*;
+    use configuration::logger::{DEFAULT_LOGGER, DIAGNOSTICS, LOGGER};
     use glam::{Assembler, HandleValue, SourceSystem};
-    use rendering::rendered_text_for_test;
+    use rendering::{port_diagnostic, rendered_text_for_test};
 
     trait TestValueFacade {
         fn get(&self, root: &HandleValue, path: &str) -> Result<HandleValue, Error>;
@@ -346,192 +343,6 @@ mod tests {
         assert_eq!(diagnostics.counts().errors(), 0);
     }
 
-    /// A configured logger's host over `assembler`'s runtime, whose own
-    /// reports go to `diagnostics`.
-    fn logger_host(assembler: &Assembler, diagnostics: DiagnosticBus) -> Arc<LoggerTaskHost> {
-        Arc::new(LoggerTaskHost::new(
-            &assembler.evaluation_runtime(),
-            diagnostics,
-            assembler.reflection_environment_for_role("logger"),
-        ))
-    }
-
-    #[test]
-    fn logger_demand_resumes_failed_choice_before_reading_queued_input() {
-        let mut resolver = None;
-        let assembler = Assembler::builder()
-            .evaluation_runtime(EvaluationRuntime::new(0).expect("a runtime should open"))
-            .reflection_environment(|environment| {
-                let (gate, gate_resolver) = environment.promise("logger stderr gate");
-                resolver = Some(gate_resolver);
-                environment.values().record([("gate", gate)])
-            })
-            .expect("logger gate environment should build")
-            .build()
-            .expect("logger gate assembler should build");
-        let mut runtime = logger_runtime(assembler.clone());
-        let evaluation_runtime = assembler.evaluation_runtime();
-        let module = assembler
-            .module(["logger_demand_resume"])
-            .script(
-                "g",
-                concat!(
-                    "language g0\n",
-                    "import 'std\n",
-                    "refl.effect = .env.lookup ['gate] >>= (\\gate -> .cut (.alt ",
-                    "(.write_stderr gate =>> .fail) ",
-                    "(.read_log >>= (\\_message -> .r ()))))\n",
-                ),
-            )
-            .build()
-            .expect("logger demand fixture should compile");
-        let effect = assembler
-            .get(module.value(), "refl.effect")
-            .expect("logger demand fixture should define its effect");
-        let host = logger_host(&assembler, DiagnosticBus::for_runtime(&evaluation_runtime));
-        let lifecycle = EffectLifecycle::new_closing_session(&evaluation_runtime);
-        let task = EffectRun::new(
-            &evaluation_runtime,
-            &effect,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&lifecycle)
-        .expect("logger demand fixture should schedule");
-
-        evaluation_runtime.pump_until_stable();
-        assert!(matches!(
-            lifecycle.status(),
-            glam::reflection::EffectLifecycleStatus::Blocked
-        ));
-        assembler.diagnostic_bus().publish_local(Diagnostic::new(
-            &assembler.values(),
-            Severity::Info,
-            "queued while stderr demand is blocked",
-        ));
-        resolver
-            .take()
-            .expect("logger gate resolver should remain available")
-            .resolve(assembler.values().text("ABANDONED STDERR\n"))
-            .expect("logger stderr gate should resolve once");
-
-        evaluation_runtime.pump_until_stable();
-        assert!(matches!(
-            task.run_with(|| host.deliver()).unwrap(),
-            TaskOutcome::Complete(_)
-        ));
-        assert_eq!(
-            held_by_logger(&mut runtime),
-            0,
-            "the resumed fallback branch must consume the queued diagnostic"
-        );
-    }
-
-    #[test]
-    fn recursive_logger_drains_input_queued_before_its_first_poll() {
-        let assembler = Assembler::default();
-        let mut runtime = logger_runtime(assembler.clone());
-        let evaluation_runtime = assembler.evaluation_runtime();
-        let module = assembler
-            .module(["prequeued_logger"])
-            .script(
-                "g",
-                concat!(
-                    "language g0\n",
-                    "import 'std\n",
-                    "object logger with\n  alias logger_object\n",
-                    "  run = (.cut (.read_log >>= (\\_message -> .r ()))) =>> logger_object\n",
-                    "  eff = logger_object.run.eff\n",
-                    "refl.effect = (.cut (.heap.get ['start] >>= ",
-                    "(\\start -> (start == 1) =>> .r ()))) =>> logger\n",
-                    "refl.start = .heap.set ['start] 1\n",
-                    "refl.producer = .log 'info {msg:{text:\"queued before first poll\"}}\n",
-                ),
-            )
-            .build()
-            .expect("prequeued logger fixture should compile");
-        let effect = assembler
-            .get(module.value(), "refl.effect")
-            .expect("prequeued logger fixture should define its effect");
-        let start = assembler
-            .get(module.value(), "refl.start")
-            .expect("prequeued logger fixture should define its release effect");
-        let producer = assembler
-            .get(module.value(), "refl.producer")
-            .expect("prequeued logger fixture should define its producer");
-        let host = logger_host(&assembler, assembler.diagnostic_bus());
-        let lifecycle = EffectLifecycle::new_closing_session(&evaluation_runtime);
-        let task = EffectRun::new(
-            &evaluation_runtime,
-            &effect,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&lifecycle)
-        .expect("recursive logger root should enter coordinator work");
-        let stop = task.stopper();
-        evaluation_runtime.pump_until_stable();
-        assert!(matches!(
-            evaluation_runtime.readiness(),
-            RuntimeReadiness::Stable(_)
-        ));
-        assert!(matches!(
-            lifecycle.status(),
-            glam::reflection::EffectLifecycleStatus::Blocked
-        ));
-
-        let producer_lifecycle = EffectLifecycle::new(&evaluation_runtime);
-        let producer_task = EffectRun::new(
-            &evaluation_runtime,
-            &producer,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&producer_lifecycle)
-        .expect("prequeued diagnostic producer should schedule");
-        let report = evaluation_runtime.pump_background(4096);
-        assert_eq!(report.state, glam::BackgroundPumpState::Stable);
-        assert!(matches!(
-            producer_task.run_with(|| host.deliver()).unwrap(),
-            TaskOutcome::Complete(_)
-        ));
-        assert_eq!(
-            held_by_logger(&mut runtime),
-            1,
-            "the barrier must release only after the diagnostic is admitted"
-        );
-        let release_lifecycle = EffectLifecycle::new(&evaluation_runtime);
-        let release = EffectRun::new(
-            &evaluation_runtime,
-            &start,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&release_lifecycle)
-        .expect("logger release effect should schedule");
-        assert!(matches!(
-            release.run_with(|| host.deliver()).unwrap(),
-            TaskOutcome::Complete(_)
-        ));
-
-        evaluation_runtime.pump_until_stable();
-        let analysis = evaluation_runtime.analysis().unwrap();
-        assert!(
-            analysis.quiescent() && analysis.issues().is_empty(),
-            "the recursive logger should drain prequeued input and wait on its input, idle"
-        );
-        assert_eq!(
-            held_by_logger(&mut runtime),
-            0,
-            "the logger read what was queued before its first poll"
-        );
-        stop.stop();
-        assert!(matches!(
-            task.run_with(|| host.deliver()),
-            Ok(TaskOutcome::Cancelled)
-        ));
-    }
-
     /// Commits a value to an output whose adapter fails, and delivers it,
     /// leaving a delivery failure for an analysis to report.
     fn fail_a_delivery(runtime: &EvaluationRuntime, message: &'static str) {
@@ -556,15 +367,10 @@ mod tests {
         ));
     }
 
-    /// A batch's logger that drains with `drain` and runs no configured
-    /// logger.
-    struct DrainingLogger<'a>(&'a mut dyn FnMut() -> Result<(), Error>);
+    /// A batch's logger that runs no configured logger.
+    struct NoConfiguredLogger;
 
-    impl BatchLogger for DrainingLogger<'_> {
-        fn drain(&mut self) -> Result<(), Error> {
-            (self.0)()
-        }
-
+    impl BatchLogger for NoConfiguredLogger {
         fn halt(&mut self, _unread: usize) -> bool {
             false
         }
@@ -583,26 +389,15 @@ mod tests {
                 concat!(
                     "language g0\n",
                     "import 'std\n",
-                    "refl.effect = .r () >>= (\\_ -> seq (anno refl:(.fail) ()) (.r ()))\n",
+                    "failure = anno refl:(.fail) ()\n",
                 ),
             )
             .build()
             .expect("failure fixture should compile");
-        let effect = assembler
-            .get(module.value(), "refl.effect")
-            .expect("failure fixture should define its effect");
-        let logger_diagnostics = DiagnosticBus::for_runtime(&evaluation_runtime);
-        let host = logger_host(&assembler, logger_diagnostics.clone());
-        let lifecycle = EffectLifecycle::new(&evaluation_runtime);
-        let task = EffectRun::new(
-            &evaluation_runtime,
-            &effect,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&lifecycle)
-        .expect("failure root should schedule");
-        assert!(task.run_with(|| host.deliver()).is_err());
+        assert!(
+            assembler.get(module.value(), "failure").is_err(),
+            "the annotation's task fails as it is forced"
+        );
         fail_a_delivery(&evaluation_runtime, "output adapter failed");
         evaluation_runtime.pump_until_stable();
 
@@ -659,34 +454,17 @@ mod tests {
                 concat!(
                     "language g0\n",
                     "import 'std\n",
-                    "refl.erred = .cut (.heap.get ['never])\n",
-                    "refl.awaits = .promise.new >>= (\\pr -> .heap.set ['kept] pr.resolver =>> seq pr.promise (.r ()))\n",
+                    "erred = anno refl:(.child.task 'e (.cut (.heap.get ['never])) >>= (\\_ -> .r ())) ()\n",
+                    "awaits = anno refl:(.child.task 'a (.promise.new >>= (\\pr -> .heap.set ['kept] pr.resolver =>> seq pr.promise (.r ()))) >>= (\\_ -> .r ())) ()\n",
                 ),
             )
             .build()
             .expect("wait fixture should compile");
-        let host = logger_host(&assembler, DiagnosticBus::for_runtime(&evaluation_runtime));
-        let lifecycles = [
-            EffectLifecycle::new(&evaluation_runtime),
-            EffectLifecycle::new(&evaluation_runtime),
-        ];
-        let _tasks: Vec<_> = ["refl.erred", "refl.awaits"]
-            .iter()
-            .zip(&lifecycles)
-            .map(|(name, lifecycle)| {
-                let effect = assembler
-                    .get(module.value(), name)
-                    .expect("fixture should define its effect");
-                EffectRun::new(
-                    &evaluation_runtime,
-                    &effect,
-                    MainEffects::new(assembler.values()),
-                    host.clone(),
-                )
-                .schedule(lifecycle)
-                .expect("the effect should schedule")
-            })
-            .collect();
+        for name in ["erred", "awaits"] {
+            assembler
+                .get(module.value(), name)
+                .expect("the annotation tasks its child as it is forced");
+        }
         evaluation_runtime.pump_until_stable();
 
         let values = assembler.values();
@@ -726,74 +504,76 @@ mod tests {
     }
 
     #[test]
-    fn a_batch_renders_what_its_publishing_reports() {
+    fn a_batch_waits_for_the_default_logger_to_render_what_rendering_reports() {
+        // `quiescence-is-analyzed`: the default logger is a turn, whose
+        // rendering the analysis sees in progress, so the batch ends only
+        // once it waits on its input again, idle, having rendered what its
+        // rendering reported.
         let assembler = Assembler::default();
         let mut runtime = logger_runtime(assembler.clone());
-        hand_over_logger(&mut runtime);
         let evaluation_runtime = assembler.evaluation_runtime();
-        let module = assembler
-            .module(["reentrant_report"])
-            .script(
-                "g",
-                concat!(
-                    "language g0\n",
-                    "import 'std\n",
-                    "refl.effect = .r () >>= (\\_ -> seq (anno refl:(.fail) ()) (.r ()))\n",
-                ),
-            )
-            .build()
-            .expect("reentrant reporting fixture should compile");
-        let effect = assembler
-            .get(module.value(), "refl.effect")
-            .expect("fixture should define its effect");
-        let host = logger_host(&assembler, DiagnosticBus::for_runtime(&evaluation_runtime));
-        let lifecycle = EffectLifecycle::new(&evaluation_runtime);
-        let task = EffectRun::new(
-            &evaluation_runtime,
-            &effect,
-            MainEffects::new(assembler.values()),
-            host.clone(),
-        )
-        .schedule(&lifecycle)
-        .expect("reentrant reporting root should schedule");
-        assert!(task.run_with(|| host.deliver()).is_err());
+        fail_a_delivery(&evaluation_runtime, "output adapter failed");
 
-        let rendered = std::cell::RefCell::new(Vec::new());
-        let render = |diagnostic: Diagnostic| {
-            let first = rendered.borrow().is_empty();
-            rendered
-                .borrow_mut()
-                .push(rendered_text_for_test(&assembler, &diagnostic));
-            if first {
-                assembler.diagnostic_bus().publish_local(Diagnostic::new(
+        let rendered = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let failed = runtime
+            .run((), |root| {
+                root.run(LOGGER, |logger| {
+                    logger.wire_add(
+                        glam::Endpoint::input(DIAGNOSTICS),
+                        glam::Endpoint::output("unread"),
+                    )
+                })?;
+                let default_logger = root.fork(DEFAULT_LOGGER, {
+                    let assembler = assembler.clone();
+                    let rendered = rendered.clone();
+                    move |m| loop {
+                        match m.port_read(DIAGNOSTICS, 1) {
+                            Ok(()) => {
+                                let message = glam::transition::pop_value(m)?;
+                                let diagnostic = port_diagnostic(&assembler, message)?;
+                                let text = rendered_text_for_test(&assembler, &diagnostic);
+                                let mut rendered = rendered.lock().unwrap();
+                                if rendered.is_empty() {
+                                    assembler.diagnostic_bus().publish_local(Diagnostic::new(
+                                        &assembler.values(),
+                                        Severity::Info,
+                                        "reported while rendering",
+                                    ));
+                                }
+                                rendered.push(text);
+                            }
+                            Err(error) if error.kind() == glam::ErrorKind::Interrupted => {
+                                return Ok(());
+                            }
+                            Err(error) => return Err(error),
+                        }
+                    }
+                })?;
+                let failed = quiesce_batch(
+                    &evaluation_runtime,
                     &assembler.values(),
-                    Severity::Info,
-                    "reported while rendering",
-                ));
-            }
-        };
-        let mut drain = || {
-            for diagnostic in take_from_fallback(&mut runtime) {
-                render(diagnostic);
-            }
-            Ok(())
-        };
-        let failed = quiesce_batch(
-            &evaluation_runtime,
-            &assembler.values(),
-            render,
-            &mut DrainingLogger(&mut drain),
-        );
+                    |diagnostic| {
+                        assembler.diagnostic_bus().publish_local(diagnostic);
+                    },
+                    &mut NoConfiguredLogger,
+                );
+                evaluation_runtime.interrupt(
+                    &glam::MachinePath::from([DEFAULT_LOGGER]),
+                    assembler.values().text("the batch ended"),
+                )?;
+                root.join(default_logger)?;
+                Ok(failed)
+            })
+            .expect("the batch's turn succeeds");
 
-        assert!(failed, "the failed machine fails the batch");
-        assert_eq!(
-            *rendered.borrow(),
-            [
-                "reflection task failed permanently".to_owned(),
-                "reported while rendering".to_owned(),
-            ]
+        assert!(failed, "the delivery failure fails the batch");
+        let rendered = rendered.lock().unwrap();
+        assert_eq!(rendered.len(), 2, "{rendered:?}");
+        assert!(
+            rendered[0].contains("output adapter failed"),
+            "{rendered:?}"
         );
-        assert_eq!(assembler.diagnostic_bus().counts().total(), 1);
+        assert_eq!(rendered[1], "reported while rendering");
     }
 
     #[test]
@@ -806,7 +586,7 @@ mod tests {
             &evaluation_runtime,
             &assembler.values(),
             |_| {},
-            &mut DrainingLogger(&mut || Ok(())),
+            &mut NoConfiguredLogger,
         ));
         assert_eq!(
             evaluation_runtime
@@ -829,7 +609,7 @@ mod tests {
             &evaluation_runtime,
             &assembler.values(),
             |_| {},
-            &mut DrainingLogger(&mut || Ok(())),
+            &mut NoConfiguredLogger,
         ));
         assert!(matches!(
             evaluation_runtime.readiness(),

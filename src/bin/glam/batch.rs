@@ -10,16 +10,19 @@ use crate::command_line::{
 };
 use bytes::Bytes;
 use glam::{
-    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, Fork, Key, Machine,
+    Diagnostic, DiagnosticBus, Error, EvaluationRuntime, FileSourceSystem, Key, Machine,
     ModuleInput, Runtime, RuntimeReadiness, Severity, Values,
 };
 
 use crate::DiagnosticBusLocal;
 use crate::configuration::logger::{
-    DIAGNOSTICS, LOGGER, LoggerRun, PublishedIssues, drain_fallback, render_unread, start_logger,
+    DIAGNOSTICS, LOGGER, LoggerRun, PublishedIssues, render_unread, start_logger,
 };
 use crate::configuration::{CLI, InitialCliEnvironment, PreparationFailure, PreparedAssembly};
 use crate::rendering::DefaultLogger;
+
+/// How long a batch waits on busy turns before it looks again.
+const TURN_WAIT: std::time::Duration = std::time::Duration::from_millis(50);
 
 pub(super) fn finish_local_files(
     files: &FileSourceSystem,
@@ -147,9 +150,9 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
     let assembler = glam::transition::assembler(&runtime).clone();
     let assembler_diagnostics = assembler.diagnostic_bus();
     let values = assembler.values();
-    // The batch is one turn on the root, which starts the logger, assembles
-    // on the `cli` machine, and joins the logger before the turn ends.
-    let (operation_failed, logger_diagnostics) = runtime
+    // The batch is one turn on the root, which starts the loggers, assembles
+    // on the `cli` machine, and ends the loggers before the turn ends.
+    let (operation_failed, rendered) = runtime
         .run((), |root| {
             let mut logger = start_logger(root, &assembler)?;
             let result = root.run(CLI, |m| assemble(m, inputs, &assembly_args));
@@ -177,12 +180,10 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
                 &assembler_diagnostics,
                 &assembler.values(),
             );
-            let renderer = logger.renderer.clone();
             operation_failed |= super::profile::time("quiesce", || {
                 let mut batch_logger = RootLogger {
                     root: &mut *root,
                     logger: &mut logger,
-                    values: values.clone(),
                 };
                 quiesce_batch(
                     &assembler.evaluation_runtime(),
@@ -195,29 +196,17 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
             });
 
             // The batch ends at a quiescence whose analysis had nothing new:
-            // a configured logger still running waits on its input, idle,
-            // and its wait ends with the batch.
-            if let Some(thread) = logger.thread.take() {
-                if let Some(stop) = logger.stop.take() {
-                    stop.stop();
-                }
-                if let Err(error) = root.join(thread) {
-                    operation_failed = true;
-                    eprintln!("error: the logger ended in error: {error}");
-                }
-            }
-            if let Err(error) = root.recover(LOGGER, |logger| render_unread(logger, &renderer)) {
-                operation_failed = true;
-                eprintln!("error: could not render fallback diagnostics: {error}");
-            }
-            Ok((operation_failed, logger.diagnostics.clone()))
+            // the loggers still running wait on their inputs, idle, and
+            // their waits end with the batch.
+            operation_failed |= logger.finish(root);
+            Ok((operation_failed, logger.rendered.clone()))
         })
         .expect("the batch's turn returns its failures as diagnostics");
     super::profile::report(&runtime);
 
     if operation_failed
         || assembler_diagnostics.counts().errors() > 0
-        || logger_diagnostics.counts().errors() > 0
+        || rendered.counts().errors() > 0
     {
         ExitCode::from(1)
     } else {
@@ -227,12 +216,9 @@ fn execute_assembly(mut prepared: PreparedAssembly, command: CommandPlan) -> Exi
 
 /// The batch's logger, as the batch's quiescence drives it.
 pub(super) trait BatchLogger {
-    /// Renders what waits at the fallback, where no configured logger reads.
-    fn drain(&mut self) -> Result<(), Error>;
-
     /// Halts the configured logger, which left `unread` diagnostics in its
-    /// input at quiescence, so that the fallback renders them; `false`
-    /// where no configured logger runs.
+    /// input at quiescence, so that the default logger renders them;
+    /// `false` where no configured logger runs.
     fn halt(&mut self, unread: usize) -> bool;
 }
 
@@ -240,54 +226,21 @@ pub(super) trait BatchLogger {
 struct BusLogger;
 
 impl BatchLogger for BusLogger {
-    fn drain(&mut self) -> Result<(), Error> {
-        Ok(())
-    }
-
     fn halt(&mut self, _unread: usize) -> bool {
         false
     }
 }
 
-/// The root's `logger` machine, with a configured logger's fork or the
-/// fallback.
+/// The root's loggers, the configured logger's fork among them where one
+/// runs.
 struct RootLogger<'r, 'scope, 'env> {
     root: &'r mut Machine<'scope, 'env>,
     logger: &'r mut LoggerRun<'scope>,
-    values: Values,
 }
 
 impl BatchLogger for RootLogger<'_, '_, '_> {
-    fn drain(&mut self) -> Result<(), Error> {
-        // A configured logger's fork holds the fallback, which receives
-        // nothing until the configured logger ends.
-        if self.logger.thread.is_some() {
-            return Ok(());
-        }
-        let renderer = self.logger.renderer.clone();
-        self.root
-            .run(LOGGER, |logger| drain_fallback(logger, &renderer))
-    }
-
     fn halt(&mut self, unread: usize) -> bool {
-        let Some(thread): Option<Fork<'_>> = self.logger.thread.take() else {
-            return false;
-        };
-        self.logger.renderer.emit(&Diagnostic::new(
-            &self.values,
-            Severity::Error,
-            format!(
-                "the configured logger stopped reading, leaving {unread} diagnostics unread; \
-                 the fallback renders them"
-            ),
-        ));
-        if let Some(stop) = self.logger.stop.take() {
-            stop.stop();
-        }
-        if let Err(error) = self.root.join(thread) {
-            eprintln!("error: the logger ended in error: {error}");
-        }
-        true
+        self.logger.halt(self.root, unread)
     }
 }
 
@@ -296,7 +249,7 @@ impl BatchLogger for RootLogger<'_, '_, '_> {
 /// analysis has nothing new: there the batch ends, an atomic transition
 /// that kills nothing (`quiescence-is-analyzed`). A configured logger whose
 /// input holds unread diagnostics at quiescence is not reading, so it is
-/// halted, and the fallback renders them. Before it judges a quiescence
+/// halted, and the default logger renders them. Before it judges a quiescence
 /// with issues, the batch collects, so that a promise whose resolver was
 /// lost breaks first (`opaque-resources-reclaimed-when-unreachable`).
 /// Returns whether the batch failed: any issue fails it, as rendering may
@@ -316,10 +269,6 @@ pub(super) fn quiesce_batch(
     let mut collected = false;
     loop {
         runtime.pump_until_stable();
-        if let Err(error) = logger.drain() {
-            failed = true;
-            eprintln!("error: could not drain fallback diagnostics: {error}");
-        }
         match runtime.readiness() {
             RuntimeReadiness::Busy => continue,
             RuntimeReadiness::MaintenanceRequired(maintenance) => {
@@ -358,6 +307,12 @@ pub(super) fn quiesce_batch(
             }
         };
         if !analysis.quiescent() {
+            if !analysis.busy_turns().is_empty() {
+                // A turn in progress, such as a logger rendering, waits
+                // again or ends before the batch looks again; the timeout
+                // bounds a change no turn's run makes.
+                runtime.wait_for_turns(analysis.turn_version(), TURN_WAIT);
+            }
             continue;
         }
         if !collected && !analysis.issues().is_empty() {
@@ -369,7 +324,7 @@ pub(super) fn quiesce_batch(
             }
             continue;
         }
-        // Halted, the logger hands its input to the fallback, so its
+        // Halted, the logger hands its input to the default logger, so its
         // backlog never reaches the issues.
         if let Some(unread) = analysis
             .backlogs()
@@ -439,7 +394,7 @@ pub(super) fn finish_without_logger(
 /// without a turn that started one, and returns whether that failed.
 fn render_unread_diagnostics(runtime: &mut Runtime) -> bool {
     let renderer = DefaultLogger::new(glam::transition::assembler(runtime).clone());
-    match runtime.recover(LOGGER, |logger| render_unread(logger, &renderer)) {
+    match runtime.run((), |root| render_unread(root, &renderer)) {
         Ok(()) => false,
         Err(error) => {
             eprintln!("error: could not render diagnostics: {error}");

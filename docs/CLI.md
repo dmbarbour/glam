@@ -167,20 +167,30 @@ The conventional exported values are:
 | `conf.log` | The configured diagnostic logger. |
 | `conf.completion_script.NAME` | An optional completion adapter generator named `NAME`. |
 
-`conf.log` is an effect. A logger reads the diagnostics the batch reports,
-the analysis of what the runtime left unresolved among them. When the
-runtime is quiescent and an analysis finds nothing new, the batch ends, and a
-logger waiting on its input ends with it, cleanly. A logger that leaves
-diagnostics unread at quiescence has stopped reading: the batch halts it,
-saying so, and the fallback logger renders what it left. A conventional
+`conf.log` is an effect, which runs on the `logger` machine as its turn's.
+A logger reads the diagnostics the batch reports, the analysis of what the
+runtime left unresolved among them, from its `diagnostics` input, each an
+enriched message (`msg.text`, `msg.severity` and so on), and may write
+binaries to its `stderr` output. Its own `.log` goes to `default_logger`,
+which renders what reaches it, so a logger may enrich what it reads and log
+it, or render it itself; both write to the same standard error. A
+user-defined logger manages its own environment, as any machine does: it
+reads `process` and what the configuration binds with `.env.lookup`.
+
+When the runtime is quiescent and an analysis finds nothing new, the batch
+ends, and a logger waiting on its input ends with it, cleanly. A logger that
+leaves diagnostics unread at quiescence has stopped reading: the batch halts
+it, saying so, and the default logger renders what it left. A conventional
 logger loops on a read in a cut:
 
 ```g
+import 'std as std
+
 object conf.logger_loop with
   alias logger_loop
   run =
-    (.cut (.read_log >>= \message ->
-      .write_stderr (message.msg.text ++ [10]) =>>
+    (.cut (.port.read 'diagnostics 1 >>= \messages ->
+      .port.write 'stderr (std.list.map (\message -> message.msg.text ++ [10]) messages) =>>
       .r ())) =>>
     logger_loop
 
@@ -189,11 +199,12 @@ object conf.logger_loop with
 conf.log = conf.logger_loop
 ```
 
-With no diagnostic waiting, `.read_log` fails, and the cut waits, idle, until
-input arrives. The diagnostic stream is not semantically closed; the batch's
-end, not the logger, decides when it stops. Recurrence is deliberately outside
-`.cut`: a successful read and write must commit before the next iteration
-begins, while the read stays inside the cut so that later input wakes it.
+With no diagnostic waiting, the read is pushback, and the cut waits, idle,
+until input arrives. The diagnostic stream is not semantically closed; the
+batch's end, not the logger, decides when it stops. Recurrence is
+deliberately outside `.cut`: a successful read and write must commit before
+the next iteration begins, while the read stays inside the cut so that later
+input wakes it.
 
 The remaining sections focus on `conf.cli`.
 

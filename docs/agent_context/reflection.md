@@ -170,8 +170,7 @@ and control flow.
   outermost cut, which waits, and outside every cut re-drives the request
   once the host generation passes the one it read, which it carries so no
   wakeup is lost. `begin_cut_attempt` resets the frame's pushback; take a
-  frame's fallback only after checking it. `.read_log` still fails on an
-  empty input until `api-refl-cli-log` moves the logger onto ports.
+  frame's fallback only after checking it.
 - `.child.interrupt Key Reason` takes the running tasks (the heads of
   unflagged queues) of the child and its descendants, breaks their replies
   with `Reason` and flags their machines, and each child a stopped run

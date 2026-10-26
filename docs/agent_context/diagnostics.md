@@ -97,20 +97,22 @@ client-owned rendering. Current flow lives in
 - Runtime ingress prepares its port message, the enriched diagnostic,
   before mutation admission. A valid bus publication remains counted if
   ingress preparation fails; that failure remains separately reportable.
-- A diagnostics port carries enriched messages, which glam reads as
-  `.read_log` gave them. Rust reads one only as a renderer, evaluating its
-  `msg.severity`, `msg.origin.source.file` and `msg.location.line`; never
-  read a severity from a value to count or route it.
+- A diagnostics port carries enriched messages, which glam reads and
+  writes. Rust reads one only as a renderer, evaluating its
+  `msg.severity`, `msg.origin.source.file` and `msg.location.line`; a
+  renderer may count what it rendered, as the CLI's default logger does,
+  but never read a severity from a value to route it.
 
 ## Logger and Rendering Boundaries
 
 - The library does not render or print diagnostics. Executable and IDE clients
   perform privileged inspection through the public reflection facade.
-- Logger input and logger-session output buses are separate. Logger `.log`
-  cannot feed its own `.read_log` stream.
-- Logger input claims, heap edits, and output intents commit atomically. Host
-  decoding and callbacks happen after all runtime locks and mutation admission
-  are released.
+- A configured logger's `.log` goes to `default_logger`, which the root
+  wires from the logger's diagnostics output, so it cannot feed the
+  logger's own input.
+- A configured logger's input claims, heap edits, and port writes commit
+  atomically, as one turn's cut. Host decoding and callbacks happen after
+  all runtime locks and mutation admission are released.
 - Input conversion finishes before mutation admission. Output decode,
   adaptation, diagnostic subscribers, and terminal writers must also run
   without inherited managed-mutator authority; retain roots or owned bytes

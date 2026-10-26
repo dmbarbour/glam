@@ -1,266 +1,417 @@
+//! The CLI's loggers, machines under the root
+//! (`machines-communicate-through-wired-ports`). The root's diagnostics go
+//! to `logger`, which runs `conf.log` as a turn where one is configured, and
+//! hands what it holds, and what reaches it later, to `default_logger`
+//! when it ends, or at once where none is. The default logger runs
+//! continuously: it renders what reaches it, the configured logger's own
+//! `.log` among it, so a configured logger may leave rendering to it and
+//! focus on enrichment. Both write to `stderr`, which writes the process's
+//! standard error. The root owns their wiring, out of the configured
+//! logger's reach.
+
+use std::io::{self, Write};
 use std::sync::Arc;
 use std::thread;
 
-use glam::reflection::{
-    EffectLifecycle, EffectRun, EffectRunStop, ScheduledEffectRun, TaskOutcome,
-};
+use glam::reflection::EffectRequestSpec;
 use glam::{
-    Assembler, Diagnostic, DiagnosticBus, DiagnosticSubscription, Endpoint, Error, Fork,
-    HandleValue, Machine, Runtime, Values,
+    Answer, Assembler, Diagnostic, DiagnosticBus, EffectProvider, Endpoint, Error, ErrorKind, Fork,
+    Machine, MachinePath, Runtime, Severity,
 };
 
 use crate::DiagnosticBusLocal;
 use crate::configuration::{CLI, entry_context, select_entry, selects_nothing};
 use crate::rendering::{DefaultLogger, port_diagnostic};
 
-mod effects;
 mod reports;
 
-pub(crate) use effects::{LoggerTaskHost, MainEffects};
 pub(crate) use reports::PublishedIssues;
 
 /// The machine, a direct child of the root, to which the root sends the
 /// diagnostics gathered at its input. A configured logger reads them from
-/// the logger's input; the logger's child [`FALLBACK`] takes what it leaves,
-/// and everything when none is configured.
+/// its input.
 pub(crate) const LOGGER: &str = "logger";
 
-/// The logger's child, whose input holds diagnostics for the CLI to render
-/// as [`DefaultLogger`] does.
-pub(crate) const FALLBACK: &str = "fallback";
+/// The root's child that renders what the logger hands over and what a
+/// configured logger logs, running continuously.
+pub(crate) const DEFAULT_LOGGER: &str = "default_logger";
+
+/// The root's child that writes what reaches its input of the same name,
+/// binaries, to the process's standard error.
+pub(crate) const STDERR: &str = "stderr";
 
 pub(crate) const DIAGNOSTICS: &str = "diagnostics";
 
-/// The logger's output to [`FALLBACK`], for what its input holds when it
-/// hands over.
+/// The logger's output to [`DEFAULT_LOGGER`], for what its input holds when
+/// it hands over.
 const UNREAD: &str = "unread";
 
-/// Wires the root's diagnostics to the logger, before anything is
-/// published. The logger and its fallback each keep what reaches them, in
-/// place of the default pass-through to their parents: the logger until a
-/// configured logger reads it or the logger hands it to its fallback, and
-/// the fallback until the CLI renders it.
+/// Wires the loggers, before anything is published: the root's diagnostics
+/// to the logger, the logger's hand-over and its own `.log` to the default
+/// logger, rather than back to the root, and both loggers' `stderr` outputs
+/// to `stderr`. The loggers keep what reaches them, in place of the default
+/// pass-through to their parent.
 pub(crate) fn wire_logger(runtime: &mut Runtime) -> Result<(), Error> {
     let keep = |machine: &mut Machine<'_, '_>| {
         machine.wire_del(Endpoint::input(DIAGNOSTICS), Endpoint::output(DIAGNOSTICS))
     };
-    runtime.run([LOGGER, FALLBACK], keep)?;
-    runtime.run(LOGGER, |logger| {
-        keep(logger)?;
-        logger.wire_add(
-            Endpoint::output(UNREAD),
-            Endpoint::child(FALLBACK, DIAGNOSTICS),
-        )
-    })?;
+    runtime.run(LOGGER, keep)?;
+    runtime.run(DEFAULT_LOGGER, keep)?;
     runtime.run((), |root| {
         root.wire_add(
             Endpoint::input(DIAGNOSTICS),
             Endpoint::child(LOGGER, DIAGNOSTICS),
-        )
+        )?;
+        for source in [UNREAD, DIAGNOSTICS] {
+            root.wire_add(
+                Endpoint::child(LOGGER, source),
+                Endpoint::child(DEFAULT_LOGGER, DIAGNOSTICS),
+            )?;
+        }
+        root.wire_del(
+            Endpoint::child(LOGGER, DIAGNOSTICS),
+            Endpoint::input(DIAGNOSTICS),
+        )?;
+        for writer in [LOGGER, DEFAULT_LOGGER] {
+            root.wire_add(
+                Endpoint::child(writer, STDERR),
+                Endpoint::child(STDERR, STDERR),
+            )?;
+        }
+        Ok(())
     })
 }
 
-/// Starts the logger that the configuration selects, on a fork of the
-/// root's child [`LOGGER`], or, where it selects none, hands the logger's
-/// diagnostics to its fallback at once.
+/// Starts the loggers on forks of the root's children: `stderr`, the
+/// default logger, and the logger that the configuration selects, or,
+/// where it selects none, hands the logger's diagnostics to the default
+/// logger at once.
 pub(crate) fn start_logger<'scope>(
     root: &mut Machine<'scope, '_>,
     assembler: &Assembler,
 ) -> Result<LoggerRun<'scope>, Error> {
     let renderer = Arc::new(DefaultLogger::new(assembler.clone()));
-    let evaluation_runtime = assembler.evaluation_runtime();
-    let diagnostics = DiagnosticBus::for_runtime(&evaluation_runtime);
-    let subscription = diagnostics.subscribe(renderer.clone());
-    let values = assembler.values();
-    let custom = match root.run(CLI, select_logger) {
-        Ok(custom) => custom,
+    let rendered = DiagnosticBus::for_runtime(&assembler.evaluation_runtime());
+    let stderr = root.fork(STDERR, {
+        let assembler = assembler.clone();
+        move |stderr| write_stderr(stderr, &assembler)
+    })?;
+    let default_logger = root.fork(DEFAULT_LOGGER, {
+        let renderer = renderer.clone();
+        let rendered = rendered.clone();
+        move |default_logger| render_diagnostics(default_logger, &renderer, &rendered)
+    })?;
+    let selected = match root.run(CLI, select_logger) {
+        Ok(selected) => selected,
         Err(error) => {
-            let diagnostic = error
-                .diagnostic(&values)
-                .expect("configuration failure belongs to the assembler runtime");
-            diagnostics.publish_local(diagnostic);
-            None
+            publish_error(assembler, error);
+            false
         }
     };
-    let task_diagnostics = diagnostics.clone();
-    let task_values = evaluation_runtime.values();
-    // The configured logger's environment as the logger machine sees it,
-    // taken once, since the logger is not yet a turn.
-    let environment = root.run(LOGGER, |logger| {
-        Ok(glam::transition::reflection_environment(logger, "logger"))
-    })?;
-    let scheduled = custom.and_then(|custom| {
-        let lifecycle = EffectLifecycle::new_closing_session(&evaluation_runtime);
-        let host = Arc::new(LoggerTaskHost::new(
-            &evaluation_runtime,
-            diagnostics.clone(),
-            environment,
-        ));
-        let run = EffectRun::new(
-            &evaluation_runtime,
-            &custom,
-            MainEffects::new(values.clone()),
-            host.clone(),
-        )
-        .contextualizing_failures(
-            entry_context(&task_values, "log").expect("configuration context is local"),
-        );
-        match run.and_then(|run| {
-            run.asserting_unit_result("configured logger result")
-                .requiring_unit_result()
-                .schedule(&lifecycle)
-        }) {
-            Ok(task) => Some((task, host)),
-            Err(error) => {
-                task_diagnostics.publish_local(
-                    error
-                        .with_context(
-                            &task_values,
-                            entry_context(&task_values, "log")
-                                .expect("configuration context is local"),
-                        )
-                        .diagnostic(&task_values),
-                );
-                None
-            }
-        }
-    });
-    let Some((task, host)) = scheduled else {
+    let logger = if selected {
+        root.take(CLI, 1)?;
+        root.give(LOGGER, 1)?;
+        let builder = thread::Builder::new()
+            .name("glam-logger".to_owned())
+            // The logger evaluates ordinary Glam configuration and therefore
+            // needs the same practical stack headroom as the process main
+            // thread. Deep evaluator paths are being migrated to explicit
+            // machines, but the bootstrap must not make a configured logger
+            // depend on the platform's smaller default child-thread stack in
+            // the meantime.
+            .stack_size(8 * 1024 * 1024);
+        let assembler = assembler.clone();
+        Some(root.fork_with(builder, LOGGER, move |logger| {
+            run_configured_logger(logger, &assembler);
+            // What the configured logger left, and what arrives later, is
+            // the default logger's.
+            hand_over(logger)
+        })?)
+    } else {
         root.run(LOGGER, hand_over)?;
-        return Ok(LoggerRun {
-            thread: None,
-            stop: None,
-            diagnostics,
-            renderer,
-            _subscription: subscription,
-        });
+        None
     };
-    let fork_renderer = renderer.clone();
-    let stop = task.stopper();
-    let builder = thread::Builder::new()
-        .name("glam-logger".to_owned())
-        // The logger evaluates ordinary Glam configuration and therefore
-        // needs the same practical stack headroom as the process main thread.
-        // Deep evaluator paths are being migrated to explicit machines, but
-        // the bootstrap must not make a configured logger depend on the
-        // platform's smaller default child-thread stack in the meantime.
-        .stack_size(8 * 1024 * 1024);
-    let thread = root.fork_with(builder, LOGGER, move |logger| {
-        run_configured_logger(task, &host, &task_diagnostics, &task_values);
-        // What the configured logger left, and what arrives later, is the
-        // fallback's.
-        hand_over(logger)?;
-        drain_fallback(logger, &fork_renderer)
-    })?;
     Ok(LoggerRun {
-        thread: Some(thread),
-        stop: Some(stop),
-        diagnostics,
+        logger,
+        default_logger: Some(default_logger),
+        stderr: Some(stderr),
+        rendered,
         renderer,
-        _subscription: subscription,
     })
 }
 
-/// Runs the configured logger to its end, delivering what it commits on
-/// this client thread, wherever the task runs, so rendering stays off the
-/// workers. Its failures go to its own bus.
-fn run_configured_logger(
-    task: ScheduledEffectRun,
-    host: &LoggerTaskHost,
-    diagnostics: &DiagnosticBus,
-    values: &Values,
-) {
-    match task.run_with(|| host.deliver()) {
-        // Only the batch stops the logger: at its end, where the logger
-        // waits on its input, idle, or halting it, with a diagnostic of its
-        // own, for leaving its input unread (`quiescence-is-analyzed`).
-        Ok(TaskOutcome::Complete(_) | TaskOutcome::Cancelled) => {}
-        // A failure is the logger's own, which its caller reports.
+/// Runs the configured logger, on top of the logger's stack, as an effect
+/// of the logger's turn, until it ends or the batch interrupts it. Its
+/// failures, and a result other than unit, are reported on the assembler's
+/// bus, which brings them to the default logger once the logger hands
+/// over.
+fn run_configured_logger(logger: &mut Machine<'_, '_>, assembler: &Assembler) {
+    let ran = (|| {
+        logger.dict_pack(Vec::<&str>::new())?;
+        logger.swap()?;
+        logger.effect_run(&mut ConfiguredLogger)?;
+        logger.eval()?;
+        logger.unit_push();
+        let unit = logger.same_representation()?;
+        logger.discard(1)?;
+        if !unit {
+            return Err(Error::new(format!(
+                "configured logger result: unit expected, received {:?}",
+                logger.kind()?
+            )));
+        }
+        logger.discard(2)
+    })();
+    match ran {
+        // Only the batch interrupts the logger: at its end, where the
+        // logger waits on its input, idle, or halting it, with a diagnostic
+        // of its own, for leaving its input unread (`quiescence-is-analyzed`).
+        Ok(()) => {}
+        Err(error) if error.kind() == ErrorKind::Interrupted => {}
         Err(error) => {
-            diagnostics.publish_local(error.diagnostic(values));
+            let values = assembler.values();
+            let error = entry_context(&values, "log")
+                .and_then(|context| error.clone().with_context(&values, context))
+                .unwrap_or(error);
+            publish_error(assembler, error);
         }
     }
 }
 
-/// Hands what the logger's input holds, and what reaches it later, to its
-/// fallback, in one cut, so the fallback receives every diagnostic in
-/// order: the logger wires its input on to the fallback, and sends what the
-/// input holds through its unread output.
+/// A configured logger's effects: every family passes through to the
+/// logger machine, its `.log` to the default logger and its ports to the
+/// logger's.
+struct ConfiguredLogger;
+
+impl EffectProvider for ConfiguredLogger {
+    type Request = ();
+
+    fn requests(&self) -> Vec<EffectRequestSpec<()>> {
+        Vec::new()
+    }
+
+    fn answer(&mut self, _: &mut Machine<'_, '_>, (): &()) -> Result<Answer, Error> {
+        unreachable!("the configured logger makes no requests of the CLI's own")
+    }
+}
+
+/// Renders what reaches the default logger, in order, writing each
+/// rendering to its `stderr` output and counting it on `rendered`, until
+/// the batch interrupts it where its input holds nothing more.
+fn render_diagnostics(
+    default_logger: &mut Machine<'_, '_>,
+    renderer: &DefaultLogger,
+    rendered: &DiagnosticBus,
+) -> Result<(), Error> {
+    loop {
+        match default_logger.port_read(DIAGNOSTICS, 1) {
+            Ok(()) => {
+                let message = glam::transition::pop_value(default_logger)?;
+                let diagnostic = port_diagnostic(renderer.assembler(), message)?;
+                default_logger.bytes_push(renderer.rendered(&diagnostic));
+                rendered.publish_local(diagnostic);
+                default_logger.port_write(STDERR, 1)?;
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Writes what reaches `stderr` to the process's standard error, in order,
+/// until the batch interrupts it where its input holds nothing more.
+fn write_stderr(stderr: &mut Machine<'_, '_>, assembler: &Assembler) -> Result<(), Error> {
+    loop {
+        match stderr.port_read(STDERR, 1) {
+            Ok(()) => {
+                let value = glam::transition::pop_value(stderr)?;
+                write_binary(assembler, value);
+            }
+            Err(error) if error.kind() == ErrorKind::Interrupted => return Ok(()),
+            Err(error) => return Err(error),
+        }
+    }
+}
+
+/// Writes `value`, evaluated to binary data, to the process's standard
+/// error, reporting a value that is not binary data on the assembler's bus.
+fn write_binary(assembler: &Assembler, value: glam::HandleValue) {
+    let values = assembler.values();
+    let written = values
+        .anno_binary(value)
+        .and_then(|binary| assembler.evaluator().eval(&binary))
+        .and_then(|binary| binary.as_bytes())
+        .and_then(|bytes| bytes.ok_or_else(|| Error::new("stderr output requires binary data")));
+    match written {
+        Ok(bytes) => {
+            let _ = io::stderr().write_all(&bytes);
+        }
+        Err(error) => publish_error(assembler, error),
+    }
+}
+
+/// Publishes `error` on the assembler's bus.
+fn publish_error(assembler: &Assembler, error: Error) {
+    let values = assembler.values();
+    assembler.diagnostic_bus().publish_local(
+        error
+            .diagnostic(&values)
+            .expect("logger failures belong to the assembler's runtime"),
+    );
+}
+
+/// Hands what the logger's input holds, and what reaches it later, to the
+/// default logger, in one cut, so it receives every diagnostic in order:
+/// the logger wires its input on to its unread output, and sends what the
+/// input holds through it.
 fn hand_over(logger: &mut Machine<'_, '_>) -> Result<(), Error> {
     logger.cut(|logger| {
-        logger.wire_add(
-            Endpoint::input(DIAGNOSTICS),
-            Endpoint::child(FALLBACK, DIAGNOSTICS),
-        )?;
+        logger.wire_add(Endpoint::input(DIAGNOSTICS), Endpoint::output(UNREAD))?;
         let unread = logger.port_available(DIAGNOSTICS);
         logger.port_read(DIAGNOSTICS, unread)?;
         logger.port_write(UNREAD, unread)
     })
 }
 
-/// Takes the diagnostics waiting at the logger's fallback, in order, as its
+/// Takes the diagnostics waiting at the default logger, in order, as its
 /// renderer, `assembler`'s, reads them.
-pub(crate) fn take_fallback(
-    logger: &mut Machine<'_, '_>,
+pub(crate) fn take_diagnostics(
+    default_logger: &mut Machine<'_, '_>,
     assembler: &Assembler,
 ) -> Result<Vec<Diagnostic>, Error> {
-    let held = logger.run(FALLBACK, |fallback| {
-        let count = fallback.port_available(DIAGNOSTICS);
-        fallback.port_read(DIAGNOSTICS, count)?;
-        let mut held = (0..count)
-            .map(|_| glam::transition::pop_value(fallback))
-            .collect::<Result<Vec<_>, _>>()?;
-        held.reverse();
-        Ok(held)
-    })?;
+    let count = default_logger.port_available(DIAGNOSTICS);
+    default_logger.port_read(DIAGNOSTICS, count)?;
+    let mut held = (0..count)
+        .map(|_| glam::transition::pop_value(default_logger))
+        .collect::<Result<Vec<_>, _>>()?;
+    held.reverse();
     held.into_iter()
         .map(|message| port_diagnostic(assembler, message))
         .collect()
 }
 
-/// Renders the diagnostics waiting at the logger's fallback.
-pub(crate) fn drain_fallback(
-    logger: &mut Machine<'_, '_>,
+/// Renders what the loggers left, where none runs: what the logger holds,
+/// which it hands over first, what waits at `stderr`, and what waits at the
+/// default logger. Machines in error are recovered.
+pub(crate) fn render_unread(
+    root: &mut Machine<'_, '_>,
     renderer: &DefaultLogger,
 ) -> Result<(), Error> {
-    for diagnostic in take_fallback(logger, renderer.assembler())? {
+    root.recover(LOGGER, hand_over)?;
+    let assembler = renderer.assembler().clone();
+    root.recover(STDERR, |stderr| {
+        let count = stderr.port_available(STDERR);
+        stderr.port_read(STDERR, count)?;
+        let mut held = (0..count)
+            .map(|_| glam::transition::pop_value(stderr))
+            .collect::<Result<Vec<_>, _>>()?;
+        held.reverse();
+        for value in held {
+            write_binary(&assembler, value);
+        }
+        Ok(())
+    })?;
+    for diagnostic in root.recover(DEFAULT_LOGGER, |default_logger| {
+        take_diagnostics(default_logger, &assembler)
+    })? {
         renderer.emit(&diagnostic);
     }
     Ok(())
 }
 
-/// Renders every diagnostic the logger holds, at the end: what its input
-/// holds, which it hands over first, and what waits at its fallback.
-pub(crate) fn render_unread(
-    logger: &mut Machine<'_, '_>,
-    renderer: &DefaultLogger,
-) -> Result<(), Error> {
-    hand_over(logger)?;
-    drain_fallback(logger, renderer)
-}
-
-/// The logger `conf.log` selects, evaluated, or none.
-fn select_logger(m: &mut Machine<'_, '_>) -> Result<Option<HandleValue>, Error> {
+/// Leaves the logger `conf.log` selects, evaluated, on the stack, and
+/// returns whether it selects one.
+fn select_logger(m: &mut Machine<'_, '_>) -> Result<bool, Error> {
     m.list_pack(0)?;
     m.local_get("configuration")?;
     select_entry(m, "log", &["conf", "log"])?;
     m.eval()?;
     if selects_nothing(m)? {
         m.discard(1)?;
-        return Ok(None);
+        return Ok(false);
     }
-    glam::transition::pop_value(m).map(Some)
+    Ok(true)
 }
 
+/// The loggers' forks, which the batch ends.
 pub(crate) struct LoggerRun<'scope> {
     /// The configured logger's fork, where one runs.
-    pub(crate) thread: Option<Fork<'scope>>,
-    /// Stops the configured logger's run, where one runs.
-    pub(crate) stop: Option<EffectRunStop>,
-    /// What the configured logger reports, which `renderer` renders.
-    pub(crate) diagnostics: DiagnosticBus,
+    logger: Option<Fork<'scope>>,
+    default_logger: Option<Fork<'scope>>,
+    stderr: Option<Fork<'scope>>,
+    /// What the default logger rendered, counted.
+    pub(crate) rendered: DiagnosticBus,
     pub(crate) renderer: Arc<DefaultLogger>,
-    _subscription: DiagnosticSubscription,
+}
+
+impl<'scope> LoggerRun<'scope> {
+    /// Halts the configured logger, which left `unread` diagnostics in its
+    /// input at quiescence, so that the default logger renders them, saying
+    /// so; `false` where no configured logger runs.
+    pub(crate) fn halt(&mut self, root: &mut Machine<'scope, '_>, unread: usize) -> bool {
+        let Some(logger) = self.logger.take() else {
+            return false;
+        };
+        let assembler = self.renderer.assembler();
+        let values = assembler.values();
+        assembler.diagnostic_bus().publish_local(Diagnostic::new(
+            &values,
+            Severity::Error,
+            format!(
+                "the configured logger stopped reading, leaving {unread} diagnostics unread; \
+                 the default logger renders them"
+            ),
+        ));
+        end(root, assembler, LOGGER, logger);
+        true
+    }
+
+    /// Ends the loggers, at the batch's end: the configured logger, which
+    /// hands what it holds to the default logger, then the default logger
+    /// and `stderr`, each once its input holds nothing more; then renders
+    /// what is left. Returns whether that failed.
+    pub(crate) fn finish(&mut self, root: &mut Machine<'scope, '_>) -> bool {
+        let assembler = self.renderer.assembler().clone();
+        let mut failed = false;
+        for (machine, fork) in [
+            (LOGGER, self.logger.take()),
+            (DEFAULT_LOGGER, self.default_logger.take()),
+            (STDERR, self.stderr.take()),
+        ] {
+            if let Some(fork) = fork {
+                failed |= !end(root, &assembler, machine, fork);
+            }
+        }
+        if let Err(error) = render_unread(root, &self.renderer) {
+            failed = true;
+            eprintln!("error: could not render what the loggers left: {error}");
+        }
+        failed
+    }
+}
+
+/// Interrupts the turn on the root's child `machine`, whose wait then ends,
+/// and joins its fork. Returns whether it ended without error.
+fn end<'scope>(
+    root: &mut Machine<'scope, '_>,
+    assembler: &Assembler,
+    machine: &str,
+    fork: Fork<'scope>,
+) -> bool {
+    let values = assembler.values();
+    if let Err(error) = assembler.evaluation_runtime().interrupt(
+        &MachinePath::from([machine]),
+        values.text("the batch ended"),
+    ) {
+        eprintln!("error: could not interrupt the {machine} machine: {error}");
+    }
+    match root.join(fork) {
+        Ok(()) => true,
+        Err(error) => {
+            eprintln!("error: the {machine} machine ended in error: {error}");
+            false
+        }
+    }
 }
 
 /// A runtime whose diagnostics wait at the logger, and probes of it.
@@ -268,7 +419,7 @@ pub(crate) struct LoggerRun<'scope> {
 pub(crate) mod test_support {
     use glam::{Assembler, Diagnostic, Runtime};
 
-    use super::{DIAGNOSTICS, LOGGER, hand_over, take_fallback, wire_logger};
+    use super::{DEFAULT_LOGGER, DIAGNOSTICS, LOGGER, hand_over, take_diagnostics, wire_logger};
 
     /// A runtime around `assembler`, wired as the CLI wires its own.
     pub(crate) fn logger_runtime(assembler: Assembler) -> Runtime {
@@ -285,26 +436,28 @@ pub(crate) mod test_support {
             .expect("the logger is idle")
     }
 
-    /// Hands the logger's diagnostics to its fallback, as the CLI does
-    /// when no logger is configured or the configured one ends.
+    /// Hands the logger's diagnostics to the default logger, as the CLI
+    /// does when no logger is configured or the configured one ends.
     pub(crate) fn hand_over_logger(runtime: &mut Runtime) {
         runtime
             .run(LOGGER, hand_over)
             .expect("the logger hands over");
     }
 
-    /// Takes the diagnostics waiting at the logger's fallback.
-    pub(crate) fn take_from_fallback(runtime: &mut Runtime) -> Vec<Diagnostic> {
+    /// Takes the diagnostics waiting at the default logger.
+    pub(crate) fn take_from_default_logger(runtime: &mut Runtime) -> Vec<Diagnostic> {
         let assembler = glam::transition::assembler(runtime).clone();
         runtime
-            .run(LOGGER, |logger| take_fallback(logger, &assembler))
-            .expect("the fallback holds diagnostics")
+            .run(DEFAULT_LOGGER, |default_logger| {
+                take_diagnostics(default_logger, &assembler)
+            })
+            .expect("the default logger holds diagnostics")
     }
 
     /// Takes every diagnostic the logger holds, handing them over first.
     pub(crate) fn take_unread(runtime: &mut Runtime) -> Vec<Diagnostic> {
         hand_over_logger(runtime);
-        take_from_fallback(runtime)
+        take_from_default_logger(runtime)
     }
 }
 
@@ -313,7 +466,7 @@ mod tests {
     use glam::{Assembler, Diagnostic, Severity};
 
     use super::test_support::{
-        hand_over_logger, held_by_logger, logger_runtime, take_from_fallback, take_unread,
+        hand_over_logger, held_by_logger, logger_runtime, take_from_default_logger, take_unread,
     };
     use crate::DiagnosticBusLocal;
     use crate::rendering::rendered_text_for_test;
@@ -335,7 +488,7 @@ mod tests {
         hand_over_logger(&mut runtime);
         assert_eq!(held_by_logger(&mut runtime), 0, "it handed them over");
         publish("third");
-        let taken = take_from_fallback(&mut runtime);
+        let taken = take_from_default_logger(&mut runtime);
         assert_eq!(
             taken
                 .iter()
@@ -344,7 +497,7 @@ mod tests {
             ["first", "second", "third"],
             "what the logger held, then what arrived after"
         );
-        assert!(take_from_fallback(&mut runtime).is_empty());
+        assert!(take_from_default_logger(&mut runtime).is_empty());
     }
 
     #[test]
@@ -368,11 +521,11 @@ mod owner_tests {
 
     fn assert_logger_run_owner_inventory(run: &LoggerRun<'_>) {
         let LoggerRun {
-            thread: _,
-            stop: _,
-            diagnostics: _,
+            logger: _,
+            default_logger: _,
+            stderr: _,
+            rendered: _,
             renderer: _,
-            _subscription: _,
         } = run;
     }
 

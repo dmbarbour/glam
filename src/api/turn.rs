@@ -34,7 +34,7 @@ use bytes::Bytes;
 
 use super::runtime::{
     DIAGNOSTICS, PortAddress, PortJournal, RuntimeEventJournal, RuntimeSharedResources,
-    ShareJournal, TurnRun, Wire, WireEnd,
+    ShareJournal, TurnActivity, TurnRun, Wire, WireEnd,
 };
 use super::{
     Assembler, Diagnostic, Error, ErrorKind, EvaluationRuntime, ModuleInput, Value as HandleValue,
@@ -767,7 +767,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         mut runs: Vec<Arc<TurnRun>>,
     ) -> Self {
         let resources = runtime.assembler.evaluation_runtime().shared_resources();
-        runs.push(Arc::new(resources.enter_turn(path.clone())));
+        runs.push(Arc::new(resources.enter_turn(path.clone(), false)));
         Self::fork_turn(runtime, scope, path, state, runs)
     }
 
@@ -1051,7 +1051,9 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         // The fork's run enters here, before its thread starts, so that an
         // interrupt posted meanwhile reaches it.
         let mut runs = self.runs.clone();
-        runs.push(Arc::new(self.resources().enter_turn(fork_path.clone())));
+        runs.push(Arc::new(
+            self.resources().enter_turn(fork_path.clone(), true),
+        ));
         let thread = builder.spawn_scoped(self.scope, move || {
             let (state, branch) = taken
                 .lock()
@@ -1060,6 +1062,7 @@ impl<'scope, 'env> Machine<'scope, 'env> {
                 .expect("a fork's thread takes its machine once");
             // The fork's turn is a scope of its own, as every turn is.
             let fork_return = thread::scope(|scope| {
+                runs.last().expect("the fork's run entered").start();
                 let mut machine = Machine::fork_turn(runtime, scope, fork_path, state, runs);
                 machine.cut = branch;
                 machine.cut_offset = cut_offset;
@@ -1166,10 +1169,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             outcome,
             panic,
             branch,
-        } = pending
-            .thread
-            .join()
-            .unwrap_or_else(|panic| resume_unwind(panic));
+        } = {
+            let run = self.current_run();
+            let _joining = run.doing(TurnActivity::Joining);
+            pending
+                .thread
+                .join()
+                .unwrap_or_else(|panic| resume_unwind(panic))
+        };
         self.state.join_in(&pending.path, state);
         // A panic may have abandoned the cut a branch came from.
         let merged = match (branch, &mut self.cut) {
@@ -2366,18 +2373,6 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         })
     }
 
-    /// The reflection environment of `role` as this machine sees it, its
-    /// shares as they stand over the role's sealed environment, for the
-    /// CLI's transition (`crate::transition`).
-    pub(crate) fn reflection_environment(&self, role: &str) -> HandleValue {
-        let base = self.runtime.assembler.reflection_environment_for_role(role);
-        HandleValue::from_runtime_root(environment::committed_environment(
-            &self.resources(),
-            &self.path,
-            &base.into_runtime_root(),
-        ))
-    }
-
     /// Pushes a promised value, which waits until it is resolved, then its
     /// resolver: an opaque glam value that [`Self::promise_fulfill`] or
     /// [`Self::promise_break`] resolves, once.
@@ -3432,6 +3427,8 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         generation: u64,
         awaited: &[WorkDependency],
     ) {
+        let run = self.current_run();
+        let _awaiting = run.doing(TurnActivity::AwaitingEvaluation(generation));
         let runtime = self.runtime.assembler.evaluation_runtime();
         let context = self.runtime.assembler.eval_context();
         let waits = awaited
@@ -3640,11 +3637,23 @@ impl<'scope, 'env> Machine<'scope, 'env> {
             self.check_interrupt()?;
             match resources.validate_transaction(journal, events) {
                 (StoreCommitResult::Committed, _) => {
+                    // Idle while what it observed holds, as an analysis
+                    // reads it (`quiescence-is-analyzed`).
+                    let run = self.current_run();
+                    let _waiting = run.doing(TurnActivity::Waiting(Arc::new((
+                        journal.clone(),
+                        events.clone(),
+                    ))));
                     resources.wait_for_change(generation);
                 }
                 _ => return Ok(()),
             }
         }
+    }
+
+    /// The run this turn is in now, its innermost.
+    fn current_run(&self) -> Arc<TurnRun> {
+        self.runs.last().expect("a turn has a run").clone()
     }
 
     /// Fails with the reason of a host's interrupt that reaches this turn,

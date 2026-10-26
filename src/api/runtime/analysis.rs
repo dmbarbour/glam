@@ -171,6 +171,8 @@ impl RuntimeIssue<'_> {
 pub struct RuntimeAnalysis {
     runtime: EvaluationRuntimeId,
     quiescent: bool,
+    busy_turns: Vec<MachinePath>,
+    turn_version: u64,
     waits: Vec<RuntimeWait>,
     backlogs: Vec<RuntimeBacklog>,
     obligations: Vec<PendingObligation>,
@@ -184,9 +186,24 @@ impl RuntimeAnalysis {
         self.runtime
     }
 
-    /// Whether no work runs or can without action from outside.
+    /// Whether no work runs or can without action from outside, a turn's
+    /// among it, but the asking thread's own.
     pub fn quiescent(&self) -> bool {
         self.quiescent
+    }
+
+    /// The machines where a turn is in progress, on any thread but the one
+    /// that asked, whose turn is the observer: one that runs, or waits
+    /// where what it observed has changed since. A turn waiting where what
+    /// it observed holds is idle, and one joining its forks defers to them.
+    pub fn busy_turns(&self) -> &[MachinePath] {
+        &self.busy_turns
+    }
+
+    /// The version of the turns' runs that this analysis read, to wait on
+    /// with [`EvaluationRuntime::wait_for_turns`].
+    pub fn turn_version(&self) -> u64 {
+        self.turn_version
     }
 
     /// Each unfinished work, by its id.
@@ -251,6 +268,13 @@ impl RuntimeAnalysis {
 }
 
 impl EvaluationRuntime {
+    /// Waits until a turn's run enters, leaves or changes what it does
+    /// since an analysis that read `version` ([`RuntimeAnalysis::turn_version`]),
+    /// or `timeout` passes: for a host whose analysis found turns busy.
+    pub fn wait_for_turns(&self, version: u64, timeout: std::time::Duration) {
+        self.state.shared_resources.wait_for_turns(version, timeout);
+    }
+
     /// Analyzes the runtime as it stands (`quiescence-is-analyzed`): at any
     /// time, changing nothing. It fails only on a poisoned runtime.
     pub fn analysis(&self) -> Result<RuntimeAnalysis, Error> {
@@ -261,6 +285,10 @@ impl EvaluationRuntime {
             )));
         }
         let coordinator = self.state.work.runtime_analysis_snapshot();
+        let (turn_version, busy_turns) = self
+            .state
+            .shared_resources
+            .turns_in_progress(std::thread::current().id());
         let failed_roots = self.state.work.failed_roots();
         let (delivering, mut failures, accepted, backlogs, delivery_failures) = {
             let state = self
@@ -299,7 +327,9 @@ impl EvaluationRuntime {
         failures.sort_by(|left, right| left.0.cmp(&right.0));
         Ok(RuntimeAnalysis {
             runtime: self.id(),
-            quiescent: coordinator.quiescent && !delivering,
+            quiescent: coordinator.quiescent && !delivering && busy_turns.is_empty(),
+            busy_turns: busy_turns.into_iter().map(MachinePath::from).collect(),
+            turn_version,
             waits: coordinator
                 .waits
                 .into_iter()

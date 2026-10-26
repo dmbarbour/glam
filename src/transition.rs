@@ -22,14 +22,6 @@ pub fn assembler(runtime: &Runtime) -> &Assembler {
     runtime.assembler()
 }
 
-/// The reflection environment of `role` as `machine` sees it: its shares,
-/// as they stand, over the role's sealed environment. Used by the CLI's
-/// `configuration::logger` module for the configured logger's host, until
-/// loggers are turns.
-pub fn reflection_environment(machine: &Machine<'_, '_>, role: &str) -> Value {
-    machine.reflection_environment(role)
-}
-
 /// Compiles `inputs` at `module_path`, eagerly, through the handle API's
 /// assembler, pushing the module and returning its warnings, as the turn
 /// API's compile did before `api-compile-ops`. Used by the CLI's
@@ -63,9 +55,9 @@ where
 }
 
 /// Pops a machine's top value without evaluating it. Used by the CLI's
-/// `configuration` module to hand the configuration, and the logger it
-/// selects, to what has not moved to turns, and by its
-/// `configuration::logger` module to render the diagnostics its fallback
+/// `configuration` module to hand the configuration to what has not moved
+/// to turns, and by its `configuration::logger` module to render the
+/// diagnostics its default logger reads and write the binaries `stderr`
 /// reads.
 pub fn pop_value(machine: &mut Machine<'_, '_>) -> Result<Value, Error> {
     machine.pop()

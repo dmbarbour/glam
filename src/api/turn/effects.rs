@@ -740,6 +740,28 @@ impl Machine<'_, '_> {
                     None => self.effect_restore(cuts, entry),
                 }
             }
+            // As the turn's own cut does, the effect's waits for what it
+            // observed to change and runs again; one that observed nothing
+            // lets its failure through. Within a cut of the turn's, the
+            // failure is that cut's.
+            HostControl::CutFailed(entry) => {
+                cuts.entry = None;
+                let Some((_, start)) = cuts.owned.take() else {
+                    self.effect_restore(cuts, entry);
+                    run.resume_failure(false);
+                    return Ok(());
+                };
+                cuts.checkpoints.clear();
+                match self.transaction_end::<()>(start, Err(self.fail())) {
+                    Err(CutRetry::Never(_)) | Ok(()) => run.resume_failure(false),
+                    Err(retry) => {
+                        self.transaction_await(retry)?;
+                        cuts.entry = Some(entry);
+                        cuts.owned = Some((entry, self.transaction_begin()));
+                        run.resume_failure(true);
+                    }
+                }
+            }
             HostControl::CutCommit { retries } => {
                 let entry = cuts.entry.take().expect("a committing cut began before it");
                 cuts.checkpoints.retain(|(version, _)| *version < entry);

@@ -1119,6 +1119,33 @@ handle API goes.
         its own methods serve them; a port, a wire's end or a setting
         converts to a key before the request parks, by the conversion
         reflection's port requests use), then the logger itself.
+        Decided before it (maintainer, 2026-10-26): turns join the
+        analysis first, `turn-analysis` (`quiescence-is-analyzed`); the
+        fallback is `default_logger`, running continuously, and receives
+        a configured logger's `.log`, which then focuses on enrichment;
+        and a user-defined logger manages its own environment, the CLI
+        binding nothing on its machine. Clarified the same day: the
+        configured logger may still render, and both loggers write to one
+        `stderr` machine.
+        Built 2026-10-26 in one commit, since the analysis counting turns
+        and the logger as a turn need each other (`turn-analysis`,
+        `api-refl-cli-log`): each turn run records its thread and what it
+        does, and the analysis reads each thread's innermost run but the
+        observer's (`busy_turns`, `wait_for_turns`); `logger`,
+        `default_logger` and `stderr` are the root's children, the last
+        two continuous forks, `conf.log` the logger turn's effect, and
+        `.read_log`, `.write_stderr`, `LoggerTaskHost`, `MainEffects`,
+        the logger role's environment and `Diagnostic`'s transport encoding
+        retire. Building it found turn effect runs did not wait out a
+        failed outermost cut that observed, as `m.cut` does; the hosted run
+        now pauses there (`HostControl::CutFailed`) for the turn to decide.
+        Choices of the implementer: the default logger counts what it
+        renders on a bus of its own, whose errors fail the batch; `stderr`
+        evaluates what reaches it, reporting a value that is not binary
+        on the assembler's bus, where `.write_stderr` failed the logger;
+        and a failed effect cut that observed nothing still lets its
+        failure through, where `m.cut` would report that no change could
+        wake it.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
         Designed in [Obligations](Obligations_2026-10-25.md), drafted
         2026-10-25 for review, decided the same day (acceptance explicit,

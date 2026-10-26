@@ -67,7 +67,7 @@ independently.
 
 The embedding library installs no default renderer. `Assembler` drops events
 unless a client subscribes and never prints diagnostics itself. The `glam`
-binary privately owns `conf.log` selection, supervision, fallback rendering,
+binary privately owns `conf.log` selection, supervision, default rendering,
 terminal styling, and the process exit decision; it implements those policies
 with the library's generic buses, ingresses, runtime event endpoints, and
 effect-host facilities.
@@ -106,61 +106,52 @@ writes, with `msg.severity` and `msg.origin` folded in. Valid bus
 publication remains counted even if that preparation fails; the ingress
 retains that terminal failure and ordinary bus subscribers still receive the
 event. A Rust reader takes a port's message as a renderer does: the CLI's
-fallback evaluates its severity, source and line (`port_diagnostic`).
+default logger evaluates its severity, source and line (`port_diagnostic`).
 
 Each message arrives at the root's input as a child's write would,
 following the root's wiring. Before configuration compilation, the binary
-wires that input on to its `logger` machine, a direct child of the root, whose
-input buffer holds runtime roots, not a typed Rust diagnostic queue. The
-logger, and its own child `fallback`, keep what reaches them in place of the
-default pass-through to their parents. `.read_log` claims from the logger's
-input through the logger task's ordinary `RuntimeEventJournal`, so a
-successful transaction commits its heap edits, input claim, and output intents
-atomically.
+wires the CLI's loggers, the root's children, and owns their wiring, out of a
+configured logger's reach (`configuration/logger/mod.rs`):
 
-Since diagnostics wait at the logger from the start, installing `conf.log`
-switches no route: its root is scheduled and reads what has gathered. Its
-lifecycle closes the root's demand session when the root ends.
+- `logger` receives the root's diagnostics input and keeps it. A
+  configured logger runs on it as a turn, `conf.log` an effect of that
+  turn (`Machine::effect_run`), every family passing through: it reads
+  with `.port.read 'diagnostics N` and writes with `.port.write 'stderr
+  [Bin]`, and its `.log` goes to its diagnostics output, which the root
+  wires to `default_logger` rather than back to its own input.
+- `default_logger` runs continuously on a fork of its own: it renders each
+  message that reaches it to bytes with the default renderer, counts it on
+  a bus of its own, whose errors fail the batch, and writes the bytes to
+  its `stderr` output. A configured logger may leave rendering to it and
+  focus on enrichment, or render itself.
+- `stderr` writes what reaches it, binaries, to the process's standard
+  error, on a fork of its own, so both loggers' output keeps one order.
+
+When the configured logger ends, at the batch's end or before, the logger
+hands over in one cut: it wires its input on to its `unread` output, which
+the root wires to `default_logger`, and sends what the input holds there,
+so the default logger receives every diagnostic in order and nothing
+arrives between. Without a configured logger, the logger hands over at
+once. A configured logger's failure, and a result other than unit, are
+published on the assembler's bus, and so reach the default logger.
 
 ## Transactional Logger Output
 
-The configured logger runs as a reflection task in its own demand session. It
-shares the runtime coordinator, reflection heap, protected volumes, and
-executor, while retaining its role environment and diagnostic bus.
-
-Logger `.log` and `.write_stderr` calls are output intents in the same event
-journal as `.read_log` input claims and reflection-store edits. Commit installs
-identified outbox records in per-endpoint order. Delivery later claims one
-record, releases every runtime lock, decodes the retained root, and invokes the
-host callback. Independent endpoints may deliver concurrently; one endpoint
-preserves commit order.
-
-Input converters run and finish rooting before mutation admission. Output
-decoders and adapters run after a delivery ticket has detached the retained
-root from guarded state, and delivery terminalization reacquires runtime state
-only after both callbacks return. None of these host callbacks inherits a
-managed mutator.
+A configured logger's reads, writes and `.log` are port actions of its
+turn's transaction: a cut commits them together, and an abandoned
+alternative leaves none, since its journal never commits. Output endpoints,
+whose delivery decodes a committed root on a client thread, remain for
+hosts that wire a machine's output to the host
+(`RuntimeOutputWriter`): their decode errors, callback errors and caught
+panics become persistent delivery failures, reportable until acknowledged,
+which fail a batch independently of rendering.
 
 The event layer transports unrestricted values and neither forces them nor
 uses outer WHNF as an admission policy. A turn's `.log` writes its possibly
-lazy message, enriched, to its machine's diagnostics output; the configured
-logger's host encodes its own `.log` outputs in an immediate transport
-envelope until the logger is a turn; `.write_stderr` performs its semantic
-binary assertion before committing the output intent. A decoder remains free
-to evaluate its delivered value explicitly. This choice is host policy rather
-than a primitive delivery guarantee, and nested diagnostic fields may remain
-lazy until formatting demands them.
-
-Decode errors, callback errors, and caught panics become persistent Rust-layer
-delivery failures. They remain reportable until explicitly acknowledged and
-make batch execution fail independently of whether rendering succeeds.
-Abandoned alternatives cannot leak diagnostics or bytes because their event
-journals never commit.
-
-The logger's profile includes `.read_log`, `.write_stderr`, its environment,
-and its diagnostic destination. Annotation-created
-reflection tasks instead use the runtime's immutable default reflection
-profile and shared reflection bus policy.
+lazy message, enriched, to its machine's diagnostics output; `stderr`
+evaluates what reaches it to binary data as it writes, and reports a value
+that is not, on the assembler's bus. Nested diagnostic fields may remain lazy
+until formatting demands them.
 
 ## Formatting Policy
 
@@ -211,35 +202,30 @@ Both Glam formatting and fallback rendering finish into owned bytes before the
 terminal writer is invoked, so a writer is another mutator-free host callback
 rather than an extension of evaluation.
 
-## Logger Completion and Fallback
+## Logger Completion
 
 The diagnostic stream has no semantic closed state. A conventional logger loop
-reads with `.read_log` in a cut, which waits, idle, while its input is empty;
-new committed input wakes it and retries the read. The batch, not a bus-close
-bit, decides when diagnostics stop: it ends at a quiescence whose analysis
-has nothing new (`quiescence-is-analyzed`), and a logger still waiting on its
-input ends with it (`EffectRunStop`), cleanly. A logger whose input holds
+reads with `.port.read 'diagnostics 1` in a cut, which waits, idle, while its
+input is empty; new committed input wakes it and retries the read. The
+batch, not a bus-close bit, decides when diagnostics stop: it ends at a
+quiescence whose analysis has nothing new (`quiescence-is-analyzed`), which
+counts the loggers' turns: a turn waiting where what it observed holds is
+idle, and one woken by input, or rendering, is in progress, so the batch
+waits on it (`EvaluationRuntime::wait_for_turns`). At the end, the batch
+interrupts the configured logger, whose wait ends cleanly and which hands
+over, then the default logger and `stderr`, each once its input holds
+nothing more, and renders what is left directly. A logger whose input holds
 unread diagnostics at quiescence has stopped reading: the batch halts it,
-with an error diagnostic saying so, and the fallback renders its backlog.
-
-When the configured logger ends, at the batch's end or before, the logger hands
-over in one cut: it wires its input on to `fallback` and sends what the input
-holds there, so the fallback receives every diagnostic in order and nothing
-arrives between. Without a configured logger, the logger hands over at once.
-The CLI renders what waits at the fallback with its default renderer: between
-pumps while no configured logger's fork holds the logger, and at the end.
+with an error diagnostic saying so, and the default logger renders its
+backlog.
 
 The batch publishes each issue an analysis at quiescence finds through the
 assembler's bus, and so through the logger, never around it: each issue once,
 by its identity (`PublishedIssues`), for the batch's life. Work that
 publishing admits causes another runtime pump before the next analysis.
 
-Delivery and rendering run only on client threads, never on an evaluation
-worker. The logger task only journals and commits its outputs, wherever it
-runs; the CLI's logger thread delivers them between pumps
-(`ScheduledEffectRun::run_with`), and its subscribers render there. The
-hand-over runs on that thread too, as the configured logger ends, and the
-fallback renders on the thread of the turn that reads it.
+Rendering runs only on client threads, never on an evaluation worker: the
+loggers' turns are the CLI's forks.
 
 Nothing is killed at the batch's end. Each issue an analysis at quiescence
 finds, a wait on a promise no one resolves, an erred wait, a backlog, a

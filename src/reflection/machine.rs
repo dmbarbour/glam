@@ -3673,6 +3673,22 @@ impl<S: TaskSpecialization> EffectTask<S> {
                 scope_depth: frame.parent_scope_depth,
             }));
         }
+        // Where the host runs the cuts, a failure that nothing handles is
+        // the host's to wait out, as its own cut's would be, and run the cut
+        // again, or to let through: the host's transaction holds what the
+        // cut observed (`HostControl::CutFailed`).
+        if frame.pushback.is_none()
+            && self.execution.cuts.is_empty()
+            && let Some(hosted) = self.hosted.as_mut()
+        {
+            hosted.pending = Some(HostControl::CutFailed(frame.outer.host_version));
+            let scope_depth = frame.parent_scope_depth;
+            hosted.failing = Some(frame);
+            return Ok(MachineStep::Continue(MachineWork::Outcome {
+                outcome: failed.into_failure(),
+                scope_depth,
+            }));
+        }
         if !frame.owns_transaction {
             return Ok(MachineStep::Continue(MachineWork::Outcome {
                 outcome: failed.into_failure(),
@@ -3857,6 +3873,10 @@ impl<S: TaskSpecialization> EffectTask<S> {
             hosted.committing.is_none(),
             "a hosted cut's commit awaits its host's answer"
         );
+        assert!(
+            hosted.failing.is_none(),
+            "a hosted cut's failure awaits its host's answer"
+        );
         // Each resumption of an earlier version raises a restore.
         debug_assert!(
             self.execution
@@ -3912,6 +3932,20 @@ impl<S: TaskSpecialization> EffectTask<S> {
             return;
         }
         self.restart_hosted_cut(frame);
+    }
+
+    /// Answers [`HostControl::CutFailed`]: the outermost cut runs again,
+    /// as the host waited out what its transaction observed and began it
+    /// again, or the failure goes through.
+    pub(super) fn resume_failure(&mut self, retry: bool) {
+        let frame = self
+            .hosted
+            .as_mut()
+            .and_then(|hosted| hosted.failing.take())
+            .expect("a failure awaits its host's answer");
+        if retry {
+            self.restart_hosted_cut(frame);
+        }
     }
 
     /// Runs the outermost cut again from its entry, as the host began its
@@ -6125,6 +6159,11 @@ pub(crate) enum HostControl {
     /// The outermost cut failed: the host returns to the version it began
     /// at.
     CutAbort(u64),
+    /// The outermost cut failed, and nothing handles the failure: the host
+    /// returns to the version it began at, and, as its own cut would, waits
+    /// for what its transaction observed to change and runs the cut again,
+    /// or lets the failure through. The run polls only once answered.
+    CutFailed(u64),
     /// The task resumes a branch set aside at this version.
     Restore(u64),
 }
@@ -6148,6 +6187,8 @@ struct HostedCuts<S: TaskSpecialization> {
     pending: Option<HostControl>,
     /// The outermost cut, while the host commits it.
     committing: Option<CutFrame<S>>,
+    /// The outermost cut, while the host decides on its failure.
+    failing: Option<CutFrame<S>>,
     result: Option<HostedResult>,
 }
 
@@ -6158,6 +6199,7 @@ impl<S: TaskSpecialization> Default for HostedCuts<S> {
             set_aside: false,
             pending: None,
             committing: None,
+            failing: None,
             result: None,
         }
     }

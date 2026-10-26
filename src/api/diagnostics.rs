@@ -11,7 +11,6 @@ use super::runtime::{
 use super::{Error, EvaluationRuntime, Value, Values};
 use crate::core::{CoreValueFactory, Dict, Key, Value as CoreValue};
 use crate::diagnostic::{CompilationTrace, Severity};
-use crate::number::Number;
 use crate::runtime::EvaluationRuntimeId;
 use crate::source::SourceIdentity;
 
@@ -206,118 +205,6 @@ impl Diagnostic {
             )))
         })?;
         Ok(Self { emission, ..self })
-    }
-
-    /// Encodes this Rust envelope as one runtime-local value for buffered
-    /// transport, which the configured logger's host uses for its own
-    /// outputs. A diagnostics port carries the enriched message instead
-    /// ([`Self::enrich`]).
-    #[doc(hidden)]
-    pub fn transport_value(&self, values: &Values) -> Result<Value, Error> {
-        self.emission.require_runtime(values.runtime)?;
-        if let Some(origin) = &self.origin {
-            origin.require_runtime(values.runtime)?;
-        }
-        values.with_access(|access| {
-            let mut fields = Dict::new_sync()
-                .insert(
-                    Key::atom_from_text("emission"),
-                    access.clone_core(&self.emission)?,
-                )
-                .insert(
-                    Key::atom_from_text("severity"),
-                    self.severity.value(access.runtime_access(), values.core()),
-                );
-            if let Some(origin) = &self.origin {
-                fields = fields.insert(Key::atom_from_text("origin"), access.clone_core(origin)?);
-            }
-            if let Some(source) = &self.source {
-                fields = fields.insert(
-                    Key::atom_from_text("source"),
-                    CoreValue::binary_from_text(source.as_ref()),
-                );
-            }
-            if let Some(line) = self.line {
-                fields = fields.insert(
-                    Key::atom_from_text("line"),
-                    CoreValue::Number(Number::integer(line as i64)),
-                );
-            }
-            // The message summarizes the emission as built, which a composed
-            // emission no longer shows.
-            fields = fields.insert(
-                Key::atom_from_text("message"),
-                CoreValue::binary_from_text(self.message.as_ref()),
-            );
-            Ok(access.wrap(CoreValue::Dict(fields)))
-        })
-    }
-
-    #[doc(hidden)]
-    pub fn from_transport_value(values: &Values, value: &Value) -> Result<Self, Error> {
-        value.require_runtime(values.runtime)?;
-        values.with_access(|access| {
-            access.with_core(value, |value| {
-                let CoreValue::Dict(fields) = value else {
-                    return Err(Error::new("diagnostic transport requires a dictionary"));
-                };
-                let field = |name: &str| fields.get(&Key::atom_from_text(name));
-                let emission = field("emission")
-                    .map(|value| access.runtime_access().duplicate_value(value))
-                    .ok_or_else(|| Error::new("diagnostic transport is missing `emission`"))?;
-                let severity = match field("severity")
-                    .and_then(|value| access.runtime_access().key_from_value(value))
-                {
-                    Some(value) if value == *crate::core::keys::INFO => Severity::Info,
-                    Some(value) if value == *crate::core::keys::WARN => Severity::Warning,
-                    Some(value) if value == *crate::core::keys::ERROR => Severity::Error,
-                    _ => return Err(Error::new("diagnostic transport has an invalid severity")),
-                };
-                let source = field("source")
-                    .map(|source| {
-                        let CoreValue::Binary(source) = source else {
-                            return Err(Error::new("diagnostic transport source must be text"));
-                        };
-                        std::str::from_utf8(source)
-                            .map(Arc::<str>::from)
-                            .map_err(|_| Error::new("diagnostic transport source must be text"))
-                    })
-                    .transpose()?;
-                let line = field("line")
-                    .map(|line| {
-                        let CoreValue::Number(line) = line else {
-                            return Err(Error::new(
-                                "diagnostic transport line must be nonnegative",
-                            ));
-                        };
-                        line.to_i64_if_integer()
-                            .and_then(|line| usize::try_from(line).ok())
-                            .ok_or_else(|| {
-                                Error::new("diagnostic transport line must be nonnegative")
-                            })
-                    })
-                    .transpose()?;
-                let origin = field("origin")
-                    .map(|origin| access.wrap(access.runtime_access().duplicate_value(origin)));
-                let message = match field("message") {
-                    Some(CoreValue::Binary(message)) => {
-                        Arc::from(String::from_utf8_lossy(message).as_ref())
-                    }
-                    Some(_) => {
-                        return Err(Error::new("diagnostic transport message must be text"));
-                    }
-                    None => Arc::from(EMISSION_SUMMARY),
-                };
-                Ok(Self {
-                    emission: access.wrap(emission),
-                    origin,
-                    source,
-                    severity,
-                    line,
-                    message,
-                })
-            })?
-        })
     }
 
     /// The text a renderer shows: `msg.text`, evaluated, since a
@@ -635,8 +522,8 @@ impl DiagnosticBus {
 
     /// Installs the single ordered runtime ingress for this bus, which
     /// routes every diagnostic it publishes, in sequence order, to the input
-    /// `port` of the machine at `machine`, as a transport value
-    /// ([`Diagnostic::from_transport_value`] reads it back).
+    /// `port` of the machine at `machine`, as its enriched message
+    /// ([`Diagnostic::enrich`]), which glam reads and writes.
     ///
     /// The ingress receives publications before ordinary subscribers, admits
     /// only runtime-rooted values, and remains registered weakly so neither

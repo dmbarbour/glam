@@ -138,6 +138,11 @@ the CLI moves onto it.
 5. Later: turns counted in quiescence once settlement's runtime and the
    turn runtime meet, as `rt.analysis()`; and the analysis as a
    reflection effect, for a logger's or an IDE's status.
+   Turns counted, built 2026-10-26 ahead of the rest (`turn-analysis`,
+   maintainer): the evaluation runtime's analysis reads each thread's
+   innermost turn run but the observer's, idle while it waits where what it
+   observed holds. `rt.analysis()` on the turn runtime, and the analysis
+   as a reflection effect, remain.
 
 ### Step 3, planned (survey, 2026-10-25)
 

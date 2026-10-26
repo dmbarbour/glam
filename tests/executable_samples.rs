@@ -198,9 +198,9 @@ fn configured_logger_can_observe_the_structured_direct_assembly_trace() {
     let mut configuration = fs::read_to_string("samples/config/direct_assembly.g")
         .expect("direct-assembly configuration should be readable");
     configuration.push_str(
-        "\nconf.log = .read_log >>= \\message ->\n\
-         \x20\x20((list.head message.direct_assembly.trace.events).effect.op == \".section.root\") =>>\n\
-         \x20\x20\x20\x20.write_stderr (\"STRUCTURED TRACE\" ++ [10])\n",
+        "\nconf.log = .port.read 'diagnostics 1 >>= \\messages ->\n\
+         \x20\x20((list.head (list.head messages).direct_assembly.trace.events).effect.op == \".section.root\") =>>\n\
+         \x20\x20\x20\x20.port.write 'stderr [\"STRUCTURED TRACE\" ++ [10]]\n",
     );
     let configuration_path = config_dir.join("direct_assembly.g");
     fs::write(&configuration_path, configuration)

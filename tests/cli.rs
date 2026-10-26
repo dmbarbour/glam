@@ -701,7 +701,7 @@ fn configured_logger_reads_diagnostics_and_writes_stderr_effectfully() {
     let invalid = dir.join("invalid.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\message -> .write_stderr (\"CUSTOM: \" ++ message.msg.text ++ [10]))\n",
+        "language g0\nimport 'std as std\nobject conf.env\nconf.log = .port.read 'diagnostics 1 >>= (\\messages -> .port.write 'stderr (std.list.map (\\message -> \"CUSTOM: \" ++ message.msg.text ++ [10]) messages))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&invalid, b"language g0\nvalue = \xff\n")
@@ -731,7 +731,7 @@ fn configured_logger_composes_reusable_reflection_requests() {
     let invalid = dir.join("invalid.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .cut (.read_log >>= (\\_message -> (.log 'warn { msg:{ text:\"REFLECTION LOG\" } }) =>> (.write_stderr (\"COMPOSED\" ++ [10]) =>> .r ())))\n",
+        "language g0\nobject conf.env\nconf.log = .cut (.port.read 'diagnostics 1 >>= (\\_messages -> (.log 'warn { msg:{ text:\"REFLECTION LOG\" } }) =>> (.port.write 'stderr [\"COMPOSED\" ++ [10]] =>> .r ())))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&invalid, b"language g0\nvalue = \xff\n")
@@ -772,8 +772,8 @@ fn configured_logger_abandons_diagnostics_and_stderr_from_failed_choices() {
             "object conf.env\n",
             "conf.log = .cut (.alt ",
             "((.log 'warn {msg:{text:\"ABANDONED DIAGNOSTIC\"}}) =>> ",
-            "(.write_stderr (\"ABANDONED STDERR\" ++ [10]) =>> .fail)) ",
-            "(.read_log >>= (\\_message -> .write_stderr (\"COMMITTED\" ++ [10]))))\n",
+            "(.port.write 'stderr [\"ABANDONED STDERR\" ++ [10]] =>> .fail)) ",
+            "(.port.read 'diagnostics 1 >>= (\\_messages -> .port.write 'stderr [\"COMMITTED\" ++ [10]])))\n",
         ),
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
@@ -806,7 +806,7 @@ fn configured_logger_can_read_the_process_reflection_environment() {
     let invalid = dir.join("invalid.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env.lookup ['process,'env] >>= (\\environment -> .write_stderr (environment.[\"GLAM_TEST_REFLECTION_ENV\"] ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env.lookup ['process,'env] >>= (\\environment -> .port.write 'stderr [environment.[\"GLAM_TEST_REFLECTION_ENV\"] ++ [10]])\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(&invalid, b"language g0\nvalue = \xff\n")
@@ -829,36 +829,6 @@ fn configured_logger_can_read_the_process_reflection_environment() {
 }
 
 #[test]
-fn configured_logger_observes_its_own_reasoning_role() {
-    let dir = unique_temp_dir("glam-conf-log-role");
-    fs::create_dir_all(&dir)
-        .unwrap_or_else(|err| panic!("failed to create {}: {err}", dir.display()));
-    let config = dir.join("conf.g");
-    let assembly = dir.join("assembly.g");
-    fs::write(
-        &config,
-        "language g0\nobject conf.env\nconf.log = .env.lookup ['glam,'reasoning,'role] >>= (\\role -> (role == 'logger) =>> .write_stderr (\"LOGGER ROLE\" ++ [10]))\n",
-    )
-    .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
-    fs::write(&assembly, "language g0\nasm.result = \"\"\n")
-        .unwrap_or_else(|err| panic!("failed to write {}: {err}", assembly.display()));
-
-    let output = glam_command()
-        .env("GLAM_CONF", &config)
-        .arg("--file")
-        .arg(&assembly)
-        .output()
-        .expect("failed to run glam");
-
-    assert!(output.status.success());
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        stderr.contains("LOGGER ROLE\n"),
-        "configured logger did not observe its logger role:\n{stderr}"
-    );
-}
-
-#[test]
 fn assembler_and_logger_reasoning_sessions_share_the_runtime_heap() {
     let dir = unique_temp_dir("glam-conf-log-runtime-heap");
     fs::create_dir_all(&dir)
@@ -867,7 +837,7 @@ fn assembler_and_logger_reasoning_sessions_share_the_runtime_heap() {
     let assembly = dir.join("assembly.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\_message -> .alt (.heap.try_get ['marker]) (.r ()) >>= (\\marker -> (marker == \"assembler\") =>> .write_stderr (\"SHARED\" ++ [10])))\n",
+        "language g0\nobject conf.env\nconf.log = .port.read 'diagnostics 1 >>= (\\_messages -> .alt (.heap.try_get ['marker]) (.r ()) >>= (\\marker -> (marker == \"assembler\") =>> .port.write 'stderr [\"SHARED\" ++ [10]]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
     fs::write(
@@ -899,7 +869,7 @@ fn reflection_arguments_are_ordered_and_do_not_enter_assembly_arguments() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env.lookup ['process,'refl_args] >>= (\\arguments -> (arguments == [\"quick\",\"thorough\"]) =>> .write_stderr (\"REFLECTION ARGS\" ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env.lookup ['process,'refl_args] >>= (\\arguments -> (arguments == [\"quick\",\"thorough\"]) =>> .port.write 'stderr [\"REFLECTION ARGS\" ++ [10]])\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
@@ -932,7 +902,7 @@ fn bootstrap_cli_arguments_are_exposed_as_user_and_canonical_views() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .env.lookup ['process] >>= (\\process -> (process.args == process.cli.args) =>> .write_stderr (\"CLI ARGS\" ++ [10]))\n",
+        "language g0\nobject conf.env\nconf.log = .env.lookup ['process] >>= (\\process -> (process.args == process.cli.args) =>> .port.write 'stderr [\"CLI ARGS\" ++ [10]])\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
@@ -1083,10 +1053,11 @@ fn configured_logger_can_drain_until_the_batch_ends() {
         &config,
         concat!(
             "language g0\n",
+            "import 'std as std\n",
             "object conf.env\n",
             "object conf.logger_loop with\n  alias logger_loop\n",
-            "  run = (.cut (.read_log >>= (\\message -> ",
-            "(.write_stderr (message.msg.text ++ [10])) =>> .r ()))) =>> logger_loop\n",
+            "  run = (.cut (.port.read 'diagnostics 1 >>= (\\messages -> ",
+            "(.port.write 'stderr (std.list.map (\\message -> message.msg.text ++ [10]) messages)) =>> .r ()))) =>> logger_loop\n",
             "  eff = logger_loop.run.eff\n",
             "conf.log = conf.logger_loop\n",
         ),
@@ -1120,7 +1091,7 @@ fn configured_logger_does_not_read_its_own_log_output() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = (.log 'warn { msg:{ text:\"LOGGER OUTPUT\" } }) =>> .cut (.read_log >>= (\\_message -> .log 'error { msg:{ text:\"READ OWN OUTPUT\" } }))\n",
+        "language g0\nobject conf.env\nconf.log = (.log 'warn { msg:{ text:\"LOGGER OUTPUT\" } }) =>> .cut (.port.read 'diagnostics 1 >>= (\\_messages -> .log 'error { msg:{ text:\"READ OWN OUTPUT\" } }))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
@@ -1177,7 +1148,7 @@ fn a_configured_logger_waiting_on_its_input_ends_with_the_batch() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .read_log =>> .r ()\n",
+        "language g0\nobject conf.env\nconf.log = .port.read 'diagnostics 1 =>> .r ()\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 
@@ -1208,7 +1179,7 @@ fn a_configured_logger_that_stops_reading_is_halted_for_the_fallback() {
     let config = dir.join("conf.g");
     fs::write(
         &config,
-        "language g0\nobject conf.env\nconf.log = .read_log >>= (\\m -> .write_stderr (m.msg.text ++ [10]) =>> .cut (.heap.try_get ['never]))\n",
+        "language g0\nimport 'std as std\nobject conf.env\nconf.log = .port.read 'diagnostics 1 >>= (\\messages -> .port.write 'stderr (std.list.map (\\m -> m.msg.text ++ [10]) messages) =>> .cut (.heap.try_get ['never]))\n",
     )
     .unwrap_or_else(|err| panic!("failed to write {}: {err}", config.display()));
 

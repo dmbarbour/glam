@@ -430,6 +430,12 @@ impl<S: TaskSpecialization> HostedEffectRun<S> {
     pub(crate) fn restart_outermost_cut(&mut self) {
         self.task.restart_outermost_cut();
     }
+
+    /// Answers [`HostControl::CutFailed`]: the cut runs again, or the
+    /// failure goes through. The run polls only once answered.
+    pub(crate) fn resume_failure(&mut self, retry: bool) {
+        self.task.resume_failure(retry);
+    }
 }
 
 #[cfg(test)]
