@@ -2662,6 +2662,10 @@ maps the short names used here to file names.
     happen is of interest, whether or not anything was owed.)
   - `api-settlement` is redirected to `api-quiescence`, and "settlement"
     leaves the vocabulary with the step.
+  - (Decided by the maintainer, 2026-10-26: readiness presents no
+    judgement. `Ready` and `Deadlocked` fold into one `Stable` snapshot,
+    and the distinction is the analysis's; "deadlock" leaves the names of
+    the work it lists.)
 - **Reasons:** a batch's end is the client's judgment of a quiescent
   state, not something the runtime stages; an analysis serves IDEs,
   loggers and batches alike once it reflects state rather than staging

@@ -269,6 +269,15 @@ final diagnostics through it).
    the analysis or the snapshot instead; the validation tests, the forced
    kills, the client demand kill, and the turn test of settlement's
    collection retire with what they tested.
+5. `readiness-stable` — readiness presents no judgement (maintainer,
+   2026-10-26: "leave distinction to analysis"). Built 2026-10-26:
+   `RuntimeReadiness::Stable(StableSnapshot)`, a stamp and the store, in
+   place of `Ready` and `Deadlocked`, and the coordinator's readiness
+   likewise; the unfinished work it listed is the analysis's waits, and
+   `RuntimeDeadlockWork` is `RuntimeWork`. Tests that read a deadlock
+   snapshot read the analysis; one duplicating an analysis's retention
+   test retires; a test that read `Ready` as "the join finished" checks
+   that the analysis lists no wait.
 
 **Decided on the end design** (maintainer, 2026-10-25: yes to both, "this
 aligns nicely with my thinking"): a backlog is unresolved by default, its

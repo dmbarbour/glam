@@ -473,7 +473,7 @@ mod tests {
         evaluation_runtime.pump_until_stable();
         assert!(matches!(
             evaluation_runtime.readiness(),
-            RuntimeReadiness::Deadlocked(_)
+            RuntimeReadiness::Stable(_)
         ));
         assert!(matches!(
             lifecycle.status(),
@@ -833,7 +833,7 @@ mod tests {
         ));
         assert!(matches!(
             evaluation_runtime.readiness(),
-            RuntimeReadiness::Ready(_)
+            RuntimeReadiness::Stable(_)
         ));
     }
 }

@@ -1035,9 +1035,9 @@ impl Assembler {
     /// observational readiness snapshot.
     ///
     /// This method imposes no step or time limit. A runnable infinite task
-    /// therefore keeps it running forever. The returned snapshot is not
-    /// committed: clients analyze the runtime, or choose whether to kill a
-    /// deadlock.
+    /// therefore keeps it running forever. The returned snapshot judges
+    /// nothing: a client analyzes the runtime to learn what waits, and what
+    /// is owed (`quiescence-is-analyzed`).
     pub fn drain_reasoning(&self) -> RuntimeReadiness {
         let runtime = self.evaluation_runtime();
         runtime.pump_until_stable();

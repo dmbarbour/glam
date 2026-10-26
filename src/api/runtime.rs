@@ -49,7 +49,6 @@ pub(crate) use machines::{
     break_replies, clear_child_machines, machine_diagnostic, reason_diagnostic,
 };
 pub(in crate::api) use ports::{DIAGNOSTICS, PortAddress, PortJournal, Wire, WireEnd};
-use readiness::runtime_deadlock_work_from_snapshot;
 pub use readiness::*;
 pub(in crate::api) use shares::ShareJournal;
 
@@ -1408,11 +1407,12 @@ impl EvaluationRuntime {
                 failure: maintenance.latest_failure.map(maintenance_failure),
             });
         }
-        let coordinator = self.state.work.runtime_readiness_snapshot();
-        if matches!(coordinator, RuntimeCoordinatorReadiness::Busy) {
+        let RuntimeCoordinatorReadiness::Stable { work_generation } =
+            self.state.work.runtime_readiness_snapshot()
+        else {
             drop(exclusive);
             return RuntimeReadiness::Busy;
-        }
+        };
 
         let reflection = {
             let state = self
@@ -1432,36 +1432,15 @@ impl EvaluationRuntime {
         let observation_epoch = self.state.shared_resources.observations.current().get();
         drop(exclusive);
 
-        match coordinator {
-            RuntimeCoordinatorReadiness::Busy => unreachable!("handled above"),
-            RuntimeCoordinatorReadiness::Ready { work_generation } => {
-                RuntimeReadiness::Ready(QuiescenceSnapshot {
-                    runtime: self.clone(),
-                    stamp: RuntimeReadinessStamp {
-                        work_generation,
-                        observation_epoch,
-                        gc_maintenance_revision: maintenance.revision,
-                    },
-                    reflection,
-                })
-            }
-            RuntimeCoordinatorReadiness::Deadlocked {
+        RuntimeReadiness::Stable(StableSnapshot {
+            runtime: self.clone(),
+            stamp: RuntimeReadinessStamp {
                 work_generation,
-                unfinished,
-            } => RuntimeReadiness::Deadlocked(DeadlockSnapshot {
-                runtime: self.clone(),
-                stamp: RuntimeReadinessStamp {
-                    work_generation,
-                    observation_epoch,
-                    gc_maintenance_revision: maintenance.revision,
-                },
-                unfinished: unfinished
-                    .into_iter()
-                    .map(|work| runtime_deadlock_work_from_snapshot(self.values().core(), work))
-                    .collect(),
-                reflection,
-            }),
-        }
+                observation_epoch,
+                gc_maintenance_revision: maintenance.revision,
+            },
+            reflection,
+        })
     }
 
     /// Internal activity inspection for the scheduler pump. Retained failures

@@ -27,12 +27,10 @@ pub(crate) struct RuntimePumpSnapshot {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum RuntimeCoordinatorReadiness {
     Busy,
-    Ready {
+    /// No work is queued or runs: whatever remains waits, as an analysis
+    /// classifies it (`quiescence-is-analyzed`).
+    Stable {
         work_generation: u64,
-    },
-    Deadlocked {
-        work_generation: u64,
-        unfinished: Vec<RuntimeDeadlockWorkSnapshot>,
     },
 }
 
@@ -71,7 +69,7 @@ pub(crate) enum RuntimeDependencySnapshot {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct RuntimeDeadlockWorkSnapshot {
+pub(crate) struct RuntimeWorkSnapshot {
     pub(crate) work: EvaluationWorkId,
     pub(crate) session: Option<EvaluationSessionId>,
     pub(crate) task: Option<EvaluationTaskId>,
@@ -147,8 +145,6 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
         return RuntimeCoordinatorReadiness::Busy;
     }
 
-    let mut unfinished = Vec::new();
-
     for record in state.work.values() {
         if matches!(
             record.state,
@@ -160,20 +156,9 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
         {
             return RuntimeCoordinatorReadiness::Busy;
         }
-
-        unfinished.push(unfinished_work_snapshot_locked(state, record).expect("handled above"));
     }
-
-    if unfinished.is_empty() {
-        RuntimeCoordinatorReadiness::Ready {
-            work_generation: state.work_generation,
-        }
-    } else {
-        unfinished.sort_by_key(|work| work.work.get());
-        RuntimeCoordinatorReadiness::Deadlocked {
-            work_generation: state.work_generation,
-            unfinished,
-        }
+    RuntimeCoordinatorReadiness::Stable {
+        work_generation: state.work_generation,
     }
 }
 
@@ -182,7 +167,7 @@ fn runtime_readiness_locked(state: &WorkCoordinatorState) -> RuntimeCoordinatorR
 pub(super) fn unfinished_work_snapshot_locked(
     state: &WorkCoordinatorState,
     record: &WorkRecord,
-) -> Option<RuntimeDeadlockWorkSnapshot> {
+) -> Option<RuntimeWorkSnapshot> {
     let state_snapshot = match record.state {
         WorkState::Dormant => RuntimeWorkStateSnapshot::Dormant,
         WorkState::Reserved => RuntimeWorkStateSnapshot::Reserved,
@@ -192,7 +177,7 @@ pub(super) fn unfinished_work_snapshot_locked(
         | WorkState::InlineForced
         | WorkState::Terminalizing => return None,
     };
-    Some(RuntimeDeadlockWorkSnapshot {
+    Some(RuntimeWorkSnapshot {
         work: record.id,
         session: (!matches!(record.kind, WorkKind::LazyRoute(_))).then_some(record.demand_session),
         task: task_for_record(record),
@@ -269,13 +254,13 @@ mod tests {
 
     /// Compile-exhaustive ownership latch for the failure-bearing readiness
     /// record.
-    fn assert_readiness_failure_boundary_inventory(snapshot: &RuntimeDeadlockWorkSnapshot) {
-        let RuntimeDeadlockWorkSnapshot { blocked_error, .. } = snapshot;
+    fn assert_readiness_failure_boundary_inventory(snapshot: &RuntimeWorkSnapshot) {
+        let RuntimeWorkSnapshot { blocked_error, .. } = snapshot;
         let _: &Option<RuntimeFailureRoot> = blocked_error;
     }
 
     #[test]
     fn readiness_failure_boundary_inventory_is_complete() {
-        let _: fn(&RuntimeDeadlockWorkSnapshot) = assert_readiness_failure_boundary_inventory;
+        let _: fn(&RuntimeWorkSnapshot) = assert_readiness_failure_boundary_inventory;
     }
 }

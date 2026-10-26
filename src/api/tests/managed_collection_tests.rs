@@ -237,13 +237,13 @@ fn production_collection_preserves_each_serial_boundary() {
     );
     drop(reflection);
     runtime.pump_until_stable();
-    let RuntimeReadiness::Ready(before_quiescent_collection) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(before_quiescent_collection) = runtime.readiness() else {
         panic!("committed reflection state without work should be ready")
     };
     runtime
         .collect_managed_for_maintenance()
         .expect("the reflection-quiescent serial boundary should collect");
-    let RuntimeReadiness::Ready(after_quiescent_collection) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(after_quiescent_collection) = runtime.readiness() else {
         panic!("collection should not create runtime work")
     };
     assert_eq!(
@@ -340,7 +340,7 @@ fn production_collection_preserves_each_serial_boundary() {
     assert_eq!(transported.message(), "preserved diagnostic");
 
     runtime.pump_until_stable();
-    let RuntimeReadiness::Ready(snapshot) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(snapshot) = runtime.readiness() else {
         panic!("delivered output should leave the runtime ready")
     };
     assert_eq!(snapshot.reflection().root().runtime_id(), runtime.id());
@@ -991,7 +991,7 @@ fn runtime_request_during_finalization_coalesces_and_lease_release_wakes_pump() 
         .expect("lease retirement must wake the parked pump");
     pump.join().expect("runtime pump should finish cleanly");
     assert!(
-        matches!(runtime.readiness(), RuntimeReadiness::Ready(_)),
+        matches!(runtime.readiness(), RuntimeReadiness::Stable(_)),
         "a request linearized before successful completion should be coalesced"
     );
 
@@ -1025,7 +1025,7 @@ fn recoverable_trace_panic_becomes_retryable_maintenance_and_durable_failure() {
         .service()
         .expect("the trace fixture should succeed on its second attempt");
     assert!(
-        matches!(runtime.readiness(), RuntimeReadiness::Ready(_)),
+        matches!(runtime.readiness(), RuntimeReadiness::Stable(_)),
         "a successful retry should restore ordinary readiness"
     );
     // `quiescence-is-analyzed`: an analysis lists the retained failure, and
@@ -1076,7 +1076,7 @@ fn recoverable_finalizer_panic_retains_retry_work_and_failure_history() {
         .expect("the untouched finalizer suffix should retry successfully");
     assert_eq!(completed.pending_finalizers(), 0);
     assert!(
-        matches!(runtime.readiness(), RuntimeReadiness::Ready(_)),
+        matches!(runtime.readiness(), RuntimeReadiness::Stable(_)),
         "successful finalizer retry should restore readiness"
     );
     let analysis = runtime.analysis().expect("the runtime is not poisoned");
@@ -1171,7 +1171,7 @@ fn runtime_no_auto_pressure_requires_explicit_service() {
         before.epoch(),
         "ordinary NoAuto outer entries must not service advisory pressure"
     );
-    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Stable(_)));
 
     let serviced = runtime
         .service_managed_collection()
@@ -1242,7 +1242,7 @@ fn foreground_evaluation_services_collector_pressure() {
     runtime.pump_until_stable();
     let readiness = runtime.readiness();
     assert!(
-        matches!(readiness, RuntimeReadiness::Ready(_)),
+        matches!(readiness, RuntimeReadiness::Stable(_)),
         "{readiness:?}"
     );
     drop(retained);
@@ -1283,13 +1283,13 @@ fn stable_pump_without_pressure_changes_no_maintenance_state() {
         return;
     }
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let RuntimeReadiness::Ready(before) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(before) = runtime.readiness() else {
         panic!("new runtime should be ready")
     };
 
     runtime.pump_until_stable();
 
-    let RuntimeReadiness::Ready(after) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(after) = runtime.readiness() else {
         panic!("a pressure-free pump should leave the runtime ready")
     };
     assert_eq!(
@@ -1310,14 +1310,14 @@ fn stable_pump_promotes_pressure_once_without_changing_policy() {
     runtime
         .service_managed_collection()
         .expect("baseline collection should complete");
-    let RuntimeReadiness::Ready(before_pressure) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(before_pressure) = runtime.readiness() else {
         panic!("baseline runtime should be ready")
     };
     let retained = runtime
         .values()
         .core()
         .cross_managed_pressure_threshold_for_test();
-    let RuntimeReadiness::Ready(advisory_only) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(advisory_only) = runtime.readiness() else {
         panic!("collector-local pressure should remain advisory before a stable pump")
     };
     assert_eq!(
@@ -1370,7 +1370,7 @@ fn pressure_after_one_stable_snapshot_waits_for_the_next_pump() {
     }
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
     runtime.pump_until_stable();
-    let RuntimeReadiness::Ready(before_pressure) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(before_pressure) = runtime.readiness() else {
         panic!("pressure-free runtime should be ready")
     };
 
@@ -1378,7 +1378,7 @@ fn pressure_after_one_stable_snapshot_waits_for_the_next_pump() {
         .values()
         .core()
         .cross_managed_pressure_threshold_for_test();
-    let RuntimeReadiness::Ready(before_next_pump) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(before_next_pump) = runtime.readiness() else {
         panic!("pressure after the prior pump snapshot must remain advisory")
     };
     assert_eq!(
@@ -1554,7 +1554,7 @@ fn parked_pump_promotes_pressure_after_activity_wake() {
     // Under aggressive verification the woken pump also services its own
     // promotion; see the 2026-10-03 regression plan, D7 and D11.
     if aggressive_gc_verification() {
-        assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Stable(_)));
     } else {
         assert!(matches!(
             runtime.readiness(),
@@ -1661,7 +1661,7 @@ fn repository_aggressive_mode_services_new_allocations_at_each_stable_pump() {
         "the next stable pump must service the new allocations exactly once"
     );
     assert!(
-        matches!(runtime.readiness(), RuntimeReadiness::Ready(_)),
+        matches!(runtime.readiness(), RuntimeReadiness::Stable(_)),
         "readiness after an aggressive pump should match ordinary mode"
     );
     assert_eq!(

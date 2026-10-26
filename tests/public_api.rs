@@ -6,8 +6,8 @@ use bytes::Bytes;
 use glam::{
     Assembler, AssemblerBuilder, CONTENT_DIGEST_ALGORITHM, ContentDigest, Diagnostic,
     DiagnosticEvent, EvaluatedValue, EvaluationRuntime, HandleValue, ImportResolver, ModuleInput,
-    RelativeSourcePath, RuntimeAnalysis, RuntimeReadiness, Severity, SourceArtifact, SourceError,
-    SourceIdentity, SourceSystem, ValueKind,
+    RelativeSourcePath, RuntimeAnalysis, RuntimeReadiness, RuntimeWait, Severity, SourceArtifact,
+    SourceError, SourceIdentity, SourceSystem, ValueKind,
 };
 
 fn record<I, S>(values: &glam::Values, entries: I) -> HandleValue
@@ -157,23 +157,27 @@ fn custom_conflict_analysis_remains_available_through_the_public_facade() {
     assert_eq!(assembler.conflict_analysis().name(), "public-test");
 }
 
-/// The analysis of a runtime that reasoning left ready
-/// (`quiescence-is-analyzed`).
+/// The analysis of a runtime that reasoning left stable, with no work
+/// waiting (`quiescence-is-analyzed`).
 fn ready_analysis(assembler: &Assembler) -> RuntimeAnalysis {
     match assembler.drain_reasoning() {
-        RuntimeReadiness::Ready(_) => assembler
-            .evaluation_runtime()
-            .analysis()
-            .expect("a ready runtime is not poisoned"),
+        RuntimeReadiness::Stable(_) => {
+            let analysis = assembler
+                .evaluation_runtime()
+                .analysis()
+                .expect("a stable runtime is not poisoned");
+            assert!(
+                analysis.waits().is_empty(),
+                "reasoning unexpectedly left {} works waiting",
+                analysis.waits().len()
+            );
+            analysis
+        }
         RuntimeReadiness::Busy => panic!("draining should return a stable readiness snapshot"),
         RuntimeReadiness::MaintenanceRequired(maintenance)
         | RuntimeReadiness::MaintenanceFailed(maintenance) => panic!(
             "reasoning unexpectedly required {:?} managed maintenance",
             maintenance.state()
-        ),
-        RuntimeReadiness::Deadlocked(deadlock) => panic!(
-            "reasoning unexpectedly deadlocked with {} unfinished work items",
-            deadlock.unfinished().len()
         ),
         RuntimeReadiness::Poisoned => panic!("reasoning unexpectedly poisoned its runtime"),
     }
@@ -513,12 +517,17 @@ fn public_promise_completion_resumes_blocked_reasoning_in_its_session() {
     )
     .expect("ordinary demand should schedule automatic reflection");
 
-    let RuntimeReadiness::Deadlocked(blocked) = assembler.drain_reasoning() else {
-        panic!("the unresolved host promise should deadlock its reflection task")
+    let RuntimeReadiness::Stable(_) = assembler.drain_reasoning() else {
+        panic!("the unresolved host promise should leave the runtime stable")
     };
     assert!(
-        !blocked.unfinished().is_empty(),
-        "runtime-wide readiness should retain the promise-dependent work"
+        !assembler
+            .evaluation_runtime()
+            .analysis()
+            .unwrap()
+            .waits()
+            .is_empty(),
+        "the analysis should list the promise-dependent work"
     );
 
     resolver
@@ -558,14 +567,16 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         b"value".as_slice()
     );
 
-    let RuntimeReadiness::Deadlocked(first) = assembler.drain_reasoning() else {
-        panic!("retryable failure should leave the runtime deadlocked")
+    let RuntimeReadiness::Stable(_) = assembler.drain_reasoning() else {
+        panic!("retryable failure should leave the runtime stable")
     };
+    let first = assembler.evaluation_runtime().analysis().unwrap();
     let blocked = first
-        .unfinished()
+        .waits()
         .iter()
+        .map(RuntimeWait::work)
         .find(|task| task.blocked_diagnostic().is_some())
-        .expect("retryable failure should remain structured in the report");
+        .expect("retryable failure should remain structured in the analysis");
     let diagnostic = blocked
         .blocked_diagnostic()
         .expect("blocked task should expose its diagnostic");
@@ -593,13 +604,14 @@ fn public_reasoning_report_exposes_retryable_blocked_errors() {
         b"structured retryable failure".as_slice()
     );
 
-    let RuntimeReadiness::Deadlocked(second) = assembler.drain_reasoning() else {
-        panic!("an unchanged retryable failure should remain deadlocked")
+    let RuntimeReadiness::Stable(_) = assembler.drain_reasoning() else {
+        panic!("an unchanged retryable failure should leave the runtime stable")
     };
+    let second = assembler.evaluation_runtime().analysis().unwrap();
     let repeated = second
-        .unfinished()
+        .waits()
         .iter()
-        .find_map(|task| task.blocked_diagnostic())
+        .find_map(|wait| wait.work().blocked_diagnostic())
         .expect("repeated reporting should retain the failure");
     // Every report shares the failure's one diagnostic.
     assert!(same_representation(

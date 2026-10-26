@@ -44,8 +44,8 @@ pub(crate) use coordinator::{
     EvaluationTaskMachine, EvaluationTaskStatus, EvaluationWaitPoll, EvaluationWaitToken,
     EvaluationWorkCoordinator, ExactDemandRoute, PreparedEvaluationTask, PromiseProducerObligation,
     PromiseProducerPublication, ReflectionTaskResultPolicy, RuntimeCoordinatorReadiness,
-    RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot, RuntimeWaitFamilySnapshot,
-    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot, TaskStatusPublisher, TaskStatusWake,
+    RuntimeDependencySnapshot, RuntimeWaitFamilySnapshot, RuntimeWorkKindSnapshot,
+    RuntimeWorkSnapshot, RuntimeWorkStateSnapshot, TaskStatusPublisher, TaskStatusWake,
     WaitMachineSnapshot, WakeRegistration, WorkDependency,
 };
 pub(crate) use executor::EvaluationExecutor;

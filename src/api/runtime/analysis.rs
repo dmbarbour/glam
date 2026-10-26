@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use super::readiness::{FailedMachine, RuntimeDeadlockWork, runtime_deadlock_work_from_snapshot};
+use super::readiness::{FailedMachine, RuntimeWork, runtime_work_from_snapshot};
 use super::{
     EvaluationRuntime, RuntimeDeliveryFailure, RuntimeMaintenanceFailure, maintenance_failure,
 };
@@ -35,7 +35,7 @@ pub enum RuntimeWaitFamily {
 /// the machine it runs on.
 #[derive(Clone, Debug)]
 pub struct RuntimeWait {
-    work: RuntimeDeadlockWork,
+    work: RuntimeWork,
     family: RuntimeWaitFamily,
     cause: Option<u64>,
     awaited: bool,
@@ -43,7 +43,7 @@ pub struct RuntimeWait {
 }
 
 impl RuntimeWait {
-    pub fn work(&self) -> &RuntimeDeadlockWork {
+    pub fn work(&self) -> &RuntimeWork {
         &self.work
     }
 
@@ -304,7 +304,7 @@ impl EvaluationRuntime {
                 .waits
                 .into_iter()
                 .map(|wait| RuntimeWait {
-                    work: runtime_deadlock_work_from_snapshot(core, wait.work),
+                    work: runtime_work_from_snapshot(core, wait.work),
                     family: match wait.family {
                         RuntimeWaitFamilySnapshot::Idle => RuntimeWaitFamily::Idle,
                         RuntimeWaitFamilySnapshot::InProgress => RuntimeWaitFamily::InProgress,

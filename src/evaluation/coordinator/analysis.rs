@@ -10,7 +10,7 @@ use crate::core::Key;
 use super::readiness::unfinished_work_snapshot_locked;
 use super::{
     DependencyEdge, EvaluationTaskId, EvaluationWorkCoordinator, EvaluationWorkId,
-    RuntimeDeadlockWorkSnapshot, WorkCoordinatorState, WorkKind, WorkState, dependency_edge_locked,
+    RuntimeWorkSnapshot, WorkCoordinatorState, WorkKind, WorkState, dependency_edge_locked,
     task_block, work_dependency,
 };
 
@@ -45,7 +45,7 @@ pub(crate) enum WaitMachineSnapshot {
 /// reflection task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RuntimeWaitSnapshot {
-    pub(crate) work: RuntimeDeadlockWorkSnapshot,
+    pub(crate) work: RuntimeWorkSnapshot,
     pub(crate) family: RuntimeWaitFamilySnapshot,
     pub(crate) cause: Option<EvaluationWorkId>,
     pub(crate) awaited: bool,

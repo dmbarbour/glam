@@ -6,8 +6,8 @@ use crate::api::{Diagnostic, MachinePath, Value, Values};
 use crate::core::{CoreValueFactory, Key};
 use crate::diagnostic::Severity;
 use crate::evaluation::{
-    EvaluationTaskId, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
-    RuntimeObservationEpoch, RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
+    EvaluationTaskId, RuntimeDependencySnapshot, RuntimeObservationEpoch, RuntimeWorkKindSnapshot,
+    RuntimeWorkSnapshot, RuntimeWorkStateSnapshot,
 };
 use crate::runtime::{EvaluationRuntimeId, RuntimeFailureRoot, RuntimeValueRoot};
 
@@ -95,8 +95,7 @@ pub enum RuntimeReadiness {
     Busy,
     MaintenanceRequired(RuntimeMaintenanceSnapshot),
     MaintenanceFailed(RuntimeMaintenanceSnapshot),
-    Ready(QuiescenceSnapshot),
-    Deadlocked(DeadlockSnapshot),
+    Stable(StableSnapshot),
     /// A panic tore the runtime's scheduler, transaction, or exclusive-admission
     /// state. That is a runtime implementation error, never Glam semantics.
     /// The runtime accepts no further work, but dropping it remains safe, and
@@ -116,10 +115,7 @@ impl fmt::Debug for RuntimeReadiness {
                 .debug_tuple("MaintenanceFailed")
                 .field(snapshot)
                 .finish(),
-            Self::Ready(snapshot) => formatter.debug_tuple("Ready").field(snapshot).finish(),
-            Self::Deadlocked(snapshot) => {
-                formatter.debug_tuple("Deadlocked").field(snapshot).finish()
-            }
+            Self::Stable(snapshot) => formatter.debug_tuple("Stable").field(snapshot).finish(),
             Self::Poisoned => formatter.write_str("Poisoned"),
         }
     }
@@ -338,27 +334,28 @@ impl RuntimeMaintenanceReport {
     }
 }
 
-/// A stable runtime with no unfinished work, as a readiness probe found it:
-/// its stamp and its reflection store. What the runtime holds, an analysis
-/// says (`quiescence-is-analyzed`).
+/// A stable runtime, in which no work is queued or runs, as a readiness probe
+/// found it: its stamp and its reflection store. It judges nothing: what the
+/// runtime holds, and whether anything is owed, an analysis says
+/// (`quiescence-is-analyzed`).
 #[derive(Clone)]
-pub struct QuiescenceSnapshot {
+pub struct StableSnapshot {
     pub(super) runtime: EvaluationRuntime,
     pub(super) stamp: RuntimeReadinessStamp,
     pub(super) reflection: crate::reflection::StoreSnapshot,
 }
 
-impl fmt::Debug for QuiescenceSnapshot {
+impl fmt::Debug for StableSnapshot {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         formatter
-            .debug_struct("QuiescenceSnapshot")
+            .debug_struct("StableSnapshot")
             .field("runtime", &self.runtime.id())
             .field("stamp", &self.stamp)
             .finish_non_exhaustive()
     }
 }
 
-impl QuiescenceSnapshot {
+impl StableSnapshot {
     pub fn runtime_id(&self) -> EvaluationRuntimeId {
         self.runtime.id()
     }
@@ -372,7 +369,7 @@ impl QuiescenceSnapshot {
     }
 }
 
-/// Kind of unfinished work retained in a deadlock report.
+/// Kind of unfinished work an analysis lists.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeWorkKind {
     ReflectionTask,
@@ -382,7 +379,7 @@ pub enum RuntimeWorkKind {
     Spark,
 }
 
-/// Stable non-runnable state retained in a deadlock report.
+/// The state of unfinished work an analysis lists: none of it runs.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RuntimeWorkState {
     Dormant,
@@ -433,9 +430,9 @@ impl RuntimeTaskWait {
     }
 }
 
-/// One unfinished participant retained by a deadlock snapshot.
+/// One unfinished work, as an analysis lists it, waiting or not yet started.
 #[derive(Clone, Debug)]
-pub struct RuntimeDeadlockWork {
+pub struct RuntimeWork {
     work_id: u64,
     session_id: Option<u64>,
     task_id: Option<u64>,
@@ -447,7 +444,7 @@ pub struct RuntimeDeadlockWork {
     blocked_diagnostic: Option<Diagnostic>,
 }
 
-impl RuntimeDeadlockWork {
+impl RuntimeWork {
     pub fn work_id(&self) -> u64 {
         self.work_id
     }
@@ -488,44 +485,6 @@ impl RuntimeDeadlockWork {
     }
 }
 
-/// Retained stable evidence that at least one participant cannot progress.
-#[derive(Clone)]
-pub struct DeadlockSnapshot {
-    pub(super) runtime: EvaluationRuntime,
-    pub(super) stamp: RuntimeReadinessStamp,
-    pub(super) unfinished: Vec<RuntimeDeadlockWork>,
-    pub(super) reflection: crate::reflection::StoreSnapshot,
-}
-
-impl fmt::Debug for DeadlockSnapshot {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("DeadlockSnapshot")
-            .field("runtime", &self.runtime.id())
-            .field("stamp", &self.stamp)
-            .field("unfinished", &self.unfinished)
-            .finish_non_exhaustive()
-    }
-}
-
-impl DeadlockSnapshot {
-    pub fn runtime_id(&self) -> EvaluationRuntimeId {
-        self.runtime.id()
-    }
-
-    pub fn stamp(&self) -> RuntimeReadinessStamp {
-        self.stamp
-    }
-
-    pub fn unfinished(&self) -> &[RuntimeDeadlockWork] {
-        &self.unfinished
-    }
-
-    pub fn reflection(&self) -> &crate::reflection::StoreSnapshot {
-        &self.reflection
-    }
-}
-
 fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> RuntimeDependency {
     match snapshot {
         RuntimeDependencySnapshot::Wait {
@@ -554,11 +513,11 @@ fn runtime_dependency_from_snapshot(snapshot: RuntimeDependencySnapshot) -> Runt
     }
 }
 
-pub(super) fn runtime_deadlock_work_from_snapshot(
+pub(super) fn runtime_work_from_snapshot(
     values: &CoreValueFactory,
-    snapshot: RuntimeDeadlockWorkSnapshot,
-) -> RuntimeDeadlockWork {
-    RuntimeDeadlockWork {
+    snapshot: RuntimeWorkSnapshot,
+) -> RuntimeWork {
+    RuntimeWork {
         work_id: snapshot.work.get(),
         session_id: snapshot.session.map(|session| session.get()),
         task_id: snapshot.task.map(EvaluationTaskId::get),
@@ -587,18 +546,17 @@ pub(super) fn runtime_deadlock_work_from_snapshot(
 mod tests {
     use super::*;
 
-    /// Ownership latch for the host-visible blocked-work failure retained by
-    /// readiness snapshots and analyses: only its composed
-    /// diagnostic, never a raw failure.
-    fn assert_runtime_deadlock_work_failure_boundary(work: &RuntimeDeadlockWork) {
-        let RuntimeDeadlockWork {
+    /// Ownership latch for the host-visible blocked-work failure an analysis
+    /// retains: only its composed diagnostic, never a raw failure.
+    fn assert_runtime_work_failure_boundary(work: &RuntimeWork) {
+        let RuntimeWork {
             blocked_diagnostic, ..
         } = work;
         let _: &Option<Diagnostic> = blocked_diagnostic;
     }
 
     #[test]
-    fn runtime_deadlock_work_failure_boundary_is_complete() {
-        let _: fn(&RuntimeDeadlockWork) = assert_runtime_deadlock_work_failure_boundary;
+    fn runtime_work_failure_boundary_is_complete() {
+        let _: fn(&RuntimeWork) = assert_runtime_work_failure_boundary;
     }
 }

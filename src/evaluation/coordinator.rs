@@ -64,8 +64,8 @@ use deferred::{
     claim_lazy_route, deferred_work_mut,
 };
 pub(crate) use readiness::{
-    RuntimeCoordinatorReadiness, RuntimeDeadlockWorkSnapshot, RuntimeDependencySnapshot,
-    RuntimeWorkKindSnapshot, RuntimeWorkStateSnapshot,
+    RuntimeCoordinatorReadiness, RuntimeDependencySnapshot, RuntimeWorkKindSnapshot,
+    RuntimeWorkSnapshot, RuntimeWorkStateSnapshot,
 };
 #[cfg(test)]
 use reflection::ReflectionCancellation;

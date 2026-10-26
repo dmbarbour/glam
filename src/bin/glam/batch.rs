@@ -348,7 +348,7 @@ pub(super) fn quiesce_batch(
                 );
                 return true;
             }
-            RuntimeReadiness::Ready(_) | RuntimeReadiness::Deadlocked(_) => {}
+            RuntimeReadiness::Stable(_) => {}
         }
         let analysis = match runtime.analysis() {
             Ok(analysis) => analysis,
@@ -568,6 +568,6 @@ mod tests {
             },
             &mut BusLogger,
         ));
-        assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+        assert!(matches!(runtime.readiness(), RuntimeReadiness::Stable(_)));
     }
 }

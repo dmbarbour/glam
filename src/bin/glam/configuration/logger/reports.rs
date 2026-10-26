@@ -5,8 +5,8 @@
 use std::collections::BTreeSet;
 
 use glam::{
-    Diagnostic, Error, HandleValue, Key, RuntimeAnalysis, RuntimeDeadlockWork, RuntimeDependency,
-    RuntimeIssue, RuntimeWaitFamily, RuntimeWorkKind, RuntimeWorkState, Severity, Values,
+    Diagnostic, Error, HandleValue, Key, RuntimeAnalysis, RuntimeDependency, RuntimeIssue,
+    RuntimeWaitFamily, RuntimeWork, RuntimeWorkKind, RuntimeWorkState, Severity, Values,
 };
 
 /// What names an issue, so a batch publishes each once.
@@ -163,7 +163,7 @@ fn issue_diagnostic(values: &Values, issue: &RuntimeIssue<'_>) -> Result<Diagnos
 /// What names a waiting work in a report.
 fn work_args(
     values: &Values,
-    work: &RuntimeDeadlockWork,
+    work: &RuntimeWork,
 ) -> Result<Vec<(&'static str, HandleValue)>, Error> {
     let mut args = vec![
         ("work", report_id(values, work.work_id())?),

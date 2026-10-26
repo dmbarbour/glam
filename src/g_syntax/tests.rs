@@ -4322,7 +4322,7 @@ ordinary = "ordinary"
         &resolved_value_at_path_with_context(&context, &module, &["ordinary"]),
         &Value::binary_from_text("ordinary"),
     );
-    let crate::api::RuntimeReadiness::Ready(_) = assembler.drain_reasoning() else {
+    let crate::api::RuntimeReadiness::Stable(_) = assembler.drain_reasoning() else {
         panic!("successful host choices should leave the runtime ready")
     };
     let analysis = assembler.evaluation_runtime().analysis().unwrap();
@@ -4353,7 +4353,7 @@ ordinary = "ordinary"
         &Value::binary_from_text("ordinary"),
     );
     let analyze = || {
-        let crate::api::RuntimeReadiness::Ready(_) = assembler.drain_reasoning() else {
+        let crate::api::RuntimeReadiness::Stable(_) = assembler.drain_reasoning() else {
             panic!("a failed reflection task should leave the runtime ready")
         };
         assembler.evaluation_runtime().analysis().unwrap()

@@ -7124,10 +7124,10 @@ fn runtime_pump_follows_new_work_into_another_session() {
 fn runtime_readiness_is_ready_when_no_work_is_retained() {
     let fixture = SameRuntimeFixture::new();
 
-    let crate::api::RuntimeReadiness::Ready(first) = fixture.runtime.readiness() else {
+    let crate::api::RuntimeReadiness::Stable(first) = fixture.runtime.readiness() else {
         panic!("an idle runtime should be ready")
     };
-    let crate::api::RuntimeReadiness::Ready(second) = fixture.runtime.readiness() else {
+    let crate::api::RuntimeReadiness::Stable(second) = fixture.runtime.readiness() else {
         panic!("an unchanged runtime should remain ready")
     };
 
@@ -7143,7 +7143,7 @@ fn runtime_readiness_is_ready_when_no_work_is_retained() {
 }
 
 #[test]
-fn runtime_deadlock_readiness_with_error_is_observational() {
+fn an_analysis_of_a_blocked_error_is_observational() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     context
@@ -7151,12 +7151,14 @@ fn runtime_deadlock_readiness_with_error_is_observational() {
         .expect("blocked task should schedule");
     fixture.runtime.pump_until_stable();
 
-    let crate::api::RuntimeReadiness::Deadlocked(first) = fixture.runtime.readiness() else {
-        panic!("retryable task error should produce a stable deadlock")
+    let crate::api::RuntimeReadiness::Stable(first) = fixture.runtime.readiness() else {
+        panic!("a retryable task error should leave the runtime stable")
     };
-    assert_eq!(first.unfinished().len(), 1);
+    let analysis = fixture.runtime.analysis().unwrap();
+    assert_eq!(analysis.waits().len(), 1);
     assert_eq!(
-        first.unfinished()[0]
+        analysis.waits()[0]
+            .work()
             .blocked_diagnostic()
             .map(crate::api::Diagnostic::message),
         Some("EvalFailure")
@@ -7166,8 +7168,8 @@ fn runtime_deadlock_readiness_with_error_is_observational() {
         .expect("fixture coordinator should remain live")
         .work_generation();
 
-    let crate::api::RuntimeReadiness::Deadlocked(second) = fixture.runtime.readiness() else {
-        panic!("observing a deadlock must not disturb blocked work")
+    let crate::api::RuntimeReadiness::Stable(second) = fixture.runtime.readiness() else {
+        panic!("observing blocked work must not disturb it")
     };
     assert_eq!(first.stamp(), second.stamp());
     assert_eq!(second.stamp().work_generation(), generation);
@@ -7181,8 +7183,8 @@ fn runtime_deadlock_readiness_with_error_is_observational() {
     );
 }
 
-/// An analysis keeps the blocked failure's one diagnostic, shared with a
-/// readiness snapshot of the same wait, after the work, its context and its
+/// An analysis keeps the blocked failure's one diagnostic, shared with any
+/// other analysis of the same wait, after the work, its context and its
 /// fixture retire: once collected, the diagnostic still renders the
 /// failure's payload.
 #[test]
@@ -7204,16 +7206,15 @@ fn an_analysis_retains_one_blocked_diagnostic_after_origin_retirement() {
         .expect("structured blocked task should schedule");
 
     fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Deadlocked(deadlock) = fixture.runtime.readiness() else {
-        panic!("the structured blocked task should produce a deadlock snapshot")
-    };
-    let snapshot_diagnostic = deadlock.unfinished()[0]
+    let earlier = fixture.runtime.analysis().unwrap();
+    let snapshot_diagnostic = earlier.waits()[0]
+        .work()
         .blocked_diagnostic()
-        .expect("the deadlock snapshot should retain the blocked diagnostic")
+        .expect("an earlier analysis should retain the blocked diagnostic")
         .clone();
 
     let analysis = fixture.runtime.analysis().unwrap();
-    drop(deadlock);
+    drop(earlier);
     let report_diagnostic = analysis.waits()[0]
         .work()
         .blocked_diagnostic()
@@ -7240,46 +7241,6 @@ fn an_analysis_retains_one_blocked_diagnostic_after_origin_retirement() {
         .evaluate_root_whnf(payload.into_runtime_root())
         .unwrap_or_else(|_| panic!("the retained diagnostic should render its payload"));
     payload.assert_same_representation_for_test(&values, &Value::Number(41.into()));
-}
-
-#[test]
-fn deadlock_snapshot_diagnostic_survives_after_coordinator_record_retirement() {
-    let fixture = SameRuntimeFixture::new();
-    let context = fixture.context();
-    let values = context.values().clone();
-    let failure = structured_failure(&context, "deadlock snapshot root");
-    let task = context
-        .schedule_task({
-            let failure = failure.clone();
-            move |_| Ok(Box::new(BlockedWithFailure(failure)))
-        })
-        .expect("the deadlock-snapshot fixture should schedule");
-
-    fixture.runtime.pump_until_stable();
-    let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
-        panic!("the blocked task should produce a deadlock snapshot")
-    };
-    assert_eq!(task.cancel(), EvaluationTaskCancellation::Requested);
-    drop(task);
-    drop(failure);
-
-    let snapshot_live = values
-        .collect_managed_for_test()
-        .expect("the detached deadlock snapshot should retain its blocked diagnostic");
-    let retained = snapshot.unfinished()[0]
-        .blocked_diagnostic()
-        .expect("the deadlock snapshot should preserve the blocked diagnostic");
-    assert_eq!(
-        retained.rendered_text_for_test(&crate::api::Values::from_core_factory(values.clone())),
-        "deadlock snapshot root"
-    );
-
-    drop(snapshot);
-    let reclaimed = values
-        .collect_managed_for_test()
-        .expect("dropping the deadlock snapshot should release its managed roots");
-    assert!(reclaimed.root_entries() < snapshot_live.root_entries());
-    assert!(reclaimed.finalized_slots() >= 1);
 }
 
 #[test]
@@ -7322,7 +7283,7 @@ fn an_analysis_diagnostic_survives_its_owners_until_dropped() {
 }
 
 #[test]
-fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
+fn parked_client_is_external_activity_while_task_waits_remain_typed() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let child = context
@@ -7364,16 +7325,24 @@ fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
         ClientDemandResult::Complete(_)
     ));
 
-    let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
-        panic!("blocked task and strict join should remain a scheduler deadlock")
+    assert!(matches!(
+        fixture.runtime.readiness(),
+        crate::api::RuntimeReadiness::Stable(_)
+    ));
+    let snapshot = fixture.runtime.analysis().unwrap();
+    let unfinished = |analysis: &crate::api::RuntimeAnalysis| {
+        analysis
+            .waits()
+            .iter()
+            .map(|wait| wait.work().clone())
+            .collect::<Vec<_>>()
     };
 
-    assert_eq!(snapshot.unfinished().len(), 2);
-    let parent_work = snapshot
-        .unfinished()
-        .iter()
+    assert_eq!(unfinished(&snapshot).len(), 2);
+    let parent_work = unfinished(&snapshot)
+        .into_iter()
         .find(|work| work.task_id() == Some(parent.id().get()))
-        .expect("strict join should appear in the deadlock report");
+        .expect("strict join should appear in the analysis");
     assert!(matches!(
         parent_work.dependency(),
         Some(crate::api::RuntimeDependency::TaskWait {
@@ -7382,7 +7351,7 @@ fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
             ..
         }) if *task_id == child.id().get() && *session_id == context.session_id().get()
     ));
-    assert!(snapshot.unfinished().iter().any(|work| {
+    assert!(unfinished(&snapshot).iter().any(|work| {
         work.task_id() == Some(child.id().get())
             && work.observed_epoch() == Some(7)
             && work.state() == crate::api::RuntimeWorkState::Blocked
@@ -7391,15 +7360,15 @@ fn parked_client_is_external_activity_while_task_deadlocks_remain_typed() {
     let retained = snapshot.clone();
     context.complete_wait(child.wait());
     fixture.runtime.pump_until_stable();
-    assert!(matches!(
-        fixture.runtime.readiness(),
-        crate::api::RuntimeReadiness::Ready(_)
-    ));
-    assert_eq!(retained.unfinished().len(), 2);
+    assert!(
+        fixture.runtime.analysis().unwrap().waits().is_empty(),
+        "the child's completion finishes the join"
+    );
+    assert_eq!(unfinished(&retained).len(), 2, "an analysis is a snapshot");
 }
 
 #[test]
-fn dormant_and_reserved_work_are_reported_as_deadlock_anomalies() {
+fn an_analysis_lists_dormant_and_reserved_work() {
     let fixture = SameRuntimeFixture::new();
     let context = fixture.context();
     let coordinator = context.coordinator().expect("coordinator should be live");
@@ -7413,14 +7382,17 @@ fn dormant_and_reserved_work_are_reported_as_deadlock_anomalies() {
         .reserve_reflection(&context.session, task, wait.clone())
         .expect("reserved reflection work should register");
 
-    let crate::api::RuntimeReadiness::Deadlocked(snapshot) = fixture.runtime.readiness() else {
-        panic!("orphaned dormant and reserved records should be visible deadlocks")
-    };
-    assert!(snapshot.unfinished().iter().any(|work| {
+    assert!(matches!(
+        fixture.runtime.readiness(),
+        crate::api::RuntimeReadiness::Stable(_)
+    ));
+    let analysis = fixture.runtime.analysis().unwrap();
+    let works = || analysis.waits().iter().map(crate::api::RuntimeWait::work);
+    assert!(works().any(|work| {
         work.kind() == crate::api::RuntimeWorkKind::DeferredEvaluation
             && work.state() == crate::api::RuntimeWorkState::Dormant
     }));
-    assert!(snapshot.unfinished().iter().any(|work| {
+    assert!(works().any(|work| {
         work.task_id() == Some(task.get())
             && work.kind() == crate::api::RuntimeWorkKind::ReflectionTask
             && work.state() == crate::api::RuntimeWorkState::Reserved
@@ -7528,7 +7500,7 @@ fn an_analysis_follows_a_wait_to_work_in_progress() {
     assert!(
         matches!(
             fixture.runtime.readiness(),
-            crate::api::RuntimeReadiness::Deadlocked(_)
+            crate::api::RuntimeReadiness::Stable(_)
         ),
         "the reserved task never launches"
     );

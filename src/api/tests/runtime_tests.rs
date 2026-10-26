@@ -813,7 +813,7 @@ fn runtime_activity_cannot_lose_a_wake_before_parking() {
 #[test]
 fn readiness_stamp_tracks_heap_and_event_observations() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let RuntimeReadiness::Ready(initial) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(initial) = runtime.readiness() else {
         panic!("new runtime should be ready")
     };
 
@@ -827,7 +827,7 @@ fn readiness_stamp_tracks_heap_and_event_observations() {
         runtime.commit_reflection(&heap),
         crate::reflection::StoreCommitResult::Committed
     );
-    let RuntimeReadiness::Ready(after_heap) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(after_heap) = runtime.readiness() else {
         panic!("heap state without work should remain ready")
     };
     assert!(after_heap.stamp().observation_epoch() > initial.stamp().observation_epoch());
@@ -841,7 +841,7 @@ fn readiness_stamp_tracks_heap_and_event_observations() {
         .input_endpoint(integer_converter(&runtime))
         .expect("input endpoint should register");
     input.sender().admit(1).expect("input should admit");
-    let RuntimeReadiness::Ready(after_input) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(after_input) = runtime.readiness() else {
         panic!("unused buffered input is state rather than activity")
     };
     assert!(after_input.stamp().observation_epoch() > after_heap.stamp().observation_epoch());
@@ -864,7 +864,7 @@ fn readiness_stamp_tracks_heap_and_event_observations() {
 #[test]
 fn gc_activity_invalidates_readiness_and_remains_busy_until_retired() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let RuntimeReadiness::Ready(before) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(before) = runtime.readiness() else {
         panic!("new runtime should be ready")
     };
     let lease = runtime
@@ -877,7 +877,7 @@ fn gc_activity_invalidates_readiness_and_remains_busy_until_retired() {
 
     let heap = runtime.values().core().managed_maintenance_snapshot();
     lease.finish(crate::runtime::RuntimeGcLeaseOutcome::success(heap));
-    let RuntimeReadiness::Ready(after) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(after) = runtime.readiness() else {
         panic!("retiring the only maintenance lease should restore readiness")
     };
     assert!(after.stamp().gc_maintenance_revision() > before.stamp().gc_maintenance_revision());
@@ -886,11 +886,11 @@ fn gc_activity_invalidates_readiness_and_remains_busy_until_retired() {
 #[test]
 fn explicit_managed_collection_request_is_actionable_runtime_state() {
     let runtime = EvaluationRuntime::new(0).expect("runtime should build");
-    let RuntimeReadiness::Ready(before) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(before) = runtime.readiness() else {
         panic!("new runtime should be ready")
     };
     drop(runtime.values().text("ordinary NoAuto access"));
-    let RuntimeReadiness::Ready(after_access) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(after_access) = runtime.readiness() else {
         panic!("ordinary NoAuto access should not create maintenance work")
     };
     assert_eq!(
@@ -924,7 +924,7 @@ fn explicit_managed_collection_request_is_actionable_runtime_state() {
             .completed_collection_epoch_for_test(),
         report.epoch()
     );
-    let RuntimeReadiness::Ready(after) = runtime.readiness() else {
+    let RuntimeReadiness::Stable(after) = runtime.readiness() else {
         panic!("successful maintenance should consume the explicit request")
     };
     assert!(after.stamp().gc_maintenance_revision() > maintenance.revision());
@@ -968,7 +968,7 @@ fn one_readiness_snapshot_admits_exactly_one_maintenance_service() {
             .count(),
         1
     );
-    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Stable(_)));
 }
 
 pub(super) fn decode_test_integer(
@@ -1172,7 +1172,7 @@ fn runtime_pump_waits_for_running_output_delivery() {
         .expect("delivery terminalization should wake the runtime pump");
     pump.join().expect("runtime pump should finish cleanly");
     assert!(!runtime.has_delivery_activity());
-    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Stable(_)));
     assert!(
         activity.wait_count() > 0,
         "running delivery should park the pump rather than busy-polling"
@@ -1502,7 +1502,7 @@ fn output_failures_are_terminal_durable_and_acknowledgeable() {
     assert!(snapshot.get(decode_id).is_some());
     assert!(snapshot.get(adapter_id).is_some());
     assert!(snapshot.get(panic_id).is_some());
-    assert!(matches!(runtime.readiness(), RuntimeReadiness::Ready(_)));
+    assert!(matches!(runtime.readiness(), RuntimeReadiness::Stable(_)));
     // `quiescence-is-analyzed`: an analysis lists each retained failure,
     // until the host acknowledges it.
     let analyzed_failures = || {
@@ -2340,7 +2340,7 @@ stopped = anno refl:(.child.task 's (.heap.set ['s_started] () =>> .cut (.heap.t
             .evaluate(&assembler.get(module.value(), name).unwrap())
             .unwrap_or_else(|error| panic!("{name}: {error}"));
     }
-    let RuntimeReadiness::Ready(_) = assembler.drain_reasoning() else {
+    let RuntimeReadiness::Stable(_) = assembler.drain_reasoning() else {
         panic!("the children should leave the runtime ready")
     };
     let analysis = assembler.evaluation_runtime().analysis().unwrap();
@@ -2383,7 +2383,7 @@ observed = anno refl:(.fail) "never"
         .get(module.value(), "observed")
         .and_then(|value| assembler.evaluate(&value));
     assert!(observed.is_err(), "the demander observes the failure");
-    let RuntimeReadiness::Ready(_) = assembler.drain_reasoning() else {
+    let RuntimeReadiness::Stable(_) = assembler.drain_reasoning() else {
         panic!("the failed annotation should leave the runtime ready")
     };
     let analysis = assembler.evaluation_runtime().analysis().unwrap();
@@ -2621,7 +2621,7 @@ broken = anno refl:(1 / 0) ()
     );
     assert!(matches!(
         assembler.drain_reasoning(),
-        RuntimeReadiness::Deadlocked(_)
+        RuntimeReadiness::Stable(_)
     ));
 }
 

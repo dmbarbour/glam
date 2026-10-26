@@ -539,10 +539,11 @@ control-flow overview.
   and each retry walks the chain under the coordinator lock the publisher
   needs (`perf-worker-scaling`).
 - Runtime readiness covers all demand sessions in the runtime. Runnable or
-  claimed producer work is `Busy`; a stable set in which every unfinished
-  record is blocked is a typed deadlock snapshot. Pure deferred-value cycles
-  are diagnosed earlier by the strict dependency graph, while cycles through
-  promises or reflection tasks remain ordinary deadlock candidates.
+  claimed producer work is `Busy`; otherwise the runtime is `Stable`, a
+  snapshot that judges nothing, and an analysis classifies what waits
+  (`quiescence-is-analyzed`). Pure deferred-value cycles are diagnosed
+  earlier by the strict dependency graph, while a wait through promises or
+  reflection tasks is an analysis's promise wait.
 
 ## Verification Discipline
 
