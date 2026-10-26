@@ -351,7 +351,7 @@ fn the_environment_passes_through_to_the_machine_s() {
                 "language g0\nobject share with\n    greeting = \"hello\"\n",
             )?;
             m.dict_get("share")?;
-            m.env_mixin_set()?;
+            m.env_overlay()?;
             run(m, ".env.lookup ['greeting]", &mut Standard)?;
             m.text_pop()
         })
@@ -374,7 +374,7 @@ fn an_effect_overlays_and_clears_the_turn_machine_s_environment() {
                 "language g0\nobject share with\n    greeting = \"hello\"\n",
             )?;
             m.dict_get("share")?;
-            m.env_mixin_set()?;
+            m.env_overlay()?;
             run(
                 m,
                 ".env.overlay (std.object_from_dict {farewell:\"bye\"}) =>> .env.lookup ['greeting] >>= (\\g -> .env.lookup ['farewell] >>= (\\f -> .r [g, f]))",

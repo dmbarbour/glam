@@ -153,7 +153,7 @@ fn bind_process(root: &mut Machine<'_, '_>, cli_arguments: &CliArguments) -> Res
     root.take(CLI, 1)?;
     root.swap()?;
     root.apply(1)?;
-    root.env_mixin_set()
+    root.env_overlay()
 }
 
 /// Fulfills the root's promises of `process.args` and `process.refl_args`.

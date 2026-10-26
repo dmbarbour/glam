@@ -1091,6 +1091,19 @@ handle API goes.
         turn's machine, so `.read_log` and `.write_stderr` become
         `.port.read 'diagnostics 1` and `.port.write 'stderr [Bin]` and
         `LoggerTaskHost` retires.
+        Decided for it (maintainer, 2026-10-26): diagnostics ports carry
+        enriched messages; a host's interrupt reaches turns at selected
+        steps, their results deciding their machines' errors
+        (`quiescence-is-analyzed`); the fallback and a `stderr` machine
+        are the CLI's, the logger's siblings under the root
+        (`machines-communicate-through-wired-ports`); and the machine API
+        renames its environment methods to match glam's,
+        `env_lookup`, `env_overlay` and `env_clear`. In the order built:
+        `machine-env-names` (built 2026-10-26: `env_lookup(path)`,
+        `env_overlay()` and `env_clear()`, `env_mixin_set` and
+        `env_mixin_get` retiring, the CLI's process share an overlay),
+        `turn-interrupts`, `diagnostics-enriched`,
+        `effect-run-ports`, then the logger itself.
       - `api-refl-obligations`: accepted promises, for tasks and turns.
         Designed in [Obligations](Obligations_2026-10-25.md), drafted
         2026-10-25 for review, decided the same day (acceptance explicit,

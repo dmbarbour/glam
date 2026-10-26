@@ -213,7 +213,7 @@ fn reflection_reads_the_refl_machine_s_environment_over_its_sealed_one() {
         root.dict_pack(Vec::<&str>::new())?;
         root.script_object(["shares"], "g", shares)?;
         root.dict_get("root_share")?;
-        root.env_mixin_set()
+        root.env_overlay()
     })
     .expect("the root binds its share");
     let assembler = rt.assembler();

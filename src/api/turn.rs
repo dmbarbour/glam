@@ -2245,16 +2245,22 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok((module.into_value(), diagnostics))
     }
 
-    /// Pushes this machine's environment: the mixins that it and its
-    /// ancestors set, composed from the root down as one object, built
-    /// lazily, so nothing is evaluated (`machines-inherit-an-environment`):
-    /// as `object _ extends` the mixins, its own first, so a machine's mixin
-    /// overrides what its ancestors' set. Within a cut, the read joins the
-    /// cut's transaction and sees its changes, and the cut runs again when a
-    /// mixin above changes; outside one, it reads the mixins as they stand.
-    pub fn env_get(&mut self) {
+    /// Pushes the value at `path` in this machine's environment, the whole
+    /// environment where `path` is empty, as `.env.lookup` does: the
+    /// overlays on it and its ancestors, composed from the root down as one
+    /// object, built lazily, so nothing is evaluated, a machine's own
+    /// overlays over what its ancestors' say, the latest first
+    /// (`machines-inherit-an-environment`). Within a cut, the read joins
+    /// the cut's transaction and sees its changes, and the cut runs again
+    /// when an overlay above changes; outside one, it reads the overlays as
+    /// they stand. A path the environment does not define is an error where
+    /// the value is read.
+    pub fn env_lookup<K: Into<Key>>(
+        &mut self,
+        path: impl IntoIterator<Item = K>,
+    ) -> Result<(), Error> {
         let machines = environment::environment_chain(&self.path);
-        let mixins = match &mut self.cut {
+        let shares = match &mut self.cut {
             Some(cut) => machines
                 .iter()
                 .filter_map(|machine| environment::observed_mixin(cut, machine))
@@ -2274,38 +2280,25 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         let values = self.runtime.assembler.values();
         let composed = crate::g_syntax::composed_environment_root(
             values.core(),
-            mixins
+            shares
                 .into_iter()
                 .map(HandleValue::into_runtime_root)
                 .collect(),
             None,
         );
         self.push(HandleValue::from_runtime_root(composed));
-    }
-
-    /// Sets the top value, an object, as this machine's mixin of the
-    /// environment, popping it: the mixin that the environments of the
-    /// machine and its descendants extend, in place of one set before. Only
-    /// the machine sets its mixin. Outside a cut, it commits at once;
-    /// within one, with the outermost cut.
-    pub fn env_mixin_set(&mut self) -> Result<(), Error> {
-        let mixin = self.peek()?.clone();
-        self.runtime.assembler.values().require(&mixin)?;
-        let machine = self.path.clone();
-        let path = environment::environment_share(&machine);
-        self.transact(|store, events| {
-            store.write_environment(path.clone(), mixin.clone());
-            events.shares.set(machine.clone());
-            Ok(())
-        })?;
-        self.pop()?;
+        let path: Vec<Key> = path.into_iter().map(Into::into).collect();
+        if !path.is_empty() {
+            self.dict_get_path(path)?;
+        }
         Ok(())
     }
 
     /// Overlays the top value, an object, on this machine's environment,
     /// popping it: it stacks on the machine's share, which becomes the
     /// overlay over what it was, so the environments of the machine and its
-    /// descendants see it first (`machines-inherit-an-environment`). Outside
+    /// descendants see it first (`machines-inherit-an-environment`). As
+    /// objects compose, it overrides a name it inherits with `:=`. Outside
     /// a cut, it commits at once; within one, with the outermost cut.
     pub fn env_overlay(&mut self) -> Result<(), Error> {
         let overlay = self.peek()?.clone();
@@ -2321,41 +2314,14 @@ impl<'scope, 'env> Machine<'scope, 'env> {
         Ok(())
     }
 
-    /// Pushes this machine's own mixin of the environment, to extend and
-    /// set again, or an empty object where it has none. Within a cut, the
-    /// read joins the cut's transaction, as [`Self::env_get`]'s does.
-    pub fn env_mixin_get(&mut self) {
+    /// Clears the overlays on this machine's environment, so the
+    /// environments of the machine and its descendants are its ancestors'
+    /// alone. Outside a cut, it commits at once; within one, with the
+    /// outermost cut.
+    pub fn env_clear(&mut self) -> Result<(), Error> {
         let machine = self.path.clone();
-        let mixin = match &mut self.cut {
-            Some(cut) => environment::observed_mixin(cut, &machine),
-            None => {
-                let (_, store, events) = self.resources().transaction_snapshot();
-                ShareJournal::new(&events.shares)
-                    .is_set(&machine)
-                    .then(|| store.environment_value(&environment::environment_share(&machine)))
-            }
-        };
-        let mixin = mixin.unwrap_or_else(|| {
-            let values = self.runtime.assembler.values();
-            HandleValue::from_runtime_root(crate::g_syntax::composed_environment_root(
-                values.core(),
-                Vec::new(),
-                None,
-            ))
-        });
-        self.push(mixin);
-    }
-
-    /// Clears this machine's mixin of the environment, so the environments
-    /// of the machine and its descendants extend its ancestors' alone.
-    /// Outside a cut, it commits at once; within one, with the outermost
-    /// cut.
-    pub fn env_mixin_clear(&mut self) -> Result<(), Error> {
-        let machine = self.path.clone();
-        let path = environment::environment_share(&machine);
         self.transact(|store, events| {
-            store.remove_environment(path.clone());
-            events.shares.clear(machine.clone());
+            crate::api::clear_environment(store, events, &machine);
             Ok(())
         })
     }

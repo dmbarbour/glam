@@ -802,18 +802,13 @@ impl Machine<'_, '_> {
                 self.port_write(DIAGNOSTICS.clone(), 1)?;
                 self.unit_push();
             }
-            Standard::EnvLookup => {
-                self.env_get();
-                if !path.is_empty() {
-                    self.dict_get_path(path.iter().cloned())?;
-                }
-            }
+            Standard::EnvLookup => self.env_lookup(path.iter().cloned())?,
             Standard::EnvOverlay => {
                 self.env_overlay()?;
                 self.unit_push();
             }
             Standard::EnvClear => {
-                self.env_mixin_clear()?;
+                self.env_clear()?;
                 self.unit_push();
             }
         }

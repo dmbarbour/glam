@@ -144,7 +144,7 @@ fn bind_args(m: &mut Machine<'_, '_>) -> Result<(), Error> {
     m.dict_get("share")?;
     m.stash_pop(1)?;
     m.apply(1)?;
-    m.env_mixin_set()
+    m.env_overlay()
 }
 
 #[test]
@@ -157,14 +157,10 @@ fn a_promised_value_in_a_share_waits_alone_until_fulfilled() {
             root.local_set("resolver")?;
             bind_args(root)?;
             let fork = root.fork("reader", move |r| {
-                r.env_get();
-                r.dict_get("spec")?;
+                r.env_lookup(["spec"])?;
                 r.eval()?;
                 r.discard(1)?;
-                let args = await_int(r, waiting, |r| {
-                    r.env_get();
-                    r.dict_get("args")
-                })?;
+                let args = await_int(r, waiting, |r| r.env_lookup(["args"]))?;
                 r.int_push(args);
                 Ok(())
             })?;

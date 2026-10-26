@@ -1,4 +1,4 @@
-//! A machine's environment: the mixins that it and its ancestors set,
+//! A machine's environment: the overlays that it and its ancestors stack,
 //! composed from the root down (`machines-inherit-an-environment`).
 
 use std::sync::mpsc;
@@ -17,24 +17,30 @@ object child_share with
     name := \"child\"
 object own_share with
     own = \"mine\"
-extended mixin = mixin with
+object extra_share with
     extra = \"more\"
+object later_share with
+    own := \"later\"
 ";
 
-/// Binds the object `share`, which the module above defines, as the
-/// machine's share.
+/// Overlays the object `share`, which the module above defines, on the
+/// machine's environment.
 fn bind(m: &mut Machine<'_, '_>, share: &str) -> Result<(), Error> {
     m.dict_pack(Vec::<&str>::new())?;
     m.script_object(["shares"], "g", SHARES)?;
     m.dict_get(share)?;
-    m.env_mixin_set()
+    m.env_overlay()
 }
 
 /// The text at `path` in the machine's environment, evaluated.
 fn read(m: &mut Machine<'_, '_>, path: &str) -> Result<String, Error> {
-    m.env_get();
-    m.dict_get_path(path.split('.'))?;
+    m.env_lookup(path.split('.'))?;
     m.text_pop()
+}
+
+/// Pushes the machine's whole environment.
+fn environment(m: &mut Machine<'_, '_>) -> Result<(), Error> {
+    m.env_lookup(Vec::<&str>::new())
 }
 
 #[test]
@@ -65,7 +71,7 @@ fn an_unbound_environment_defines_nothing() {
     let mut rt = runtime();
     let (defined, read) = rt
         .run(["a", "b"], |m| {
-            m.env_get();
+            environment(m)?;
             let defined = m.dict_defines("greeting")?;
             m.dict_get("greeting")?;
             Ok((defined, m.eval().is_ok()))
@@ -88,7 +94,7 @@ fn bindings_are_transactional_and_clear_unbinds_a_subtree() {
             abandoned.expect_err("the cut ended in error").kind(),
             ErrorKind::Failure
         );
-        c.env_get();
+        environment(c)?;
         assert!(!c.dict_defines("name")?, "the failed cut bound nothing");
         c.discard(1)?;
 
@@ -96,7 +102,7 @@ fn bindings_are_transactional_and_clear_unbinds_a_subtree() {
         c.run("g", |g| bind(g, "child_share"))?;
         c.clear()?;
         c.run("g", |g| {
-            g.env_get();
+            environment(g)?;
             assert!(!g.dict_defines("name")?, "clear unbound the subtree");
             g.discard(1)
         })
@@ -113,7 +119,7 @@ fn a_cut_waiting_on_its_environment_wakes_when_an_ancestor_binds() {
             let fork = p.fork("c", move |c| {
                 let mut attempts = 0;
                 c.cut(|c| {
-                    c.env_get();
+                    environment(c)?;
                     if !c.dict_defines("name")? {
                         attempts += 1;
                         if attempts == 1 {
@@ -139,48 +145,38 @@ fn a_cut_waiting_on_its_environment_wakes_when_an_ancestor_binds() {
 }
 
 #[test]
-fn a_machine_extends_its_own_mixin_and_may_clear_it() {
+fn overlays_stack_and_a_clear_drops_them() {
     let mut rt = runtime();
     rt.run((), |root| bind(root, "root_share"))
-        .expect("the root sets its mixin");
-    let (extended, kept) = rt
+        .expect("the root overlays its environment");
+    let (stacked, overridden, kept) = rt
         .run("c", |c| {
-            c.env_mixin_get();
-            assert!(
-                !c.dict_defines("greeting")?,
-                "it has no mixin of its own yet"
-            );
-            c.discard(1)?;
-
             bind(c, "own_share")?;
-            c.dict_pack(Vec::<&str>::new())?;
-            c.script_object(["shares"], "g", SHARES)?;
-            c.dict_get("extended")?;
-            c.env_mixin_get();
-            c.apply(1)?;
-            c.env_mixin_set()?;
-            let extended = (read(c, "own")?, read(c, "extra")?, read(c, "greeting")?);
-
-            c.env_mixin_clear()?;
-            c.env_get();
-            assert!(!c.dict_defines("own")?, "its mixin is gone");
+            bind(c, "extra_share")?;
+            let stacked = (read(c, "own")?, read(c, "extra")?, read(c, "greeting")?);
+            bind(c, "later_share")?;
+            let overridden = read(c, "own")?;
+            c.env_clear()?;
+            environment(c)?;
+            assert!(!c.dict_defines("own")?, "its overlays are gone");
             c.discard(1)?;
-            Ok((extended, read(c, "greeting")?))
+            Ok((stacked, overridden, read(c, "greeting")?))
         })
         .expect("the turn should succeed");
     assert_eq!(
-        extended,
+        stacked,
         ("mine".to_owned(), "more".to_owned(), "hello".to_owned()),
-        "its own mixin, extended and set again, over the root's"
+        "its overlays stack over the root's"
     );
+    assert_eq!(overridden, "later", "a later overlay overrides with `:=`");
     assert_eq!(kept, "hello", "cleared, the environment is its ancestors'");
 }
 
 #[test]
-fn a_machine_with_a_mixin_is_present() {
+fn a_machine_with_an_overlay_is_present() {
     let mut rt = runtime();
     rt.run(["p", "c"], |c| bind(c, "root_share"))
-        .expect("a machine sets its mixin");
+        .expect("a machine overlays its environment");
     let walked = |rt: &mut Runtime| {
         rt.machines("p")
             .map(|(path, _)| path.keys().len())
@@ -189,9 +185,9 @@ fn a_machine_with_a_mixin_is_present() {
     assert_eq!(
         walked(&mut rt),
         [2],
-        "p/c holds only its mixin, and is present"
+        "p/c holds only its overlay, and is present"
     );
-    rt.run(["p", "c"], |c| c.env_mixin_clear())
-        .expect("it clears its mixin");
+    rt.run(["p", "c"], |c| c.env_clear())
+        .expect("it clears its overlays");
     assert!(walked(&mut rt).is_empty(), "then nothing holds it");
 }

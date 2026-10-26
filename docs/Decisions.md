@@ -2398,7 +2398,13 @@ maps the short names used here to file names.
     assembler's bus, into the diagnostics input of a `refl` machine under
     the root, as if its children had sent them, so by default they pass
     through to the root's input and follow its wiring
-    (`machines-inherit-an-environment`).
+    (`machines-inherit-an-environment`). (Decided by the maintainer,
+    2026-10-26: a diagnostics port carries the enriched message, the
+    emission with `msg.severity` and `msg.origin` folded in, so a logger
+    reads with `.port.read 'diagnostics 1` what `.read_log` gave it, and
+    the Rust `Diagnostic` is a view of that value. Reason: glam reads and
+    writes one shape of diagnostic, rather than a transport record of
+    Rust's.)
   - `m.pending()` lists a machine's inputs holding values, a read of all
     its buffers, so a cut waiting on it wakes when any input receives.
 - **Alternatives rejected:** communication by heap logs with readers'
@@ -2417,6 +2423,12 @@ maps the short names used here to file names.
   diagnostic bus's switching between a logger's input FIFO and a fallback
   output retires: the CLI's logger is a machine whose fallback is its child,
   and the hand-over is its own rewiring (maintainer, the same day).
+  (Amended by the maintainer, 2026-10-26: the fallback, and a `stderr`
+  machine to which the logger writes, are the CLI's, siblings of the
+  logger under the root, since a machine wires and clears its direct
+  children and a configured logger runs on the logger machine. The
+  hand-over stays the logger's own rewiring, of its input onto an output
+  the root wires to the fallback.)
 - **Recorded in:** runtime API plan, `api-ports`.
 
 ### Machines inherit an environment that each binds a share of
@@ -2678,6 +2690,15 @@ maps the short names used here to file names.
     happen is of interest, whether or not anything was owed.)
   - `api-settlement` is redirected to `api-quiescence`, and "settlement"
     leaves the vocabulary with the step.
+  - (Decided by the maintainer, 2026-10-26, for the logger as a turn: a
+    host's interrupt reaches turns too, checked at selected steps. A turn
+    running at or below the machine when the interrupt is posted, with
+    what it runs within itself, fails its next such step, a cut waiting
+    for a change, a blocking read or an effect run between quanta, with
+    the interrupt's reason. Whether its machine is then in error is the
+    turn's result's to say, as for any error a turn may handle. Reason:
+    the batch ends a logger that runs as a turn, waiting on its input, as
+    it ends any idle wait, and a turn's errors are its own to handle.)
   - (Decided by the maintainer, 2026-10-26: readiness presents no
     judgement. `Ready` and `Deadlocked` fold into one `Stable` snapshot,
     and the distinction is the analysis's; "deadlock" leaves the names of
