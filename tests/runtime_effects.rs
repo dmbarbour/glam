@@ -235,27 +235,26 @@ fn the_whole_of_the_state_holds_the_reset_stack() {
     .expect("the turn should succeed");
 }
 
-/// Defines `.env` itself, passing only the heap through.
+/// Defines `.env` and `.port` itself, passing only the heap through. Each
+/// answers 7; its request is its arity.
 struct OwnEnv;
 
 impl EffectProvider for OwnEnv {
-    type Request = ();
+    type Request = usize;
 
     fn passes_through(&self) -> EffectFamilies {
         EffectFamilies::HEAP
     }
 
-    fn requests(&self) -> Vec<EffectRequestSpec<()>> {
-        vec![EffectRequestSpec::new(
-            "env",
-            ["own_env_test", "request", "env"],
-            1,
-            (),
-        )]
+    fn requests(&self) -> Vec<EffectRequestSpec<usize>> {
+        vec![
+            EffectRequestSpec::new("env", ["own_env_test", "request", "env"], 1, 1),
+            EffectRequestSpec::new("port", ["own_env_test", "request", "port"], 0, 0),
+        ]
     }
 
-    fn answer(&mut self, m: &mut Machine<'_, '_>, _request: &()) -> Result<Answer, Error> {
-        m.discard(1)?;
+    fn answer(&mut self, m: &mut Machine<'_, '_>, arity: &usize) -> Result<Answer, Error> {
+        m.discard(*arity)?;
         m.int_push(7);
         Ok(Answer::Return)
     }
@@ -266,11 +265,18 @@ fn a_provider_defines_a_family_it_does_not_pass_through() {
     let mut rt = Runtime::open(RuntimeConfig::new()).expect("a runtime should open");
     let got = rt
         .run("m", |m| {
-            run(m, ".heap.set ['k] 2 =>> .env ['anything]", &mut OwnEnv)?;
+            run(
+                m,
+                ".heap.set ['k] 2 =>> .env ['anything] >>= (\\e -> .port >>= (\\p -> .r (e + p)))",
+                &mut OwnEnv,
+            )?;
             m.int_pop()
         })
         .expect("the turn should succeed");
-    assert_eq!(got, 7, "the provider's `.env`, not the machine's");
+    assert_eq!(
+        got, 14,
+        "the provider's `.env` and `.port`, not the machine's"
+    );
 }
 
 #[test]
